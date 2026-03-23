@@ -7,8 +7,8 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "lint": "eslint src/",
-    "test": "node --test tests/load/config.test.js tests/load/reporter.test.js",
-    "test:coverage": "node --test --experimental-test-coverage tests/load/config.test.js tests/load/reporter.test.js",
+    "test": "node --test tests/load/config.test.js tests/load/reporter.test.js tests/errors-unit.test.js tests/api-errors.test.js",
+    "test:coverage": "node --test --experimental-test-coverage tests/load/config.test.js tests/load/reporter.test.js tests/errors-unit.test.js tests/api-errors.test.js",
     "load:baseline": "node tests/load/run-baselines.js"
   },
   "keywords": [],
@@ -23,6 +23,7 @@
   "devDependencies": {
     "autocannon": "^8.0.0",
     "c8": "^11.0.0",
-    "eslint": "^10.0.3"
+    "eslint": "^10.0.3",
+    "supertest": "^7.2.2"
   }
 }

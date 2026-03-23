@@ -6,16 +6,20 @@
 const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
+const { AppError } = require('./errors/AppError');
+const { correlationIdMiddleware } = require('./middleware/correlationId');
+const { notFoundHandler, errorHandler } = require('./middleware/errorHandler');
 
 /**
  * Create the Express application instance.
  *
  * @returns {import('express').Express}
  */
-function createApp() {
+function createApp(options = {}) {
   const app = express();
 
   app.use(cors());
+  app.use(correlationIdMiddleware);
   app.use(express.json());
 
   // Health check
@@ -50,6 +54,16 @@ function createApp() {
   });
 
   app.post('/api/invoices', (req, res) => {
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+      throw new AppError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: 'Invoice payload must be a JSON object.',
+        retryable: false,
+        retryHint: 'Send a valid JSON object in the request body and try again.',
+      });
+    }
+
     res.status(201).json({
       data: { id: 'placeholder', status: 'pending_verification' },
       message: 'Invoice upload will be implemented with verification and tokenization.',
@@ -59,20 +73,65 @@ function createApp() {
   // Placeholder: Escrow (to be wired to Soroban)
   app.get('/api/escrow/:invoiceId', (req, res) => {
     const { invoiceId } = req.params;
+
+    if (!invoiceId || !/^[A-Za-z0-9_-]{3,128}$/.test(invoiceId)) {
+      throw new AppError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: 'Invoice ID is invalid.',
+        retryable: false,
+        retryHint: 'Provide a valid invoice ID and try again.',
+      });
+    }
+
     res.json({
       data: { invoiceId, status: 'not_found', fundedAmount: 0 },
       message: 'Escrow state will be read from Soroban contract.',
     });
   });
 
-  app.use((req, res) => {
-    res.status(404).json({ error: 'Not found', path: req.path });
-  });
+  if (options.enableTestRoutes) {
+    app.get('/__test__/auth', (req, res) => {
+      if (!req.header('authorization')) {
+        throw new AppError({
+          status: 401,
+          code: 'AUTHENTICATION_REQUIRED',
+          message: 'Authentication is required for this endpoint.',
+          retryable: false,
+          retryHint: 'Provide valid credentials and try again.',
+        });
+      }
 
-  app.use((err, req, res, _next) => {
-    console.error(err);
-    res.status(500).json({ error: 'Internal server error' });
-  });
+      res.json({ ok: true });
+    });
+
+    app.get('/__test__/forbidden', (req, res) => {
+      throw new AppError({
+        status: 403,
+        code: 'FORBIDDEN',
+        message: 'You do not have access to this resource.',
+        retryable: false,
+        retryHint: 'Use an account with the required permissions and try again.',
+      });
+    });
+
+    app.get('/__test__/upstream', (req, res) => {
+      const error = new Error('connection refused');
+      error.code = 'ECONNREFUSED';
+      throw error;
+    });
+
+    app.get('/__test__/explode', (req, res) => {
+      throw new Error('Sensitive stack detail should not leak');
+    });
+
+    app.get('/__test__/throw-string', (req, res) => {
+      throw 'boom';
+    });
+  }
+
+  app.use(notFoundHandler);
+  app.use(errorHandler);
 
   return app;
 }

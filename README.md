@@ -43,8 +43,8 @@ Part of the LiquiFact stack: frontend (Next.js) | backend (this repo) | contract
 | `npm run dev` | Start API with watch mode |
 | `npm run start` | Start API |
 | `npm run lint` | Run ESLint on `src/` |
-| `npm test` | Run load helper tests |
-| `npm run test:coverage` | Run load helper tests with coverage |
+| `npm test` | Run load helper tests and structured error tests |
+| `npm run test:coverage` | Run helper/API tests with coverage |
 | `npm run load:baseline` | Run the core endpoint load baseline suite |
 
 Default port: `3001`.
@@ -180,6 +180,97 @@ tests/load/reports/
 - This suite establishes baselines, not maximum capacity.
 - Results depend on local machine resources and runtime conditions.
 - The invoices and escrow endpoints are currently placeholders, so these baselines should be treated as early reference points rather than production sizing data.
+
+---
+
+## Structured API errors
+
+All API failures now return a consistent structured error payload:
+
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Malformed JSON request body.",
+    "correlation_id": "req_f7d1b9f6c0f1459d8b3b7b6a",
+    "retryable": false,
+    "retry_hint": "Fix the JSON payload and try again."
+  }
+}
+```
+
+### Error fields
+
+- `code`: stable machine-readable error code
+- `message`: safe human-readable message
+- `correlation_id`: per-request identifier for debugging and support
+- `retryable`: whether the caller may safely retry
+- `retry_hint`: safe retry guidance
+
+### Current error categories
+
+- `VALIDATION_ERROR`
+- `AUTHENTICATION_REQUIRED`
+- `FORBIDDEN`
+- `NOT_FOUND`
+- `UPSTREAM_ERROR`
+- `INTERNAL_SERVER_ERROR`
+
+### Correlation IDs
+
+- Every request receives a correlation ID.
+- The API returns it in both the response body and the `X-Correlation-Id` header.
+- If a client sends `X-Correlation-Id` and it matches the accepted pattern, the value is echoed back.
+- Invalid client-supplied IDs are ignored and replaced with a generated ID.
+
+### Structured failure behavior
+
+The centralized mapper covers:
+
+- malformed JSON
+- validation failures
+- authorization and authentication failures
+- not found responses
+- upstream connection failures
+- unexpected thrown errors
+- non-`Error` thrown values
+
+### Security notes
+
+- Internal stack traces and raw exception details are never returned to clients.
+- Correlation IDs are sanitized and do not expose internal state.
+- Retry hints are generic and do not leak infrastructure details.
+- Server-side logs include correlation context without returning sensitive internals in responses.
+
+### Example responses
+
+Validation error:
+
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Invoice payload must be a JSON object.",
+    "correlation_id": "req_d3b92b4d2d554f33b8d8b089",
+    "retryable": false,
+    "retry_hint": "Send a valid JSON object in the request body and try again."
+  }
+}
+```
+
+Unexpected error:
+
+```json
+{
+  "error": {
+    "code": "INTERNAL_SERVER_ERROR",
+    "message": "An internal server error occurred.",
+    "correlation_id": "req_3d5d8c9e4ff34dd9aa73b946",
+    "retryable": false,
+    "retry_hint": "Do not retry until the issue is resolved or support is contacted."
+  }
+}
+```
 
 ---
 
