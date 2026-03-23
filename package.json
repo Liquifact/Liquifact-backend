@@ -7,7 +7,9 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "lint": "eslint src/",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test tests/load/config.test.js tests/load/reporter.test.js",
+    "test:coverage": "node --test --experimental-test-coverage tests/load/config.test.js tests/load/reporter.test.js",
+    "load:baseline": "node tests/load/run-baselines.js"
   },
   "keywords": [],
   "author": "",
@@ -19,6 +21,8 @@
     "express": "^5.2.1"
   },
   "devDependencies": {
+    "autocannon": "^8.0.0",
+    "c8": "^11.0.0",
     "eslint": "^10.0.3"
   }
 }
