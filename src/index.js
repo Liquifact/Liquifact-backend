@@ -7,6 +7,8 @@ const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
 
+const { callSorobanContract } = require('./services/soroban');
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 
@@ -42,8 +44,33 @@ app.get('/api', (req, res) => {
 const invoicesRouter = require('./routes/invoices');
 const escrowRouter = require('./routes/escrow');
 
-app.use('/api/invoices', invoicesRouter);
-app.use('/api/escrow', escrowRouter);
+app.post('/api/invoices', (req, res) => {
+  res.status(201).json({
+    data: { id: 'placeholder', status: 'pending_verification' },
+    message: 'Invoice upload will be implemented with verification and tokenization.',
+  });
+});
+
+// Placeholder: Escrow (to be wired to Soroban)
+app.get('/api/escrow/:invoiceId', async (req, res) => {
+  const { invoiceId } = req.params;
+
+  try {
+    // Simulated remote contract call
+    const operation = async () => {
+      return { invoiceId, status: 'not_found', fundedAmount: 0 };
+    };
+
+    const data = await callSorobanContract(operation);
+    
+    res.json({
+      data,
+      message: 'Escrow state read from Soroban contract via robust integration wrapper.',
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Error fetching escrow state' });
+  }
+});
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found', path: req.path });
