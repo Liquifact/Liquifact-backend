@@ -8,6 +8,7 @@ const RBAC_POLICY = {
   ESCROW_READ: ['admin', 'operator'],
   APPROVE_INVOICE: ['admin', 'operator'],
   ESCROW_SETTLE: ['admin'],
+  UPDATE_INVOICE_STATUS: ['admin', 'operator'],
 };
 
 module.exports = RBAC_POLICY;

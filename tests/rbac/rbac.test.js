@@ -78,6 +78,96 @@ describe('RBAC API Tests', () => {
     });
   });
 
+  describe('Invoice Status State Machine', () => {
+    describe('Valid Transitions', () => {
+      const validTransitions = [
+        { current: 'draft', next: 'pending_verification' },
+        { current: 'pending_verification', next: 'approved' },
+        { current: 'pending_verification', next: 'draft' },
+        { current: 'approved', next: 'funded' },
+        { current: 'funded', next: 'settled' },
+        { current: 'settled', next: 'closed' }
+      ];
+
+      validTransitions.forEach(({ current, next }) => {
+        it(`${current} -> ${next} -> 200`, async () => {
+          const res = await request(app)
+            .patch('/api/invoices/123/status')
+            .set('x-role', 'admin')
+            .send({ currentStatus: current, nextStatus: next });
+          expect(res.statusCode).toBe(200);
+        });
+      });
+    });
+
+    describe('Invalid Transitions', () => {
+      const invalidTransitions = [
+        { current: 'draft', next: 'approved' },
+        { current: 'approved', next: 'draft' },
+        { current: 'settled', next: 'approved' },
+        { current: 'closed', next: 'draft' }
+      ];
+
+      invalidTransitions.forEach(({ current, next }) => {
+        it(`${current} -> ${next} -> 400`, async () => {
+          const res = await request(app)
+            .patch('/api/invoices/123/status')
+            .set('x-role', 'admin')
+            .send({ currentStatus: current, nextStatus: next });
+          expect(res.statusCode).toBe(400);
+        });
+      });
+    });
+
+    describe('RBAC Tests', () => {
+      it('admin -> allowed', async () => {
+        const res = await request(app)
+          .patch('/api/invoices/123/status')
+          .set('x-role', 'admin')
+          .send({ currentStatus: 'draft', nextStatus: 'pending_verification' });
+        expect(res.statusCode).toBe(200);
+      });
+      it('operator -> allowed', async () => {
+        const res = await request(app)
+          .patch('/api/invoices/123/status')
+          .set('x-role', 'operator')
+          .send({ currentStatus: 'draft', nextStatus: 'pending_verification' });
+        expect(res.statusCode).toBe(200);
+      });
+      it('user -> 403', async () => {
+        const res = await request(app)
+          .patch('/api/invoices/123/status')
+          .set('x-role', 'user')
+          .send({ currentStatus: 'draft', nextStatus: 'pending_verification' });
+        expect(res.statusCode).toBe(403);
+      });
+    });
+
+    describe('State Machine Edge Cases', () => {
+      it('missing currentStatus -> 400', async () => {
+        const res = await request(app)
+          .patch('/api/invoices/123/status')
+          .set('x-role', 'admin')
+          .send({ nextStatus: 'pending_verification' });
+        expect(res.statusCode).toBe(400);
+      });
+      it('missing nextStatus -> 400', async () => {
+        const res = await request(app)
+          .patch('/api/invoices/123/status')
+          .set('x-role', 'admin')
+          .send({ currentStatus: 'draft' });
+        expect(res.statusCode).toBe(400);
+      });
+      it('invalid status string -> 400', async () => {
+        const res = await request(app)
+          .patch('/api/invoices/123/status')
+          .set('x-role', 'admin')
+          .send({ currentStatus: 'invalid_status', nextStatus: 'another_invalid' });
+        expect(res.statusCode).toBe(400);
+      });
+    });
+  });
+
   describe('Edge Cases', () => {
     it('No header -> defaults to "user"', async () => {
       // POST requires admin/operator, defaults to user -> 403
