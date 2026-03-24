@@ -15,6 +15,9 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
+const mockAuth = require('./middleware/mockAuth');
+app.use(mockAuth);
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({
@@ -38,13 +41,8 @@ app.get('/api', (req, res) => {
   });
 });
 
-// Placeholder: Invoices (to be wired to Invoice Service + DB)
-app.get('/api/invoices', (req, res) => {
-  res.json({
-    data: [],
-    message: 'Invoice service will list tokenized invoices here.',
-  });
-});
+const invoicesRouter = require('./routes/invoices');
+const escrowRouter = require('./routes/escrow');
 
 app.post('/api/invoices', (req, res) => {
   res.status(201).json({
@@ -83,6 +81,10 @@ app.use((err, req, res, _next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-app.listen(PORT, () => {
-  console.log(`LiquiFact API running at http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`LiquiFact API running at http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;

@@ -111,6 +111,62 @@ We welcome docs improvements, bug fixes, and new API endpoints aligned with the 
 
 ---
 
+## RBAC (Role-Based Access Control)
+
+This project uses a simple RBAC system.
+
+### Roles
+- admin
+- operator
+- user
+
+### How it works
+- Role is passed via `x-role` header (temporary simulation)
+- Middleware enforces access control
+
+### Protected Operations
+- POST /api/invoices/:id/approve → admin, operator
+- POST /api/escrow/:invoiceId/settle → admin only
+
+### Example
+curl -H "x-role: admin" http://localhost:3001/api/invoices
+curl -X POST http://localhost:3001/api/invoices/123/approve -H "x-role: admin"
+curl -X POST http://localhost:3001/api/escrow/123/settle -H "x-role: admin"
+
+### Security Notes
+
+- RBAC is enforced via middleware
+- Roles are currently simulated via `x-role` header
+- This is NOT secure for production
+- Future implementation should extract roles from verified JWT tokens
+
+## Invoice Status State Machine
+
+Valid transitions:
+
+draft → pending_verification  
+pending_verification → approved | draft  
+approved → funded  
+funded → settled  
+settled → closed  
+
+Endpoint:
+PATCH /api/invoices/:id/status
+
+### Example
+curl -X PATCH http://localhost:3001/api/invoices/123/status \
+  -H "Content-Type: application/json" \
+  -H "x-role: admin" \
+  -d '{"currentStatus":"approved","nextStatus":"funded"}'
+
+### Security Notes
+
+- Transitions are strictly validated defensively against the `INVOICE_STATE_TRANSITIONS` policy map.
+- Cannot bypass transitions via route handler since `invoiceStateGuard` triggers.
+- Returns `400 Bad Request` or `403 Forbidden` according to the respective failure.
+
+---
+
 ## License
 
 MIT (see root LiquiFact project for full license).
