@@ -12,4 +12,11 @@ router.get('/:invoiceId', roleGuard(RBAC_POLICY.ESCROW_READ), (req, res) => {
   });
 });
 
+router.post('/:invoiceId/settle', roleGuard(RBAC_POLICY.ESCROW_SETTLE), (req, res) => {
+  res.json({
+    data: { invoiceId: req.params.invoiceId, status: 'settled' },
+    message: 'Escrow settlement will trigger Soroban contract.',
+  });
+});
+
 module.exports = router;

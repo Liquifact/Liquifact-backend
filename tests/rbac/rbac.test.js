@@ -48,6 +48,36 @@ describe('RBAC API Tests', () => {
     });
   });
 
+  describe('Invoice Approval POST', () => {
+    it('admin -> 200', async () => {
+      const res = await request(app).post('/api/invoices/123/approve').set('x-role', 'admin');
+      expect(res.statusCode).toBe(200);
+    });
+    it('operator -> 200', async () => {
+      const res = await request(app).post('/api/invoices/123/approve').set('x-role', 'operator');
+      expect(res.statusCode).toBe(200);
+    });
+    it('user -> 403', async () => {
+      const res = await request(app).post('/api/invoices/123/approve').set('x-role', 'user');
+      expect(res.statusCode).toBe(403);
+    });
+  });
+
+  describe('Escrow Settlement POST', () => {
+    it('admin -> 200', async () => {
+      const res = await request(app).post('/api/escrow/123/settle').set('x-role', 'admin');
+      expect(res.statusCode).toBe(200);
+    });
+    it('operator -> 403', async () => {
+      const res = await request(app).post('/api/escrow/123/settle').set('x-role', 'operator');
+      expect(res.statusCode).toBe(403);
+    });
+    it('user -> 403', async () => {
+      const res = await request(app).post('/api/escrow/123/settle').set('x-role', 'user');
+      expect(res.statusCode).toBe(403);
+    });
+  });
+
   describe('Edge Cases', () => {
     it('No header -> defaults to "user"', async () => {
       // POST requires admin/operator, defaults to user -> 403
@@ -57,6 +87,14 @@ describe('RBAC API Tests', () => {
       // GET invoices allows user -> 200
       const resGet = await request(app).get('/api/invoices');
       expect(resGet.statusCode).toBe(200);
+
+      // Approve invoice requires admin/operator -> 403
+      const resApprove = await request(app).post('/api/invoices/123/approve');
+      expect(resApprove.statusCode).toBe(403);
+
+      // Settle escrow requires admin -> 403
+      const resSettle = await request(app).post('/api/escrow/123/settle');
+      expect(resSettle.statusCode).toBe(403);
     });
 
     it('Invalid role -> 403', async () => {

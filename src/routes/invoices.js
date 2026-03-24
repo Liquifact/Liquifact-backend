@@ -18,4 +18,11 @@ router.post('/', roleGuard(RBAC_POLICY.CREATE_INVOICE), (req, res) => {
   });
 });
 
+router.post('/:id/approve', roleGuard(RBAC_POLICY.APPROVE_INVOICE), (req, res) => {
+  res.json({
+    data: { id: req.params.id, status: 'approved' },
+    message: 'Invoice approval workflow will be implemented.',
+  });
+});
+
 module.exports = router;
