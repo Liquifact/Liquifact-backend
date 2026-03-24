@@ -3,6 +3,10 @@
  * Express server bootstrap for invoice financing, auth, and Stellar integration.
  */
 
+const express = require('express');
+const cors = require('cors');
+const AppError = require('./errors/AppError');
+const errorHandler = require('./middleware/errorHandler');
 require('dotenv').config();
 const { globalLimiter, sensitiveLimiter } = require('./middleware/rateLimit');
 const { authenticateToken } = require('./middleware/auth');
@@ -59,24 +63,18 @@ app.get('/api', (req, res) => {
   });
 });
 
-/**
- * Lists tokenized invoices.
- * Filters out soft-deleted records unless explicitly requested.
- * 
- * @param {import('express').Request} req - The Express request object.
- * @param {import('express').Response} res - The Express response object.
- * @returns {void}
- */
-app.get('/api/invoices', (req, res) => {
-  const includeDeleted = req.query.includeDeleted === 'true';
-  const filteredInvoices = includeDeleted 
-    ? invoices 
-    : invoices.filter(inv => !inv.deletedAt);
-
-  return res.json({
-    data: filteredInvoices,
-    message: includeDeleted ? 'Showing all invoices (including deleted).' : 'Showing active invoices.',
-  });
+// Example route using AppError
+app.get('/api/invoices', (req, res, next) => {
+  // Simulating an error scenario where the service is not ready
+  return next(
+    new AppError({
+      type: 'https://liquifact.com/probs/service-not-implemented',
+      title: 'Service Not Implemented',
+      status: 501,
+      detail: 'The invoice service is currently under development.',
+      instance: req.originalUrl,
+    })
+  );
 });
 
 /**
