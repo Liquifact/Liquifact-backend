@@ -9,6 +9,10 @@ node_modules/
 # Logs and debug
 npm-debug.log*
 *.log
+coverage/
 
 # OS
 .DS_Store
+
+# Load baseline reports
+tests/load/reports/
