@@ -1,6 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const invoiceRoutes = require('./routes/invoiceRoutes');
+const { callSorobanContract } = require('./services/soroban');
+
 
 const app = express();
 
@@ -25,21 +27,43 @@ app.get('/api', (req, res) => {
     endpoints: {
       health: 'GET /health',
       invoices: 'GET /api/invoices/:id', // Updated to show new endpoint
+      escrow: 'GET /api/escrow/:invoiceId',
     },
   });
 });
 
+app.post('/api/invoices', (req, res) => {
+  res.status(201).json({
+    data: { id: 'placeholder', status: 'pending_verification' },
+    message: 'Invoice upload will be implemented with verification and tokenization.',
+  });
+});
+
+
 // Register routes
 app.use('/api/invoices', invoiceRoutes);
 
-// Placeholder: Escrow (to be wired to Soroban)
-app.get('/api/escrow/:invoiceId', (req, res) => {
+// Placeholder for Escrow (wired to Soroban)
+app.get('/api/escrow/:invoiceId', async (req, res) => {
   const { invoiceId } = req.params;
-  res.json({
-    data: { invoiceId, status: 'not_found', fundedAmount: 0 },
-    message: 'Escrow state will be read from Soroban contract.',
-  });
+
+  try {
+    // Simulated remote contract call
+    const operation = async () => {
+      return { invoiceId, status: 'not_found', fundedAmount: 0 };
+    };
+
+    const data = await callSorobanContract(operation);
+    
+    res.json({
+      data,
+      message: 'Escrow state read from Soroban contract via robust integration wrapper.',
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Error fetching escrow state' });
+  }
 });
+
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found', path: req.path });

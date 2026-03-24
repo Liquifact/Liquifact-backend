@@ -1,6 +1,6 @@
 /**
  * LiquiFact API Gateway
- * Main entry point for the Express server.
+ * Main entrance for the backend server.
  */
 
 const app = require('./app');
