@@ -5,6 +5,8 @@
 
 const express = require('express');
 const cors = require('cors');
+const AppError = require('./errors/AppError');
+const errorHandler = require('./middleware/errorHandler');
 require('dotenv').config();
 
 const { callSorobanContract } = require('./services/soroban');
@@ -38,15 +40,34 @@ app.get('/api', (req, res) => {
   });
 });
 
-// Placeholder: Invoices (to be wired to Invoice Service + DB)
-app.get('/api/invoices', (req, res) => {
-  res.json({
-    data: [],
-    message: 'Invoice service will list tokenized invoices here.',
-  });
+// Example route using AppError
+app.get('/api/invoices', (req, res, next) => {
+  // Simulating an error scenario where the service is not ready
+  return next(
+    new AppError({
+      type: 'https://liquifact.com/probs/service-not-implemented',
+      title: 'Service Not Implemented',
+      status: 501,
+      detail: 'The invoice service is currently under development.',
+      instance: req.originalUrl,
+    })
+  );
 });
 
-app.post('/api/invoices', (req, res) => {
+app.post('/api/invoices', (req, res, next) => {
+  const { amount } = req.body;
+  if (!amount) {
+    // Example: Validation error following RFC 7807
+    return next(
+      new AppError({
+        type: 'https://liquifact.com/probs/invalid-request',
+        title: 'Validation Error',
+        status: 400,
+        detail: "The 'amount' field is required for invoice creation.",
+        instance: req.originalUrl,
+      })
+    );
+  }
   res.status(201).json({
     data: { id: 'placeholder', status: 'pending_verification' },
     message: 'Invoice upload will be implemented with verification and tokenization.',
@@ -74,15 +95,26 @@ app.get('/api/escrow/:invoiceId', async (req, res) => {
   }
 });
 
-app.use((req, res) => {
-  res.status(404).json({ error: 'Not found', path: req.path });
+// Handle 404
+app.use((req, res, next) => {
+  next(
+    new AppError({
+      type: 'https://liquifact.com/probs/not-found',
+      title: 'Resource Not Found',
+      status: 404,
+      detail: `The path ${req.path} does not exist.`,
+      instance: req.originalUrl,
+    })
+  );
 });
 
-app.use((err, req, res, _next) => {
-  console.error(err);
-  res.status(500).json({ error: 'Internal server error' });
-});
+// Centralized Global Error Handler
+app.use(errorHandler);
 
-app.listen(PORT, () => {
-  console.log(`LiquiFact API running at http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`LiquiFact API running at http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;

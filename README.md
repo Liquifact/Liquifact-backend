@@ -6,6 +6,23 @@ Part of the LiquiFact stack: **frontend** (Next.js) | **backend** (this repo) | 
 
 ---
 
+## Error Handling (RFC 7807)
+
+This API uses RFC 7807 Problem Details format for error responses.
+
+Example:
+{
+  "type": "https://example.com/errors/bad-request",
+  "title": "Bad Request",
+  "status": 400,
+  "detail": "Invalid input",
+  "instance": "/api/resource"
+}
+
+Content-Type: application/problem+json
+
+---
+
 ## Prerequisites
 
 - **Node.js** 20+ (LTS recommended)

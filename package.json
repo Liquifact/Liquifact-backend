@@ -7,7 +7,8 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "lint": "eslint src/",
-    "test": "jest --coverage"
+    "test": "jest --coverage",
+    "test:watch": "jest --watch"
   },
   "keywords": [],
   "author": "",
@@ -20,6 +21,7 @@
   },
   "devDependencies": {
     "eslint": "^10.0.3",
-    "jest": "^30.3.0"
+    "jest": "^30.3.0",
+    "supertest": "^7.2.2"
   }
 }
