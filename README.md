@@ -92,6 +92,37 @@ We welcome docs improvements, bug fixes, and new API endpoints aligned with the 
 
 ---
 
+## RBAC (Role-Based Access Control)
+
+This project uses a simple RBAC system.
+
+### Roles
+- admin
+- operator
+- user
+
+### How it works
+- Role is passed via `x-role` header (temporary simulation)
+- Middleware enforces access control
+
+### Protected Operations
+- POST /api/invoices/:id/approve → admin, operator
+- POST /api/escrow/:invoiceId/settle → admin only
+
+### Example
+curl -H "x-role: admin" http://localhost:3001/api/invoices
+curl -X POST http://localhost:3001/api/invoices/123/approve -H "x-role: admin"
+curl -X POST http://localhost:3001/api/escrow/123/settle -H "x-role: admin"
+
+### Security Notes
+
+- RBAC is enforced via middleware
+- Roles are currently simulated via `x-role` header
+- This is NOT secure for production
+- Future implementation should extract roles from verified JWT tokens
+
+---
+
 ## License
 
 MIT (see root LiquiFact project for full license).
