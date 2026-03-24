@@ -7,13 +7,9 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "lint": "eslint src/",
-<<<<<<< HEAD
-    "test": "echo \"Error: no test specified\" && exit 1",
     "format:check": "prettier --check .",
-    "format:fix": "prettier --write ."
-=======
+    "format:fix": "prettier --write .",
     "test": "jest --coverage"
->>>>>>> fc12b48d189bc28ced02d4c1b534d6bf44114b96
   },
   "keywords": [],
   "author": "",
@@ -26,11 +22,8 @@
   },
   "devDependencies": {
     "eslint": "^10.0.3",
-<<<<<<< HEAD
     "prettier": "3.8.1",
-    "prettier-plugin-organize-imports": "^4.3.0"
-=======
+    "prettier-plugin-organize-imports": "^4.3.0",
     "jest": "^30.3.0"
->>>>>>> fc12b48d189bc28ced02d4c1b534d6bf44114b96
   }
 }
