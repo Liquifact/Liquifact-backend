@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  build-and-lint:
+  lint-and-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,14 +15,17 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
-          cache: "npm"
+          node-version: '20'
+          cache: 'npm'
 
       - name: Install dependencies
         run: npm ci
 
       - name: Lint
         run: npm run lint
+
+      - name: Test and Coverage
+        run: npm run test:coverage
 
       - name: Build check
         run: node --check src/index.js

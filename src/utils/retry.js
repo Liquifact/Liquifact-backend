@@ -30,17 +30,17 @@ async function withRetry(operation, options = {}) {
   const MAX_DELAY_CAP = 60000;
   const MAX_BASE_DELAY_CAP = 10000;
 
-  let {
-    maxRetries = 3,
-    baseDelay = 500,
-    maxDelay = 10000,
+  const {
+    maxRetries: rawMaxRetries = 3,
+    baseDelay: rawBaseDelay = 500,
+    maxDelay: rawMaxDelay = 10000,
     shouldRetry = () => true
   } = options;
 
   // Validate and cap configuration to prevent accidental resource exhaustion
-  maxRetries = Math.max(0, Math.min(maxRetries, MAX_RETRIES_CAP));
-  baseDelay = Math.max(0, Math.min(baseDelay, MAX_BASE_DELAY_CAP));
-  maxDelay = Math.max(0, Math.min(maxDelay, MAX_DELAY_CAP));
+  const maxRetries = Math.max(0, Math.min(rawMaxRetries, MAX_RETRIES_CAP));
+  const baseDelay = Math.max(0, Math.min(rawBaseDelay, MAX_BASE_DELAY_CAP));
+  const maxDelay = Math.max(0, Math.min(rawMaxDelay, MAX_DELAY_CAP));
 
   let attempt = 0;
 
