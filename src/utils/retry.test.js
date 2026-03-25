@@ -56,7 +56,7 @@ describe('Retry Utility', () => {
     // baseDelay caps at 10000ms. We set it high so it forces maxDelay.
     try {
       await withRetry(operation, { maxRetries: 1, baseDelay: 1000, maxDelay: 50 });
-    } catch (e) {
+    } catch {
       // Ignored
     }
     

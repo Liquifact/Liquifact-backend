@@ -8,6 +8,7 @@ const cors = require('cors');
 require('dotenv').config();
 
 const { callSorobanContract } = require('./services/soroban');
+const invoiceService = require('./services/invoiceService');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -38,18 +39,108 @@ app.get('/api', (req, res) => {
   });
 });
 
-// Placeholder: Invoices (to be wired to Invoice Service + DB)
-app.get('/api/invoices', (req, res) => {
+// Invoices: List all invoices with optional filtering
+/**
+ * GET /api/invoices
+ * 
+ * Returns all invoices, optionally filtered by status.
+ * 
+ * Query Parameters:
+ *   - status (optional): Filter by invoice status
+ * 
+ * Response:
+ *   - data: Array of invoice objects
+ *   - count: Total number of invoices returned
+ * 
+ * @example
+ * GET /api/invoices
+ * GET /api/invoices?status=verified
+ */
+app.get('/api/invoices', async (req, res) => {
+  const { status } = req.query;
+  const filterOptions = {};
+
+  if (status) {
+    const validStatuses = [
+      'pending_verification',
+      'verified',
+      'active',
+      'funded',
+      'completed',
+      'cancelled',
+    ];
+
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({
+        error: 'Invalid status filter',
+        validStatuses,
+      });
+    }
+
+    filterOptions.status = status;
+  }
+
+  const result = await invoiceService.list(filterOptions);
+
+  if (!result.success) {
+    return res.status(500).json({
+      error: result.error,
+    });
+  }
+
   res.json({
-    data: [],
-    message: 'Invoice service will list tokenized invoices here.',
+    data: result.invoices,
+    count: result.count,
   });
 });
 
-app.post('/api/invoices', (req, res) => {
+// Invoices: Create a new invoice
+/**
+ * POST /api/invoices
+ * 
+ * Creates a new invoice with the provided data.
+ * Returns the created invoice with a generated ID and initial status.
+ * 
+ * Request Body:
+ *   - invoiceNumber (string, required): Unique invoice identifier (1-64 chars, alphanumeric + dash/underscore)
+ *   - sellerName (string, required): Name of the invoice seller (max 255 chars)
+ *   - buyerName (string, required): Name of the invoice buyer (max 255 chars)
+ *   - amount (number, required): Invoice amount (must be > 0)
+ *   - currency (string, required): ISO 4217 3-letter currency code
+ *   - dueDate (string, required): ISO 8601 due date string (must be in future)
+ *   - description (string, optional): Invoice description (max 2000 chars)
+ *   - status (string, optional): Initial status (default: pending_verification)
+ * 
+ * Responses:
+ *   - 201: Invoice created successfully
+ *   - 400: Validation error
+ *   - 500: Server error
+ * 
+ * @example
+ * POST /api/invoices
+ * {
+ *   "invoiceNumber": "INV-2026-001",
+ *   "sellerName": "Acme Corp",
+ *   "buyerName": "Tech LLC",
+ *   "amount": 5000.50,
+ *   "currency": "USD",
+ *   "dueDate": "2026-12-31T23:59:59Z",
+ *   "description": "Q1 2026 services"
+ * }
+ */
+app.post('/api/invoices', async (req, res) => {
+  const result = await invoiceService.create(req.body);
+
+  if (!result.success) {
+    return res.status(400).json({
+      error: result.error,
+      errors: result.errors,
+    });
+  }
+
   res.status(201).json({
-    data: { id: 'placeholder', status: 'pending_verification' },
-    message: 'Invoice upload will be implemented with verification and tokenization.',
+    data: result.invoice,
+    message: 'Invoice created successfully',
   });
 });
 
