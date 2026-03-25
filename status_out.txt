@@ -1,0 +1,64 @@
+On branch feature/get-invoice-by-id
+Your branch is up to date with 'origin/feature/get-invoice-by-id'.
+
+You have unmerged paths.
+  (fix conflicts and run "git commit")
+  (use "git merge --abort" to abort the merge)
+
+Changes to be committed:
+	modified:   .env.example
+	modified:   .github/workflows/ci.yml
+	modified:   .gitignore
+	new file:   .prettierignore
+	new file:   .prettierrc
+	deleted:    coverage/lcov-report/base.css
+	deleted:    coverage/lcov-report/block-navigation.js
+	deleted:    coverage/lcov-report/favicon.png
+	deleted:    coverage/lcov-report/prettify.css
+	deleted:    coverage/lcov-report/prettify.js
+	deleted:    coverage/lcov-report/retry.js.html
+	deleted:    coverage/lcov-report/services/index.html
+	deleted:    coverage/lcov-report/services/soroban.js.html
+	deleted:    coverage/lcov-report/sort-arrow-sprite.png
+	deleted:    coverage/lcov-report/sorter.js
+	deleted:    coverage/lcov-report/utils/index.html
+	deleted:    coverage/lcov-report/utils/retry.js.html
+	modified:   eslint.config.js
+	new file:   src/__tests__/auth.test.js
+	new file:   src/__tests__/deprecation.test.js
+	new file:   src/__tests__/rateLimit.test.js
+	new file:   src/app.test.js
+	new file:   src/config/cors.js
+	new file:   src/config/cors.test.js
+	new file:   src/index.test.js
+	new file:   src/middleware/auth.js
+	new file:   src/middleware/deprecation.js
+	new file:   src/middleware/errorHandler.js
+	new file:   src/middleware/rateLimit.js
+	new file:   src/utils/asyncHandler.js
+	modified:   src/utils/retry.js
+	modified:   src/utils/retry.test.js
+	new file:   tests/app.test.js
+	new file:   tests/helpers/createTestApp.js
+	new file:   tests/setup.js
+	new file:   tests/unit/asyncHandler.test.js
+	new file:   tests/unit/errorHandler.test.js
+
+Unmerged paths:
+  (use "git add/rm <file>..." as appropriate to mark resolution)
+	both modified:   README.md
+	deleted by them: coverage/clover.xml
+	deleted by them: coverage/coverage-final.json
+	deleted by them: coverage/lcov-report/index.html
+	deleted by them: coverage/lcov.info
+	both modified:   package-lock.json
+	both modified:   package.json
+	both added:      src/app.js
+	both modified:   src/index.js
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	branches.txt
+	merge_out.txt
+	status_out.txt
+

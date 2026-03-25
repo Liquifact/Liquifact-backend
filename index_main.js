@@ -1,26 +1,12 @@
 /**
  * LiquiFact API Gateway
-<<<<<<< HEAD
- * Main entrance for the backend server.
- */
-
-const app = require('./app');
-=======
  * Express server bootstrap for invoice financing, auth, and Stellar integration.
  */
 
->>>>>>> main
 require('dotenv').config();
 const { globalLimiter, sensitiveLimiter } = require('./middleware/rateLimit');
 const { authenticateToken } = require('./middleware/auth');
 
-<<<<<<< HEAD
-const PORT = process.env.PORT || 3001;
-
-app.listen(PORT, () => {
-  console.log(`LiquiFact API running at http://localhost:${PORT}`);
-});
-=======
 const asyncHandler = require('./utils/asyncHandler');
 const errorHandler = require('./middleware/errorHandler');
 const { callSorobanContract } = require('./services/soroban');
@@ -277,4 +263,3 @@ if (process.env.NODE_ENV !== 'test') {
 
 // Export app and state for testing
 module.exports = { app, startServer, resetStore };
->>>>>>> main

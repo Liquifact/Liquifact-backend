@@ -1,0 +1,15 @@
+Auto-merging README.md
+CONFLICT (content): Merge conflict in README.md
+CONFLICT (modify/delete): coverage/clover.xml deleted in main and modified in HEAD.  Version HEAD of coverage/clover.xml left in tree.
+CONFLICT (modify/delete): coverage/coverage-final.json deleted in main and modified in HEAD.  Version HEAD of coverage/coverage-final.json left in tree.
+CONFLICT (modify/delete): coverage/lcov-report/index.html deleted in main and modified in HEAD.  Version HEAD of coverage/lcov-report/index.html left in tree.
+CONFLICT (modify/delete): coverage/lcov.info deleted in main and modified in HEAD.  Version HEAD of coverage/lcov.info left in tree.
+Auto-merging package-lock.json
+CONFLICT (content): Merge conflict in package-lock.json
+Auto-merging package.json
+CONFLICT (content): Merge conflict in package.json
+Auto-merging src/app.js
+CONFLICT (add/add): Merge conflict in src/app.js
+Auto-merging src/index.js
+CONFLICT (content): Merge conflict in src/index.js
+Automatic merge failed; fix conflicts and then commit the result.

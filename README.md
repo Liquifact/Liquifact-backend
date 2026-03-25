@@ -130,8 +130,19 @@ Production default:
 ```
 liquifact-backend/
 ├── src/
+<<<<<<< HEAD
+<<<<<<< HEAD
+│   ├── app.js          # App configuration
+│   ├── index.js        # Server entry point
+│   ├── routes/         # API routes
+│   ├── services/       # Business logic / DB interaction
+│   └── tests/          # Unit and integration tests
+├── .env.example
+=======
+=======
 │   ├── config/
 │   │   └── cors.js     # CORS allowlist parsing and policy
+>>>>>>> main
 │   ├── services/
 │   │   └── soroban.js  # Contract interaction wrappers
 │   ├── utils/
@@ -139,12 +150,28 @@ liquifact-backend/
 │   ├── app.js          # Express app, middleware, routes
 │   └── index.js        # Runtime bootstrap
 ├── .env.example        # Env template
+>>>>>>> main
 ├── eslint.config.js
 └── package.json
 ```
 
 ---
 
+<<<<<<< HEAD
+## API Endpoints
+
+### Invoices
+
+#### `GET /api/invoices/:id`
+Retrieve a single invoice.
+- **Requires header**: `x-user-id` (mock user identification).
+- **Responses**:
+  - `200 OK`: Returns the invoice data.
+  - `400 Bad Request`: Invalid or missing ID.
+  - `401 Unauthorized`: Missing `x-user-id` header.
+  - `403 Forbidden`: User does not have access to the invoice.
+  - `404 Not Found`: Invoice with specified ID doesn't exist.
+=======
 ## Resiliency & Retries
 
 To ensure reliable communication with Soroban contract provider APIs, this backend implements a robust **Retry and Backoff** mechanism (`src/utils/retry.js`). 
@@ -157,6 +184,7 @@ To ensure reliable communication with Soroban contract provider APIs, this backe
   - `maxDelay` is hard-capped to 60,000ms (1 minute).
   - `baseDelay` is hard-capped to 10,000ms.
 - **Contract Integration**: `src/services/soroban.js` wraps raw API calls securely with this utility, ensuring all escrow and invoice state interactions are fault-tolerant.
+>>>>>>> main
 
 ---
 
