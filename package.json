@@ -7,7 +7,9 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "lint": "eslint src/",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "lint:fix": "eslint src/ --fix",
+    "test": "jest",
+    "test:coverage": "jest --coverage"
   },
   "keywords": [],
   "author": "",
@@ -16,9 +18,16 @@
   "dependencies": {
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
-    "express": "^5.2.1"
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.3.1",
+    "jsonwebtoken": "^9.0.3"
   },
   "devDependencies": {
-    "eslint": "^10.0.3"
+    "eslint": "^9.21.0",
+    "eslint-plugin-jsdoc": "^50.6.3",
+    "eslint-plugin-security": "^3.0.1",
+    "globals": "^16.0.0",
+    "jest": "^30.3.0",
+    "supertest": "^7.0.0"
   }
 }
