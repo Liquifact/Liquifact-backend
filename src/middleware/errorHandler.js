@@ -1,9 +1,11 @@
+const logger = require('../utils/logger');
+
 /**
  * Global error handling middleware
  * Ensures consistent error responses and prevents stack leaks in production.
  */
 const errorHandler = (err, req, res, _next) => {
-  console.error(err);
+  logger.error(err.message || 'Internal server error', err);
 
   const statusCode = err.statusCode || 500;
 

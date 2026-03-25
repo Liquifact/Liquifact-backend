@@ -3,19 +3,25 @@
  * Express server bootstrap for invoice financing, auth, and Stellar integration.
  */
 
+const express = require('express');
+const cors = require('cors');
 require('dotenv').config();
 const { globalLimiter, sensitiveLimiter } = require('./middleware/rateLimit');
 const { authenticateToken } = require('./middleware/auth');
+const requestId = require('./middleware/requestId');
+const logger = require('./utils/logger');
 
 const asyncHandler = require('./utils/asyncHandler');
 const errorHandler = require('./middleware/errorHandler');
 const { callSorobanContract } = require('./services/soroban');
 
+const app = express();
 const PORT = process.env.PORT || 3001;
 
 /**
  * Global Middlewares
  */
+app.use(requestId);
 app.use(cors());
 app.use(express.json());
 
@@ -231,7 +237,7 @@ app.use((req, res, next) => {
  * @returns {void}
  */
 app.use((err, req, res, _next) => {
-  console.error(err);
+  logger.error(err.message || 'Internal server error', err);
   return res.status(500).json({ error: 'Internal server error' });
 });
 
@@ -242,7 +248,7 @@ app.use((err, req, res, _next) => {
  */
 const startServer = () => {
   const server = app.listen(PORT, () => {
-    console.warn(`LiquiFact API running at http://localhost:${PORT}`);
+    logger.warn(`LiquiFact API running at http://localhost:${PORT}`);
   });
   return server;
 };
