@@ -1,3 +1,4 @@
+/* global describe, test, expect, beforeAll */
 const request = require('supertest');
 const express = require('express');
 const { deprecate } = require('../middleware/deprecation');

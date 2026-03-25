@@ -14,6 +14,7 @@ const jwt = require('jsonwebtoken');
  * @param {import('express').Request} req - Express request object
  * @param {import('express').Response} res - Express response object
  * @param {import('express').NextFunction} next - Express next middleware function
+ * @returns {void}
  */
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];

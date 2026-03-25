@@ -18,6 +18,7 @@ class WebhookService {
    * 
    * @param {string} url The endpoint to receive notifications.
    * @param {string} secret Symmetrical secret key for signing payloads.
+   * @returns {void}
    */
   register(url, secret) {
     this.subscriptions.push({ url, secret });
@@ -39,6 +40,7 @@ class WebhookService {
    * 
    * @param {Object} subscription Subscription details {url, secret}.
    * @param {Object} event Event payload containing id, type, and data.
+   * @returns {Promise<void>}
    */
   async #deliver(subscription, event) {
     const payload = JSON.stringify(event);
@@ -95,6 +97,7 @@ class WebhookService {
    * 
    * @param {Object} invoice The invoice object.
    * @param {string} newStatus The new status of the invoice.
+   * @returns {Promise<void>}
    */
   async notifyInvoiceStatusChange(invoice, newStatus) {
     const event = {
@@ -116,6 +119,8 @@ class WebhookService {
 
   /**
    * Clears the in-memory subscriptions (mainly for tests).
+   * 
+   * @returns {void}
    */
   reset() {
     this.subscriptions = [];
