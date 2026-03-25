@@ -1,6 +1,11 @@
 /**
  * Global error handling middleware
  * Ensures consistent error responses and prevents stack leaks in production.
+ * 
+ * @param {Error} err - The error object.
+ * @param {import('express').Request} req - The Express request object.
+ * @param {import('express').Response} res - The Express response object.
+ * @param {import('express').NextFunction} _next - The next middleware function.
  */
 const errorHandler = (err, req, res, _next) => {
   console.error(err);
