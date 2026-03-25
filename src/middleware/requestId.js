@@ -4,6 +4,10 @@ const logger = require('../utils/logger');
 /**
  * Middleware that generates or propagates a correlation ID for each request.
  * It injects the ID into the logger via AsyncLocalStorage and adds it to the response headers.
+ * 
+ * @param {import('express').Request} req - The Express request object.
+ * @param {import('express').Response} res - The Express response object.
+ * @param {import('express').NextFunction} next - The next middleware function.
  */
 function requestId(req, res, next) {
   // Use existing X-Request-Id if present (for cross-service tracing), otherwise generate new one.

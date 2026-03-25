@@ -6,13 +6,13 @@
 const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
-const { globalLimiter, sensitiveLimiter } = require('./middleware/rateLimit');
-const { authenticateToken } = require('./middleware/auth');
+const { globalLimiter: _globalLimiter, sensitiveLimiter: _sensitiveLimiter } = require('./middleware/rateLimit');
+const { authenticateToken: _authenticateToken } = require('./middleware/auth');
 const requestId = require('./middleware/requestId');
 const logger = require('./utils/logger');
 
-const asyncHandler = require('./utils/asyncHandler');
-const errorHandler = require('./middleware/errorHandler');
+const _asyncHandler = require('./utils/asyncHandler');
+const _errorHandler = require('./middleware/errorHandler');
 const { callSorobanContract } = require('./services/soroban');
 
 const app = express();
