@@ -6,6 +6,9 @@ const { withRetry } = require('../utils/retry');
  * Supports HMAC-SHA256 signatures, exponential backoff retries, and deduplication via unique event IDs.
  */
 class WebhookService {
+  /**
+   * Initializes the WebhookService with empty subscription and history stores.
+   */
   constructor() {
     // In-memory subscription store (for demo purposes)
     this.subscriptions = [];
@@ -67,7 +70,12 @@ class WebhookService {
         maxRetries: 5,
         baseDelay: 1000,
         maxDelay: 30000,
-        // Only retry transient errors
+        /**
+         * Logic to determine if a webhook delivery error is transient.
+         * 
+         * @param {Error} error The error encountered during delivery.
+         * @returns {boolean} True if the error should be retried.
+         */
         shouldRetry: (error) => {
           const msg = error.message.toLowerCase();
           return msg.includes('timeout') || msg.includes('50') || msg.includes('429');

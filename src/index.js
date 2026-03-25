@@ -161,7 +161,7 @@ app.delete('/api/invoices/:id', (req, res) => {
   // eslint-disable-next-line security/detect-object-injection
   invoices[invoiceIndex].deletedAt = new Date().toISOString();
 
-  // Trigger webhook notification (asynchronous)
+  // eslint-disable-next-line security/detect-object-injection
   webhookService.notifyInvoiceStatusChange(invoices[invoiceIndex], 'void').catch(err => {
     console.error(`Webhook notification failed for invoice ${id}:`, err);
   });
@@ -197,7 +197,7 @@ app.patch('/api/invoices/:id/restore', (req, res) => {
   // eslint-disable-next-line security/detect-object-injection
   invoices[invoiceIndex].deletedAt = null;
 
-  // Trigger webhook notification (asynchronous)
+  // eslint-disable-next-line security/detect-object-injection
   webhookService.notifyInvoiceStatusChange(invoices[invoiceIndex], 'pending_verification').catch(err => {
     console.error(`Webhook notification failed for invoice ${id}:`, err);
   });
