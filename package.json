@@ -7,9 +7,30 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "lint": "eslint src/",
+<<<<<<< HEAD
+    "test": "jest --coverage --detectOpenHandles",
+    "test:watch": "jest --watch"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "collectCoverage": true,
+    "collectCoverageFrom": [
+      "src/**/*.js",
+      "!src/index.js"
+    ],
+    "coverageThreshold": {
+      "global": {
+        "branches": 95,
+        "functions": 95,
+        "lines": 95,
+        "statements": 95
+      }
+    }
+=======
     "lint:fix": "eslint src/ --fix",
     "test": "jest",
     "test:coverage": "jest --coverage"
+>>>>>>> main
   },
   "keywords": [],
   "author": "",
@@ -23,11 +44,18 @@
     "jsonwebtoken": "^9.0.3"
   },
   "devDependencies": {
+<<<<<<< HEAD
+    "@types/jest": "^30.0.0",
+    "eslint": "^10.0.3",
+    "jest": "^30.3.0",
+    "supertest": "^7.2.2"
+=======
     "eslint": "^9.21.0",
     "eslint-plugin-jsdoc": "^50.6.3",
     "eslint-plugin-security": "^3.0.1",
     "globals": "^16.0.0",
     "jest": "^30.3.0",
     "supertest": "^7.0.0"
+>>>>>>> main
   }
 }

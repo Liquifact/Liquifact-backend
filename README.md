@@ -125,20 +125,50 @@ Production default:
 
 ---
 
+## API Pagination
+
+The `GET /api/invoices` endpoint supports pagination via query parameters:
+
+- `page`: The page number (default: 1).
+- `limit`: Number of records per page (default: 10, max: 100).
+
+Response metadata includes:
+- `total`: Total records in the system.
+- `page`: Current page.
+- `limit`: Current limit.
+- `totalPages`: Total number of pages based on the limit.
+- `hasNextPage`: Boolean indicating if a next page exists.
+- `hasPreviousPage`: Boolean indicating if a previous page exists.
+
+---
+
 ## Project structure
 
 ```
 liquifact-backend/
 ├── src/
+<<<<<<< HEAD
+│   ├── app.js               # Express application and routes
+│   ├── index.js             # Server entry point
+=======
 │   ├── config/
 │   │   └── cors.js     # CORS allowlist parsing and policy
+>>>>>>> main
 │   ├── services/
-│   │   └── soroban.js  # Contract interaction wrappers
+│   │   ├── invoiceService.js # Business logic and pagination
+│   │   └── soroban.js        # Contract interaction wrappers
 │   ├── utils/
+<<<<<<< HEAD
+│   │   └── retry.js          # Exponential backoff utility
+│   └── tests/
+│       └── pagination.test.js # Integration and unit tests
+├── .env.example              # Env template
+=======
 │   │   └── retry.js    # Exponential backoff utility
 │   ├── app.js          # Express app, middleware, routes
 │   └── index.js        # Runtime bootstrap
 ├── .env.example        # Env template
+>>>>>>> main
 ├── eslint.config.js
 └── package.json
 ```
