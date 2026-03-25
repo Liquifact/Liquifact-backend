@@ -160,6 +160,21 @@ To ensure reliable communication with Soroban contract provider APIs, this backe
 
 ---
 
+## Logging & Request Correlation
+
+To simplify debugging and tracing requests across services, the API implements **Request Correlation IDs**.
+
+### Key Features
+- **RequestId Middleware (`src/middleware/requestId.js`)**: Automatically generates a unique UUID (v4) for every incoming request if the `X-Request-Id` header is missing.
+- **Propagation**: The ID is returned in the `X-Request-Id` response header and propagated through all logs associated with that request.
+- **Async Context Logging (`src/utils/logger.js`)**: Uses Node.js `AsyncLocalStorage` to automatically inject the current correlation ID into every log message without needing to pass it manually through function arguments.
+- **JSON Structured Logs**: All logs are output in structured JSON format, including `timestamp`, `level`, `requestId`, and `message`, making them easily searchable in centralized logging systems (e.g., ELK, CloudWatch, Datadog).
+
+Example log format:
+```json
+{"level":"info","timestamp":"2026-03-25T23:00:00.000Z","requestId":"550e8400-e29b-41d4-a716-446655440000","message":"Invoice uploaded successfully."}
+```
+
 ## CI/CD
 
 GitHub Actions runs on every push and pull request to `main`:

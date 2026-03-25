@@ -1,3 +1,4 @@
+/* global describe, it, expect, beforeAll */
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const app = require('../index');
