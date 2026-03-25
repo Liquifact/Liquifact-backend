@@ -1,16 +1,29 @@
 /**
  * LiquiFact API Gateway
  * Express server for invoice financing, auth, and Stellar integration.
+ * 
+ * Environment validation is performed at startup to ensure all required
+ * configuration is present and valid before the server starts.
  */
 
 const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
 
+const { validateEnv } = require('./config/env');
 const { callSorobanContract } = require('./services/soroban');
 
+// Validate environment configuration at startup (fail fast)
+let config;
+try {
+  config = validateEnv();
+} catch (error) {
+  console.error('\n' + error.message + '\n');
+  process.exit(1);
+}
+
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = config.PORT;
 
 app.use(cors());
 app.use(express.json());
@@ -21,6 +34,7 @@ app.get('/health', (req, res) => {
     status: 'ok',
     service: 'liquifact-api',
     version: '0.1.0',
+    environment: config.NODE_ENV,
     timestamp: new Date().toISOString(),
   });
 });
