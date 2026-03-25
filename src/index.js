@@ -3,14 +3,18 @@
  * Express server bootstrap for invoice financing, auth, and Stellar integration.
  */
 
+const express = require('express');
+const cors = require('cors');
 require('dotenv').config();
 const { globalLimiter, sensitiveLimiter } = require('./middleware/rateLimit');
 const { authenticateToken } = require('./middleware/auth');
+const webhookService = require('./services/webhook');
 
 const asyncHandler = require('./utils/asyncHandler');
 const errorHandler = require('./middleware/errorHandler');
 const { callSorobanContract } = require('./services/soroban');
 
+const app = express();
 const PORT = process.env.PORT || 3001;
 
 /**
@@ -60,6 +64,23 @@ app.get('/api', (req, res) => {
 });
 
 /**
+ * Registers a new webhook subscription.
+ * 
+ * @param {import('express').Request} req - The Express request object.
+ * @param {import('express').Response} res - The Express response object.
+ * @returns {void}
+ */
+app.post('/api/webhooks/register', (req, res) => {
+  const { url, secret } = req.body;
+  if (!url || !secret) {
+    return res.status(400).json({ error: 'URL and secret are required for webhook registration.' });
+  }
+
+  webhookService.register(url, secret);
+  return res.status(201).json({ message: 'Webhook registered successfully.' });
+});
+
+/**
  * Lists tokenized invoices.
  * Filters out soft-deleted records unless explicitly requested.
  * 
@@ -105,6 +126,11 @@ app.post('/api/invoices', (req, res) => {
 
   invoices.push(newInvoice);
 
+  // Trigger webhook notification (asynchronous)
+  webhookService.notifyInvoiceStatusChange(newInvoice, 'pending_verification').catch(err => {
+    console.error(`Webhook notification failed for invoice ${newInvoice.id}:`, err);
+  });
+
   return res.status(201).json({
     data: newInvoice,
     message: 'Invoice uploaded successfully.',
@@ -134,6 +160,11 @@ app.delete('/api/invoices/:id', (req, res) => {
 
   // eslint-disable-next-line security/detect-object-injection
   invoices[invoiceIndex].deletedAt = new Date().toISOString();
+
+  // Trigger webhook notification (asynchronous)
+  webhookService.notifyInvoiceStatusChange(invoices[invoiceIndex], 'void').catch(err => {
+    console.error(`Webhook notification failed for invoice ${id}:`, err);
+  });
 
   return res.json({
     message: 'Invoice soft-deleted successfully.',
@@ -165,6 +196,11 @@ app.patch('/api/invoices/:id/restore', (req, res) => {
 
   // eslint-disable-next-line security/detect-object-injection
   invoices[invoiceIndex].deletedAt = null;
+
+  // Trigger webhook notification (asynchronous)
+  webhookService.notifyInvoiceStatusChange(invoices[invoiceIndex], 'pending_verification').catch(err => {
+    console.error(`Webhook notification failed for invoice ${id}:`, err);
+  });
 
   return res.json({
     message: 'Invoice restored successfully.',

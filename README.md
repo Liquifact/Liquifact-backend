@@ -160,6 +160,41 @@ To ensure reliable communication with Soroban contract provider APIs, this backe
 
 ---
 
+## Webhook Notifications
+
+The API provides real-time notifications for **Invoice Status Changes** via webhooks.
+
+### Key Features
+- **Signed Events**: Payloads are signed using HMAC-SHA256 with a shared secret key (provided during registration). Verify signatures via the `X-Liquifact-Signature` header.
+- **Reliable Delivery**: Automatic exponential backoff retries (up to 5 attempts) for transient errors (e.g., HTTP 5xx, 429).
+- **Deduplication**: Every webhook event contains a unique `X-Liquifact-Event-Id` header to help consumers safely handle duplicate deliveries gracefully.
+- **Lifecycle Events**:
+  - `invoice.status_changed`: Fired when an invoice is uploaded, voided (deleted), or restored.
+
+### Webhook Registration
+To receive notifications, register your endpoint:
+`POST /api/webhooks/register`
+```json
+{
+  "url": "https://your-app.com/api/webhooks",
+  "secret": "your-secure-shared-secret"
+}
+```
+
+### Signature Verification (Example code snippet for clients)
+```javascript
+const crypto = require('crypto');
+const signature = req.headers['x-liquifact-signature'];
+const expectedSignature = crypto
+  .createHmac('sha256', secret)
+  .update(JSON.stringify(req.body))
+  .digest('hex');
+
+if (signature !== expectedSignature) {
+  throw new Error('Invalid signature');
+}
+```
+
 ## CI/CD
 
 GitHub Actions runs on every push and pull request to `main`:
