@@ -7,10 +7,34 @@ const cors = require('cors');
 const { deprecate } = require('./middleware/deprecation');
 const { authenticateToken } = require('./middleware/auth');
 const { globalLimiter, sensitiveLimiter } = require('./middleware/rateLimit');
+const errorHandler = require('./middleware/errorHandler');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+/** @type {Map<string, object>} In-memory invoice store */
+let store = new Map();
+
+/**
+ * Resets the in-memory store. Used for test isolation.
+ *
+ * @returns {void}
+ */
+function resetStore() {
+  store = new Map();
+}
+
+/**
+ * Starts the HTTP server.
+ *
+ * @returns {import('http').Server} The running server instance.
+ */
+function startServer() {
+  return app.listen(PORT, () => {
+    console.log(`LiquiFact API running at http://localhost:${PORT}`);
+  });
+}
 
 app.use(cors());
 app.use(express.json());
@@ -39,25 +63,50 @@ app.get('/api', (req, res) => {
   });
 });
 
-// Placeholder: Invoices
+// Invoices
 app.get('/api/invoices', deprecate({
   sunset: '2026-12-31T23:59:59Z',
   link: 'https://docs.liquifact.com/api/v2/invoices',
 }), (req, res) => {
-  res.json({
-    data: [],
-    message: 'Invoice service will list tokenized invoices here.',
-  });
+  const includeDeleted = req.query.includeDeleted === 'true';
+  const invoices = Array.from(store.values()).filter(
+    (inv) => includeDeleted || inv.deletedAt === null
+  );
+  res.json({ data: invoices });
 });
 
 app.post('/api/invoices', authenticateToken, sensitiveLimiter, (req, res) => {
-  res.status(201).json({
-    data: { id: 'placeholder', status: 'pending_verification' },
-    message: 'Invoice upload will be implemented with verification and tokenization.',
-  });
+  const { amount, customer } = req.body;
+  if (!amount || !customer) {
+    return res.status(400).json({ error: 'Missing required fields: amount, customer' });
+  }
+  const id = `inv_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const invoice = { id, amount, customer, deletedAt: null, createdAt: new Date().toISOString() };
+  store.set(id, invoice);
+  return res.status(201).json({ data: invoice });
 });
 
-// Placeholder: Escrow
+app.delete('/api/invoices/:id', (req, res) => {
+  const { id } = req.params;
+  const invoice = store.get(id);
+  if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+  if (invoice.deletedAt !== null) return res.status(400).json({ error: 'Invoice is already deleted' });
+  invoice.deletedAt = new Date().toISOString();
+  store.set(id, invoice);
+  return res.json({ data: invoice });
+});
+
+app.patch('/api/invoices/:id/restore', (req, res) => {
+  const { id } = req.params;
+  const invoice = store.get(id);
+  if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+  if (invoice.deletedAt === null) return res.status(400).json({ error: 'Invoice is not deleted' });
+  invoice.deletedAt = null;
+  store.set(id, invoice);
+  return res.json({ data: invoice });
+});
+
+// Escrow
 app.get('/api/escrow/:invoiceId', (req, res) => {
   const { invoiceId } = req.params;
   res.json({
@@ -73,19 +122,21 @@ app.post('/api/escrow', authenticateToken, (req, res) => {
   });
 });
 
+// 404
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found', path: req.path });
 });
 
-app.use((err, req, res, _next) => {
-  console.error(err);
-  res.status(500).json({ error: 'Internal server error' });
-});
+// Error handler
+app.use(errorHandler);
 
 if (require.main === module) {
-  app.listen(PORT, () => {
-    console.log(`LiquiFact API running at http://localhost:${PORT}`);
-  });
+  startServer();
 }
 
+app.resetStore = resetStore;
+app.startServer = startServer;
 module.exports = app;
+module.exports.app = app;
+module.exports.resetStore = resetStore;
+module.exports.startServer = startServer;

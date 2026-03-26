@@ -5,6 +5,7 @@ const app = require('../index');
 describe('Rate Limiting Middleware', () => {
     const secret = process.env.JWT_SECRET || 'test-secret';
     const validToken = jwt.sign({ id: 'test_user_1' }, secret);
+    const validBody = { amount: 100, customer: 'Rate Test Corp' };
 
     it('should return 200 for health check (global limiter allows many)', async () => {
         const response = await request(app).get('/health');
@@ -18,19 +19,16 @@ describe('Rate Limiting Middleware', () => {
                 const response = await request(app)
                     .post('/api/invoices')
                     .set('Authorization', `Bearer ${validToken}`)
-                    .send({});
-
+                    .send(validBody);
                 if (response.status === 429) {
                     break;
                 }
                 expect(response.status).toBe(201);
             }
-
             const throttledResponse = await request(app)
                 .post('/api/invoices')
                 .set('Authorization', `Bearer ${validToken}`)
-                .send({});
-
+                .send(validBody);
             expect(throttledResponse.status).toBe(429);
             expect(throttledResponse.body.error).toContain('rate limit exceeded');
         });
