@@ -4,13 +4,17 @@
  */
 
 require('dotenv').config();
+const express = require("express");
+const cors = require("cors");
 const { globalLimiter, sensitiveLimiter } = require('./middleware/rateLimit');
 const { authenticateToken } = require('./middleware/auth');
 
 const asyncHandler = require('./utils/asyncHandler');
 const errorHandler = require('./middleware/errorHandler');
 const { callSorobanContract } = require('./services/soroban');
+const { verifyInvoice } = require('./services/invoiceVerification');
 
+const app = express();
 const PORT = process.env.PORT || 3001;
 
 /**
@@ -69,8 +73,8 @@ app.get('/api', (req, res) => {
  */
 app.get('/api/invoices', (req, res) => {
   const includeDeleted = req.query.includeDeleted === 'true';
-  const filteredInvoices = includeDeleted 
-    ? invoices 
+  const filteredInvoices = includeDeleted
+    ? invoices
     : invoices.filter(inv => !inv.deletedAt);
 
   return res.json({
@@ -87,18 +91,22 @@ app.get('/api/invoices', (req, res) => {
  * @param {import('express').Response} res - The Express response object.
  * @returns {void}
  */
-app.post('/api/invoices', (req, res) => {
+app.post('/api/invoices', async (req, res) => {
   const { amount, customer } = req.body;
-  
-  if (!amount || !customer) {
+
+  if (amount === undefined || !customer) {
     return res.status(400).json({ error: 'Amount and customer are required' });
   }
+
+  // Run verification pipeline hook
+  const verificationResult = await verifyInvoice({ amount, customer });
 
   const newInvoice = {
     id: `inv_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
     amount,
     customer,
-    status: 'pending_verification',
+    status: verificationResult.status,
+    verificationReason: verificationResult.reason || null,
     createdAt: new Date().toISOString(),
     deletedAt: null,
   };
@@ -195,7 +203,7 @@ app.get('/api/escrow/:invoiceId', async (req, res) => {
     };
 
     const data = await callSorobanContract(operation);
-    
+
     res.json({
       data,
       message: 'Escrow state read from Soroban contract via robust integration wrapper.',

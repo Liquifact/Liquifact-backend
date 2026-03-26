@@ -90,6 +90,18 @@ The middleware authenticates the token against the `JWT_SECRET` environment vari
 
 ---
 
+## Invoice Verification Pipeline
+
+When setting up new invoices via `POST /api/invoices`, the system runs the payload through a strict verification hook (`src/services/invoiceVerification.js`).
+This pipeline performs fraud checks and business validations before the invoice is officially approved:
+- Assesses for strict type safety (e.g., positive numerical amounts, well-structured strings).
+- Validates data against predefined business logic rules (rejecting amounts above a global maximum, forcing manual review for threshold amounts).
+- Enforces security assumptions by checking payload content for common injection patterns (like XSS signatures in customer names).
+
+The resulting invoice maintains a verifiable status of `VERIFIED`, `REJECTED`, or `MANUAL_REVIEW`, as well as an associated `verificationReason` for failed or suspicious uploads.
+
+---
+
 ## Rate Limiting
 
 The API implements request throttling to prevent abuse:

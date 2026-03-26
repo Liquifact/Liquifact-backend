@@ -30,7 +30,18 @@ describe('LiquiFact API', () => {
       expect(response.body.data).toHaveProperty('id');
       expect(response.body.data.amount).toBe(1000);
       expect(response.body.data.customer).toBe('Test Corp');
+      expect(response.body.data.status).toBe('VERIFIED');
       expect(response.body.data.deletedAt).toBeNull();
+    });
+
+    it('POST /api/invoices - creates a rejected invoice if verification fails', async () => {
+      const response = await request(app)
+        .post('/api/invoices')
+        .send({ amount: -500, customer: 'Shady Corp' });
+      
+      expect(response.status).toBe(201);
+      expect(response.body.data.status).toBe('REJECTED');
+      expect(response.body.data.verificationReason).toBe('Invalid amount: must be a positive number');
     });
 
     it('POST /api/invoices - fails if missing fields', async () => {
