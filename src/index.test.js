@@ -1,3 +1,10 @@
+jest.mock('./middleware/auth', () => ({
+  authenticateToken: (req, res, next) => {
+    req.user = { id: 1, role: 'admin' };
+    next();
+  }
+}));
+
 const request = require('supertest');
 const { app, resetStore, startServer } = require('./index');
 

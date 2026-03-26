@@ -1,10 +1,10 @@
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
-const app = require('../index');
+const { app } = require('../index');
 
 describe('Rate Limiting Middleware', () => {
     const secret = process.env.JWT_SECRET || 'test-secret';
-    const validToken = jwt.sign({ id: 'test_user_1' }, secret);
+    const validToken = jwt.sign({ id: 'test_user_1', role: 'admin' }, secret);
 
     it('should return 200 for health check (global limiter allows many)', async () => {
         const response = await request(app).get('/health');
@@ -23,7 +23,7 @@ describe('Rate Limiting Middleware', () => {
                 const response = await request(app)
                     .post('/api/invoices')
                     .set('Authorization', `Bearer ${validToken}`)
-                    .send({});
+                    .send({ amount: 1000, customer: 'Test' });
 
                 // If we hit a 429 early because of previous tests, we just break and check the next one.
                 if (response.status === 429) break;
@@ -34,7 +34,7 @@ describe('Rate Limiting Middleware', () => {
             const throttledResponse = await request(app)
                 .post('/api/invoices')
                 .set('Authorization', `Bearer ${validToken}`)
-                .send({});
+                .send({ amount: 1000, customer: 'Test' });
 
             expect(throttledResponse.status).toBe(429);
             expect(throttledResponse.body.error).toContain('rate limit exceeded');

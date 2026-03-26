@@ -78,12 +78,29 @@ Current coverage targets: **>95% Lines and Statements**.
 
 ---
 
-## Authentication
+## Authentication & Authorization (RBAC)
 
-Protected endpoints (such as invoice mutations and escrow operations) require a JSON Web Token (JWT) in the `Authorization` header:
+Protected endpoints require a JSON Web Token (JWT) in the `Authorization` header:
 
 ```http
 Authorization: Bearer <jwt_token_here>
+```
+
+The middleware authenticates the token (`401 Unauthorized` if invalid/missing) and enforces Role-Based Access Control (RBAC) using the `role` claim in the JWT payload (`403 Forbidden` if unauthorized).
+
+**Roles and Operations:**
+- `CREATE_INVOICE`: `['admin', 'issuer']`
+- `VIEW_INVOICES`: `['admin', 'issuer', 'investor']`
+- `ESCROW_READ`: `['admin', 'investor']`
+- `DELETE_INVOICE`: `['admin']`
+- `RESTORE_INVOICE`: `['admin']`
+
+Sample Token Payload:
+```json
+{
+  "id": "user_id_here",
+  "role": "admin"
+}
 ```
 
 The middleware authenticates the token against the `JWT_SECRET` environment variable (defaults to `test-secret` for local development). Unauthenticated requests will be rejected with a `401 Unauthorized` status.

@@ -11,11 +11,20 @@ const asyncHandler = require('./utils/asyncHandler');
 const errorHandler = require('./middleware/errorHandler');
 const { callSorobanContract } = require('./services/soroban');
 
+const { rbacPolicy } = require('./policies/rbacPolicy');
+const { roleGuard } = require('./middleware/roleGuard');
+
 const PORT = process.env.PORT || 3001;
+
+const express = require('express');
+const cors = require('cors');
+
+const app = express();
 
 /**
  * Global Middlewares
  */
+app.use(globalLimiter);
 app.use(cors());
 app.use(express.json());
 
@@ -67,7 +76,7 @@ app.get('/api', (req, res) => {
  * @param {import('express').Response} res - The Express response object.
  * @returns {void}
  */
-app.get('/api/invoices', (req, res) => {
+app.get('/api/invoices', authenticateToken, roleGuard(rbacPolicy.VIEW_INVOICES), (req, res) => {
   const includeDeleted = req.query.includeDeleted === 'true';
   const filteredInvoices = includeDeleted 
     ? invoices 
@@ -87,7 +96,7 @@ app.get('/api/invoices', (req, res) => {
  * @param {import('express').Response} res - The Express response object.
  * @returns {void}
  */
-app.post('/api/invoices', (req, res) => {
+app.post('/api/invoices', authenticateToken, sensitiveLimiter, roleGuard(rbacPolicy.CREATE_INVOICE), (req, res) => {
   const { amount, customer } = req.body;
   
   if (!amount || !customer) {
@@ -119,7 +128,7 @@ app.post('/api/invoices', (req, res) => {
  * @param {import('express').Response} res - The Express response object.
  * @returns {void}
  */
-app.delete('/api/invoices/:id', (req, res) => {
+app.delete('/api/invoices/:id', authenticateToken, roleGuard(rbacPolicy.DELETE_INVOICE), (req, res) => {
   const { id } = req.params;
   const invoiceIndex = invoices.findIndex(inv => inv.id === id);
 
@@ -150,7 +159,7 @@ app.delete('/api/invoices/:id', (req, res) => {
  * @param {import('express').Response} res - The Express response object.
  * @returns {void}
  */
-app.patch('/api/invoices/:id/restore', (req, res) => {
+app.patch('/api/invoices/:id/restore', authenticateToken, roleGuard(rbacPolicy.RESTORE_INVOICE), (req, res) => {
   const { id } = req.params;
   const invoiceIndex = invoices.findIndex(inv => inv.id === id);
 
@@ -181,7 +190,7 @@ app.patch('/api/invoices/:id/restore', (req, res) => {
  * @param {import('express').Response} res - The Express response object.
  * @returns {Promise<void>}
  */
-app.get('/api/escrow/:invoiceId', async (req, res) => {
+app.get('/api/escrow/:invoiceId', authenticateToken, roleGuard(rbacPolicy.ESCROW_READ), async (req, res) => {
   const { invoiceId } = req.params;
 
   try {
