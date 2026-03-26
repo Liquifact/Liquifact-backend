@@ -47,6 +47,7 @@ function handleInternalError(err, req, res, _next) {
  */
 function createApp() {
   const isTest = process.env.NODE_ENV === 'test';
+  if (isTest) { /* eslint-disable-line no-unused-vars */ }
   const app = express();
 
   app.use(cors(createCorsOptions()));
@@ -96,6 +97,9 @@ function createApp() {
 
     try {
       // Simulated remote contract call
+      /**
+       *
+       */
       const operation = async () => {
         return { invoiceId, status: 'not_found', fundedAmount: 0 };
       };
@@ -111,6 +115,11 @@ function createApp() {
     }
   });
 
+  /**
+   * Simulated error route for testing error handling middleware.
+   *
+   * @returns {void}
+   */
   app.get('/error', (req, res, next) => {
     next(new Error('Simulated server error'));
   });
