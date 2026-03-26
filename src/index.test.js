@@ -1,7 +1,15 @@
 const request = require('supertest');
+const jwt = require('jsonwebtoken');
 const { app, resetStore, startServer } = require('./index');
 
 describe('LiquiFact API', () => {
+  const secret = process.env.JWT_SECRET || 'test-secret';
+  let validToken;
+
+  beforeAll(() => {
+    validToken = jwt.sign({ id: 'test_user_1', role: 'user' }, secret, { expiresIn: '1h' });
+  });
+
   beforeEach(() => {
     resetStore();
   });
@@ -24,6 +32,7 @@ describe('LiquiFact API', () => {
     it('POST /api/invoices - creates a new invoice', async () => {
       const response = await request(app)
         .post('/api/invoices')
+        .set('Authorization', `Bearer ${validToken}`)
         .send({ amount: 1000, customer: 'Test Corp' });
       
       expect(response.status).toBe(201);
@@ -34,14 +43,17 @@ describe('LiquiFact API', () => {
     });
 
     it('POST /api/invoices - fails if missing fields', async () => {
-      const response = await request(app).post('/api/invoices').send({ amount: 1000 });
+      const response = await request(app)
+        .post('/api/invoices')
+        .set('Authorization', `Bearer ${validToken}`)
+        .send({ amount: 1000 });
       expect(response.status).toBe(400);
       expect(response.body).toHaveProperty('error');
     });
 
     it('GET /api/invoices - lists active invoices', async () => {
-      await request(app).post('/api/invoices').send({ amount: 1000, customer: 'A' });
-      await request(app).post('/api/invoices').send({ amount: 2000, customer: 'B' });
+      await request(app).post('/api/invoices').set('Authorization', `Bearer ${validToken}`).send({ amount: 1000, customer: 'A' });
+      await request(app).post('/api/invoices').set('Authorization', `Bearer ${validToken}`).send({ amount: 2000, customer: 'B' });
 
       const response = await request(app).get('/api/invoices');
       expect(response.status).toBe(200);
@@ -51,10 +63,11 @@ describe('LiquiFact API', () => {
     it('DELETE /api/invoices/:id - soft deletes an invoice', async () => {
       const postRes = await request(app)
         .post('/api/invoices')
+        .set('Authorization', `Bearer ${validToken}`)
         .send({ amount: 500, customer: 'Delete Me' });
       const id = postRes.body.data.id;
 
-      const delRes = await request(app).delete(`/api/invoices/${id}`);
+      const delRes = await request(app).delete(`/api/invoices/${id}`).set('Authorization', `Bearer ${validToken}`);
       expect(delRes.status).toBe(200);
       expect(delRes.body.data.deletedAt).not.toBeNull();
 
@@ -68,24 +81,24 @@ describe('LiquiFact API', () => {
     });
 
     it('DELETE /api/invoices/:id - fails for non-existent or already deleted', async () => {
-      const res404 = await request(app).delete('/api/invoices/nonexistent');
+      const res404 = await request(app).delete('/api/invoices/nonexistent').set('Authorization', `Bearer ${validToken}`);
       expect(res404.status).toBe(404);
 
-      const postRes = await request(app).post('/api/invoices').send({ amount: 100, customer: 'X' });
+      const postRes = await request(app).post('/api/invoices').set('Authorization', `Bearer ${validToken}`).send({ amount: 100, customer: 'X' });
       const id = postRes.body.data.id;
-      await request(app).delete(`/api/invoices/${id}`);
+      await request(app).delete(`/api/invoices/${id}`).set('Authorization', `Bearer ${validToken}`);
       
-      const res400 = await request(app).delete(`/api/invoices/${id}`);
+      const res400 = await request(app).delete(`/api/invoices/${id}`).set('Authorization', `Bearer ${validToken}`);
       expect(res400.status).toBe(400);
       expect(res400.body.error).toBe('Invoice is already deleted');
     });
 
     it('PATCH /api/invoices/:id/restore - restores a deleted invoice', async () => {
-      const postRes = await request(app).post('/api/invoices').send({ amount: 100, customer: 'X' });
+      const postRes = await request(app).post('/api/invoices').set('Authorization', `Bearer ${validToken}`).send({ amount: 100, customer: 'X' });
       const id = postRes.body.data.id;
-      await request(app).delete(`/api/invoices/${id}`);
+      await request(app).delete(`/api/invoices/${id}`).set('Authorization', `Bearer ${validToken}`);
 
-      const restoreRes = await request(app).patch(`/api/invoices/${id}/restore`);
+      const restoreRes = await request(app).patch(`/api/invoices/${id}/restore`).set('Authorization', `Bearer ${validToken}`);
       expect(restoreRes.status).toBe(200);
       expect(restoreRes.body.data.deletedAt).toBeNull();
 
@@ -94,13 +107,13 @@ describe('LiquiFact API', () => {
     });
 
     it('PATCH /api/invoices/:id/restore - fails for non-existent or not deleted', async () => {
-      const res404 = await request(app).patch('/api/invoices/nonexistent/restore');
+      const res404 = await request(app).patch('/api/invoices/nonexistent/restore').set('Authorization', `Bearer ${validToken}`);
       expect(res404.status).toBe(404);
 
-      const postRes = await request(app).post('/api/invoices').send({ amount: 100, customer: 'X' });
+      const postRes = await request(app).post('/api/invoices').set('Authorization', `Bearer ${validToken}`).send({ amount: 100, customer: 'X' });
       const id = postRes.body.data.id;
       
-      const res400 = await request(app).patch(`/api/invoices/${id}/restore`);
+      const res400 = await request(app).patch(`/api/invoices/${id}/restore`).set('Authorization', `Bearer ${validToken}`);
       expect(res400.status).toBe(400);
       expect(res400.body.error).toBe('Invoice is not deleted');
     });

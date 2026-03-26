@@ -4,20 +4,21 @@
  */
 
 require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
 const { globalLimiter, sensitiveLimiter } = require('./middleware/rateLimit');
 const { authenticateToken } = require('./middleware/auth');
-
-const asyncHandler = require('./utils/asyncHandler');
-const errorHandler = require('./middleware/errorHandler');
 const { callSorobanContract } = require('./services/soroban');
 
 const PORT = process.env.PORT || 3001;
+const app = express();
 
 /**
  * Global Middlewares
  */
 app.use(cors());
 app.use(express.json());
+app.use(globalLimiter);
 
 // In-memory storage for invoices (Issue #25)
 let invoices = [];
@@ -25,7 +26,7 @@ let invoices = [];
 /**
  * Health check endpoint.
  * Returns the current status and version of the service.
- * 
+ *
  * @param {import('express').Request} req - The Express request object.
  * @param {import('express').Response} res - The Express response object.
  * @returns {void}
@@ -42,7 +43,7 @@ app.get('/health', (req, res) => {
 /**
  * API information endpoint.
  * Lists available endpoints and service description.
- * 
+ *
  * @param {import('express').Request} req - The Express request object.
  * @param {import('express').Response} res - The Express response object.
  * @returns {void}
@@ -62,15 +63,15 @@ app.get('/api', (req, res) => {
 /**
  * Lists tokenized invoices.
  * Filters out soft-deleted records unless explicitly requested.
- * 
+ *
  * @param {import('express').Request} req - The Express request object.
  * @param {import('express').Response} res - The Express response object.
  * @returns {void}
  */
 app.get('/api/invoices', (req, res) => {
   const includeDeleted = req.query.includeDeleted === 'true';
-  const filteredInvoices = includeDeleted 
-    ? invoices 
+  const filteredInvoices = includeDeleted
+    ? invoices
     : invoices.filter(inv => !inv.deletedAt);
 
   return res.json({
@@ -81,15 +82,16 @@ app.get('/api/invoices', (req, res) => {
 
 /**
  * Uploads and tokenizes a new invoice.
+ * Requires JWT authentication and is subject to the sensitive rate limit.
  * Generates a unique ID and sets the creation timestamp.
- * 
+ *
  * @param {import('express').Request} req - The Express request object.
  * @param {import('express').Response} res - The Express response object.
  * @returns {void}
  */
-app.post('/api/invoices', (req, res) => {
+app.post('/api/invoices', authenticateToken, sensitiveLimiter, (req, res) => {
   const { amount, customer } = req.body;
-  
+
   if (!amount || !customer) {
     return res.status(400).json({ error: 'Amount and customer are required' });
   }
@@ -113,13 +115,14 @@ app.post('/api/invoices', (req, res) => {
 
 /**
  * Performs a soft delete on an invoice.
+ * Requires JWT authentication.
  * Sets the deletedAt timestamp instead of removing the record.
- * 
+ *
  * @param {import('express').Request} req - The Express request object.
  * @param {import('express').Response} res - The Express response object.
  * @returns {void}
  */
-app.delete('/api/invoices/:id', (req, res) => {
+app.delete('/api/invoices/:id', authenticateToken, (req, res) => {
   const { id } = req.params;
   const invoiceIndex = invoices.findIndex(inv => inv.id === id);
 
@@ -144,13 +147,14 @@ app.delete('/api/invoices/:id', (req, res) => {
 
 /**
  * Restores a soft-deleted invoice.
+ * Requires JWT authentication.
  * Resets the deletedAt timestamp to null.
- * 
+ *
  * @param {import('express').Request} req - The Express request object.
  * @param {import('express').Response} res - The Express response object.
  * @returns {void}
  */
-app.patch('/api/invoices/:id/restore', (req, res) => {
+app.patch('/api/invoices/:id/restore', authenticateToken, (req, res) => {
   const { id } = req.params;
   const invoiceIndex = invoices.findIndex(inv => inv.id === id);
 
@@ -174,9 +178,9 @@ app.patch('/api/invoices/:id/restore', (req, res) => {
 });
 
 /**
- * Retrieves escrow state for a specific invoice.
- * Robust integration wrapper for Soroban contract interaction.
- * 
+ * Retrieves escrow state for a specific invoice from the Soroban contract.
+ * Robust integration wrapper with exponential backoff retries.
+ *
  * @param {import('express').Request} req - The Express request object.
  * @param {import('express').Response} res - The Express response object.
  * @returns {Promise<void>}
@@ -187,7 +191,7 @@ app.get('/api/escrow/:invoiceId', async (req, res) => {
   try {
     /**
      * Simulated remote contract call.
-     * 
+     *
      * @returns {Promise<Object>} The escrow data.
      */
     const operation = async () => {
@@ -195,7 +199,7 @@ app.get('/api/escrow/:invoiceId', async (req, res) => {
     };
 
     const data = await callSorobanContract(operation);
-    
+
     res.json({
       data,
       message: 'Escrow state read from Soroban contract via robust integration wrapper.',
@@ -206,8 +210,23 @@ app.get('/api/escrow/:invoiceId', async (req, res) => {
 });
 
 /**
+ * Placeholder: initiates an escrow operation for the given invoice.
+ * Requires JWT authentication. Full Soroban integration is pending.
+ *
+ * @param {import('express').Request} req - The Express request object.
+ * @param {import('express').Response} res - The Express response object.
+ * @returns {void}
+ */
+app.post('/api/escrow', authenticateToken, (req, res) => {
+  return res.json({
+    data: { status: 'funded' },
+    message: 'Escrow operation placeholder. Full Soroban integration pending.',
+  });
+});
+
+/**
  * 404 handler for unknown routes.
- * 
+ *
  * @param {import('express').Request} req - The Express request object.
  * @param {import('express').Response} res - The Express response object.
  * @param {import('express').NextFunction} next - The next middleware function.
@@ -223,7 +242,7 @@ app.use((req, res, next) => {
 /**
  * Global error handler.
  * Logs the error and returns a 500 status.
- * 
+ *
  * @param {Error} err - The error object.
  * @param {import('express').Request} req - The Express request object.
  * @param {import('express').Response} res - The Express response object.
@@ -237,7 +256,7 @@ app.use((err, req, res, _next) => {
 
 /**
  * Starts the Express server.
- * 
+ *
  * @returns {import('http').Server} The started server.
  */
 const startServer = () => {
@@ -249,7 +268,7 @@ const startServer = () => {
 
 /**
  * Resets the in-memory store (for testing purposes).
- * 
+ *
  * @returns {void}
  */
 const resetStore = () => {

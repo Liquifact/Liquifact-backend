@@ -90,6 +90,83 @@ The middleware authenticates the token against the `JWT_SECRET` environment vari
 
 ---
 
+## API Key Authentication
+
+In addition to JWT, the API supports **API key authentication** for trusted machine-to-machine (service-to-service) clients. API keys are scoped so that each key can only access the subset of operations it was provisioned for.
+
+### Header
+
+```http
+X-API-Key: lf_your_api_key_here
+```
+
+### Configuration (`API_KEYS`)
+
+API keys are configured via the `API_KEYS` environment variable — a **semicolon-separated** list of JSON objects. Each object has:
+
+| Field      | Type      | Required | Description |
+|------------|-----------|----------|-------------|
+| `key`      | `string`  | ✅        | The secret key. Must start with `lf_` and be ≥ 10 characters. |
+| `clientId` | `string`  | ✅        | Unique identifier for the calling service. |
+| `scopes`   | `string[]`| ✅        | Non-empty list of permissions (see table below). |
+| `revoked`  | `boolean` | ❌        | When `true` the key is instantly rejected. Defaults to `false`. |
+
+**Example value:**
+
+```
+API_KEYS={"key":"lf_billing_svc_key","clientId":"billing-service","scopes":["invoices:read","invoices:write"]};{"key":"lf_legacy_key","clientId":"legacy-svc","scopes":["invoices:read"],"revoked":true}
+```
+
+### Available Scopes
+
+| Scope            | Grants access to                                |
+|------------------|-------------------------------------------------|
+| `invoices:read`  | `GET /api/invoices` — list active invoices       |
+| `invoices:write` | `POST /api/invoices` — create / modify invoices  |
+| `escrow:read`    | `GET /api/escrow/:id` — read escrow state        |
+
+### Error Responses
+
+| Status | Reason |
+|--------|--------|
+| `401`  | Header missing, key unknown, or key revoked |
+| `403`  | Key is valid but lacks the required scope |
+
+### Key Rotation
+
+Zero-downtime key rotation flow:
+
+1. **Add** the new key entry to `API_KEYS` alongside the existing one.
+2. **Deploy** — both keys accept traffic.
+3. **Update** the calling service to use the new key.
+4. **Revoke** the old key by setting `"revoked": true` in its entry and redeploy.
+5. *(Optional)* Remove the revoked entry entirely in a follow-up deploy.
+
+### Usage Example
+
+Apply the middleware to any route:
+
+```js
+const { authenticateApiKey } = require('./src/middleware/apiKeyAuth');
+
+// No scope requirement — any valid, non-revoked key passes
+app.get('/api/invoices', authenticateApiKey(), handler);
+
+// Scope-guarded endpoint
+app.post('/api/invoices', authenticateApiKey({ requiredScope: 'invoices:write' }), handler);
+```
+
+On success, `req.apiClient` is populated with:
+
+```json
+{
+  "clientId": "billing-service",
+  "scopes": ["invoices:read", "invoices:write"]
+}
+```
+
+---
+
 ## Rate Limiting
 
 The API implements request throttling to prevent abuse:
@@ -131,14 +208,25 @@ Production default:
 liquifact-backend/
 ├── src/
 │   ├── config/
-│   │   └── cors.js     # CORS allowlist parsing and policy
+│   │   ├── cors.js        # CORS allowlist parsing and policy
+│   │   └── apiKeys.js     # API key registry: parsing, validation, scopes
+│   ├── middleware/
+│   │   ├── auth.js        # JWT Bearer token authentication
+│   │   ├── apiKeyAuth.js  # API key authentication + scope enforcement
+│   │   ├── rateLimit.js   # Global and sensitive route rate limiters
+│   │   ├── errorHandler.js
+│   │   └── deprecation.js
 │   ├── services/
-│   │   └── soroban.js  # Contract interaction wrappers
+│   │   └── soroban.js     # Contract interaction wrappers
 │   ├── utils/
-│   │   └── retry.js    # Exponential backoff utility
-│   ├── app.js          # Express app, middleware, routes
-│   └── index.js        # Runtime bootstrap
-├── .env.example        # Env template
+│   │   ├── retry.js       # Exponential backoff utility
+│   │   └── asyncHandler.js
+│   ├── app.js             # Express app, middleware, routes
+│   └── index.js           # Runtime bootstrap
+├── tests/
+│   └── unit/
+│       └── apiKeyAuth.test.js  # API key auth unit + integration tests
+├── .env.example           # Env template (includes API_KEYS docs)
 ├── eslint.config.js
 └── package.json
 ```

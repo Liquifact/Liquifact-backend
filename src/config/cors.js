@@ -93,6 +93,13 @@ function createCorsOptions(env = process.env) {
   const allowedOriginsSet = new Set(allowedOrigins);
 
   return {
+    /**
+     * Evaluates whether the incoming request origin is permitted.
+     *
+     * @param {string | undefined} origin - The request Origin header value.
+     * @param {Function} callback - CORS callback: `callback(error, allow)`.
+     * @returns {void}
+     */
     origin(origin, callback) {
       if (!origin || allowedOriginsSet.has(origin)) {
         return callback(null, true);

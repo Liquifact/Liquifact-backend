@@ -1,6 +1,6 @@
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
-const app = require('../index');
+const { app } = require('../index');
 
 describe('Authentication Middleware', () => {
     const secret = process.env.JWT_SECRET || 'test-secret';
@@ -56,11 +56,11 @@ describe('Authentication Middleware', () => {
             expect(response.body.error).toBe('Token has expired');
         });
 
-        it('should return 201 when a valid token is provided', async () => {
+        it('should return 201 when a valid token is provided with valid body', async () => {
             const response = await request(app)
                 .post('/api/invoices')
                 .set('Authorization', `Bearer ${validToken}`)
-                .send({});
+                .send({ amount: 500, customer: 'Auth Test Client' });
             expect(response.status).toBe(201);
             expect(response.body.data.status).toBe('pending_verification');
         });
