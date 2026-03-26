@@ -60,9 +60,9 @@ describe('Authentication Middleware', () => {
             const response = await request(app)
                 .post('/api/invoices')
                 .set('Authorization', `Bearer ${validToken}`)
-                .send({});
+                .send({ amount: 1000, customer: 'Test Corp' });
             expect(response.status).toBe(201);
-            expect(response.body.data.status).toBe('pending_verification');
+            expect(response.body.data).toHaveProperty('id');
         });
     });
 

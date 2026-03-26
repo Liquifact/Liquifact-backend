@@ -1,106 +1,98 @@
-const DEVELOPMENT_FALLBACK_ORIGINS = [
-  'http://localhost:3000',
-  'http://127.0.0.1:3000',
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
-];
-
-const CORS_REJECTION_MESSAGE = 'Origin not allowed by CORS';
+const CORS_REJECTION_MESSAGE = 'Not allowed by CORS';
+const CORS_REJECTION_SYMBOL = Symbol('CorsOriginRejected');
 
 /**
- * Parses a comma-separated origin allowlist into normalized exact-match origins.
+ * Creates a CORS rejection error with a 403 status.
  *
- * @param {string | undefined} value Raw environment variable value.
- * @returns {string[]} Normalized list of allowed origins.
+ * @returns {Error} A CORS rejection error.
+ */
+function createCorsRejectionError() {
+  const err = new Error(CORS_REJECTION_MESSAGE);
+  err.status = 403;
+  err[CORS_REJECTION_SYMBOL] = true;
+  return err;
+}
+
+/**
+ * Checks if an error is a CORS origin rejection error.
+ *
+ * @param {Error} err - The error to check.
+ * @returns {boolean} True if the error is a CORS rejection error.
+ */
+function isCorsOriginRejectedError(err) {
+  return err != null && err[CORS_REJECTION_SYMBOL] === true;
+}
+
+/**
+ * Parses a comma-separated string of allowed origins.
+ *
+ * @param {string|undefined} value - The raw env string.
+ * @returns {string[]} Array of trimmed, non-empty origin strings.
  */
 function parseAllowedOrigins(value) {
-  if (!value) {
-    return [];
-  }
-
-  return value
-    .split(',')
-    .map((origin) => origin.trim())
-    .filter(Boolean);
+  if (!value) { return []; }
+  return value.split(',').map((o) => o.trim()).filter(Boolean);
 }
 
 /**
- * Returns the built-in localhost allowlist used when development mode has no
- * explicit CORS configuration.
+ * Returns the development fallback origins.
  *
- * @returns {string[]} Local development origins.
+ * @returns {string[]} Localhost origins for development.
  */
 function getDevelopmentFallbackOrigins() {
-  return [...DEVELOPMENT_FALLBACK_ORIGINS];
+  return ['http://localhost:3000', 'http://localhost:5173'];
 }
 
 /**
- * Resolves the effective origin allowlist for the current environment.
+ * Returns allowed origins from environment variables.
  *
- * @param {NodeJS.ProcessEnv} env Environment variables to evaluate.
- * @returns {string[]} Effective exact-match allowlist.
+ * @param {object} env - Environment variables object.
+ * @returns {string[]} Array of allowed origins.
  */
-function getAllowedOriginsFromEnv(env = process.env) {
-  const configuredOrigins = parseAllowedOrigins(env.CORS_ALLOWED_ORIGINS);
-
-  if (configuredOrigins.length > 0) {
-    return configuredOrigins;
+function getAllowedOriginsFromEnv(env) {
+  if (env.CORS_ALLOWED_ORIGINS) {
+    return parseAllowedOrigins(env.CORS_ALLOWED_ORIGINS);
   }
-
   if (env.NODE_ENV === 'development') {
     return getDevelopmentFallbackOrigins();
   }
-
   return [];
 }
 
 /**
- * Creates the explicit error object used to reject a blocked browser origin.
+ * Creates and returns the CORS configuration options for the application.
  *
- * @returns {Error & { status: number }} CORS rejection error.
+ * @param {object} env - Environment variables object.
+ * @returns {import('cors').CorsOptions} The CORS options object.
  */
-function createCorsRejectionError() {
-  const error = new Error(CORS_REJECTION_MESSAGE);
-  error.status = 403;
-  return error;
-}
-
-/**
- * Determines whether the supplied error is the dedicated CORS rejection error.
- *
- * @param {Error | undefined} error Error raised during request handling.
- * @returns {boolean} True when the error is a blocked-origin CORS error.
- */
-function isCorsOriginRejectedError(error) {
-  return Boolean(
-    error &&
-    error.status === 403 &&
-    error.message === CORS_REJECTION_MESSAGE
-  );
-}
-
-/**
- * Builds Express CORS options using an environment-driven exact-match allowlist.
- *
- * Requests without an Origin header remain allowed so non-browser clients and
- * same-origin traffic are not blocked by CORS policy.
- *
- * @param {NodeJS.ProcessEnv} env Environment variables to evaluate.
- * @returns {{ origin: (origin: string | undefined, callback: Function) => void }} CORS options.
- */
-function createCorsOptions(env = process.env) {
-  const allowedOrigins = getAllowedOriginsFromEnv(env);
-  const allowedOriginsSet = new Set(allowedOrigins);
-
+function createCorsOptions(env) {
+  const allowedOrigins = getAllowedOriginsFromEnv(env || process.env);
   return {
-    origin(origin, callback) {
-      if (!origin || allowedOriginsSet.has(origin)) {
-        return callback(null, true);
-      }
-
+    origin: (origin, callback) => {
+      if (!origin) { return callback(null, true); }
+      if (allowedOrigins.includes(origin)) { return callback(null, true); }
       return callback(createCorsRejectionError());
     },
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
   };
+}
+
+/**
+ * Handles CORS errors and returns a 403 Forbidden response for rejected origins.
+ *
+ * @param {Error} err - The error object.
+ * @param {import('express').Request} req - Express request object.
+ * @param {import('express').Response} res - Express response object.
+ * @param {import('express').NextFunction} next - Express next callback.
+ * @returns {void}
+ */
+function handleCorsError(err, req, res, next) {
+  if (isCorsOriginRejectedError(err)) {
+    res.status(403).json({ error: err.message });
+    return;
+  }
+  next(err);
 }
 
 module.exports = {
@@ -109,6 +101,7 @@ module.exports = {
   createCorsRejectionError,
   getAllowedOriginsFromEnv,
   getDevelopmentFallbackOrigins,
+  handleCorsError,
   isCorsOriginRejectedError,
   parseAllowedOrigins,
 };

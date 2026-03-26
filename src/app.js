@@ -1,3 +1,4 @@
+ 
 const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
@@ -46,6 +47,10 @@ function handleInternalError(err, req, res, _next) {
  * @returns {import('express').Express} Configured Express application.
  */
 function createApp() {
+  const isTest = process.env.NODE_ENV === 'test';
+  if (isTest) {
+    // Test mode logic can go here
+  }
   const app = express();
 
   app.use(cors(createCorsOptions()));
@@ -110,6 +115,14 @@ function createApp() {
     }
   });
 
+  /**
+   * Simulated error route for testing error handling middleware.
+   *
+   * @param {import('express').Request} req Express request.
+   * @param {import('express').Response} res Express response.
+   * @param {import('express').NextFunction} next Express next callback.
+   * @returns {void}
+   */
   app.get('/error', (req, res, next) => {
     next(new Error('Simulated server error'));
   });
