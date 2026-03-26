@@ -30,7 +30,7 @@ function isCorsOriginRejectedError(err) {
  * @returns {string[]} Array of trimmed, non-empty origin strings.
  */
 function parseAllowedOrigins(value) {
-  if (!value) return [];
+  if (!value) { return []; }
   return value.split(',').map((o) => o.trim()).filter(Boolean);
 }
 
@@ -68,15 +68,9 @@ function getAllowedOriginsFromEnv(env) {
 function createCorsOptions(env) {
   const allowedOrigins = getAllowedOriginsFromEnv(env || process.env);
   return {
-    /**
-     * Origin validation function.
-     *
-     * @param {string|undefined} origin - The request origin.
-     * @param {Function} callback - The CORS callback.
-     */
     origin: (origin, callback) => {
-      if (!origin) return callback(null, true);
-      if (allowedOrigins.includes(origin)) return callback(null, true);
+      if (!origin) { return callback(null, true); }
+      if (allowedOrigins.includes(origin)) { return callback(null, true); }
       return callback(createCorsRejectionError());
     },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],

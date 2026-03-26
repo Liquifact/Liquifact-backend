@@ -89,8 +89,8 @@ app.post('/api/invoices', authenticateToken, sensitiveLimiter, (req, res) => {
 app.delete('/api/invoices/:id', (req, res) => {
   const { id } = req.params;
   const invoice = store.get(id);
-  if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
-  if (invoice.deletedAt !== null) return res.status(400).json({ error: 'Invoice is already deleted' });
+  if (!invoice) {return res.status(404).json({ error: 'Invoice not found' });}
+  if (invoice.deletedAt !== null) {return res.status(400).json({ error: 'Invoice is already deleted' });}
   invoice.deletedAt = new Date().toISOString();
   store.set(id, invoice);
   return res.json({ data: invoice });
@@ -99,8 +99,8 @@ app.delete('/api/invoices/:id', (req, res) => {
 app.patch('/api/invoices/:id/restore', (req, res) => {
   const { id } = req.params;
   const invoice = store.get(id);
-  if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
-  if (invoice.deletedAt === null) return res.status(400).json({ error: 'Invoice is not deleted' });
+  if (!invoice) {return res.status(404).json({ error: 'Invoice not found' });}
+  if (invoice.deletedAt === null) {return res.status(400).json({ error: 'Invoice is not deleted' });}
   invoice.deletedAt = null;
   store.set(id, invoice);
   return res.json({ data: invoice });
