@@ -1,23 +1,14 @@
 /**
- * Global error handling middleware
- * Ensures consistent error responses and prevents stack leaks in production.
+ * Global error handler middleware.
+ *
+ * @param {Error} err - Error object.
+ * @param {import('express').Request} req - Express request object.
+ * @param {import('express').Response} res - Express response object.
+ * @param {import('express').NextFunction} _next - Express next callback.
+ * @returns {void}
  */
-const errorHandler = (err, req, res, _next) => {
-  console.error(err);
+function errorHandler(err, req, res, _next) {
+  res.status(500).json({ error: 'Internal server error' });
+}
 
-  const statusCode = err.statusCode || 500;
-
-  res.status(statusCode).json({
-    error: {
-      message:
-        process.env.NODE_ENV === 'production'
-          ? 'Internal server error'
-          : err.message,
-      ...(process.env.NODE_ENV !== 'production' && {
-        stack: err.stack,
-      }),
-    },
-  });
-};
-
-module.exports = errorHandler;
+module.exports = { errorHandler };
