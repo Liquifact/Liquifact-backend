@@ -26,7 +26,7 @@ describe('Rate Limiting Middleware', () => {
                     .send({ amount: 1000, customer: 'Test' });
 
                 // If we hit a 429 early because of previous tests, we just break and check the next one.
-                if (response.status === 429) break;
+                if (response.status === 429) {break;}
                 expect(response.status).toBe(201);
             }
 

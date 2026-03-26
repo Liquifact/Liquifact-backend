@@ -95,6 +95,10 @@ function createApp() {
 
     try {
       // Simulated remote contract call
+      /**
+       * Simulates a remote contract call operation.
+       * @returns {Promise<Object>} Escrow state object.
+       */
       const operation = async () => {
         return { invoiceId, status: 'not_found', fundedAmount: 0 };
       };
