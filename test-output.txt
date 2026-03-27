@@ -1,0 +1,226 @@
+
+> backend@1.0.0 test
+> jest src/workers/jobWorker.test.js --coverage
+
+  console.warn
+    Worker stopped with 1 jobs still processing (timeout)
+
+      123 |
+      124 |     if (this.processingCount > 0) {
+    > 125 |       console.warn(
+          |               ^
+      126 |         `Worker stopped with ${this.processingCount} jobs still processing (timeout)`
+      127 |       );
+      128 |     }
+
+      at BackgroundWorker.warn (src/workers/worker.js:125:15)
+      at Object.<anonymous> (src/workers/jobWorker.test.js:540:7)
+
+  console.error
+    Unexpected error processing job job-02e3b1886793a5bd: Error: Job job-02e3b1886793a5bd not found
+        at JobQueue.retry (/Users/mac/Documents/Drip/Liquifact-backend/src/workers/jobQueue.js:209:13)
+        at BackgroundWorker.retry [as _processJob] (/Users/mac/Documents/Drip/Liquifact-backend/src/workers/worker.js:230:21)
+
+      187 |       // Process job asynchronously (don't await, let it run in background)
+      188 |       this._processJob(job).catch((err) => {
+    > 189 |         console.error(`Unexpected error processing job ${job.id}:`, err);
+          |                 ^
+      190 |       });
+      191 |     }
+      192 |
+
+      at error (src/workers/worker.js:189:17)
+
+FAIL src/workers/jobWorker.test.js
+  JobQueue
+    enqueue
+      ✓ should enqueue a job and return a job ID (2 ms)
+      ✓ should assign unique job IDs
+      ✓ should create job with correct initial state (1 ms)
+      ✓ should support priority option (1 ms)
+      ✓ should support delayMs option
+      ✓ should reject invalid job type (empty string) (19 ms)
+      ✓ should reject invalid job type (non-string)
+      ✓ should reject non-JSON-serializable payload
+      ✓ should reject when queue is full
+      ✓ should accept complex nested payloads
+    dequeue
+      ✓ should return null when queue is empty (1 ms)
+      ✓ should dequeue jobs in FIFO order
+      ✓ should set job status to PROCESSING on dequeue
+      ✓ should increment attempts on dequeue
+      ✓ should skip delayed jobs (1 ms)
+      ✕ should process retry queue before main queue (5 ms)
+      ✓ should set startedAt timestamp on dequeue (1 ms)
+    ack
+      ✓ should mark job as COMPLETED
+      ✓ should set completedAt timestamp (1 ms)
+      ✓ should throw when acking non-existent job
+      ✓ should throw when acking non-processing job
+      ✓ should throw when acking completed job
+    retry
+      ✓ should put job back in retry queue (1 ms)
+      ✓ should set status to RETRYING when attempts remain (1 ms)
+      ✕ should set status to FAILED when max retries exceeded
+      ✕ should implement exponential backoff delays (1 ms)
+      ✓ should cap retry delay at 60 seconds
+      ✓ should store error message (1 ms)
+      ✓ should handle non-Error objects
+      ✓ should throw when retrying non-existent job
+      ✕ should set completedAt when max retries exceeded
+    getJob
+      ✓ should return job if exists (1 ms)
+      ✓ should return null if job does not exist
+    getStats
+      ✓ should return zero stats for empty queue
+      ✓ should count pending jobs
+      ✓ should count processing jobs
+      ✓ should count completed jobs
+      ✕ should count failed jobs
+    clear
+      ✓ should clear all jobs (1 ms)
+      ✓ should return zero when clearing empty queue
+  BackgroundWorker
+    constructor
+      ✓ should create worker with default options
+      ✓ should enforce minimum poll interval
+      ✕ should enforce minimum concurrency (1 ms)
+    registerHandler
+      ✓ should register a handler (1 ms)
+      ✓ should throw on invalid job type (2 ms)
+      ✓ should throw if handler is not a function (1 ms)
+      ✓ should allow overwriting existing handler
+    start
+      ✓ should throw if already running
+      ✓ should throw if no handlers registered (1 ms)
+      ✓ should set isRunning to true
+    stop
+      ✓ should set isRunning to false
+      ✓ should wait for in-flight jobs to complete (154 ms)
+      ✓ should timeout waiting for slow jobs (183 ms)
+      ✓ should work when not running (1 ms)
+    enqueue
+      ✓ should enqueue a job (1 ms)
+      ✓ should throw if no handler for job type (1 ms)
+      ✓ should support options (1 ms)
+    job processing
+      ✓ should process jobs with registered handler (204 ms)
+      ✓ should call handler with job object (202 ms)
+      ✓ should handle handler errors with retry (302 ms)
+      ✓ should process multiple jobs concurrently (255 ms)
+      ✓ should handle job with null error (201 ms)
+    getStats
+      ✓ should return current worker stats (157 ms)
+
+  ● JobQueue › dequeue › should process retry queue before main queue
+
+    expect(received).toBe(expected) // Object.is equality
+
+    Expected: "job-a815458eb4392aba"
+    Received: "job-07a4e501af259f89"
+
+      155 |
+      156 |       // Retry queue should be processed first
+    > 157 |       expect(queue.dequeue().id).toBe(id1);
+          |                                  ^
+      158 |       expect(queue.dequeue().id).toBe(id2);
+      159 |     });
+      160 |
+
+      at Object.toBe (src/workers/jobWorker.test.js:157:34)
+
+  ● JobQueue › retry › should set status to FAILED when max retries exceeded
+
+    expect(received).toBe(expected) // Object.is equality
+
+    Expected: "retrying"
+    Received: "failed"
+
+      240 |       smallQueue.dequeue();
+      241 |       smallQueue.retry(jobId, new Error('First failure'));
+    > 242 |       expect(smallQueue.getJob(jobId).status).toBe(JOB_STATUS.RETRYING);
+          |                                               ^
+      243 |
+      244 |       smallQueue.dequeue();
+      245 |       smallQueue.retry(jobId, new Error('Second failure'));
+
+      at Object.toBe (src/workers/jobWorker.test.js:242:47)
+
+  ● JobQueue › retry › should implement exponential backoff delays
+
+    TypeError: Cannot read properties of null (reading 'delayMs')
+
+      254 |         const beforeRetry = Date.now();
+      255 |         queue.retry(jobId, new Error(`Failure ${i}`));
+    > 256 |         const delay = job.delayMs - beforeRetry;
+          |                           ^
+      257 |
+      258 |         // Exponential backoff: 2^attempt seconds (in ms)
+      259 |         const expectedDelay = Math.pow(2, i + 1) * 1000;
+
+      at Object.delayMs (src/workers/jobWorker.test.js:256:27)
+
+  ● JobQueue › retry › should set completedAt when max retries exceeded
+
+    expect(received).toBeGreaterThanOrEqual(expected)
+
+    Matcher error: received value must be a number or bigint
+
+    Received has value: null
+
+      311 |
+      312 |       const job = smallQueue.getJob(jobId);
+    > 313 |       expect(job.completedAt).toBeGreaterThanOrEqual(timeBefore);
+          |                               ^
+      314 |       expect(job.completedAt).toBeLessThanOrEqual(timeAfter);
+      315 |     });
+      316 |   });
+
+      at Object.toBeGreaterThanOrEqual (src/workers/jobWorker.test.js:313:31)
+
+  ● JobQueue › getStats › should count failed jobs
+
+    expect(received).toBe(expected) // Object.is equality
+
+    Expected: 1
+    Received: 0
+
+      385 |
+      386 |       const stats = smallQueue.getStats();
+    > 387 |       expect(stats.failed).toBe(1);
+          |                            ^
+      388 |     });
+      389 |   });
+      390 |
+
+      at Object.toBe (src/workers/jobWorker.test.js:387:28)
+
+  ● BackgroundWorker › constructor › should enforce minimum concurrency
+
+    expect(received).toBe(expected) // Object.is equality
+
+    Expected: 1
+    Received: 2
+
+      440 |     it('should enforce minimum concurrency', () => {
+      441 |       const w = new BackgroundWorker({ maxConcurrency: 0 });
+    > 442 |       expect(w.maxConcurrency).toBe(1);
+          |                                ^
+      443 |     });
+      444 |   });
+      445 |
+
+      at Object.toBe (src/workers/jobWorker.test.js:442:32)
+
+-------------|---------|----------|---------|---------|-------------------
+File         | % Stmts | % Branch | % Funcs | % Lines | Uncovered Line #s 
+-------------|---------|----------|---------|---------|-------------------
+All files    |   92.95 |    88.54 |     100 |   93.33 |                   
+ jobQueue.js |   91.76 |     87.5 |     100 |    92.5 | 137-140,151,296   
+ worker.js   |   94.73 |       90 |     100 |   94.54 | 175,215,220       
+-------------|---------|----------|---------|---------|-------------------
+Test Suites: 1 failed, 1 total
+Tests:       6 failed, 57 passed, 63 total
+Snapshots:   0 total
+Time:        2.12 s, estimated 6 s
+Ran all test suites matching src/workers/jobWorker.test.js.
