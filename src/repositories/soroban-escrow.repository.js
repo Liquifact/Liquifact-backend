@@ -5,6 +5,9 @@ const { callSorobanContract } = require('../services/soroban');
  * @fileoverview Concrete implementation of EscrowRepository using Soroban contracts.
  */
 
+/**
+ *
+ */
 class SorobanEscrowRepository extends EscrowRepository {
   /**
    * Get the current state of an escrow for a given invoice via Soroban.

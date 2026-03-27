@@ -1,3 +1,7 @@
+/**
+ * In-memory escrow repository implementation.
+ * @returns {Object} Escrow repository instance.
+ */
 const EscrowRepository = require('./escrow.repository');
 
 /**
@@ -5,7 +9,14 @@ const EscrowRepository = require('./escrow.repository');
  * Useful for development and testing without blockchain dependencies.
  */
 
+/**
+ *
+ */
 class InMemoryEscrowRepository extends EscrowRepository {
+  /**
+   * Constructs an in-memory escrow repository instance.
+   * @returns {InMemoryEscrowRepository}
+   */
   constructor() {
     super();
     /**
@@ -18,7 +29,7 @@ class InMemoryEscrowRepository extends EscrowRepository {
   /**
    * Get the current state of an escrow for a given invoice.
    * @param {string} invoiceId The invoice ID.
-   * @returns {Promise<import('./escrow.repository').EscrowState>}
+   * @returns {Promise<import('./escrow.repository').EscrowState>} Escrow state object.
    */
   async getEscrowState(invoiceId) {
     const existing = this.escrows.get(invoiceId);
@@ -42,6 +53,7 @@ class InMemoryEscrowRepository extends EscrowRepository {
    * Update or set the escrow state (for testing/mocking).
    * @param {string} invoiceId The invoice ID.
    * @param {Partial<import('./escrow.repository').EscrowState>} state The state to set.
+   * @returns {Promise<void>} Resolves when the state is set.
    */
   async setEscrowState(invoiceId, state) {
     this.escrows.set(invoiceId, {

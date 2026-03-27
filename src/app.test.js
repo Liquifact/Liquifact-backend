@@ -4,6 +4,18 @@ const { createApp, handleCorsError } = require('./app');
 const { CORS_REJECTION_MESSAGE } = require('./config/cors');
 const { createCorsOptions } = require('./config/cors');
 
+/**
+ * Temporarily overrides process.env variables for the duration of a function.
+ * @param {Object} env - Environment variables to set.
+ * @param {Function} fn - Function to execute with overridden env.
+ * @returns {*} The return value of fn.
+ */
+/**
+ * Executes a function with overridden environment variables.
+ * @param {Object} env - Environment variables to override.
+ * @param {Function} fn - Function to execute with overridden env.
+ * @returns {*} The return value of fn.
+ */
 function withEnv(env, fn) {
   const previousValues = new Map();
 
@@ -30,6 +42,22 @@ function withEnv(env, fn) {
   }
 }
 
+/**
+ * Creates a mock Express request object for testing.
+ * @param {Object} [root0]
+ * @param {string} [root0.method]
+ * @param {string} [root0.origin]
+ * @param {string} [root0.path]
+ * @returns {Object} Mock request object.
+ */
+/**
+ * Creates a mock request object for testing.
+ * @param {Object} [options]
+ * @param options.method
+ * @param options.origin
+ * @param options.path
+ * @returns {Object} Mock request object.
+ */
 function createMockRequest({ method = 'GET', origin, path = '/health' } = {}) {
   return {
     method,
@@ -41,17 +69,39 @@ function createMockRequest({ method = 'GET', origin, path = '/health' } = {}) {
           'access-control-request-method': 'GET',
         }
       : {},
+    /**
+     * Gets a header value from the request.
+     * @param {string} name - Header name.
+     * @returns {*} Header value.
+     */
     header(name) {
       return this.headers[name.toLowerCase()];
     },
+    /**
+     * Gets a header value from the request.
+     * @param {string} name - Header name.
+     * @returns {*} Header value.
+     */
     get(name) {
       return this.headers[name.toLowerCase()];
     },
   };
 }
 
+/**
+ * Creates a mock Express response object for testing.
+ * @returns {Object} Mock response object.
+ */
+/**
+ * Creates a mock response object for testing.
+ * @returns {Object} Mock response object.
+ */
 function createMockResponse() {
   const headers = {};
+  /**
+   * Resolver function for the response.
+   * @returns {void}
+   */
   let resolveResponse = () => {};
 
   const response = {
@@ -60,22 +110,53 @@ function createMockResponse() {
     body: undefined,
     finished: false,
     locals: {},
+    /**
+     * Sets the resolver function for the response.
+     * @param {Function} resolver - Resolver function.
+     * @returns {void}
+     */
     setResolver(resolver) {
       resolveResponse = resolver;
     },
+    /**
+     * Sets a header on the response.
+     * @param {string} name - Header name.
+     * @param {*} value - Header value.
+     * @returns {void}
+     */
     setHeader(name, value) {
       headers[name.toLowerCase()] = value;
     },
+    /**
+     * Gets a header value from the response.
+     * @param {string} name - Header name.
+     * @returns {*} Header value.
+     */
     getHeader(name) {
       return headers[name.toLowerCase()];
     },
+    /**
+     * Removes a header from the response.
+     * @param {string} name - Header name.
+     * @returns {void}
+     */
     removeHeader(name) {
       delete headers[name.toLowerCase()];
     },
+    /**
+     * Sets the status code for the response.
+     * @param {number} code - Status code.
+     * @returns {Object} The response object.
+     */
     status(code) {
       this.statusCode = code;
       return this;
     },
+    /**
+     * Sends a JSON response.
+     * @param {*} payload - Response payload.
+     * @returns {Object} The response object.
+     */
     json(payload) {
       this.body = payload;
       this.finished = true;
@@ -86,6 +167,11 @@ function createMockResponse() {
       });
       return this;
     },
+    /**
+     * Ends the response.
+     * @param {*} payload - Response payload.
+     * @returns {Object} The response object.
+     */
     end(payload) {
       this.body = payload;
       this.finished = true;
@@ -101,6 +187,18 @@ function createMockResponse() {
   return response;
 }
 
+/**
+ * Invokes an Express app with a mock request and response.
+ * @param {Object} app - Express app instance.
+ * @param {Object} [reqOptions] - Request options.
+ * @returns {Promise<Object>} Resolves with response data.
+ */
+/**
+ * Invokes the app with a mock request and response.
+ * @param {Object} app - The app instance.
+ * @param {Object} [reqOptions]
+ * @returns {Promise<Object>} Resolves with the response object.
+ */
 function invokeApp(app, reqOptions = {}) {
   return new Promise((resolve, reject) => {
     const req = createMockRequest(reqOptions);
@@ -124,6 +222,18 @@ function invokeApp(app, reqOptions = {}) {
   });
 }
 
+/**
+ * Runs the CORS middleware with a mock request/response.
+ * @param {Object} env - Environment variables.
+ * @param {Object} [reqOptions] - Request options.
+ * @returns {Promise<{req: Object, res: Object, nextCalled: boolean}>}
+ */
+/**
+ * Runs the CORS middleware for a given environment and request options.
+ * @param {Object} env - Environment variables.
+ * @param {Object} [reqOptions]
+ * @returns {Promise<Object>} Resolves with the response object.
+ */
 function runCorsMiddleware(env, reqOptions = {}) {
   return new Promise((resolve, reject) => {
     const middleware = cors(createCorsOptions(env));

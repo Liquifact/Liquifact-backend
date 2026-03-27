@@ -1,6 +1,10 @@
 /**
  * Global error handling middleware
  * Ensures consistent error responses and prevents stack leaks in production.
+ * @param err
+ * @param req
+ * @param res
+ * @param _next
  */
 const errorHandler = (err, req, res, _next) => {
   console.error(err);

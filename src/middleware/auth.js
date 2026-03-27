@@ -14,6 +14,14 @@ const jwt = require('jsonwebtoken');
  * @param {import('express').Request} req - Express request object
  * @param {import('express').Response} res - Express response object
  * @param {import('express').NextFunction} next - Express next middleware function
+ * @returns {void}
+ */
+/**
+ * Middleware function to enforce authentication for protected routes.
+ * @param {Object} req - Express request object.
+ * @param {Object} res - Express response object.
+ * @param {Function} next - Express next middleware function.
+ * @returns {void}
  */
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];

@@ -90,7 +90,7 @@ function createApp(deps = {}) {
         data: invoices,
         message: 'Invoice list retrieved via repository abstraction layer.',
       });
-    } catch (error) {
+    } catch {
       res.status(500).json({ error: 'Failed to retrieve invoices' });
     }
   });
@@ -103,7 +103,7 @@ function createApp(deps = {}) {
         data: newInvoice,
         message: 'Invoice created successfully via repository abstraction layer.',
       });
-    } catch (error) {
+    } catch {
       res.status(500).json({ error: 'Failed to create invoice' });
     }
   });

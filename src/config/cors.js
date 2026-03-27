@@ -88,11 +88,27 @@ function isCorsOriginRejectedError(error) {
  * @param {NodeJS.ProcessEnv} env Environment variables to evaluate.
  * @returns {{ origin: (origin: string | undefined, callback: Function) => void }} CORS options.
  */
+/**
+ * Creates CORS options for the Express CORS middleware.
+ * @param {Object} [env=process.env] - Environment variables.
+ * @returns {{origin: function(string, function): void}} CORS options.
+ */
+/**
+ * Creates CORS options for the application.
+ * @param {Object} [env=process.env] - The environment variables.
+ * @returns {{ origin: (origin: string | undefined, callback: Function) => void }} CORS options.
+ */
 function createCorsOptions(env = process.env) {
   const allowedOrigins = getAllowedOriginsFromEnv(env);
   const allowedOriginsSet = new Set(allowedOrigins);
 
   return {
+    /**
+     * CORS origin validation callback.
+     * @param {string|undefined} origin - The request origin.
+     * @param {Function} callback - Callback to signal CORS result.
+     * @returns {void}
+     */
     origin(origin, callback) {
       if (!origin || allowedOriginsSet.has(origin)) {
         return callback(null, true);

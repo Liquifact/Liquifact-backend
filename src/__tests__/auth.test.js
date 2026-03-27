@@ -1,5 +1,6 @@
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
+/* eslint-env jest */
 const app = require('../index');
 
 describe('Authentication Middleware', () => {

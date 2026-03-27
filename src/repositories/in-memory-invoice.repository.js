@@ -1,3 +1,7 @@
+/**
+ * In-memory invoice repository implementation.
+ * @returns {Object} Invoice repository instance.
+ */
 const InvoiceRepository = require('./invoice.repository');
 
 /**
@@ -5,7 +9,14 @@ const InvoiceRepository = require('./invoice.repository');
  * Suitable for testing and prototyping before switching to a real database.
  */
 
+/**
+ *
+ */
 class InMemoryInvoiceRepository extends InvoiceRepository {
+  /**
+   * Constructs an in-memory invoice repository instance.
+   * @returns {InMemoryInvoiceRepository}
+   */
   constructor() {
     super();
     /**
@@ -19,7 +30,7 @@ class InMemoryInvoiceRepository extends InvoiceRepository {
    * Find all invoices.
    * @param {Object} [filter={}] Optional filters.
    * @param {boolean} [filter.includeDeleted=false] Whether to include soft-deleted invoices.
-   * @returns {Promise<import('./invoice.repository').Invoice[]>}
+   * @returns {Promise<import('./invoice.repository').Invoice[]>} Array of invoices.
    */
   async findAll(filter = {}) {
     const includeDeleted = filter.includeDeleted || false;
@@ -33,7 +44,7 @@ class InMemoryInvoiceRepository extends InvoiceRepository {
   /**
    * Find an invoice by its unique ID.
    * @param {string} id The invoice ID.
-   * @returns {Promise<import('./invoice.repository').Invoice|null>}
+   * @returns {Promise<import('./invoice.repository').Invoice|null>} Invoice or null if not found.
    */
   async findById(id) {
     const invoice = this.invoices.get(id);
