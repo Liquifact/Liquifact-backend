@@ -4,12 +4,20 @@
  */
 
 require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
 const { globalLimiter, sensitiveLimiter } = require('./middleware/rateLimit');
 const { authenticateToken } = require('./middleware/auth');
 
 const asyncHandler = require('./utils/asyncHandler');
 const errorHandler = require('./middleware/errorHandler');
 const { callSorobanContract } = require('./services/soroban');
+const { cacheResponse } = require('./middleware/cache');
+const { createCacheStore } = require('./services/cacheStore');
+const { cacheConfig } = require('./config/cache');
+
+const app = express();
+const escrowCache = createCacheStore();
 
 const PORT = process.env.PORT || 3001;
 
@@ -181,7 +189,19 @@ app.patch('/api/invoices/:id/restore', (req, res) => {
  * @param {import('express').Response} res - The Express response object.
  * @returns {Promise<void>}
  */
-app.get('/api/escrow/:invoiceId', async (req, res) => {
+app.get('/api/escrow/:invoiceId',
+  cacheResponse({
+    ttl: cacheConfig.escrowTtl,
+    store: escrowCache,
+    /**
+     * Derives a cache key from the invoice ID in the request params.
+     *
+     * @param {import('express').Request} req - The Express request object.
+     * @returns {string} The cache key for this escrow request.
+     */
+    keyFn: (req) => `escrow:${req.params.invoiceId}`,
+  }),
+  async (req, res) => {
   const { invoiceId } = req.params;
 
   try {
@@ -254,6 +274,7 @@ const startServer = () => {
  */
 const resetStore = () => {
   invoices = [];
+  escrowCache.clear();
 };
 
 // Start server if not in test mode
