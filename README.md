@@ -51,6 +51,7 @@ Part of the LiquiFact stack: **frontend** (Next.js) | **backend** (this repo) | 
 Default port: **3001**. After starting:
 
 - Health: [http://localhost:3001/health](http://localhost:3001/health)
+- Readiness: [http://localhost:3001/ready](http://localhost:3001/ready)
 - API info: [http://localhost:3001/api](http://localhost:3001/api)
 - Invoices: [http://localhost:3001/api/invoices](http://localhost:3001/api/invoices)
   - `GET /api/invoices` - List active invoices
@@ -58,6 +59,85 @@ Default port: **3001**. After starting:
   - `POST /api/invoices` - Create invoice
   - `DELETE /api/invoices/:id` - Soft delete invoice
   - `PATCH /api/invoices/:id/restore` - Restore deleted invoice
+
+---
+
+## Health and Readiness Probes
+
+The API provides Kubernetes-compatible health and readiness endpoints for monitoring and orchestration.
+
+### GET /health (Liveness Probe)
+
+Always returns `200 OK` to indicate the service process is running.
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "service": "liquifact-api",
+  "version": "0.1.0",
+  "timestamp": "2024-01-15T10:30:00.000Z"
+}
+```
+
+**Use case:** Kubernetes liveness probe to restart unhealthy pods.
+
+### GET /ready (Readiness Probe)
+
+Checks external dependencies (Soroban RPC, database) and returns:
+- `200 OK` when all critical dependencies are healthy
+- `503 Service Unavailable` when any dependency is down
+
+**Response (healthy):**
+```json
+{
+  "ready": true,
+  "service": "liquifact-api",
+  "timestamp": "2024-01-15T10:30:00.000Z",
+  "checks": {
+    "soroban": {
+      "status": "healthy",
+      "latency": 45
+    },
+    "database": {
+      "status": "not_configured"
+    }
+  }
+}
+```
+
+**Response (unhealthy):**
+```json
+{
+  "ready": false,
+  "service": "liquifact-api",
+  "timestamp": "2024-01-15T10:30:00.000Z",
+  "checks": {
+    "soroban": {
+      "status": "unhealthy",
+      "latency": 5002,
+      "error": "Connection timeout"
+    },
+    "database": {
+      "status": "not_configured"
+    }
+  }
+}
+```
+
+**Dependency Status Values:**
+- `healthy` - Dependency is reachable and responding
+- `unhealthy` - Dependency is unreachable or returning errors
+- `unknown` - Dependency URL not configured (treated as healthy)
+- `not_configured` - Optional dependency not enabled
+- `not_implemented` - Health check pending implementation
+
+**Use case:** Kubernetes readiness probe to control traffic routing.
+
+**Security Notes:**
+- Health checks have a 5-second timeout to prevent hanging
+- No sensitive information (credentials, internal IPs) is exposed
+- Checks run in parallel for efficiency
 
 ---
 
@@ -133,6 +213,7 @@ liquifact-backend/
 │   ├── config/
 │   │   └── cors.js     # CORS allowlist parsing and policy
 │   ├── services/
+│   │   ├── health.js   # Dependency health checks
 │   │   └── soroban.js  # Contract interaction wrappers
 │   ├── utils/
 │   │   └── retry.js    # Exponential backoff utility

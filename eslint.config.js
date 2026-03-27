@@ -52,7 +52,7 @@ module.exports = [
     },
   },
   {
-    files: ['src/**/*.test.js'],
+    files: ['src/**/*.test.js', 'src/__tests__/**/*.js'],
     languageOptions: {
       sourceType: 'module',
       globals: {
@@ -60,15 +60,19 @@ module.exports = [
         jest: 'readonly',
         describe: 'readonly',
         it: 'readonly',
+        test: 'readonly',
         expect: 'readonly',
         beforeEach: 'readonly',
         afterEach: 'readonly',
+        beforeAll: 'readonly',
+        afterAll: 'readonly',
       },
     },
     rules: {
       // Relax some rules for tests
       'no-unused-vars': ['error', { varsIgnorePattern: '^_', argsIgnorePattern: '^_' }],
       'security/detect-non-literal-fs-filename': 'off',
+      'security/detect-object-injection': 'off',
       'jsdoc/require-jsdoc': 'off',
       'jsdoc/require-description': 'off',
     }

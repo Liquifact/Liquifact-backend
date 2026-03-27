@@ -4,19 +4,18 @@
  */
 
 require('dotenv').config();
-const { globalLimiter, sensitiveLimiter } = require('./middleware/rateLimit');
-const { authenticateToken } = require('./middleware/auth');
-
-const asyncHandler = require('./utils/asyncHandler');
-const errorHandler = require('./middleware/errorHandler');
+const express = require('express');
+const cors = require('cors');
+const { createCorsOptions } = require('./config/cors');
 const { callSorobanContract } = require('./services/soroban');
 
+const app = express();
 const PORT = process.env.PORT || 3001;
 
 /**
  * Global Middlewares
  */
-app.use(cors());
+app.use(cors(createCorsOptions()));
 app.use(express.json());
 
 // In-memory storage for invoices (Issue #25)
@@ -187,7 +186,7 @@ app.get('/api/escrow/:invoiceId', async (req, res) => {
   try {
     /**
      * Simulated remote contract call.
-     * 
+     *
      * @returns {Promise<Object>} The escrow data.
      */
     const operation = async () => {
