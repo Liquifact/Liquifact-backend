@@ -96,7 +96,11 @@ function createApp() {
     const { invoiceId } = req.params;
 
     try {
-      // Simulated remote contract call
+      /**
+       * Simulated remote contract call.
+       *
+       * @returns {Promise<object>} Simulated escrow payload.
+       */
       const operation = async () => {
         return { invoiceId, status: 'not_found', fundedAmount: 0 };
       };

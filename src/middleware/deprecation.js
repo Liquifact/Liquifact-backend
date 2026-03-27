@@ -1,6 +1,7 @@
 /**
  * Middleware to signal API deprecation via HTTP headers (RFC 8594).
- * * @param {Object} options - Configuration for the deprecation headers.
+ *
+ * @param {object} options - Configuration for the deprecation headers.
  * @param {string} [options.sunset] - ISO 8601 date string (e.g., '2026-12-31T23:59:59Z').
  * @param {string} [options.link] - URL pointing to migration documentation or new endpoint.
  * @returns {Function} Express middleware function.

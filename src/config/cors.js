@@ -92,14 +92,24 @@ function createCorsOptions(env = process.env) {
   const allowedOrigins = getAllowedOriginsFromEnv(env);
   const allowedOriginsSet = new Set(allowedOrigins);
 
-  return {
-    origin(origin, callback) {
-      if (!origin || allowedOriginsSet.has(origin)) {
-        return callback(null, true);
-      }
+  /**
+   * Validates whether a request origin is permitted by the configured allowlist.
+   *
+   * @param {string | undefined} origin Incoming request Origin header.
+   * @param {(error: Error | null, allow?: boolean) => void} callback CORS callback.
+   * @returns {void}
+   */
+  function validateOrigin(origin, callback) {
+    if (!origin || allowedOriginsSet.has(origin)) {
+      callback(null, true);
+      return;
+    }
 
-      return callback(createCorsRejectionError());
-    },
+    callback(createCorsRejectionError());
+  }
+
+  return {
+    origin: validateOrigin,
   };
 }
 

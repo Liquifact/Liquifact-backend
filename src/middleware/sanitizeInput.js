@@ -18,9 +18,20 @@ function sanitizeInput(req, _res, next) {
   Object.defineProperty(req, 'query', {
     configurable: true,
     enumerable: true,
+    /**
+     * Gets the sanitized query object.
+     *
+     * @returns {object} Sanitized query object.
+     */
     get() {
       return sanitizedQuery;
     },
+    /**
+     * Re-sanitizes the query object when Express reassigns it.
+     *
+     * @param {object} value New query object.
+     * @returns {void}
+     */
     set(value) {
       sanitizedQuery = sanitizeValue(value);
     },
@@ -30,9 +41,20 @@ function sanitizeInput(req, _res, next) {
   Object.defineProperty(req, 'params', {
     configurable: true,
     enumerable: true,
+    /**
+     * Gets sanitized route params.
+     *
+     * @returns {object} Sanitized params.
+     */
     get() {
       return sanitizedParams;
     },
+    /**
+     * Re-sanitizes route params when Express updates them.
+     *
+     * @param {object} value New params object.
+     * @returns {void}
+     */
     set(value) {
       sanitizedParams = sanitizeValue(value);
     },
