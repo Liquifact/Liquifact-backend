@@ -29,9 +29,9 @@ const {
   payloadTooLargeHandler,
 } = require('./middleware/bodySizeLimits');
 
-const invoiceService = require('./services/invoice.service');
-const { validateInvoiceQueryParams } = require('./utils/validators');
-const asyncHandler = require('./utils/asyncHandler');
+// const invoiceService = require('./services/invoice.service');
+// const { validateInvoiceQueryParams } = require('./utils/validators');
+// const asyncHandler = require('./utils/asyncHandler');
 
 /**
  * Returns a 403 JSON response only for the dedicated blocked-origin CORS error.
@@ -117,7 +117,7 @@ function createApp() {
       data:    [],
       message: 'Invoice service will list tokenized invoices here.',
     });
-  }));
+  });
 
   // Invoices — POST (create) with strict 512 KB body limit
   app.post('/api/invoices', ...invoiceBodyLimit(), (req, res) => {

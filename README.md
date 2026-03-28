@@ -196,6 +196,60 @@ Check the standard `RateLimit-*` headers for quota and reset time.
 
 ---
 
+## Tenant-Aware Data Isolation
+- **Overview**
+Every /api/* route enforces tenant-scoped isolation. A caller's tenant identity is resolved once per request by the middleware chain and then applied to every read and write operation. No route handler ever accepts a tenant ID from the request body — the tenant is always derived from the verified middleware context.
+
+
+- **Middleware chain**
+All protected routes use this stack:
+[globalLimiter] → [authenticateToken] → [extractTenant] → route handler
+
+| Step                  | Responsibility                                   |
+|-----------------------|--------------------------------------------------|
+| `globalLimiter`       | Rate limiting (existing)                         |
+| `authenticateToken`   | Validates JWT, attaches req.user                 |
+| `extractTenant`       | Resolves req.tenantId from header or JWT claim   |
+
+
+- **Tenant ID resolution**
+extractTenant resolves the tenant in priority order:
+
+x-tenant-id request header — for service-to-service / API-key flows
+req.user.tenantId JWT claim — set by authenticateToken
+
+If neither yields a valid identifier, the request is rejected immediately with 400 Bad Request. The server never falls back to a default tenant.
+
+
+- **Data isolation guarantee**
+Invoices are stored in a nested Map<tenantId, Map<invoiceId, Invoice>>. Every repository function requires tenantId as its first argument and queries only that tenant's bucket:
+Tenant A's data  →  { inv_001, inv_002 }
+Tenant B's data  →  { inv_003, inv_004 }
+A caller from Tenant B holding a valid invoice ID from Tenant A will always receive 404 Not Found — the invoice is simply invisible outside its owning tenant's scope.
+
+- **Escrow validation**
+Before forwarding to the Soroban contract, the escrow endpoint verifies the invoiceId exists in the requesting tenant's scope. A cross-tenant guess returns 404 without making any contract call.
+
+- **API Reference**:
+| Method          | Path                                | Auth/Tenat  | Decription                  |
+|-----------------|-------------------------------------|-------------|-----------------------------|
+| `GET`           | `health`                            | None        | Health check                |
+| `GET`           | `api`                               | None        | Endpoint listing            |
+| `GET`           | `api/invoices`                      | Yes         | List tenant invoices        |
+| `POST`          | `api/invoices`                      | Yes         | Create tenant invoice       |
+| `DELETE`        | `/api/invoices/:id`                 | Yes         | Soft delete invoice         |
+| `PATCH`         | `/api/invoices/:id/restore`         | Yes         | Restore Soft deleted invoice|
+| `GET`           | `/api/escrow/:invoiceId`            | Yes         | Read escrow data            |
+
+- **Response Headers**:
+| Header          | Required On                         |  Decription       |
+|-----------------|-------------------------------------|-------------------|
+| `x-tenant-id`   | All routes                          | Tenant identifier | 
+
+
+- **Security Notes**:
+Teant id is never read from `req.body`
+
 ## Configuration
 
 ### CORS Allowlist
