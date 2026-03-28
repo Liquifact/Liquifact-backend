@@ -1,3 +1,5 @@
+'use strict';
+
 /**
  * LiquiFact API Gateway
  * Express server bootstrap for invoice financing, auth, and Stellar integration.
@@ -12,26 +14,43 @@
 'use strict';
 
 require('dotenv').config();
+/**
+ * Express app configuration for invoice financing, auth, and Stellar integration.
+ * Server startup lives in server.js so this module can be imported cleanly in tests.
+ */
 
 const express = require('express');
 const cors = require('cors');
-
-const { globalLimiter } = require('./middleware/rateLimit');
+const { createSecurityMiddleware } = require('./middleware/security');
+require('dotenv').config();
+const { globalLimiter, sensitiveLimiter } = require('./middleware/rateLimit');
 const { authenticateToken } = require('./middleware/auth');
+
+
 const { extractTenant } = require('./middleware/tenant');
-const invoiceRepo = require('./repositories/invoiceRepository');
+const invoiceRepo = require('./services/invoice');
 
 // const asyncHandler = require('./utils/asyncHandler');
 // const errorHandler = require('./middleware/errorHandler');
 const { callSorobanContract } = require('./services/soroban');
+const AppError = require('./errors/AppError');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// ─── Global middlewares ───────────────────────────────────────────────────────
 
+/**
+ * Global Middlewares
+ */
+// Security headers — applied first so every response is protected
+app.use(createSecurityMiddleware());
 app.use(cors());
 app.use(express.json());
+app.use(globalLimiter);
+
+// In-memory storage for invoices (Issue #25)
+// let invoices = [];
+
 
 // ─── Public routes (no tenant context required) ───────────────────────────────
 
@@ -39,8 +58,8 @@ app.use(express.json());
  * Health check endpoint.
  * Returns the current status and version of the service.
  *
- * @param {import('express').Request} req
- * @param {import('express').Response} res
+ * @param {import('express').Request} req - The Express request object.
+ * @param {import('express').Response} res - The Express response object.
  * @returns {void}
  */
 app.get('/health', (req, res) => {
@@ -56,8 +75,8 @@ app.get('/health', (req, res) => {
  * API information endpoint.
  * Lists available endpoints and service description.
  *
- * @param {import('express').Request} req
- * @param {import('express').Response} res
+ * @param {import('express').Request} req - The Express request object.
+ * @param {import('express').Response} res - The Express response object.
  * @returns {void}
  */
 app.get('/api', (req, res) => {
@@ -91,8 +110,8 @@ const tenantMiddleware = [globalLimiter, authenticateToken, extractTenant];
  * Lists tokenized invoices for the authenticated tenant.
  * Filters out soft-deleted records unless explicitly requested.
  *
- * @param {import('express').Request} req
- * @param {import('express').Response} res
+ * @param {import('express').Request} req - The Express request object.
+ * @param {import('express').Response} res - The Express response object.
  * @returns {void}
  */
 app.get('/api/invoices', tenantMiddleware, (req, res) => {
@@ -111,11 +130,11 @@ app.get('/api/invoices', tenantMiddleware, (req, res) => {
  * Uploads and tokenizes a new invoice for the authenticated tenant.
  * Generates a unique ID and sets the creation timestamp.
  *
- * @param {import('express').Request} req
- * @param {import('express').Response} res
+ * @param {import('express').Request} req - The Express request object.
+ * @param {import('express').Response} res - The Express response object.
  * @returns {void}
  */
-app.post('/api/invoices', tenantMiddleware, (req, res) => {
+app.post('/api/invoices', sensitiveLimiter, authenticateToken, tenantMiddleware, (req, res) => {
   const { amount, customer } = req.body;
 
   if (!amount || !customer) {
@@ -224,6 +243,16 @@ app.get('/api/escrow/:invoiceId', tenantMiddleware, async (req, res) => {
 // ─── Fallback handlers ────────────────────────────────────────────────────────
 
 /**
+ * Simulated escrow operations (e.g. funding).
+ */
+app.post('/api/escrow', authenticateToken, sensitiveLimiter, (req, res) => {
+    res.json({
+        data: { status: 'funded' },
+        message: 'Escrow operation simulated.'
+    });
+});
+
+/**
  * 404 handler for unknown routes.
  *
  * @param {import('express').Request} req
@@ -232,10 +261,15 @@ app.get('/api/escrow/:invoiceId', tenantMiddleware, async (req, res) => {
  * @returns {void}
  */
 app.use((req, res, next) => {
-  if (req.path === '/error-test-trigger') {
-    return next(new Error('Test error'));
-  }
-  return res.status(404).json({ error: 'Not found', path: req.path });
+  next(
+    new AppError({
+      type: 'https://liquifact.com/probs/not-found',
+      title: 'Resource Not Found',
+      status: 404,
+      detail: `The path ${req.path} does not exist.`,
+      instance: req.originalUrl,
+    })
+  );
 });
 
 /**
@@ -267,9 +301,24 @@ const startServer = () => {
   return server;
 };
 
+/**
+ * Resets the in-memory store (for testing purposes).
+ *
+ * @returns {void}
+ */
+// const resetStore = () => {
+//   invoices = [];
+// };
+
 // Start server if not in test mode
 if (process.env.NODE_ENV !== 'test') {
   startServer();
 }
 
+// Export app and state for testing
 module.exports = { app, startServer };
+// Export app as default (so `require('./index')` returns the Express app directly),
+// with startServer and resetStore attached as properties for tests that need them.
+// module.exports = app;
+// module.exports.startServer = startServer;
+// module.exports.resetStore = resetStore;
