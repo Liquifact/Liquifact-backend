@@ -30,7 +30,7 @@ const {
 } = require('./middleware/bodySizeLimits');
 
 const invoiceService = require('./services/invoice.service');
-const { validateInvoiceQueryParams } = require('./utils/validators');
+const { validateInvoiceQueryParams, validateInvoicePayload } = require('./utils/validators');
 const asyncHandler = require('./utils/asyncHandler');
 
 /**
@@ -111,16 +111,31 @@ function createApp() {
     });
   });
 
-  // Invoices — GET (list)
-  app.get('/api/invoices', (req, res) => {
+  // Invoices — GET (list) with query-param validation and service call
+  app.get('/api/invoices', asyncHandler(async (req, res) => {
+    const { isValid, errors, validatedParams } = validateInvoiceQueryParams(req.query || {});
+
+    if (!isValid) {
+      res.status(400).json({ errors });
+      return;
+    }
+
+    const invoices = await invoiceService.getInvoices(validatedParams);
     res.json({
-      data:    [],
-      message: 'Invoice service will list tokenized invoices here.',
+      data:    invoices,
+      message: 'Invoices retrieved successfully.',
     });
   }));
 
-  // Invoices — POST (create) with strict 512 KB body limit
+  // Invoices — POST (create) with strict payload validation and 512 KB body limit
   app.post('/api/invoices', ...invoiceBodyLimit(), (req, res) => {
+    const { isValid, errors } = validateInvoicePayload(req.body);
+
+    if (!isValid) {
+      res.status(400).json({ errors });
+      return;
+    }
+
     res.status(201).json({
       data:    { id: 'placeholder', status: 'pending_verification' },
       message: 'Invoice upload will be implemented with verification and tokenization.',

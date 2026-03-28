@@ -100,6 +100,107 @@ function validateInvoiceQueryParams(query) {
   };
 }
 
+/**
+ * Supported ISO 4217 currency codes accepted by the invoice API.
+ *
+ * @constant {Set<string>}
+ */
+const VALID_CURRENCIES = new Set([
+  'USD', 'EUR', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 'NZD', 'CNY', 'HKD',
+  'SGD', 'SEK', 'NOK', 'DKK', 'MXN', 'BRL', 'INR', 'KRW', 'ZAR', 'NGN',
+  'GHS', 'KES', 'TZS', 'UGX', 'XOF', 'XAF', 'MAD', 'EGP', 'AED', 'SAR',
+]);
+
+/**
+ * Validates invoice creation payload fields.
+ *
+ * Performs strict type and format checks on all required invoice fields:
+ * amount, dueDate, buyer, seller, and currency. Collects all validation
+ * errors in a single pass so the caller can surface them together.
+ *
+ * @param {Object} body - The raw request body object.
+ * @param {number}  body.amount   - Invoice amount (must be a positive finite number).
+ * @param {string}  body.dueDate  - Due date in YYYY-MM-DD format.
+ * @param {string}  body.buyer    - Buyer name (non-empty string).
+ * @param {string}  body.seller   - Seller name (non-empty string).
+ * @param {string}  body.currency - ISO 4217 currency code (e.g. USD, EUR).
+ * @returns {{ isValid: boolean, errors: string[], validatedPayload: Object }}
+ *   - `isValid`          — true when all fields pass validation.
+ *   - `errors`           — list of human-readable error messages.
+ *   - `validatedPayload` — sanitised copy of accepted fields.
+ */
+function validateInvoicePayload(body) {
+  const errors = [];
+  const validatedPayload = {};
+  const safeBody = body && typeof body === 'object' ? body : {};
+
+  // ── amount ───────────────────────────────────────────────────────────────
+  const { amount } = safeBody;
+  if (amount === undefined || amount === null) {
+    errors.push('amount is required');
+  } else if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
+    errors.push('amount must be a positive number');
+  } else {
+    validatedPayload.amount = amount;
+  }
+
+  // ── dueDate ──────────────────────────────────────────────────────────────
+  const { dueDate } = safeBody;
+  const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+  if (dueDate === undefined || dueDate === null) {
+    errors.push('dueDate is required');
+  } else if (
+    typeof dueDate !== 'string' ||
+    !dateRegex.test(dueDate) ||
+    isNaN(Date.parse(dueDate))
+  ) {
+    errors.push('dueDate must be a valid date in YYYY-MM-DD format');
+  } else {
+    validatedPayload.dueDate = dueDate;
+  }
+
+  // ── buyer ────────────────────────────────────────────────────────────────
+  const { buyer } = safeBody;
+  if (buyer === undefined || buyer === null) {
+    errors.push('buyer is required');
+  } else if (typeof buyer !== 'string' || buyer.trim().length === 0) {
+    errors.push('buyer must be a non-empty string');
+  } else {
+    validatedPayload.buyer = buyer.trim();
+  }
+
+  // ── seller ───────────────────────────────────────────────────────────────
+  const { seller } = safeBody;
+  if (seller === undefined || seller === null) {
+    errors.push('seller is required');
+  } else if (typeof seller !== 'string' || seller.trim().length === 0) {
+    errors.push('seller must be a non-empty string');
+  } else {
+    validatedPayload.seller = seller.trim();
+  }
+
+  // ── currency ─────────────────────────────────────────────────────────────
+  const { currency } = safeBody;
+  if (currency === undefined || currency === null) {
+    errors.push('currency is required');
+  } else if (
+    typeof currency !== 'string' ||
+    !VALID_CURRENCIES.has(currency.toUpperCase())
+  ) {
+    errors.push('currency must be a supported ISO 4217 code (e.g. USD, EUR, GBP)');
+  } else {
+    validatedPayload.currency = currency.toUpperCase();
+  }
+
+  return {
+    isValid: errors.length === 0,
+    errors,
+    validatedPayload,
+  };
+}
+
 module.exports = {
   validateInvoiceQueryParams,
+  validateInvoicePayload,
+  VALID_CURRENCIES,
 };
