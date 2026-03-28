@@ -1,130 +1,146 @@
-const DEVELOPMENT_FALLBACK_ORIGINS = [
+/**
+ * @fileoverview CORS allowlist parsing and policy for the LiquiFact API.
+ *
+ * Reads trusted origins from the `CORS_ALLOWED_ORIGINS` environment variable
+ * (comma-separated list of exact origins) and builds an `options` object
+ * compatible with the `cors` npm package.
+ *
+ * Behaviour summary:
+ *   - Requests with **no Origin header** (curl, Postman, server-to-server) are
+ *     always allowed — the `origin` callback receives `undefined` and passes.
+ *   - Requests from an **allowed origin** receive normal CORS response headers.
+ *   - Requests from a **disallowed origin** receive a 403 Forbidden response
+ *     via a dedicated `Error` whose `.isCorsOriginRejected` flag is `true`.
+ *   - In `NODE_ENV=development`, when `CORS_ALLOWED_ORIGINS` is not set, a set
+ *     of common local development origins is permitted automatically.
+ *   - In all other environments, when `CORS_ALLOWED_ORIGINS` is not set, every
+ *     browser origin is denied.
+ *
+ * @module config/cors
+ */
+
+'use strict';
+
+/** @type {string[]} Origins allowed when no env var is set during development. */
+const DEV_DEFAULT_ORIGINS = [
   'http://localhost:3000',
-  'http://127.0.0.1:3000',
+  'http://localhost:3001',
   'http://localhost:5173',
+  'http://127.0.0.1:3000',
   'http://127.0.0.1:5173',
 ];
 
-const CORS_REJECTION_MESSAGE = 'Origin not allowed by CORS';
-
 /**
- * Parses a comma-separated origin allowlist into normalized exact-match origins.
+ * Parses `CORS_ALLOWED_ORIGINS` into a trimmed, de-duplicated array of origin
+ * strings.  Returns `null` when the variable is absent or blank.
  *
- * @param {string | undefined} value Raw environment variable value.
- * @returns {string[]} Normalized list of allowed origins.
+ * @param {string|undefined} raw - Raw value of the environment variable.
+ * @returns {string[]|null} Array of allowed origins, or `null` if unset.
  */
-function parseAllowedOrigins(value) {
-  if (!value) {
-    return [];
-  }
-
-  return value
-    .split(',')
-    .map((origin) => origin.trim())
-    .filter(Boolean);
+function parseAllowedOrigins(raw) {
+  if (!raw || raw.trim() === '') return null;
+  return [
+    ...new Set(
+      raw
+        .split(',')
+        .map((o) => o.trim())
+        .filter(Boolean)
+    ),
+  ];
 }
 
 /**
- * Returns the built-in localhost allowlist used when development mode has no
- * explicit CORS configuration.
+ * Resolves the effective origin allowlist given the current environment.
  *
- * @returns {string[]} Local development origins.
+ * @returns {string[]|null} Allowlist to enforce, or `null` meaning "deny all
+ *   browser origins" (production with no env var set).
  */
-function getDevelopmentFallbackOrigins() {
-  return [...DEVELOPMENT_FALLBACK_ORIGINS];
+function resolveAllowlist() {
+  const fromEnv = parseAllowedOrigins(process.env.CORS_ALLOWED_ORIGINS);
+  if (fromEnv !== null) return fromEnv;
+
+  if (process.env.NODE_ENV === 'development') return DEV_DEFAULT_ORIGINS;
+
+  // Production / test with no CORS_ALLOWED_ORIGINS → deny all browser origins.
+  return null;
 }
 
 /**
- * Resolves the effective origin allowlist for the current environment.
+ * Sentinel error thrown when an incoming `Origin` is not on the allowlist.
+ * The `isCorsOriginRejected` flag lets downstream error handlers identify it
+ * without `instanceof` checks across module boundaries.
  *
- * @param {NodeJS.ProcessEnv} env Environment variables to evaluate.
- * @returns {string[]} Effective exact-match allowlist.
+ * @param {string} origin - The rejected origin value.
+ * @returns {Error} Annotated error instance.
  */
-function getAllowedOriginsFromEnv(env = process.env) {
-  const configuredOrigins = parseAllowedOrigins(env.CORS_ALLOWED_ORIGINS);
-
-  if (configuredOrigins.length > 0) {
-    return configuredOrigins;
-  }
-
-  if (env.NODE_ENV === 'development') {
-    return getDevelopmentFallbackOrigins();
-  }
-
-  return [];
+function createCorsRejectionError(origin) {
+  const err = new Error(`CORS policy: origin "${origin}" is not allowed.`);
+  err.isCorsOriginRejected = true;
+  err.status = 403;
+  return err;
 }
 
 /**
- * Creates the explicit error object used to reject a blocked browser origin.
+ * Returns `true` if `err` is the dedicated blocked-origin CORS error produced
+ * by {@link createCorsRejectionError}.
  *
- * @returns {Error & { status: number }} CORS rejection error.
+ * @param {unknown} err - Value to test.
+ * @returns {boolean}
  */
-function createCorsRejectionError() {
-  const error = new Error(CORS_REJECTION_MESSAGE);
-  error.status = 403;
-  return error;
+function isCorsOriginRejectedError(err) {
+  return err != null && err.isCorsOriginRejected === true;
 }
 
 /**
- * Determines whether the supplied error is the dedicated CORS rejection error.
+ * Builds the options object for the `cors` middleware package.
  *
- * @param {Error | undefined} error Error raised during request handling.
- * @returns {boolean} True when the error is a blocked-origin CORS error.
- */
-function isCorsOriginRejectedError(error) {
-  return Boolean(
-    error &&
-    error.status === 403 &&
-    error.message === CORS_REJECTION_MESSAGE
-  );
-}
-
-/**
- * Builds Express CORS options using an environment-driven exact-match allowlist.
+ * The `origin` callback implements exact-match checking against the resolved
+ * allowlist.  It calls `callback(null, true)` to approve an origin, and
+ * `callback(err)` with the rejection error to deny it.
  *
- * Requests without an Origin header remain allowed so non-browser clients and
- * same-origin traffic are not blocked by CORS policy.
+ * @returns {import('cors').CorsOptions} Options ready to pass to `cors()`.
  *
- * @param {NodeJS.ProcessEnv} env Environment variables to evaluate.
- * @returns {{ origin: (origin: string | undefined, callback: Function) => void }} CORS options.
+ * @example
+ * const cors = require('cors');
+ * const { createCorsOptions } = require('./config/cors');
+ * app.use(cors(createCorsOptions()));
  */
-/**
- * Creates CORS options for the Express CORS middleware.
- * @param {Object} [env=process.env] - Environment variables.
- * @returns {{origin: function(string, function): void}} CORS options.
- */
-/**
- * Creates CORS options for the application.
- * @param {Object} [env=process.env] - The environment variables.
- * @returns {{ origin: (origin: string | undefined, callback: Function) => void }} CORS options.
- */
-function createCorsOptions(env = process.env) {
-  const allowedOrigins = getAllowedOriginsFromEnv(env);
-  const allowedOriginsSet = new Set(allowedOrigins);
+function createCorsOptions() {
+  const allowlist = resolveAllowlist();
 
   return {
     /**
-     * CORS origin validation callback.
-     * @param {string|undefined} origin - The request origin.
-     * @param {Function} callback - Callback to signal CORS result.
+     * Validates request origin against the allowlist.
+     * @param {string|undefined} origin - The request origin header value
+     * @param {Function} callback - CORS callback (err, allow)
      * @returns {void}
      */
     origin(origin, callback) {
-      if (!origin || allowedOriginsSet.has(origin)) {
+      // Non-browser requests (no Origin header) are always allowed.
+      if (origin === undefined) {
         return callback(null, true);
       }
 
-      return callback(createCorsRejectionError());
+      // No allowlist configured in production → deny.
+      if (allowlist === null) {
+        return callback(createCorsRejectionError(origin));
+      }
+
+      if (allowlist.includes(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(createCorsRejectionError(origin));
     },
+    // Expose the standard headers clients need.
+    optionsSuccessStatus: 200,
   };
 }
 
 module.exports = {
-  CORS_REJECTION_MESSAGE,
   createCorsOptions,
-  createCorsRejectionError,
-  getAllowedOriginsFromEnv,
-  getDevelopmentFallbackOrigins,
   isCorsOriginRejectedError,
   parseAllowedOrigins,
+  resolveAllowlist,
+  DEV_DEFAULT_ORIGINS,
 };

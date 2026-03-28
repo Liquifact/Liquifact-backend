@@ -1,3 +1,6 @@
+const AppError = require('../errors/AppError');
+const formatProblemDetails = require('../utils/problemDetails');
+
 /**
  * Global error handling middleware
  * Ensures consistent error responses and prevents stack leaks in production.
@@ -7,34 +10,35 @@
  * @param {Function} _next - Express next middleware function.
  * @returns {void}
  */
-const errorHandler = (err, req, res, _next) => {
-  console.error(err);
+function errorHandler(err, req, res, _next) {
+  let problem;
 
-  let statusCode = err.statusCode || 500;
-  let message = err.message || 'Internal server error';
-
-  // If error is an auth error, force 401
-  if (
-    message === 'Authentication token is required' ||
-    message === 'Invalid Authorization header format. Expected "Bearer <token>"' ||
-    message === 'Invalid token' ||
-    message === 'Token has expired'
-  ) {
-    statusCode = 401;
+  // Check if it's a known AppError instance
+  if (err instanceof AppError) {
+    problem = formatProblemDetails({
+      type: err.type,
+      title: err.title,
+      status: err.status,
+      detail: err.detail,
+      instance: err.instance || req.originalUrl,
+      stack: err.stack,
+    });
+  } else {
+    // If it's an unknown error, provide a fallback 500 status
+    console.error('Unhandled Error:', err);
+    problem = formatProblemDetails({
+      type: 'https://example.com/probs/unexpected-error',
+      title: 'Internal Server Error',
+      status: 500,
+      detail: 'An unexpected error occurred while processing your request.',
+      instance: req.originalUrl,
+      stack: err.stack,
+    });
   }
 
-  // Hide internal error details in production
-  if (process.env.NODE_ENV === 'production' && statusCode === 500) {
-    message = 'Internal server error';
-  }
-
-  // For 4xx errors, return { error: message } (string)
-  if (statusCode >= 400 && statusCode < 500) {
-    return res.status(statusCode).json({ error: message });
-  }
-
-  // For 5xx errors, return { error: { message } }
-  res.status(statusCode).json({ error: { message } });
-};
+  // RFC 7807 requires the Content-Type to be 'application/problem+json'
+  res.header('Content-Type', 'application/problem+json');
+  res.status(problem.status).json(problem);
+}
 
 module.exports = errorHandler;

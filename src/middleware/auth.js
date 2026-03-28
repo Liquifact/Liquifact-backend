@@ -8,16 +8,6 @@ const jwt = require('jsonwebtoken');
 
 /**
  * Middleware function to enforce authentication for protected routes.
- * It checks the "Authorization" header for a "Bearer <token>" pattern.
- * If valid, it attaches the decoded token payload to `req.user`.
- * 
- * @param {import('express').Request} req - Express request object
- * @param {import('express').Response} res - Express response object
- * @param {import('express').NextFunction} next - Express next middleware function
- * @returns {void}
- */
-/**
- * Middleware function to enforce authentication for protected routes.
  * @param {Object} req - Express request object.
  * @param {Object} res - Express response object.
  * @param {Function} next - Express next middleware function.

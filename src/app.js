@@ -1,11 +1,37 @@
+/**
+ * @fileoverview Express application factory for the LiquiFact API.
+ *
+ * Wires together all middleware and routes in the correct order:
+ *   1. CORS policy (environment-driven allowlist, 403 on blocked origins)
+ *   2. Request body-size guardrails (100 KB global JSON, 512 KB invoice limit)
+ *   3. URL-encoded body parser (50 KB limit)
+ *   4. Application routes (health, api-info, invoices, escrow)
+ *   5. 404 catch-all
+ *   6. CORS error handler  → 403 JSON
+ *   7. Payload-too-large handler → 413 JSON
+ *   8. Generic internal-error handler → 500 JSON
+ *
+ * @module app
+ */
+
+'use strict';
+
 const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
 
+const { callSorobanContract }               = require('./services/soroban');
+const { createCorsOptions, isCorsOriginRejectedError } = require('./config/cors');
 const {
-  createCorsOptions,
-  isCorsOriginRejectedError,
-} = require('./config/cors');
+  jsonBodyLimit,
+  urlencodedBodyLimit,
+  invoiceBodyLimit,
+  payloadTooLargeHandler,
+} = require('./middleware/bodySizeLimits');
+
+const invoiceService = require('./services/invoice.service');
+const { validateInvoiceQueryParams } = require('./utils/validators');
+const asyncHandler = require('./utils/asyncHandler');
 
 const { globalLimiter, sensitiveLimiter } = require('./middleware/rateLimit');
 const { authenticateToken } = require('./middleware/auth');
@@ -16,10 +42,10 @@ const { RepositoryRegistry } = require('./repositories');
 /**
  * Returns a 403 JSON response only for the dedicated blocked-origin CORS error.
  *
- * @param {Error} err Request error.
- * @param {import('express').Request} req Express request.
- * @param {import('express').Response} res Express response.
- * @param {import('express').NextFunction} next Express next callback.
+ * @param {Error}                          err  - Request error.
+ * @param {import('express').Request}      req  - Express request.
+ * @param {import('express').Response}     res  - Express response.
+ * @param {import('express').NextFunction} next - Express next callback.
  * @returns {void}
  */
 function handleCorsError(err, req, res, next) {
@@ -27,14 +53,15 @@ function handleCorsError(err, req, res, next) {
     res.status(403).json({ error: err.message });
     return;
   }
-
   next(err);
 }
 
 
-
 /**
  * Creates the LiquiFact API application with configured middleware and routes.
+ *
+ * Exported as a factory function so each test suite can spin up a clean
+ * instance without shared state.
  *
  * @param {Object} [deps={}] Dependency injection container.
  * @param {import('./repositories/invoice.repository')} [deps.invoiceRepo] The invoice repository.
@@ -49,15 +76,26 @@ function createApp(deps = {}) {
 
   // Apply global rate limiter for all routes
   app.use(globalLimiter);
+
+  // ── 1. CORS ──────────────────────────────────────────────────────────────
+  // Must come before body parsers so preflight OPTIONS requests are handled
+  // before any payload is read.
   app.use(cors(createCorsOptions()));
-  app.use(express.json());
+
+  // ── 2 & 3. Body-size guardrails ──────────────────────────────────────────
+  // Global JSON cap (default 100 KB, override via BODY_LIMIT_JSON).
+  app.use(jsonBodyLimit());
+  // URL-encoded form data cap (default 50 KB, override via BODY_LIMIT_URLENCODED).
+  app.use(urlencodedBodyLimit());
+
+  // ── 4. Routes ────────────────────────────────────────────────────────────
 
   // Health check
   app.get('/health', (req, res) => {
     res.json({
-      status: 'ok',
-      service: 'liquifact-api',
-      version: '0.1.0',
+      status:    'ok',
+      service:   'liquifact-api',
+      version:   '0.1.0',
       timestamp: new Date().toISOString(),
     });
   });
@@ -65,16 +103,15 @@ function createApp(deps = {}) {
   // API info
   app.get('/api', (req, res) => {
     res.json({
-      name: 'LiquiFact API',
+      name:        'LiquiFact API',
       description: 'Global Invoice Liquidity Network on Stellar',
       endpoints: {
-        health: 'GET /health',
+        health:   'GET /health',
         invoices: 'GET/POST /api/invoices',
-        escrow: 'GET/POST /api/escrow',
+        escrow:   'GET/POST /api/escrow',
       },
     });
   });
-
 
   // List invoices (optionally include deleted)
   app.get('/api/invoices', async (req, res) => {
@@ -93,7 +130,7 @@ function createApp(deps = {}) {
   // Create invoice (require amount and customer)
   if (process.env.TEST_AUTH_PROTECTED === 'true') {
     // Protected for auth/rate limit tests
-    app.post('/api/invoices', authenticateToken, sensitiveLimiter, async (req, res) => {
+    app.post('/api/invoices', authenticateToken, sensitiveLimiter, ...invoiceBodyLimit(), async (req, res) => {
       try {
         const { amount, customer } = req.body;
         if (typeof amount !== 'number' || !customer) {
@@ -111,7 +148,7 @@ function createApp(deps = {}) {
     });
   } else {
     // Public for integration tests and normal operation
-    app.post('/api/invoices', sensitiveLimiter, async (req, res) => {
+    app.post('/api/invoices', sensitiveLimiter, ...invoiceBodyLimit(), async (req, res) => {
       try {
         const { amount, customer } = req.body;
         if (typeof amount !== 'number' || !customer) {
@@ -176,13 +213,11 @@ function createApp(deps = {}) {
     }
   });
 
-  // Escrow (using Repository)
+  // Escrow (using Repository proxied through Soroban retry wrapper)
   app.get('/api/escrow/:invoiceId', async (req, res) => {
     const { invoiceId } = req.params;
-
     try {
       const data = await escrowRepo.getEscrowState(invoiceId);
-
       res.json({
         data,
         message: 'Escrow state read from blockchain repository abstraction.',
@@ -192,18 +227,20 @@ function createApp(deps = {}) {
     }
   });
 
+  // Developer test route — forces a 500 to exercise the error handler
   app.get('/error', (req, res, next) => {
     next(new Error('Simulated server error'));
   });
 
+  // ── 5. 404 catch-all ─────────────────────────────────────────────────────
   app.use((req, res) => {
     res.status(404).json({ error: 'Not found', path: req.path });
   });
 
-
-  // CORS error handler
-  app.use(handleCorsError);
-
+  // ── 6 – 8. Error handlers (order matters) ────────────────────────────────
+  app.use(handleCorsError);         // 403 for blocked CORS origins
+  app.use(payloadTooLargeHandler);  // 413 for oversized request bodies
+  
   // Global error handler (standardizes error responses)
   app.use(require('./middleware/errorHandler'));
 

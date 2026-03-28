@@ -17,7 +17,7 @@ describe('Rate Limiting Middleware', () => {
 
     describe('Sensitive Operations Throttling - POST /api/invoices', () => {
         // Note: The sensitive limiter has a limit of 10 per hour.
-        // To avoid affecting other tests, we should ideally use a fresh instance, 
+        // To avoid affecting other tests, we should ideally use a fresh instance,
         // but here we demonstrate the 429 response by hitting it 11 times.
 
         it('should allow up to 10 requests and then return 429 Too Many Requests', async () => {

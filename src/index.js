@@ -1,3 +1,5 @@
+'use strict';
+
 /**
  * LiquiFact API Gateway
  * Express server bootstrap for invoice financing, auth, and Stellar integration.
@@ -43,7 +45,7 @@ const startServer = () => {
 
 /**
  * Resets the in-memory store (for testing purposes).
- * 
+ *
  * @returns {void}
  */
 const resetStore = () => {
@@ -58,4 +60,8 @@ if (process.env.NODE_ENV !== 'test') {
 }
 
 // Export app and state for testing
-module.exports = { app, startServer, resetStore };
+module.exports = app;
+module.exports.startServer = startServer;
+module.exports.resetStore = resetStore;
+module.exports.createServer = createServer;
+

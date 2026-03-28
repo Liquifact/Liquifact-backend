@@ -3,6 +3,9 @@ const cors = require('cors');
 const { createApp, handleCorsError } = require('./app');
 const { CORS_REJECTION_MESSAGE } = require('./config/cors');
 const { createCorsOptions } = require('./config/cors');
+const invoiceService = require('./services/invoice.service');
+
+jest.mock('./services/invoice.service');
 
 /**
  * Temporarily overrides process.env variables for the duration of a function.
@@ -383,7 +386,8 @@ describe('LiquiFact app integration', () => {
     });
   });
 
-  it('returns the invoice placeholder list', async () => {
+  it('returns the invoice list', async () => {
+    invoiceService.getInvoices.mockResolvedValue([]);
     const response = await invokeApp(createApp(), {
       path: '/api/invoices',
     });
