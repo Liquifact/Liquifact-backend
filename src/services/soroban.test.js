@@ -1,4 +1,4 @@
-const { callSorobanContract, isRetryable } = require('./soroban');
+const { callSorobanContract } = require('./soroban');
 
 describe('Soroban Integration Wrapper', () => {
 

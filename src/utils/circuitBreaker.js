@@ -23,6 +23,7 @@ const CircuitBreakerState = {
  */
 class CircuitBreaker {
   /**
+   * Creates a new Circuit Breaker.
    * @param {Object} [options={}] - Configuration options for the Circuit Breaker.
    * @param {number} [options.failureThreshold=5] - Number of failures before state changes to OPEN.
    * @param {number} [options.recoveryTimeout=10000] - Time in ms before state changes from OPEN to HALF_OPEN.

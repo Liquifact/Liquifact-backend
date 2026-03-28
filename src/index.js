@@ -17,8 +17,7 @@ require('dotenv').config();
 const { globalLimiter, sensitiveLimiter } = require('./middleware/rateLimit');
 const { authenticateToken } = require('./middleware/auth');
 
-const asyncHandler = require('./utils/asyncHandler');
-const errorHandler = require('./middleware/errorHandler');
+const AppError = require('./errors/AppError');
 const { callSorobanContract } = require('./services/soroban');
 
 const app = express();

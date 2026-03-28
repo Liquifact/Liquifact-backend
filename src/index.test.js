@@ -15,8 +15,8 @@ const jwt = require('jsonwebtoken');
 const app = require('./index');
 const { resetStore, startServer } = app;
 
-const TEST_SECRET = process.env.JWT_SECRET || 'test-secret';
-const validToken = jwt.sign({ id: 1, role: 'user' }, TEST_SECRET, { expiresIn: '1h' });
+// const TEST_SECRET = process.env.JWT_SECRET || 'test-secret';
+// const validToken = jwt.sign({ id: 1, role: 'user' }, TEST_SECRET, { expiresIn: '1h' });
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -91,7 +91,7 @@ function expectSecureHeaders(res) {
 describe('LiquiFact API', () => {
   const secret = process.env.JWT_SECRET || 'test-secret';
   const validToken = jwt.sign({ id: 1, role: 'user' }, secret);
-  const authHeader = { Authorization: `Bearer ${validToken}` };
+  // const authHeader = { Authorization: `Bearer ${validToken}` };
 
   beforeEach(() => {
     resetStore();
@@ -209,7 +209,7 @@ describe('LiquiFact API', () => {
     });
 
     it('error handler - returns 500 on unexpected error', async () => {
-      const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+      const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => { });
       const response = await request(app).get('/error-test-trigger');
       expect(response.status).toBe(500);
       consoleSpy.mockRestore();

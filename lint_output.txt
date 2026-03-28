@@ -1,0 +1,60 @@
+
+> backend@1.0.0 lint
+> eslint src/
+
+
+/Users/onyemaanthony/WebstormProjects/Liquifact-backend/src/__tests__/bodySizeLimits.test.js
+   65:1   error    Missing JSDoc @returns declaration                                             jsdoc/require-returns
+   74:1   error    Missing JSDoc @returns declaration                                             jsdoc/require-returns
+  123:19  warning  Generic Object Injection Sink                                                  security/detect-object-injection
+  124:22  warning  Function Call Object Injection Sink                                            security/detect-object-injection
+  436:11  error    'd0' is assigned a value but never used. Allowed unused vars must match /^_/u  no-unused-vars
+
+/Users/onyemaanthony/WebstormProjects/Liquifact-backend/src/app.js
+  32:7  error  'invoiceService' is assigned a value but never used. Allowed unused vars must match /^_/u              no-unused-vars
+  33:9  error  'validateInvoiceQueryParams' is assigned a value but never used. Allowed unused vars must match /^_/u  no-unused-vars
+  34:7  error  'asyncHandler' is assigned a value but never used. Allowed unused vars must match /^_/u                no-unused-vars
+
+/Users/onyemaanthony/WebstormProjects/Liquifact-backend/src/app.test.js
+  14:29  warning  Function Call Object Injection Sink  security/detect-object-injection
+  16:9   warning  Generic Object Injection Sink        security/detect-object-injection
+  17:14  warning  Generic Object Injection Sink        security/detect-object-injection
+  19:7   warning  Generic Object Injection Sink        security/detect-object-injection
+  19:26  warning  Generic Object Injection Sink        security/detect-object-injection
+  28:16  warning  Generic Object Injection Sink        security/detect-object-injection
+  30:9   warning  Generic Object Injection Sink        security/detect-object-injection
+
+/Users/onyemaanthony/WebstormProjects/Liquifact-backend/src/config/cors.js
+  91:14  error  Expected '!==' and instead saw '!='  eqeqeq
+
+/Users/onyemaanthony/WebstormProjects/Liquifact-backend/src/errors/AppError.js
+  6:3  error  Missing JSDoc block description  jsdoc/require-description
+
+/Users/onyemaanthony/WebstormProjects/Liquifact-backend/src/index.js
+   20:7  error  'asyncHandler' is assigned a value but never used. Allowed unused vars must match /^_/u  no-unused-vars
+   21:7  error  'errorHandler' is assigned a value but never used. Allowed unused vars must match /^_/u  no-unused-vars
+  238:9  error  'AppError' is not defined                                                                no-undef
+
+/Users/onyemaanthony/WebstormProjects/Liquifact-backend/src/index.test.js
+  19:7   error    'validToken' is assigned a value but never used. Allowed unused vars must match /^_/u  no-unused-vars
+  33:10  warning  Function Call Object Injection Sink                                                    security/detect-object-injection
+  94:9   error    'authHeader' is assigned a value but never used. Allowed unused vars must match /^_/u  no-unused-vars
+
+/Users/onyemaanthony/WebstormProjects/Liquifact-backend/src/middleware/bodySizeLimits.js
+  55:38  warning  Unsafe Regular Expression      security/detect-unsafe-regex
+  64:29  warning  Generic Object Injection Sink  security/detect-object-injection
+
+/Users/onyemaanthony/WebstormProjects/Liquifact-backend/src/services/soroban.js
+  82:18  error  Expected '!==' and instead saw '!='  eqeqeq
+
+/Users/onyemaanthony/WebstormProjects/Liquifact-backend/src/utils/problemDetails.js
+  1:1  error  Missing JSDoc @returns declaration  jsdoc/require-returns
+
+/Users/onyemaanthony/WebstormProjects/Liquifact-backend/src/utils/queryBuilder.js
+  28:19  warning  Variable Assigned to Object Injection Sink  security/detect-object-injection
+  32:22  warning  Generic Object Injection Sink               security/detect-object-injection
+  49:20  warning  Generic Object Injection Sink               security/detect-object-injection
+  55:20  warning  Generic Object Injection Sink               security/detect-object-injection
+
+✖ 31 problems (15 errors, 16 warnings)
+
