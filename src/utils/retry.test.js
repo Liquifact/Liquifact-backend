@@ -1,5 +1,9 @@
 const { withRetry } = require('./retry');
 
+/**
+ * Test suite for the retry utility.
+ * @returns {void}
+ */
 describe('Retry Utility', () => {
   it('should succeed on the first try without retrying', async () => {
     const operation = jest.fn().mockResolvedValue('success');
@@ -39,9 +43,12 @@ describe('Retry Utility', () => {
   it('should abort retries if shouldRetry returns false', async () => {
     const error = new Error('Fatal Error');
     const operation = jest.fn().mockRejectedValue(error);
-    const shouldRetry = (err) => err.message !== 'Fatal Error';
-
-    await expect(
+  /**
+   * Determines whether to retry based on the error.
+   * @param {Error} err - The error to evaluate.
+   * @returns {boolean} True if the operation should retry, false otherwise.
+   */
+  const shouldRetry = (err) => err.message !== 'Fatal Error';    await expect(
       withRetry(operation, { maxRetries: 3, baseDelay: 10, shouldRetry })
     ).rejects.toThrow('Fatal Error');
     expect(operation).toHaveBeenCalledTimes(1);
@@ -68,6 +75,10 @@ describe('Retry Utility', () => {
     expect(duration).toBeLessThanOrEqual(100);
   });
 
+  /**
+   * Ensures that maxRetries is capped for security and does not allow excessive attempts.
+   * @returns {Promise<void>} Resolves when test completes.
+   */
   it('should enforce security caps on maxRetries', async () => {
     const operation = jest.fn().mockRejectedValue(new Error('Fail'));
     

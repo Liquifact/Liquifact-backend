@@ -99,9 +99,8 @@ function jsonBodyLimit(limit) {
   const maxBytes = parseSize(resolvedLimit);
 
   return [
-    express.json({ limit: resolvedLimit, strict: true }),
     /**
-     * Content-Length pre-flight guard.
+     * Content-Length pre-flight guard (must run before the JSON parser reads the body).
      *
      * @param {import('express').Request}      req
      * @param {import('express').Response}     res
@@ -115,6 +114,7 @@ function jsonBodyLimit(limit) {
       }
       next();
     },
+    express.json({ limit: resolvedLimit, strict: true }),
   ];
 }
 
@@ -168,9 +168,18 @@ function urlencodedBodyLimit(limit) {
  */
 function payloadTooLargeHandler(err, req, res, next) {
   if (err.type === 'entity.too.large') {
+    const limit =
+      typeof err.limit === 'string'
+        ? err.limit
+        : err.limit != null
+          ? String(err.limit)
+          : undefined;
     return res.status(413).json({
       error: 'Payload Too Large',
-      message: 'Request body exceeds the maximum allowed size.',
+      message: limit
+        ? `Request body exceeds the maximum allowed size of ${limit}.`
+        : 'Request body exceeds the maximum allowed size.',
+      ...(limit !== undefined ? { limit } : {}),
       path: req.path,
     });
   }
@@ -200,4 +209,5 @@ module.exports = {
   urlencodedBodyLimit,
   payloadTooLargeHandler,
   invoiceBodyLimit,
+  sendPayloadTooLarge, // for testability
 };

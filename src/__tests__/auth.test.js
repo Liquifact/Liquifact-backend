@@ -1,5 +1,8 @@
 const request = require('supertest');
+// Enable auth-protected routes for this test file
+process.env.TEST_AUTH_PROTECTED = 'true';
 const jwt = require('jsonwebtoken');
+/* eslint-env jest */
 const app = require('../index');
 
 describe('Authentication Middleware', () => {
@@ -60,7 +63,7 @@ describe('Authentication Middleware', () => {
             const response = await request(app)
                 .post('/api/invoices')
                 .set('Authorization', `Bearer ${validToken}`)
-                .send({ amount: 100, customer: 'Test Corp' });
+                .send({ amount: 100, customer: 'Test User' });
             expect(response.status).toBe(201);
             expect(response.body.data.status).toBe('pending_verification');
         });

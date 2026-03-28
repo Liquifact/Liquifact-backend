@@ -6,6 +6,25 @@
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 
 /**
+ * Safe client IP for rate-limit keys (`req.ip` throws if socket metadata is missing).
+ * @param {import('express').Request} req
+ * @returns {string}
+ */
+function getClientIp(req) {
+  const direct =
+    (req.socket && req.socket.remoteAddress) ||
+    (req.connection && req.connection.remoteAddress);
+  if (direct) {
+    return direct;
+  }
+  try {
+    return req.ip || '127.0.0.1';
+  } catch {
+    return '127.0.0.1';
+  }
+}
+
+/**
  * Standard global rate limiter for all API endpoints.
  * Limits each IP to 100 requests per 15 minutes.
  */
@@ -23,8 +42,10 @@ const globalLimiter = rateLimit({
    * @returns {string} The rate-limit key
    */
   keyGenerator: (req) => {
-    // Use user ID if authenticated, otherwise fallback to safe IP generator
-    return req.user ? `user_${req.user.id}` : ipKeyGenerator(req.ip);
+    if (req.user) {
+      return `user_${req.user.id}`;
+    }
+    return ipKeyGenerator(getClientIp(req));
   },
 });
 
@@ -46,7 +67,10 @@ const sensitiveLimiter = rateLimit({
    * @returns {string} The rate-limit key
    */
   keyGenerator: (req) => {
-    return req.user ? `user_${req.user.id}` : ipKeyGenerator(req.ip);
+    if (req.user) {
+      return `user_${req.user.id}`;
+    }
+    return ipKeyGenerator(getClientIp(req));
   },
 });
 

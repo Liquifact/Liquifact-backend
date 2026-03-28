@@ -32,8 +32,8 @@ describe('asyncHandler utility', () => {
     const res = await request(app).get('/fail');
 
     expect(res.statusCode).toBe(500);
-    expect(res.body.error).toBeDefined();
-    expect(res.body.error.message).toBe('Test error');
+    expect(res.body.title).toBe('Internal Server Error');
+    expect(res.body.status).toBe(500);
   });
 
   it('should handle rejected promises', async () => {

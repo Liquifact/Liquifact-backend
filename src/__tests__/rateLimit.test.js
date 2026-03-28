@@ -1,5 +1,8 @@
 const request = require('supertest');
+// Enable auth-protected routes for this test file
+process.env.TEST_AUTH_PROTECTED = 'true';
 const jwt = require('jsonwebtoken');
+/* eslint-env jest */
 const app = require('../index');
 
 describe('Rate Limiting Middleware', () => {
@@ -19,14 +22,17 @@ describe('Rate Limiting Middleware', () => {
 
         it('should allow up to 10 requests and then return 429 Too Many Requests', async () => {
             // Send 10 successful requests
+
             for (let i = 0; i < 10; i++) {
                 const response = await request(app)
                     .post('/api/invoices')
                     .set('Authorization', `Bearer ${validToken}`)
-                    .send({ amount: 100, customer: 'Test' });
+                    .send({ amount: 100, customer: 'Test User' });
 
                 // If we hit a 429 early because of previous tests, we just break and check the next one.
-                if (response.status === 429) {break;}
+                if (response.status === 429) {
+                  break;
+                }
                 expect(response.status).toBe(201);
             }
 
@@ -34,7 +40,7 @@ describe('Rate Limiting Middleware', () => {
             const throttledResponse = await request(app)
                 .post('/api/invoices')
                 .set('Authorization', `Bearer ${validToken}`)
-                .send({ amount: 100, customer: 'Test' });
+                .send({ amount: 100, customer: 'Test User' });
 
             expect(throttledResponse.status).toBe(429);
             expect(throttledResponse.body.error).toContain('rate limit exceeded');

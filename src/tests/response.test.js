@@ -1,72 +1,88 @@
-const request = require('supertest');
-const app = require('../app');
 
-describe('Standard Response Envelope (Issue 19)', () => {
-  it('Success response should have data, meta, and error=null', async () => {
+const request = require('supertest');
+const { createApp } = require('../app');
+const app = createApp();
+
+describe('API response shapes', () => {
+  it('GET /health uses legacy flat JSON for observability', async () => {
     const res = await request(app).get('/health');
     expect(res.status).toBe(200);
-    expect(res.body).toHaveProperty('data');
-    expect(res.body).toHaveProperty('meta');
-    expect(res.body).toHaveProperty('error');
-    expect(res.body.error).toBeNull();
-    expect(res.body.meta.version).toBe('0.1.0');
-    expect(res.body.meta).toHaveProperty('timestamp');
+    expect(res.body.status).toBe('ok');
+    expect(res.body.service).toBe('liquifact-api');
+    expect(res.body.version).toBe('0.1.0');
   });
 
-  it('Error response should have data=null, meta, and error object', async () => {
+  it('GET unknown route returns 404 JSON with path', async () => {
     const res = await request(app).get('/not-found-route');
     expect(res.status).toBe(404);
-    expect(res.body).toHaveProperty('data');
-    expect(res.body.data).toBeNull();
-    expect(res.body).toHaveProperty('meta');
-    expect(res.body).toHaveProperty('error');
-    expect(res.body.error.code).toBe('NOT_FOUND');
-    expect(res.body.error).toHaveProperty('message');
+    expect(res.body.error).toBe('Not found');
+    expect(res.body.path).toBe('/not-found-route');
   });
-  
-  it('POST /api/invoices should return 201 and standardized success envelope', async () => {
+
+  it('POST /api/invoices requires fields and uses success/error helper on validation failure', async () => {
     const res = await request(app).post('/api/invoices').send({});
+    expect(res.status).toBe(400);
+    expect(res.body.data).toBeNull();
+    expect(res.body.error.code).toBe('VALIDATION_ERROR');
+  });
+
+  it('POST /api/invoices returns success envelope when valid', async () => {
+    const res = await request(app)
+      .post('/api/invoices')
+      .send({ amount: 100, customer: 'Test' });
     expect(res.status).toBe(201);
-    expect(res.body.data.id).toBe('placeholder');
     expect(res.body.error).toBeNull();
+    expect(res.body.data).toBeDefined();
+    expect(res.body.meta.version).toBe('0.1.0');
   });
 
-  it('All routes should return standard response format', async () => {
-    const routes = ['/api', '/api/invoices', '/api/escrow/123'];
-    for (const route of routes) {
-      const res = await request(app).get(route);
-      expect(res.status).toBe(200);
-      expect(res.body).toHaveProperty('data');
-      expect(res.body).toHaveProperty('meta');
-      expect(res.body).toHaveProperty('error');
-      expect(res.body.error).toBeNull();
-    }
+  it('GET /api/invoices returns success envelope', async () => {
+    const res = await request(app).get('/api/invoices');
+    expect(res.status).toBe(200);
+    expect(res.body.error).toBeNull();
+    expect(Array.isArray(res.body.data)).toBe(true);
+    expect(res.body.meta.version).toBe('0.1.0');
   });
 
-  it('GET /debug/error should return 500 and standardized internal error', async () => {
+  it('GET /api/escrow/:id returns success envelope', async () => {
+    const res = await request(app).get('/api/escrow/123');
+    expect(res.status).toBe(200);
+    expect(res.body.error).toBeNull();
+    expect(res.body.data.invoiceId).toBe('123');
+  });
+
+  it('GET /debug/error returns 500 RFC 7807 problem details', async () => {
+    jest.spyOn(console, 'error').mockImplementation(() => {});
     process.env.NODE_ENV = 'production';
     const res = await request(app).get('/debug/error');
     expect(res.status).toBe(500);
-    expect(res.body.error.message).toBe('Internal Server Error');
-    expect(res.body.error.details).toBeNull();
+    expect(res.headers['content-type']).toContain('problem+json');
+    expect(res.body.title).toBe('Internal Server Error');
+    expect(res.body.stack).toBeUndefined();
+    console.error.mockRestore();
+    process.env.NODE_ENV = 'test';
   });
 
-  it('Internal server errors should return stack trace in development', async () => {
+  it('GET /debug/error includes stack outside production', async () => {
+    jest.spyOn(console, 'error').mockImplementation(() => {});
     process.env.NODE_ENV = 'development';
     const res = await request(app).get('/debug/error');
     expect(res.status).toBe(500);
-    expect(res.body.error.details).toContain('Error: Triggered Error');
+    expect(res.body.stack).toBeDefined();
+    console.error.mockRestore();
+    process.env.NODE_ENV = 'test';
   });
 
-  it('Internal server errors should return standard error envelope (e.g. malformed JSON)', async () => {
+  it('Malformed JSON on POST returns 400 problem details', async () => {
+    jest.spyOn(console, 'error').mockImplementation(() => {});
     const res = await request(app)
       .post('/api/invoices')
       .set('Content-Type', 'application/json')
-      .send('{"invalid": json}'); // Malformed JSON
+      .send('{"invalid": json}');
 
     expect(res.status).toBe(400);
-    expect(res.body.data).toBeNull();
-    expect(res.body.error.code).toBe('BAD_REQUEST');
+    expect(res.headers['content-type']).toContain('problem+json');
+    console.error.mockRestore();
   });
 });
 

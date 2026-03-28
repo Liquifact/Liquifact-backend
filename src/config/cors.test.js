@@ -22,8 +22,8 @@ describe('CORS configuration helper', () => {
       ).toEqual(['https://app.example.com', 'https://admin.example.com']);
     });
 
-    it('returns an empty list for missing values', () => {
-      expect(parseAllowedOrigins(undefined)).toEqual([]);
+    it('returns null for missing values', () => {
+      expect(parseAllowedOrigins(undefined)).toBeNull();
     });
   });
 

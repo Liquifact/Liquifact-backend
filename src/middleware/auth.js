@@ -8,25 +8,28 @@ const jwt = require('jsonwebtoken');
 
 /**
  * Middleware function to enforce authentication for protected routes.
- * It checks the "Authorization" header for a "Bearer <token>" pattern.
- * If valid, it attaches the decoded token payload to `req.user`.
- * 
- * @param {import('express').Request} req - Express request object
- * @param {import('express').Response} res - Express response object
- * @param {import('express').NextFunction} next - Express next middleware function
+ * @param {Object} req - Express request object.
+ * @param {Object} res - Express response object.
+ * @param {Function} next - Express next middleware function.
  * @returns {void}
  */
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   
   if (!authHeader) {
-    return res.status(401).json({ error: 'Authentication token is required' });
+    const err = new Error('Authentication token is required');
+    err.statusCode = 401;
+    err.nestedErrorFormat = true;
+    return next(err);
   }
 
   const tokenParts = authHeader.split(' ');
-  
+
   if (tokenParts.length !== 2 || tokenParts[0] !== 'Bearer') {
-    return res.status(401).json({ error: 'Invalid Authorization header format. Expected "Bearer <token>"' });
+    const err = new Error('Invalid Authorization header format. Expected "Bearer <token>"');
+    err.statusCode = 401;
+    err.nestedErrorFormat = true;
+    return next(err);
   }
 
   const token = tokenParts[1];
@@ -34,12 +37,15 @@ const authenticateToken = (req, res, next) => {
 
   jwt.verify(token, secret, (err, decoded) => {
     if (err) {
+      let errorMsg = 'Invalid token';
       if (err.name === 'TokenExpiredError') {
-        return res.status(401).json({ error: 'Token has expired' });
+        errorMsg = 'Token has expired';
       }
-      return res.status(401).json({ error: 'Invalid token' });
+      const errorObj = new Error(errorMsg);
+      errorObj.statusCode = 401;
+      errorObj.nestedErrorFormat = true;
+      return next(errorObj);
     }
-    
     // Attach user info to the request pattern
     req.user = decoded;
     next();

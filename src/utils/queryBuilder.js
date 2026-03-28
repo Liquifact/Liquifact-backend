@@ -26,7 +26,7 @@ function applyQueryOptions(query, options = {}, config = {}) {
   // Apply filters
   Object.keys(filters).forEach((key) => {
     const value = filters[key];
-    if (value === undefined || value === null || value === '') return;
+    if (value === undefined || value === null || value === '') {return;}
 
     if (allowedFilters.includes(key)) {
       const column = columnMap[key] || key;
