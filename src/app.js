@@ -131,10 +131,10 @@ function createApp() {
   app.get('/api/escrow/:invoiceId', async (req, res) => {
     const { invoiceId } = req.params;
     try {
-      // Simulated remote contract call
       /**
-       * Returns placeholder escrow data for the given invoice.
-       * @returns {Promise<Object>} The escrow state object
+       * Simulates a Soroban contract read operation for escrow state.
+       *
+       * @returns {Promise<{ invoiceId: string, status: string, fundedAmount: number }>}
        */
       const operation = async () => {
         return { invoiceId, status: 'not_found', fundedAmount: 0 };
