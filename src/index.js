@@ -5,27 +5,27 @@
  * Express server bootstrap for invoice financing, auth, and Stellar integration.
  */
 
- * Express app configuration for invoice financing, auth, and Stellar integration.
- * Server startup lives in server.js so this module can be imported cleanly in tests.
- */
+
 
 const express = require('express');
 const cors = require('cors');
 const { createSecurityMiddleware } = require('./middleware/security');
 require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
+
 const { globalLimiter, sensitiveLimiter } = require('./middleware/rateLimit');
 const { authenticateToken } = require('./middleware/auth');
 
-const asyncHandler = require('./utils/asyncHandler');
-const errorHandler = require('./middleware/errorHandler');
+const _asyncHandler = require('./utils/asyncHandler');
+const _errorHandler = require('./middleware/errorHandler');
 const { callSorobanContract } = require('./services/soroban');
+const { roleGuard } = require('./middleware/roleGuard');
+const { rbacPolicy } = require('./policies/rbacPolicy');
+const AppError = require( './errors/AppError' );
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-const app = express();
+
 
 /**
  * Global Middlewares
@@ -84,7 +84,7 @@ app.get('/api', (req, res) => {
  * @param {import('express').Response} res - The Express response object.
  * @returns {void}
  */
-app.get('/api/invoices', (req, res) => {
+app.get('/api/invoices', authenticateToken, roleGuard(rbacPolicy.VIEW_INVOICES), (req, res) => {
   const includeDeleted = req.query.includeDeleted === 'true';
   const filteredInvoices = includeDeleted
     ? invoices

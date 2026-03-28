@@ -1,10 +1,10 @@
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
-const app = require('../index');
+const { app } = require('../index');
 
 describe('Authentication Middleware', () => {
     const secret = process.env.JWT_SECRET || 'test-secret';
-    const validPayload = { id: 1, role: 'user' };
+    const validPayload = { id: 1, role: 'admin' };
     let validToken;
     let expiredToken;
 

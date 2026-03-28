@@ -57,6 +57,7 @@ module.exports = [
       sourceType: 'module',
       globals: {
         ...globals.node,
+        ...globals.jest,
         jest: 'readonly',
         describe: 'readonly',
         it: 'readonly',
@@ -66,6 +67,8 @@ module.exports = [
         afterAll: 'readonly',
         beforeEach: 'readonly',
         afterEach: 'readonly',
+        beforeAll: 'readonly',
+        afterAll: 'readonly',
       },
     },
     rules: {

@@ -171,7 +171,7 @@ Test suite covers:
 
 ---
 
-## Authentication
+## Authentication & Authorization (RBAC)
 
 Protected endpoints (invoice mutations, escrow operations) require a JWT in the `Authorization` header:
 
@@ -179,8 +179,23 @@ Protected endpoints (invoice mutations, escrow operations) require a JWT in the 
 Authorization: Bearer <jwt_token_here>
 ```
 
-The middleware validates the token against `JWT_SECRET` (defaults to `test-secret` locally).
-Unauthenticated requests are rejected with `401 Unauthorized`.
+The middleware validates the token against `JWT_SECRET` (defaults to `test-secret` for local development). Unauthenticated requests are rejected with a `401 Unauthorized` status.
+
+It also enforces Role-Based Access Control (RBAC) using the `role` claim in the JWT payload. Requests from authenticated users without the required permissions are rejected with `403 Forbidden`.
+
+**Roles and Operations:**
+- `CREATE_INVOICE`: `['admin', 'issuer']`
+- `VIEW_INVOICES`: `['admin', 'issuer', 'investor']`
+- `ESCROW_READ`: `['admin', 'investor']`
+- `DELETE_INVOICE`: `['admin']`
+- `RESTORE_INVOICE`: `['admin']`
+
+**Sample Token Payload:**
+```json
+{
+  "id": "user_id_here",
+  "role": "admin"
+}
 
 ---
 

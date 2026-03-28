@@ -1,0 +1,33 @@
+
+/home/theophilus/Desktop/Web2Dev/DripsNetwork/Liquifact-backend/src/app.js
+  98:7  error  Missing JSDoc block description     jsdoc/require-description
+  98:7  error  Missing JSDoc @returns declaration  jsdoc/require-returns
+
+/home/theophilus/Desktop/Web2Dev/DripsNetwork/Liquifact-backend/src/app.test.js
+  11:29  warning  Function Call Object Injection Sink  security/detect-object-injection
+  13:9   warning  Generic Object Injection Sink        security/detect-object-injection
+  14:14  warning  Generic Object Injection Sink        security/detect-object-injection
+  16:7   warning  Generic Object Injection Sink        security/detect-object-injection
+  16:26  warning  Generic Object Injection Sink        security/detect-object-injection
+  25:16  warning  Generic Object Injection Sink        security/detect-object-injection
+  27:9   warning  Generic Object Injection Sink        security/detect-object-injection
+
+/home/theophilus/Desktop/Web2Dev/DripsNetwork/Liquifact-backend/src/config/cors.js
+  96:5  error  Missing JSDoc block description     jsdoc/require-description
+  96:5  error  Missing JSDoc @returns declaration  jsdoc/require-returns
+
+/home/theophilus/Desktop/Web2Dev/DripsNetwork/Liquifact-backend/src/index.js
+  10:7  error  'asyncHandler' is assigned a value but never used. Allowed unused vars must match /^_/u  no-unused-vars
+  11:7  error  'errorHandler' is assigned a value but never used. Allowed unused vars must match /^_/u  no-unused-vars
+
+/home/theophilus/Desktop/Web2Dev/DripsNetwork/Liquifact-backend/src/middleware/auth.js
+  9:1  error  Missing JSDoc @returns declaration  jsdoc/require-returns
+
+/home/theophilus/Desktop/Web2Dev/DripsNetwork/Liquifact-backend/src/middleware/rateLimit.js
+  20:3  error  Missing JSDoc block description     jsdoc/require-description
+  20:3  error  Missing JSDoc @returns declaration  jsdoc/require-returns
+  42:3  error  Missing JSDoc block description     jsdoc/require-description
+  42:3  error  Missing JSDoc @returns declaration  jsdoc/require-returns
+
+✖ 18 problems (11 errors, 7 warnings)
+

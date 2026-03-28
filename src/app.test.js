@@ -11,11 +11,15 @@ function withEnv(env, fn) {
   const previousValues = new Map();
 
   for (const key of Object.keys(env)) {
+    // eslint-disable-next-line security/detect-object-injection
     previousValues.set(key, process.env[key]);
 
+    // eslint-disable-next-line security/detect-object-injection
     if (env[key] === undefined) {
+      // eslint-disable-next-line security/detect-object-injection
       delete process.env[key];
     } else {
+      // eslint-disable-next-line security/detect-object-injection
       process.env[key] = env[key];
     }
   }
@@ -25,8 +29,10 @@ function withEnv(env, fn) {
   } finally {
     for (const [key, value] of previousValues.entries()) {
       if (value === undefined) {
+        // eslint-disable-next-line security/detect-object-injection
         delete process.env[key];
       } else {
+        // eslint-disable-next-line security/detect-object-injection
         process.env[key] = value;
       }
     }

@@ -1,10 +1,10 @@
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
-const app = require('../index');
+const { app } = require('../index');
 
 describe('Rate Limiting Middleware', () => {
     const secret = process.env.JWT_SECRET || 'test-secret';
-    const validToken = jwt.sign({ id: 'test_user_1' }, secret);
+    const validToken = jwt.sign({ id: 'test_user_1', role: 'admin' }, secret);
 
     it('should return 200 for health check (global limiter allows many)', async () => {
         const response = await request(app).get('/health');
