@@ -184,6 +184,29 @@ Unauthenticated requests are rejected with `401 Unauthorized`.
 
 ---
 
+## Input Sanitization Pipeline
+
+All user-supplied request fields are sanitized before route handlers execute.
+
+- Applied to: `req.body`, `req.query`, and `req.params`
+- Middleware: `src/middleware/sanitizeInput.js`
+- Core utility: `src/utils/sanitization.js`
+
+Sanitization behavior:
+- Normalize unicode using `NFKC`
+- Remove non-printable control characters
+- Collapse whitespace and trim strings
+- Recursively sanitize nested arrays and objects
+- Drop dangerous object keys (`__proto__`, `prototype`, `constructor`) to reduce prototype-pollution risk
+- Enforce recursion and string-length limits to avoid pathological payload abuse
+
+Security assumptions:
+- This pipeline reduces malformed input and injection-style payload risks before persistence and logging.
+- It does not replace strict schema validation or parameterized database queries (those must still be used).
+- Encoders for HTML/SQL contexts should still be applied at output/query construction boundaries.
+
+---
+
 ## Rate Limiting
 
 | Scope | Limit |

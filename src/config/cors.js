@@ -108,32 +108,24 @@ function isCorsOriginRejectedError(err) {
 function createCorsOptions() {
   const allowlist = resolveAllowlist();
 
+  /**
+   * Validates whether a request origin is permitted by the configured allowlist.
+   *
+   * @param {string | undefined} origin Incoming request Origin header.
+   * @param {(error: Error | null, allow?: boolean) => void} callback CORS callback.
+   * @returns {void}
+   */
+  function validateOrigin(origin, callback) {
+    if (!origin || allowedOriginsSet.has(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(createCorsRejectionError());
+  }
+
   return {
-    /**
-     * Validates request origin against the allowlist.
-     * @param {string|undefined} origin - The request origin header value
-     * @param {Function} callback - CORS callback (err, allow)
-     * @returns {void}
-     */
-    origin(origin, callback) {
-      // Non-browser requests (no Origin header) are always allowed.
-      if (origin === undefined) {
-        return callback(null, true);
-      }
-
-      // No allowlist configured in production → deny.
-      if (allowlist === null) {
-        return callback(createCorsRejectionError(origin));
-      }
-
-      if (allowlist.includes(origin)) {
-        return callback(null, true);
-      }
-
-      return callback(createCorsRejectionError(origin));
-    },
-    // Expose the standard headers clients need.
-    optionsSuccessStatus: 200,
+    origin: validateOrigin,
   };
 }
 

@@ -15,7 +15,7 @@ describe('Authentication Middleware', () => {
 
     describe('Route Protection - POST /api/invoices', () => {
         it('should return 401 when no token is provided', async () => {
-            const response = await request(app).post('/api/invoices').send({});
+            const response = await request(app).post('/api/invoices').send({ amount: 1000, customer: 'Auth Corp' });
             expect(response.status).toBe(401);
             expect(response.body.error).toBe('Authentication token is required');
         });
@@ -24,7 +24,7 @@ describe('Authentication Middleware', () => {
             const response = await request(app)
                 .post('/api/invoices')
                 .set('Authorization', `FakeBearer ${validToken}`)
-                .send({});
+                .send({ amount: 1000, customer: 'Auth Corp' });
             expect(response.status).toBe(401);
             expect(response.body.error).toBe('Invalid Authorization header format. Expected "Bearer <token>"');
         });
@@ -33,7 +33,7 @@ describe('Authentication Middleware', () => {
             const response = await request(app)
                 .post('/api/invoices')
                 .set('Authorization', `Bearer${validToken}`)
-                .send({});
+                .send({ amount: 1000, customer: 'Auth Corp' });
             expect(response.status).toBe(401);
             expect(response.body.error).toBe('Invalid Authorization header format. Expected "Bearer <token>"');
         });
@@ -42,7 +42,7 @@ describe('Authentication Middleware', () => {
             const response = await request(app)
                 .post('/api/invoices')
                 .set('Authorization', 'Bearer some.invalid.token')
-                .send({});
+                .send({ amount: 1000, customer: 'Auth Corp' });
             expect(response.status).toBe(401);
             expect(response.body.error).toBe('Invalid token');
         });
@@ -51,7 +51,7 @@ describe('Authentication Middleware', () => {
             const response = await request(app)
                 .post('/api/invoices')
                 .set('Authorization', `Bearer ${expiredToken}`)
-                .send({});
+                .send({ amount: 1000, customer: 'Auth Corp' });
             expect(response.status).toBe(401);
             expect(response.body.error).toBe('Token has expired');
         });
@@ -60,7 +60,7 @@ describe('Authentication Middleware', () => {
             const response = await request(app)
                 .post('/api/invoices')
                 .set('Authorization', `Bearer ${validToken}`)
-                .send({ amount: 100, customer: 'Test Corp' });
+                .send({ amount: 1000, customer: 'Auth Corp' });
             expect(response.status).toBe(201);
             expect(response.body.data.status).toBe('pending_verification');
         });
@@ -69,14 +69,17 @@ describe('Authentication Middleware', () => {
     describe('Route Protection - GET /api/escrow/:invoiceId', () => {
         it('should allow escrow read with valid token', async () => {
             const response = await request(app)
-                .get('/api/escrow/test-invoice')
-                .set('Authorization', `Bearer ${validToken}`);
+                .post('/api/escrow')
+                .set('Authorization', `Bearer ${validToken}`)
+                .send({ amount: 1000, customer: 'Auth Corp' });
             expect(response.status).toBe(200);
             expect(response.body.data.invoiceId).toBe('test-invoice');
         });
 
-        it('should reject escrow read without token', async () => {
-            const response = await request(app).get('/api/escrow/test-invoice');
+        it('should reject escrow operations without token', async () => {
+            const response = await request(app)
+                .post('/api/escrow')
+                .send({ amount: 1000, customer: 'Auth Corp' });
             expect(response.status).toBe(401);
         });
     });

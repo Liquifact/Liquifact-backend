@@ -311,6 +311,19 @@ describe('LiquiFact app integration', () => {
     });
   });
 
+  it('sanitizes route params before escrow lookup', async () => {
+    const response = await invokeApp(createApp(), {
+      path: '/api/escrow/%20invoice-123%0A',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body.data).toEqual({
+      invoiceId: 'invoice-123',
+      status: 'not_found',
+      fundedAmount: 0,
+    });
+  });
+
   it('returns 404 for unknown routes', async () => {
     const response = await invokeApp(createApp(), {
       path: '/missing',

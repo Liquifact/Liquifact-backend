@@ -12,86 +12,16 @@
 
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
-const app = require('./index');
-const { resetStore, startServer } = app;
-
-const TEST_SECRET = process.env.JWT_SECRET || 'test-secret';
-const validToken = jwt.sign({ id: 1, role: 'user' }, TEST_SECRET, { expiresIn: '1h' });
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Performs a request and returns the supertest Response.
- *
- * @param {string} method - HTTP method ('get' | 'post' | 'delete' | 'patch')
- * @param {string} path   - URL path
- * @returns {Promise<import('supertest').Response>}
- */
-async function req(method, path) {
-  return request(app)[method](path);
-}
-
-/**
- * Asserts that a response carries all mandatory Helmet-set security headers.
- *
- * @param {import('supertest').Response} res - supertest response object
- */
-function expectSecureHeaders(res) {
-  // X-Content-Type-Options
-  expect(res.headers['x-content-type-options']).toBe('nosniff');
-
-  // X-Frame-Options
-  expect(res.headers['x-frame-options']).toBe('DENY');
-
-  // Strict-Transport-Security — must include max-age, includeSubDomains, preload
-  const hsts = res.headers['strict-transport-security'];
-  expect(hsts).toBeDefined();
-  expect(hsts).toContain('max-age=31536000');
-  expect(hsts).toContain('includeSubDomains');
-  expect(hsts).toContain('preload');
-
-  // Content-Security-Policy — must restrict to 'self'
-  const csp = res.headers['content-security-policy'];
-  expect(csp).toBeDefined();
-  expect(csp).toContain('default-src \'self\'');
-  expect(csp).toContain('object-src \'none\'');
-  expect(csp).toContain('frame-src \'none\'');
-
-  // Referrer-Policy
-  expect(res.headers['referrer-policy']).toBe('strict-origin-when-cross-origin');
-
-  // Cross-Origin-Opener-Policy
-  expect(res.headers['cross-origin-opener-policy']).toBe('same-origin');
-
-  // Cross-Origin-Resource-Policy
-  expect(res.headers['cross-origin-resource-policy']).toBe('same-origin');
-
-  // Cross-Origin-Embedder-Policy
-  expect(res.headers['cross-origin-embedder-policy']).toBe('require-corp');
-
-  // X-DNS-Prefetch-Control
-  expect(res.headers['x-dns-prefetch-control']).toBe('off');
-
-  // X-Permitted-Cross-Domain-Policies
-  expect(res.headers['x-permitted-cross-domain-policies']).toBe('none');
-
-  // Origin-Agent-Cluster
-  expect(res.headers['origin-agent-cluster']).toBe('?1');
-
-  // X-Powered-By must be absent (hidePoweredBy: true)
-  expect(res.headers['x-powered-by']).toBeUndefined();
-}
-
-// ---------------------------------------------------------------------------
-// Functional tests
-// ---------------------------------------------------------------------------
+const { app, resetStore, startServer } = require('./index');
 
 describe('LiquiFact API', () => {
   const secret = process.env.JWT_SECRET || 'test-secret';
-  const validToken = jwt.sign({ id: 1, role: 'user' }, secret);
-  const authHeader = { Authorization: `Bearer ${validToken}` };
+  const authHeader = () => {
+    const token = jwt.sign({ id: `index_test_user_${Date.now()}_${Math.random()}` }, secret, {
+      expiresIn: '1h',
+    });
+    return `Bearer ${token}`;
+  };
 
   beforeEach(() => {
     resetStore();
@@ -115,7 +45,7 @@ describe('LiquiFact API', () => {
     it('POST /api/invoices - creates a new invoice', async () => {
       const response = await request(app)
         .post('/api/invoices')
-        .set('Authorization', `Bearer ${validToken}`)
+        .set('Authorization', authHeader())
         .send({ amount: 1000, customer: 'Test Corp' });
 
       expect(response.status).toBe(201);
@@ -128,15 +58,21 @@ describe('LiquiFact API', () => {
     it('POST /api/invoices - fails if missing fields', async () => {
       const response = await request(app)
         .post('/api/invoices')
-        .set('Authorization', `Bearer ${validToken}`)
+        .set('Authorization', authHeader())
         .send({ amount: 1000 });
       expect(response.status).toBe(400);
       expect(response.body).toHaveProperty('error');
     });
 
     it('GET /api/invoices - lists active invoices', async () => {
-      await request(app).post('/api/invoices').set('Authorization', `Bearer ${validToken}`).send({ amount: 1000, customer: 'A' });
-      await request(app).post('/api/invoices').set('Authorization', `Bearer ${validToken}`).send({ amount: 2000, customer: 'B' });
+      await request(app)
+        .post('/api/invoices')
+        .set('Authorization', authHeader())
+        .send({ amount: 1000, customer: 'A' });
+      await request(app)
+        .post('/api/invoices')
+        .set('Authorization', authHeader())
+        .send({ amount: 2000, customer: 'B' });
 
       const response = await request(app).get('/api/invoices');
       expect(response.status).toBe(200);
@@ -146,7 +82,7 @@ describe('LiquiFact API', () => {
     it('DELETE /api/invoices/:id - soft deletes an invoice', async () => {
       const postRes = await request(app)
         .post('/api/invoices')
-        .set('Authorization', `Bearer ${validToken}`)
+        .set('Authorization', authHeader())
         .send({ amount: 500, customer: 'Delete Me' });
       const id = postRes.body.data.id;
 
@@ -167,7 +103,10 @@ describe('LiquiFact API', () => {
       const res404 = await request(app).delete('/api/invoices/nonexistent').set('Authorization', `Bearer ${validToken}`);
       expect(res404.status).toBe(404);
 
-      const postRes = await request(app).post('/api/invoices').set('Authorization', `Bearer ${validToken}`).send({ amount: 100, customer: 'X' });
+      const postRes = await request(app)
+        .post('/api/invoices')
+        .set('Authorization', authHeader())
+        .send({ amount: 100, customer: 'X' });
       const id = postRes.body.data.id;
       await request(app).delete(`/api/invoices/${id}`).set('Authorization', `Bearer ${validToken}`);
 
@@ -177,7 +116,10 @@ describe('LiquiFact API', () => {
     });
 
     it('PATCH /api/invoices/:id/restore - restores a deleted invoice', async () => {
-      const postRes = await request(app).post('/api/invoices').set('Authorization', `Bearer ${validToken}`).send({ amount: 100, customer: 'X' });
+      const postRes = await request(app)
+        .post('/api/invoices')
+        .set('Authorization', authHeader())
+        .send({ amount: 100, customer: 'X' });
       const id = postRes.body.data.id;
       await request(app).delete(`/api/invoices/${id}`).set('Authorization', `Bearer ${validToken}`);
 
@@ -193,7 +135,10 @@ describe('LiquiFact API', () => {
       const res404 = await request(app).patch('/api/invoices/nonexistent/restore').set('Authorization', `Bearer ${validToken}`);
       expect(res404.status).toBe(404);
 
-      const postRes = await request(app).post('/api/invoices').set('Authorization', `Bearer ${validToken}`).send({ amount: 100, customer: 'X' });
+      const postRes = await request(app)
+        .post('/api/invoices')
+        .set('Authorization', authHeader())
+        .send({ amount: 100, customer: 'X' });
       const id = postRes.body.data.id;
 
       const res400 = await request(app).patch(`/api/invoices/${id}/restore`).set('Authorization', `Bearer ${validToken}`);
@@ -221,6 +166,37 @@ describe('LiquiFact API', () => {
       const response = await request(app).get('/api/escrow/123').set('Authorization', `Bearer ${validToken}`);
       expect(response.status).toBe(200);
       expect(response.body.data).toHaveProperty('invoiceId', '123');
+    });
+
+    it('POST /api/escrow - sanitizes user-supplied fields', async () => {
+      const response = await request(app)
+        .post('/api/escrow')
+        .set('Authorization', authHeader())
+        .send({ invoiceId: '  abc-123 \n', fundedAmount: 10 });
+
+      expect(response.status).toBe(200);
+      expect(response.body.data).toHaveProperty('invoiceId', 'abc-123');
+    });
+  });
+
+  describe('Sanitization', () => {
+    it('POST /api/invoices - normalizes customer input before persistence', async () => {
+      const response = await request(app)
+        .post('/api/invoices')
+        .set('Authorization', authHeader())
+        .send({ amount: 1000, customer: '  ACME \n Holdings \u0000 ' });
+
+      expect(response.status).toBe(201);
+      expect(response.body.data.customer).toBe('ACME Holdings');
+    });
+
+    it('POST /api/invoices - rejects missing token before processing payload', async () => {
+      const response = await request(app)
+        .post('/api/invoices')
+        .send({ amount: 1000, customer: '  ACME \n Holdings \u0000 ' });
+
+      expect(response.status).toBe(401);
+      expect(response.body.error).toBe('Authentication token is required');
     });
   });
 

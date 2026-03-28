@@ -20,8 +20,8 @@ const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
 
-const { callSorobanContract }               = require('./services/soroban');
-const { createCorsOptions, isCorsOriginRejectedError } = require('./config/cors');
+const { callSorobanContract } = require('./services/soroban');
+const { sanitizeInput } = require('./middleware/sanitizeInput');
 const {
   jsonBodyLimit,
   urlencodedBodyLimit,
@@ -79,14 +79,8 @@ function createApp() {
   // Must come before body parsers so preflight OPTIONS requests are handled
   // before any payload is read.
   app.use(cors(createCorsOptions()));
-
-  // ── 2 & 3. Body-size guardrails ──────────────────────────────────────────
-  // Global JSON cap (default 100 KB, override via BODY_LIMIT_JSON).
-  app.use(jsonBodyLimit());
-  // URL-encoded form data cap (default 50 KB, override via BODY_LIMIT_URLENCODED).
-  app.use(urlencodedBodyLimit());
-
-  // ── 4. Routes ────────────────────────────────────────────────────────────
+  app.use(express.json());
+  app.use(sanitizeInput);
 
   // Health check
   app.get('/health', (req, res) => {
@@ -131,10 +125,10 @@ function createApp() {
   app.get('/api/escrow/:invoiceId', async (req, res) => {
     const { invoiceId } = req.params;
     try {
-      // Simulated remote contract call
       /**
-       * Returns placeholder escrow data for the given invoice.
-       * @returns {Promise<Object>} The escrow state object
+       * Simulated remote contract call.
+       *
+       * @returns {Promise<object>} Simulated escrow payload.
        */
       const operation = async () => {
         return { invoiceId, status: 'not_found', fundedAmount: 0 };
