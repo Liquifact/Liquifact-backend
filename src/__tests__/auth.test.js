@@ -1,4 +1,6 @@
 const request = require('supertest');
+// Enable auth-protected routes for this test file
+process.env.TEST_AUTH_PROTECTED = 'true';
 const jwt = require('jsonwebtoken');
 /* eslint-env jest */
 const { app } = require('../index');

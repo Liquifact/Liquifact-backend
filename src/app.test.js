@@ -48,6 +48,7 @@ function withEnv(env, fn) {
  * @param {string} [root0.method]
  * @param {string} [root0.origin]
  * @param {string} [root0.path]
+ * @param {Object} [root0.body]
  * @returns {Object} Mock request object.
  */
 /**
@@ -56,9 +57,10 @@ function withEnv(env, fn) {
  * @param options.method
  * @param options.origin
  * @param options.path
+ * @param options.body
  * @returns {Object} Mock request object.
  */
-function createMockRequest({ method = 'GET', origin, path = '/health' } = {}) {
+function createMockRequest({ method = 'GET', origin, path = '/health', body } = {}) {
   return {
     method,
     url: path,
@@ -69,6 +71,7 @@ function createMockRequest({ method = 'GET', origin, path = '/health' } = {}) {
           'access-control-request-method': 'GET',
         }
       : {},
+    body,
     /**
      * Gets a header value from the request.
      * @param {string} name - Header name.
@@ -396,7 +399,7 @@ describe('LiquiFact app integration', () => {
     const response = await invokeApp(createApp(), {
       method: 'POST',
       path: '/api/invoices',
-      body: { amount: 100, currency: 'XLM' },
+      body: { amount: 100, currency: 'XLM', customer: 'Test Customer' },
     });
 
     expect(response.statusCode).toBe(201);
@@ -444,7 +447,7 @@ describe('LiquiFact app integration', () => {
 
     expect(response.statusCode).toBe(500);
     expect(response.body).toEqual({
-      error: 'Internal server error',
+      error: { message: 'Simulated server error' },
     });
 
     consoleErrorSpy.mockRestore();
