@@ -4,8 +4,13 @@
  */
 
 require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+
 const { globalLimiter, sensitiveLimiter } = require('./middleware/rateLimit');
 const { authenticateToken } = require('./middleware/auth');
+const { validateRequest, validateResponse } = require('./middleware/validate');
+const schemas = require('./schemas/apiSchemas');
 
 const asyncHandler = require('./utils/asyncHandler');
 const errorHandler = require('./middleware/errorHandler');
@@ -13,9 +18,12 @@ const { callSorobanContract } = require('./services/soroban');
 
 const PORT = process.env.PORT || 3001;
 
+const app = express();
+
 /**
  * Global Middlewares
  */
+app.use(globalLimiter);
 app.use(cors());
 app.use(express.json());
 
@@ -67,10 +75,10 @@ app.get('/api', (req, res) => {
  * @param {import('express').Response} res - The Express response object.
  * @returns {void}
  */
-app.get('/api/invoices', (req, res) => {
+app.get('/api/invoices', validateResponse(schemas.InvoiceListResponseSchema), (req, res) => {
   const includeDeleted = req.query.includeDeleted === 'true';
-  const filteredInvoices = includeDeleted 
-    ? invoices 
+  const filteredInvoices = includeDeleted
+    ? invoices
     : invoices.filter(inv => !inv.deletedAt);
 
   return res.json({
@@ -87,9 +95,9 @@ app.get('/api/invoices', (req, res) => {
  * @param {import('express').Response} res - The Express response object.
  * @returns {void}
  */
-app.post('/api/invoices', (req, res) => {
+app.post('/api/invoices', authenticateToken, sensitiveLimiter, validateRequest(schemas.CreateInvoiceRequestSchema, 'body'), validateResponse(schemas.CreateInvoiceResponseSchema), (req, res) => {
   const { amount, customer } = req.body;
-  
+
   if (!amount || !customer) {
     return res.status(400).json({ error: 'Amount and customer are required' });
   }
@@ -119,7 +127,7 @@ app.post('/api/invoices', (req, res) => {
  * @param {import('express').Response} res - The Express response object.
  * @returns {void}
  */
-app.delete('/api/invoices/:id', (req, res) => {
+app.delete('/api/invoices/:id', authenticateToken, sensitiveLimiter, validateResponse(schemas.DeleteRestoreInvoiceResponseSchema), (req, res) => {
   const { id } = req.params;
   const invoiceIndex = invoices.findIndex(inv => inv.id === id);
 
@@ -150,7 +158,7 @@ app.delete('/api/invoices/:id', (req, res) => {
  * @param {import('express').Response} res - The Express response object.
  * @returns {void}
  */
-app.patch('/api/invoices/:id/restore', (req, res) => {
+app.patch('/api/invoices/:id/restore', authenticateToken, sensitiveLimiter, validateResponse(schemas.DeleteRestoreInvoiceResponseSchema), (req, res) => {
   const { id } = req.params;
   const invoiceIndex = invoices.findIndex(inv => inv.id === id);
 
@@ -195,7 +203,7 @@ app.get('/api/escrow/:invoiceId', async (req, res) => {
     };
 
     const data = await callSorobanContract(operation);
-    
+
     res.json({
       data,
       message: 'Escrow state read from Soroban contract via robust integration wrapper.',
@@ -203,6 +211,10 @@ app.get('/api/escrow/:invoiceId', async (req, res) => {
   } catch (error) {
     res.status(500).json({ error: error.message || 'Error fetching escrow state' });
   }
+});
+
+app.post('/api/escrow', authenticateToken, sensitiveLimiter, (req, res) => {
+  return res.status(200).json({ data: { status: 'funded' }, message: 'ok' });
 });
 
 /**

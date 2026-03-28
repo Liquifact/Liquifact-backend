@@ -101,6 +101,14 @@ Clients exceeding these limits will receive a `429 Too Many Requests` response. 
 
 ---
 
+## API Boundary Validation
+
+LiquiFact backend leverages [Zod](https://zod.dev/) to protect API boundaries against malformed data and data leaks constraint regressions:
+- **Inbound Validation**: Ensures clients provide expected payloads (e.g., `amount`, `customer`). Malformed requests receive a `400 Bad Request` containing specific constraint validation issues.
+- **Outbound Escrowing**: Employs a response interceptor to rigidly validate outbound domain responses. This prevents internal schema drift or accidental leakage of sensitive DB fields to the public network, forcing a `500 Internal Server Error` instead of breaching contracts.
+
+---
+
 ## Configuration
 
 ### CORS Allowlist

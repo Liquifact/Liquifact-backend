@@ -1,0 +1,18 @@
+  ● Validation Middleware › validateRequest › should return 400 with details if data is invalid
+
+    expect(jest.fn()).toHaveBeenCalledWith(...expected)
+
+    Expected: ObjectContaining {"details": Any<Object>, "error": "Invalid request data"}
+    Received: {"details": undefined, "error": "Invalid request data"}
+
+    Number of calls: 1
+
+    [0m [90m 45 |[39m
+     [90m 46 |[39m             expect(res[33m.[39mstatus)[33m.[39mtoHaveBeenCalledWith([35m400[39m)[33m;[39m
+    [31m[1m>[22m[39m[90m 47 |[39m             expect(res[33m.[39mjson)[33m.[39mtoHaveBeenCalledWith(expect[33m.[39mobjectContaining({
+     [90m    |[39m                              [31m[1m^[22m[39m
+     [90m 48 |[39m                 error[33m:[39m [32m'Invalid request data'[39m[33m,[39m
+     [90m 49 |[39m                 details[33m:[39m expect[33m.[39many([33mObject[39m)
+     [90m 50 |[39m             }))[33m;[39m[0m
+
+      at Object.toHaveBeenCalledWith (src/__tests__/validate.test.js:47:30)
