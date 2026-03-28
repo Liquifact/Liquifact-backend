@@ -7,7 +7,6 @@
  * @param {Function} _next - Express next middleware function.
  * @returns {void}
  */
-
 const errorHandler = (err, req, res, _next) => {
   console.error(err);
 
