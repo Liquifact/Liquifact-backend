@@ -1,7 +1,7 @@
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
 /* eslint-env jest */
-const app = require('../index');
+const { app } = require('../index');
 
 describe('Authentication Middleware', () => {
     const secret = process.env.JWT_SECRET || 'test-secret';
@@ -61,7 +61,7 @@ describe('Authentication Middleware', () => {
             const response = await request(app)
                 .post('/api/invoices')
                 .set('Authorization', `Bearer ${validToken}`)
-                .send({});
+                .send({ amount: 100, customer: 'Test User' });
             expect(response.status).toBe(201);
             expect(response.body.data.status).toBe('pending_verification');
         });

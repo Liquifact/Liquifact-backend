@@ -19,15 +19,26 @@ const app = createApp({
 });
 
 /**
+ * Returns a server-like object that supertest can use.
+ * When test mode, we wrap the app to be server-like for supertest.
+ * @returns {Object} An object with a listen method and the app.
+ */
+const createServer = () => {
+  const server = app.listen(PORT, () => {
+    if (process.env.NODE_ENV !== 'test') {
+      console.warn(`LiquiFact API running at http://localhost:${PORT}`);
+    }
+  });
+  return server;
+};
+
+/**
  * Starts the Express server.
- * 
+ *
  * @returns {import('http').Server} The started server.
  */
 const startServer = () => {
-  const server = app.listen(PORT, () => {
-    console.warn(`LiquiFact API running at http://localhost:${PORT}`);
-  });
-  return server;
+  return createServer();
 };
 
 /**
