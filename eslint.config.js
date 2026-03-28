@@ -52,7 +52,7 @@ module.exports = [
     },
   },
   {
-    files: ['src/**/*.test.js'],
+    files: ['src/**/*.test.js', 'src/__tests__/**/*.js'],
     languageOptions: {
       sourceType: 'module',
       globals: {
@@ -63,6 +63,8 @@ module.exports = [
         it: 'readonly',
         test: 'readonly',
         expect: 'readonly',
+        beforeAll: 'readonly',
+        afterAll: 'readonly',
         beforeEach: 'readonly',
         afterEach: 'readonly',
         beforeAll: 'readonly',

@@ -1,14 +1,98 @@
-jest.mock('./middleware/auth', () => ({
-  authenticateToken: (req, res, next) => {
-    req.user = { id: 1, role: 'admin' };
-    next();
-  }
-}));
+'use strict';
+
+/**
+ * LiquiFact API — integration and security header tests.
+ *
+ * Covers:
+ *  - Functional correctness of all routes (health, invoices lifecycle, escrow, error handling)
+ *  - Security header presence and policy values on every endpoint (Helmet hardening)
+ *
+ * Run with: npm run test:coverage
+ */
 
 const request = require('supertest');
-const { app, resetStore, startServer } = require('./index');
+const jwt = require('jsonwebtoken');
+const app = require('./index');
+const { resetStore, startServer } = app;
+
+const TEST_SECRET = process.env.JWT_SECRET || 'test-secret';
+const validToken = jwt.sign({ id: 1, role: 'user' }, TEST_SECRET, { expiresIn: '1h' });
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Performs a request and returns the supertest Response.
+ *
+ * @param {string} method - HTTP method ('get' | 'post' | 'delete' | 'patch')
+ * @param {string} path   - URL path
+ * @returns {Promise<import('supertest').Response>}
+ */
+async function req(method, path) {
+  return request(app)[method](path);
+}
+
+/**
+ * Asserts that a response carries all mandatory Helmet-set security headers.
+ *
+ * @param {import('supertest').Response} res - supertest response object
+ */
+function expectSecureHeaders(res) {
+  // X-Content-Type-Options
+  expect(res.headers['x-content-type-options']).toBe('nosniff');
+
+  // X-Frame-Options
+  expect(res.headers['x-frame-options']).toBe('DENY');
+
+  // Strict-Transport-Security — must include max-age, includeSubDomains, preload
+  const hsts = res.headers['strict-transport-security'];
+  expect(hsts).toBeDefined();
+  expect(hsts).toContain('max-age=31536000');
+  expect(hsts).toContain('includeSubDomains');
+  expect(hsts).toContain('preload');
+
+  // Content-Security-Policy — must restrict to 'self'
+  const csp = res.headers['content-security-policy'];
+  expect(csp).toBeDefined();
+  expect(csp).toContain('default-src \'self\'');
+  expect(csp).toContain('object-src \'none\'');
+  expect(csp).toContain('frame-src \'none\'');
+
+  // Referrer-Policy
+  expect(res.headers['referrer-policy']).toBe('strict-origin-when-cross-origin');
+
+  // Cross-Origin-Opener-Policy
+  expect(res.headers['cross-origin-opener-policy']).toBe('same-origin');
+
+  // Cross-Origin-Resource-Policy
+  expect(res.headers['cross-origin-resource-policy']).toBe('same-origin');
+
+  // Cross-Origin-Embedder-Policy
+  expect(res.headers['cross-origin-embedder-policy']).toBe('require-corp');
+
+  // X-DNS-Prefetch-Control
+  expect(res.headers['x-dns-prefetch-control']).toBe('off');
+
+  // X-Permitted-Cross-Domain-Policies
+  expect(res.headers['x-permitted-cross-domain-policies']).toBe('none');
+
+  // Origin-Agent-Cluster
+  expect(res.headers['origin-agent-cluster']).toBe('?1');
+
+  // X-Powered-By must be absent (hidePoweredBy: true)
+  expect(res.headers['x-powered-by']).toBeUndefined();
+}
+
+// ---------------------------------------------------------------------------
+// Functional tests
+// ---------------------------------------------------------------------------
 
 describe('LiquiFact API', () => {
+  const secret = process.env.JWT_SECRET || 'test-secret';
+  const validToken = jwt.sign({ id: 1, role: 'user' }, secret);
+  const authHeader = { Authorization: `Bearer ${validToken}` };
+
   beforeEach(() => {
     resetStore();
   });
@@ -31,8 +115,9 @@ describe('LiquiFact API', () => {
     it('POST /api/invoices - creates a new invoice', async () => {
       const response = await request(app)
         .post('/api/invoices')
+        .set('Authorization', `Bearer ${validToken}`)
         .send({ amount: 1000, customer: 'Test Corp' });
-      
+
       expect(response.status).toBe(201);
       expect(response.body.data).toHaveProperty('id');
       expect(response.body.data.amount).toBe(1000);
@@ -41,14 +126,17 @@ describe('LiquiFact API', () => {
     });
 
     it('POST /api/invoices - fails if missing fields', async () => {
-      const response = await request(app).post('/api/invoices').send({ amount: 1000 });
+      const response = await request(app)
+        .post('/api/invoices')
+        .set('Authorization', `Bearer ${validToken}`)
+        .send({ amount: 1000 });
       expect(response.status).toBe(400);
       expect(response.body).toHaveProperty('error');
     });
 
     it('GET /api/invoices - lists active invoices', async () => {
-      await request(app).post('/api/invoices').send({ amount: 1000, customer: 'A' });
-      await request(app).post('/api/invoices').send({ amount: 2000, customer: 'B' });
+      await request(app).post('/api/invoices').set('Authorization', `Bearer ${validToken}`).send({ amount: 1000, customer: 'A' });
+      await request(app).post('/api/invoices').set('Authorization', `Bearer ${validToken}`).send({ amount: 2000, customer: 'B' });
 
       const response = await request(app).get('/api/invoices');
       expect(response.status).toBe(200);
@@ -58,10 +146,11 @@ describe('LiquiFact API', () => {
     it('DELETE /api/invoices/:id - soft deletes an invoice', async () => {
       const postRes = await request(app)
         .post('/api/invoices')
+        .set('Authorization', `Bearer ${validToken}`)
         .send({ amount: 500, customer: 'Delete Me' });
       const id = postRes.body.data.id;
 
-      const delRes = await request(app).delete(`/api/invoices/${id}`);
+      const delRes = await request(app).delete(`/api/invoices/${id}`).set('Authorization', `Bearer ${validToken}`);
       expect(delRes.status).toBe(200);
       expect(delRes.body.data.deletedAt).not.toBeNull();
 
@@ -75,24 +164,24 @@ describe('LiquiFact API', () => {
     });
 
     it('DELETE /api/invoices/:id - fails for non-existent or already deleted', async () => {
-      const res404 = await request(app).delete('/api/invoices/nonexistent');
+      const res404 = await request(app).delete('/api/invoices/nonexistent').set('Authorization', `Bearer ${validToken}`);
       expect(res404.status).toBe(404);
 
-      const postRes = await request(app).post('/api/invoices').send({ amount: 100, customer: 'X' });
+      const postRes = await request(app).post('/api/invoices').set('Authorization', `Bearer ${validToken}`).send({ amount: 100, customer: 'X' });
       const id = postRes.body.data.id;
-      await request(app).delete(`/api/invoices/${id}`);
-      
-      const res400 = await request(app).delete(`/api/invoices/${id}`);
+      await request(app).delete(`/api/invoices/${id}`).set('Authorization', `Bearer ${validToken}`);
+
+      const res400 = await request(app).delete(`/api/invoices/${id}`).set('Authorization', `Bearer ${validToken}`);
       expect(res400.status).toBe(400);
       expect(res400.body.error).toBe('Invoice is already deleted');
     });
 
     it('PATCH /api/invoices/:id/restore - restores a deleted invoice', async () => {
-      const postRes = await request(app).post('/api/invoices').send({ amount: 100, customer: 'X' });
+      const postRes = await request(app).post('/api/invoices').set('Authorization', `Bearer ${validToken}`).send({ amount: 100, customer: 'X' });
       const id = postRes.body.data.id;
-      await request(app).delete(`/api/invoices/${id}`);
+      await request(app).delete(`/api/invoices/${id}`).set('Authorization', `Bearer ${validToken}`);
 
-      const restoreRes = await request(app).patch(`/api/invoices/${id}/restore`);
+      const restoreRes = await request(app).patch(`/api/invoices/${id}/restore`).set('Authorization', `Bearer ${validToken}`);
       expect(restoreRes.status).toBe(200);
       expect(restoreRes.body.data.deletedAt).toBeNull();
 
@@ -101,13 +190,13 @@ describe('LiquiFact API', () => {
     });
 
     it('PATCH /api/invoices/:id/restore - fails for non-existent or not deleted', async () => {
-      const res404 = await request(app).patch('/api/invoices/nonexistent/restore');
+      const res404 = await request(app).patch('/api/invoices/nonexistent/restore').set('Authorization', `Bearer ${validToken}`);
       expect(res404.status).toBe(404);
 
-      const postRes = await request(app).post('/api/invoices').send({ amount: 100, customer: 'X' });
+      const postRes = await request(app).post('/api/invoices').set('Authorization', `Bearer ${validToken}`).send({ amount: 100, customer: 'X' });
       const id = postRes.body.data.id;
-      
-      const res400 = await request(app).patch(`/api/invoices/${id}/restore`);
+
+      const res400 = await request(app).patch(`/api/invoices/${id}/restore`).set('Authorization', `Bearer ${validToken}`);
       expect(res400.status).toBe(400);
       expect(res400.body.error).toBe('Invoice is not deleted');
     });
@@ -129,7 +218,7 @@ describe('LiquiFact API', () => {
 
   describe('Escrow', () => {
     it('GET /api/escrow/:invoiceId - returns placeholder escrow state', async () => {
-      const response = await request(app).get('/api/escrow/123');
+      const response = await request(app).get('/api/escrow/123').set('Authorization', `Bearer ${validToken}`);
       expect(response.status).toBe(200);
       expect(response.body.data).toHaveProperty('invoiceId', '123');
     });
@@ -149,5 +238,115 @@ describe('LiquiFact API', () => {
 
       listenSpy.mockRestore();
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Security header tests — Helmet hardening on every endpoint
+// ---------------------------------------------------------------------------
+
+describe('Security headers — all endpoints', () => {
+  const endpoints = [
+    { method: 'get', path: '/health' },
+    { method: 'get', path: '/api' },
+    { method: 'get', path: '/api/invoices' },
+    { method: 'post', path: '/api/invoices' },
+    { method: 'get', path: '/api/escrow/test-invoice-id' },
+    { method: 'get', path: '/nonexistent-route' },
+  ];
+
+  for (const { method, path } of endpoints) {
+    it(`${method.toUpperCase()} ${path} has all required security headers`, async () => {
+      const res = await req(method, path);
+      expectSecureHeaders(res);
+    });
+  }
+});
+
+describe('Content-Security-Policy directives', () => {
+  it('includes strict script-src', async () => {
+    const res = await req('get', '/health');
+    expect(res.headers['content-security-policy']).toContain('script-src \'self\'');
+  });
+
+  it('includes strict style-src', async () => {
+    const res = await req('get', '/health');
+    expect(res.headers['content-security-policy']).toContain('style-src \'self\'');
+  });
+
+  it('allows data: URIs for images', async () => {
+    const res = await req('get', '/health');
+    expect(res.headers['content-security-policy']).toContain('img-src \'self\' data:');
+  });
+
+  it('blocks object sources', async () => {
+    const res = await req('get', '/api');
+    expect(res.headers['content-security-policy']).toContain('object-src \'none\'');
+  });
+
+  it('blocks frame sources', async () => {
+    const res = await req('get', '/api');
+    expect(res.headers['content-security-policy']).toContain('frame-src \'none\'');
+  });
+
+  it('restricts form-action to self', async () => {
+    const res = await req('get', '/api');
+    expect(res.headers['content-security-policy']).toContain('form-action \'self\'');
+  });
+
+  it('restricts base-uri to self', async () => {
+    const res = await req('get', '/api');
+    expect(res.headers['content-security-policy']).toContain('base-uri \'self\'');
+  });
+});
+
+describe('HSTS header', () => {
+  it('max-age is set to 1 year (31536000 seconds)', async () => {
+    const res = await req('get', '/health');
+    expect(res.headers['strict-transport-security']).toContain('max-age=31536000');
+  });
+
+  it('includeSubDomains is set', async () => {
+    const res = await req('get', '/health');
+    expect(res.headers['strict-transport-security']).toContain('includeSubDomains');
+  });
+
+  it('preload directive is set', async () => {
+    const res = await req('get', '/health');
+    expect(res.headers['strict-transport-security']).toContain('preload');
+  });
+});
+
+describe('X-Powered-By suppression', () => {
+  it('is absent on /health', async () => {
+    const res = await req('get', '/health');
+    expect(res.headers['x-powered-by']).toBeUndefined();
+  });
+
+  it('is absent on /api', async () => {
+    const res = await req('get', '/api');
+    expect(res.headers['x-powered-by']).toBeUndefined();
+  });
+
+  it('is absent on 404 responses', async () => {
+    const res = await req('get', '/totally-unknown');
+    expect(res.headers['x-powered-by']).toBeUndefined();
+  });
+});
+
+describe('Cross-origin isolation headers', () => {
+  it('COOP is same-origin', async () => {
+    const res = await req('get', '/health');
+    expect(res.headers['cross-origin-opener-policy']).toBe('same-origin');
+  });
+
+  it('CORP is same-origin', async () => {
+    const res = await req('get', '/health');
+    expect(res.headers['cross-origin-resource-policy']).toBe('same-origin');
+  });
+
+  it('COEP requires CORP', async () => {
+    const res = await req('get', '/health');
+    expect(res.headers['cross-origin-embedder-policy']).toBe('require-corp');
   });
 });
