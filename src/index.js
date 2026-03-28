@@ -1,8 +1,17 @@
+'use strict';
+
 /**
  * LiquiFact API Gateway
  * Express server bootstrap for invoice financing, auth, and Stellar integration.
  */
 
+ * Express app configuration for invoice financing, auth, and Stellar integration.
+ * Server startup lives in server.js so this module can be imported cleanly in tests.
+ */
+
+const express = require('express');
+const cors = require('cors');
+const { createSecurityMiddleware } = require('./middleware/security');
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -15,9 +24,13 @@ const { callSorobanContract } = require('./services/soroban');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+const app = express();
+
 /**
  * Global Middlewares
  */
+// Security headers — applied first so every response is protected
+app.use(createSecurityMiddleware());
 app.use(cors());
 app.use(express.json());
 app.use(sanitizeInput);
@@ -125,7 +138,7 @@ app.post('/api/invoices', authenticateToken, sensitiveLimiter, (req, res) => {
  * @param {import('express').Response} res - The Express response object.
  * @returns {void}
  */
-app.delete('/api/invoices/:id', (req, res) => {
+app.delete('/api/invoices/:id', authenticateToken, (req, res) => {
   const { id } = req.params;
   const invoiceIndex = invoices.findIndex((inv) => inv.id === id);
 
@@ -153,7 +166,7 @@ app.delete('/api/invoices/:id', (req, res) => {
  * @param {import('express').Response} res - The Express response object.
  * @returns {void}
  */
-app.patch('/api/invoices/:id/restore', (req, res) => {
+app.patch('/api/invoices/:id/restore', authenticateToken, (req, res) => {
   const { id } = req.params;
   const invoiceIndex = invoices.findIndex((inv) => inv.id === id);
 
@@ -200,7 +213,7 @@ app.post('/api/escrow', authenticateToken, sensitiveLimiter, (req, res) => {
  * @param {import('express').Response} res - The Express response object.
  * @returns {Promise<void>}
  */
-app.get('/api/escrow/:invoiceId', async (req, res) => {
+app.get('/api/escrow/:invoiceId', authenticateToken, async (req, res) => {
   const { invoiceId } = req.params;
 
   try {
@@ -225,6 +238,16 @@ app.get('/api/escrow/:invoiceId', async (req, res) => {
 });
 
 /**
+ * Simulated escrow operations (e.g. funding).
+ */
+app.post('/api/escrow', authenticateToken, sensitiveLimiter, (req, res) => {
+    res.json({
+        data: { status: 'funded' },
+        message: 'Escrow operation simulated.'
+    });
+});
+
+/**
  * 404 handler for unknown routes.
  *
  * @param {import('express').Request} req - The Express request object.
@@ -233,10 +256,15 @@ app.get('/api/escrow/:invoiceId', async (req, res) => {
  * @returns {void}
  */
 app.use((req, res, next) => {
-  if (req.path === '/error-test-trigger') {
-    return next(new Error('Test error'));
-  }
-  return res.status(404).json({ error: 'Not found', path: req.path });
+  next(
+    new AppError({
+      type: 'https://liquifact.com/probs/not-found',
+      title: 'Resource Not Found',
+      status: 404,
+      detail: `The path ${req.path} does not exist.`,
+      instance: req.originalUrl,
+    })
+  );
 });
 
 app.use(errorHandler);
