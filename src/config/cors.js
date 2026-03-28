@@ -38,7 +38,7 @@ const DEV_DEFAULT_ORIGINS = [
  * @returns {string[]|null} Array of allowed origins, or `null` if unset.
  */
 function parseAllowedOrigins(raw) {
-  if (!raw || raw.trim() === '') return null;
+  if (!raw || raw.trim() === '') {return null;}
   return [
     ...new Set(
       raw
@@ -57,9 +57,9 @@ function parseAllowedOrigins(raw) {
  */
 function resolveAllowlist() {
   const fromEnv = parseAllowedOrigins(process.env.CORS_ALLOWED_ORIGINS);
-  if (fromEnv !== null) return fromEnv;
+  if (fromEnv !== null) {return fromEnv;}
 
-  if (process.env.NODE_ENV === 'development') return DEV_DEFAULT_ORIGINS;
+  if (process.env.NODE_ENV === 'development') {return DEV_DEFAULT_ORIGINS;}
 
   // Production / test with no CORS_ALLOWED_ORIGINS → deny all browser origins.
   return null;
@@ -82,8 +82,8 @@ function getDevelopmentFallbackOrigins() {
 function getAllowedOriginsFromEnv(env = process.env) {
   const { NODE_ENV, CORS_ALLOWED_ORIGINS } = env;
   const parsed = parseAllowedOrigins(CORS_ALLOWED_ORIGINS);
-  if (parsed?.length > 0) return parsed;
-  if (NODE_ENV === 'development') return getDevelopmentFallbackOrigins();
+  if (parsed?.length > 0) {return parsed;}
+  if (NODE_ENV === 'development') {return getDevelopmentFallbackOrigins();}
   return [];
 }
 
@@ -94,10 +94,10 @@ const CORS_REJECTION_MESSAGE = 'CORS policy: origin is not allowed.';
  * The `isCorsOriginRejected` flag lets downstream error handlers identify it
  * without `instanceof` checks across module boundaries.
  *
- * @param {string} origin - The rejected origin value.
+ * @param {string} _origin - The rejected origin value.
  * @returns {Error} Annotated error instance.
  */
-function createCorsRejectionError(origin) {
+function createCorsRejectionError(_origin) {
   const err = new Error(CORS_REJECTION_MESSAGE);
   err.isCorsOriginRejected = true;
   err.status = 403;
@@ -112,7 +112,7 @@ function createCorsRejectionError(origin) {
  * @returns {boolean}
  */
 function isCorsOriginRejectedError(err) {
-  return err != null && err.isCorsOriginRejected === true;
+  return err !== null && err.isCorsOriginRejected === true;
 }
 
 /**

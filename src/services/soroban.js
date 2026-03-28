@@ -67,10 +67,12 @@ function computeBackoff(attempt, baseDelay, maxDelay) {
  * @returns {boolean} `true` if the call should be retried.
  */
 function isRetryable(err) {
-  if (!err) return false;
-  if (err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT') return true;
-  if (err.status != null && RETRYABLE_STATUS_CODES.has(err.status)) return true;
-  if (err.response && RETRYABLE_STATUS_CODES.has(err.response.status)) return true;
+  if (!err) {return false;}
+  if (err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT') {return true;}
+  if (err.status !== null && err.status !== undefined && RETRYABLE_STATUS_CODES.has(err.status)) {
+    return true;
+  }
+  if (err.response && RETRYABLE_STATUS_CODES.has(err.response.status)) {return true;}
   return false;
 }
 
@@ -107,7 +109,7 @@ async function withRetry(operation, config) {
     } catch (err) {
       lastErr = err;
       const isLast = attempt === maxRetries;
-      if (isLast || !isRetryable(err)) throw err;
+      if (isLast || !isRetryable(err)) {throw err;}
 
       const delay = computeBackoff(attempt, cfg.baseDelay, cfg.maxDelay);
       await sleep(delay);

@@ -62,13 +62,21 @@ function buildApp(middlewares) {
   return app;
 }
 
-/** Generates a JSON body string of approximately `targetBytes` bytes. */
+/**
+ * Generates a JSON body string of approximately `targetBytes` bytes.
+ * @param {number} targetBytes
+ * @returns {string} JSON string
+ */
 function makeJsonBody(targetBytes) {
   const paddingLen = Math.max(0, targetBytes - 11);
   return JSON.stringify({ data: 'x'.repeat(paddingLen) });
 }
 
-/** Generates a URL-encoded body string of approximately `targetBytes` bytes. */
+/**
+ * Generates a URL-encoded body string of approximately `targetBytes` bytes.
+ * @param {number} targetBytes
+ * @returns {string} Form data string
+ */
 function makeUrlencodedBody(targetBytes) {
   return `data=${'x'.repeat(Math.max(0, targetBytes - 5))}`;
 }
@@ -313,7 +321,7 @@ describe('payloadTooLargeHandler()', () => {
       next(err);
     });
     app.use(payloadTooLargeHandler);
-    // eslint-disable-next-line no-unused-vars
+     
     app.use((_err, _req, res, _next) => res.status(500).json({ error: 'other' }));
 
     const res = await request(app).post('/trigger');
@@ -325,7 +333,7 @@ describe('payloadTooLargeHandler()', () => {
     const app = express();
     app.post('/trigger', (_req, _res, next) => next(new Error('unrelated')));
     app.use(payloadTooLargeHandler);
-    // eslint-disable-next-line no-unused-vars
+     
     app.use((err, _req, res, _next) => res.status(500).json({ error: err.message }));
 
     const res = await request(app).post('/trigger');
@@ -359,12 +367,12 @@ describe('isCorsOriginRejectedError()', () => {
 describe('createCorsOptions()', () => {
   let savedEnv;
   beforeEach(() => { savedEnv = { ...process.env }; });
-  // eslint-disable-next-line no-undef
+   
   afterEach(() => {
     process.env.CORS_ALLOWED_ORIGINS = savedEnv.CORS_ALLOWED_ORIGINS;
     process.env.NODE_ENV             = savedEnv.NODE_ENV;
-    if (savedEnv.CORS_ALLOWED_ORIGINS === undefined) delete process.env.CORS_ALLOWED_ORIGINS;
-    if (savedEnv.NODE_ENV             === undefined) delete process.env.NODE_ENV;
+    if (savedEnv.CORS_ALLOWED_ORIGINS === undefined) {delete process.env.CORS_ALLOWED_ORIGINS;}
+    if (savedEnv.NODE_ENV             === undefined) {delete process.env.NODE_ENV;}
   });
 
   it('allows request with no Origin header', (done) => {
@@ -427,7 +435,7 @@ describe('computeBackoff()', () => {
     expect(computeBackoff(0, 200, 5000)).toBeGreaterThanOrEqual(0);
   });
   it('increases with attempt number', () => {
-    const d0 = computeBackoff(0, 200, 5000);
+    const _d0 = computeBackoff(0, 200, 5000);
     const d3 = computeBackoff(3, 200, 5000);
     // With jitter d3 is almost certainly larger; we check average tendency
     expect(200 * 2 ** 3).toBeGreaterThan(200); // sanity
@@ -468,6 +476,10 @@ describe('withRetry()', () => {
 
   it('retries on ECONNRESET and eventually succeeds', async () => {
     let calls = 0;
+    /**
+     * Operation that fails.
+     * @returns {Promise<string>}
+     */
     const op = () => {
       calls++;
       if (calls < 3) {
@@ -484,6 +496,10 @@ describe('withRetry()', () => {
 
   it('throws immediately on a non-retryable error', async () => {
     let calls = 0;
+    /**
+     * Operation that fails.
+     * @returns {Promise<string>}
+     */
     const op = () => { calls++; return Promise.reject(Object.assign(new Error('bad'), { status: 400 })); };
     await expect(withRetry(op, { maxRetries: 5, baseDelay: 0, maxDelay: 0 })).rejects.toThrow('bad');
     expect(calls).toBe(1);
@@ -491,6 +507,10 @@ describe('withRetry()', () => {
 
   it('throws after exhausting all retries', async () => {
     let calls = 0;
+    /**
+     * Operation that fails.
+     * @returns {Promise<string>}
+     */
     const op = () => {
       calls++;
       return Promise.reject(Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' }));
@@ -501,6 +521,10 @@ describe('withRetry()', () => {
 
   it('hard-caps maxRetries at 10', async () => {
     let calls = 0;
+    /**
+     * Operation that fails.
+     * @returns {Promise<string>}
+     */
     const op = () => {
       calls++;
       return Promise.reject(Object.assign(new Error('x'), { code: 'ECONNRESET' }));
