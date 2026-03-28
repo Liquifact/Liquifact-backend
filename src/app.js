@@ -20,7 +20,7 @@ const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
 
-const { callSorobanContract }               = require('./services/soroban');
+const { callSorobanContract } = require('./services/soroban');
 const { createCorsOptions, isCorsOriginRejectedError } = require('./config/cors');
 const {
   jsonBodyLimit,
@@ -28,10 +28,6 @@ const {
   invoiceBodyLimit,
   payloadTooLargeHandler,
 } = require('./middleware/bodySizeLimits');
-
-const invoiceService = require('./services/invoice.service');
-const { validateInvoiceQueryParams } = require('./utils/validators');
-const asyncHandler = require('./utils/asyncHandler');
 
 /**
  * Returns a 403 JSON response only for the dedicated blocked-origin CORS error.
@@ -91,9 +87,9 @@ function createApp() {
   // Health check
   app.get('/health', (req, res) => {
     res.json({
-      status:    'ok',
-      service:   'liquifact-api',
-      version:   '0.1.0',
+      status: 'ok',
+      service: 'liquifact-api',
+      version: '0.1.0',
       timestamp: new Date().toISOString(),
     });
   });
@@ -101,12 +97,12 @@ function createApp() {
   // API info
   app.get('/api', (req, res) => {
     res.json({
-      name:        'LiquiFact API',
+      name: 'LiquiFact API',
       description: 'Global Invoice Liquidity Network on Stellar',
       endpoints: {
-        health:   'GET /health',
+        health: 'GET /health',
         invoices: 'GET/POST /api/invoices',
-        escrow:   'GET/POST /api/escrow',
+        escrow: 'GET/POST /api/escrow',
       },
     });
   });
@@ -114,15 +110,15 @@ function createApp() {
   // Invoices — GET (list)
   app.get('/api/invoices', (req, res) => {
     res.json({
-      data:    [],
+      data: [],
       message: 'Invoice service will list tokenized invoices here.',
     });
-  }));
+  });
 
   // Invoices — POST (create) with strict 512 KB body limit
   app.post('/api/invoices', ...invoiceBodyLimit(), (req, res) => {
     res.status(201).json({
-      data:    { id: 'placeholder', status: 'pending_verification' },
+      data: { id: 'placeholder', status: 'pending_verification' },
       message: 'Invoice upload will be implemented with verification and tokenization.',
     });
   });

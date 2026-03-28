@@ -10,6 +10,16 @@
 
 'use strict';
 
+const { CircuitBreaker } = require('../utils/circuitBreaker');
+
+/**
+ * Circuit breaker instance for Soroban API calls.
+ */
+const sorobanCircuitBreaker = new CircuitBreaker({
+  failureThreshold: 5,
+  recoveryTimeout: 15000,
+});
+
 /**
  * Retry configuration used for all Soroban contract calls.
  *
@@ -20,8 +30,8 @@
  */
 const SOROBAN_RETRY_CONFIG = {
   maxRetries: parseInt(process.env.SOROBAN_MAX_RETRIES || '3', 10),
-  baseDelay:  parseInt(process.env.SOROBAN_BASE_DELAY  || '200', 10),
-  maxDelay:   parseInt(process.env.SOROBAN_MAX_DELAY   || '5000', 10),
+  baseDelay: parseInt(process.env.SOROBAN_BASE_DELAY || '200', 10),
+  maxDelay: parseInt(process.env.SOROBAN_MAX_DELAY || '5000', 10),
 };
 
 /**
@@ -52,10 +62,10 @@ function sleep(ms) {
  * @returns {number} Delay in milliseconds.
  */
 function computeBackoff(attempt, baseDelay, maxDelay) {
-  const safeCap  = Math.min(maxDelay, 60_000);
+  const safeCap = Math.min(maxDelay, 60_000);
   const safeBase = Math.min(baseDelay, 10_000);
-  const exp      = safeBase * 2 ** attempt;
-  const jitter   = exp * 0.2 * (Math.random() * 2 - 1); // ±20%
+  const exp = safeBase * 2 ** attempt;
+  const jitter = exp * 0.2 * (Math.random() * 2 - 1); // ±20%
   return Math.min(Math.max(0, Math.round(exp + jitter)), safeCap);
 }
 
@@ -67,10 +77,10 @@ function computeBackoff(attempt, baseDelay, maxDelay) {
  * @returns {boolean} `true` if the call should be retried.
  */
 function isRetryable(err) {
-  if (!err) return false;
-  if (err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT') return true;
-  if (err.status != null && RETRYABLE_STATUS_CODES.has(err.status)) return true;
-  if (err.response && RETRYABLE_STATUS_CODES.has(err.response.status)) return true;
+  if (!err) { return false; }
+  if (err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT') { return true; }
+  if (err.status !== null && err.status !== undefined && RETRYABLE_STATUS_CODES.has(err.status)) { return true; }
+  if (err.response && RETRYABLE_STATUS_CODES.has(err.response.status)) { return true; }
   return false;
 }
 
@@ -107,7 +117,7 @@ async function withRetry(operation, config) {
     } catch (err) {
       lastErr = err;
       const isLast = attempt === maxRetries;
-      if (isLast || !isRetryable(err)) throw err;
+      if (isLast || !isRetryable(err)) { throw err; }
 
       const delay = computeBackoff(attempt, cfg.baseDelay, cfg.maxDelay);
       await sleep(delay);
@@ -134,7 +144,7 @@ async function withRetry(operation, config) {
  * );
  */
 async function callSorobanContract(operation) {
-  return withRetry(operation, SOROBAN_RETRY_CONFIG);
+  return sorobanCircuitBreaker.execute(() => withRetry(operation, SOROBAN_RETRY_CONFIG));
 }
 
 module.exports = {

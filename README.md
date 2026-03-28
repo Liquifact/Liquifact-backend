@@ -59,6 +59,11 @@ cp .env.example .env
 | `npm test` | Run unit tests (Vitest) |
 | `npm run test:coverage` | Run tests with coverage report |
 
+### Key Features
+- **Global Error Handling**: Standardized problem details
+- **Testing**: Jest with high coverage requirements
+- **Circuit Breaker**: Robust fault-tolerance against unstable external systems.
+
 Default port: **3001**. After starting:
 
 - Health: `http://localhost:3001/health`
@@ -314,6 +319,7 @@ To ensure reliable communication with Soroban contract provider APIs, this backe
 - **Automatic retries** for HTTP 429, 502, 503, 504, and network timeouts.
 - **Jitter** (±20%) prevents thundering-herd problems.
 - **Hard caps:** `maxRetries ≤ 10`, `maxDelay ≤ 60 000 ms`, `baseDelay ≤ 10 000 ms`.
+- **Circuit Breaker Pipeline**: Integrates open/half-open/closed state transitions to fast-fail on repeated errors, drastically reducing API load when upstream nodes are unreachable.
 
 ---
 

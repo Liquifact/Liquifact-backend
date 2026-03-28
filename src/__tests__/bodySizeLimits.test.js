@@ -62,13 +62,21 @@ function buildApp(middlewares) {
   return app;
 }
 
-/** Generates a JSON body string of approximately `targetBytes` bytes. */
+/**
+ * Generates a JSON body string of approximately `targetBytes` bytes.
+ * @param {number} targetBytes
+ * @returns {string}
+ */
 function makeJsonBody(targetBytes) {
   const paddingLen = Math.max(0, targetBytes - 11);
   return JSON.stringify({ data: 'x'.repeat(paddingLen) });
 }
 
-/** Generates a URL-encoded body string of approximately `targetBytes` bytes. */
+/**
+ * Generates a URL-encoded body string of approximately `targetBytes` bytes.
+ * @param {number} targetBytes
+ * @returns {string}
+ */
 function makeUrlencodedBody(targetBytes) {
   return `data=${'x'.repeat(Math.max(0, targetBytes - 5))}`;
 }
@@ -79,32 +87,32 @@ function makeUrlencodedBody(targetBytes) {
 
 describe('parseSize()', () => {
   describe('valid inputs', () => {
-    it('parses bytes (no suffix)',          () => expect(parseSize('1024')).toBe(1024));
-    it('parses "b" suffix (lowercase)',     () => expect(parseSize('512b')).toBe(512));
-    it('parses "B" suffix (uppercase)',     () => expect(parseSize('512B')).toBe(512));
-    it('parses "kb" suffix',               () => expect(parseSize('1kb')).toBe(1024));
-    it('parses "KB" suffix',               () => expect(parseSize('100KB')).toBe(102400));
-    it('parses "mb" suffix',               () => expect(parseSize('1mb')).toBe(1048576));
-    it('parses "MB" suffix',               () => expect(parseSize('2MB')).toBe(2097152));
-    it('parses "gb" suffix',               () => expect(parseSize('1gb')).toBe(1073741824));
-    it('handles decimal values',           () => expect(parseSize('1.5mb')).toBe(Math.floor(1.5 * 1024 ** 2)));
-    it('handles surrounding whitespace',   () => expect(parseSize('  100kb  ')).toBe(102400));
-    it('returns 0 for "0b"',               () => expect(parseSize('0b')).toBe(0));
+    it('parses bytes (no suffix)', () => expect(parseSize('1024')).toBe(1024));
+    it('parses "b" suffix (lowercase)', () => expect(parseSize('512b')).toBe(512));
+    it('parses "B" suffix (uppercase)', () => expect(parseSize('512B')).toBe(512));
+    it('parses "kb" suffix', () => expect(parseSize('1kb')).toBe(1024));
+    it('parses "KB" suffix', () => expect(parseSize('100KB')).toBe(102400));
+    it('parses "mb" suffix', () => expect(parseSize('1mb')).toBe(1048576));
+    it('parses "MB" suffix', () => expect(parseSize('2MB')).toBe(2097152));
+    it('parses "gb" suffix', () => expect(parseSize('1gb')).toBe(1073741824));
+    it('handles decimal values', () => expect(parseSize('1.5mb')).toBe(Math.floor(1.5 * 1024 ** 2)));
+    it('handles surrounding whitespace', () => expect(parseSize('  100kb  ')).toBe(102400));
+    it('returns 0 for "0b"', () => expect(parseSize('0b')).toBe(0));
   });
 
   describe('TypeError', () => {
-    it('throws for empty string',    () => expect(() => parseSize('')).toThrow(TypeError));
+    it('throws for empty string', () => expect(() => parseSize('')).toThrow(TypeError));
     it('throws for whitespace-only', () => expect(() => parseSize('   ')).toThrow(TypeError));
-    it('throws for number input',    () => expect(() => parseSize(1024)).toThrow(TypeError));
-    it('throws for null',            () => expect(() => parseSize(null)).toThrow(TypeError));
-    it('throws for undefined',       () => expect(() => parseSize(undefined)).toThrow(TypeError));
-    it('throws for object',          () => expect(() => parseSize({ size: '1kb' })).toThrow(TypeError));
+    it('throws for number input', () => expect(() => parseSize(1024)).toThrow(TypeError));
+    it('throws for null', () => expect(() => parseSize(null)).toThrow(TypeError));
+    it('throws for undefined', () => expect(() => parseSize(undefined)).toThrow(TypeError));
+    it('throws for object', () => expect(() => parseSize({ size: '1kb' })).toThrow(TypeError));
   });
 
   describe('RangeError', () => {
     it('throws for unknown unit "tb"', () => expect(() => parseSize('1tb')).toThrow(RangeError));
     it('throws for non-numeric value', () => expect(() => parseSize('abckb')).toThrow(RangeError));
-    it('throws for negative value',    () => expect(() => parseSize('-1kb')).toThrow(RangeError));
+    it('throws for negative value', () => expect(() => parseSize('-1kb')).toThrow(RangeError));
   });
 });
 
@@ -159,7 +167,7 @@ describe('jsonBodyLimit()', () => {
     const res = await request(app)
       .post('/test').set('Content-Type', 'application/json').send(makeJsonBody(2048));
     expect(res.body).toMatchObject({
-      error:   'Payload Too Large',
+      error: 'Payload Too Large',
       message: expect.stringContaining('maximum allowed size'),
     });
   });
@@ -235,7 +243,7 @@ describe('urlencodedBodyLimit()', () => {
       .set('Content-Type', 'application/x-www-form-urlencoded')
       .send(makeUrlencodedBody(2048));
     expect(res.body).toMatchObject({
-      error:   'Payload Too Large',
+      error: 'Payload Too Large',
       message: expect.stringContaining('maximum allowed size'),
     });
   });
@@ -259,7 +267,7 @@ describe('invoiceBodyLimit()', () => {
 
   beforeAll(() => {
     appDefault = buildApp(invoiceBodyLimit());
-    appCustom  = buildApp(invoiceBodyLimit('2kb'));
+    appCustom = buildApp(invoiceBodyLimit('2kb'));
   });
 
   it('returns a handler array', () => {
@@ -313,7 +321,7 @@ describe('payloadTooLargeHandler()', () => {
       next(err);
     });
     app.use(payloadTooLargeHandler);
-    // eslint-disable-next-line no-unused-vars
+
     app.use((_err, _req, res, _next) => res.status(500).json({ error: 'other' }));
 
     const res = await request(app).post('/trigger');
@@ -325,7 +333,7 @@ describe('payloadTooLargeHandler()', () => {
     const app = express();
     app.post('/trigger', (_req, _res, next) => next(new Error('unrelated')));
     app.use(payloadTooLargeHandler);
-    // eslint-disable-next-line no-unused-vars
+
     app.use((err, _req, res, _next) => res.status(500).json({ error: err.message }));
 
     const res = await request(app).post('/trigger');
@@ -339,32 +347,32 @@ describe('payloadTooLargeHandler()', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('parseAllowedOrigins()', () => {
-  it('returns null for undefined',     () => expect(parseAllowedOrigins(undefined)).toBeNull());
-  it('returns null for empty string',  () => expect(parseAllowedOrigins('')).toBeNull());
-  it('returns null for blank string',  () => expect(parseAllowedOrigins('   ')).toBeNull());
-  it('parses a single origin',         () => expect(parseAllowedOrigins('https://a.com')).toEqual(['https://a.com']));
-  it('parses multiple origins',        () => expect(parseAllowedOrigins('https://a.com,https://b.com')).toEqual(['https://a.com','https://b.com']));
-  it('trims whitespace around commas', () => expect(parseAllowedOrigins(' https://a.com , https://b.com ')).toEqual(['https://a.com','https://b.com']));
-  it('de-duplicates origins',          () => expect(parseAllowedOrigins('https://a.com,https://a.com')).toEqual(['https://a.com']));
+  it('returns null for undefined', () => expect(parseAllowedOrigins(undefined)).toBeNull());
+  it('returns null for empty string', () => expect(parseAllowedOrigins('')).toBeNull());
+  it('returns null for blank string', () => expect(parseAllowedOrigins('   ')).toBeNull());
+  it('parses a single origin', () => expect(parseAllowedOrigins('https://a.com')).toEqual(['https://a.com']));
+  it('parses multiple origins', () => expect(parseAllowedOrigins('https://a.com,https://b.com')).toEqual(['https://a.com', 'https://b.com']));
+  it('trims whitespace around commas', () => expect(parseAllowedOrigins(' https://a.com , https://b.com ')).toEqual(['https://a.com', 'https://b.com']));
+  it('de-duplicates origins', () => expect(parseAllowedOrigins('https://a.com,https://a.com')).toEqual(['https://a.com']));
 });
 
 describe('isCorsOriginRejectedError()', () => {
-  it('returns true for flagged error',  () => expect(isCorsOriginRejectedError({ isCorsOriginRejected: true })).toBe(true));
-  it('returns false for plain error',   () => expect(isCorsOriginRejectedError(new Error('x'))).toBe(false));
-  it('returns false for null',          () => expect(isCorsOriginRejectedError(null)).toBe(false));
-  it('returns false for undefined',     () => expect(isCorsOriginRejectedError(undefined)).toBe(false));
-  it('returns false when flag is false',() => expect(isCorsOriginRejectedError({ isCorsOriginRejected: false })).toBe(false));
+  it('returns true for flagged error', () => expect(isCorsOriginRejectedError({ isCorsOriginRejected: true })).toBe(true));
+  it('returns false for plain error', () => expect(isCorsOriginRejectedError(new Error('x'))).toBe(false));
+  it('returns false for null', () => expect(isCorsOriginRejectedError(null)).toBe(false));
+  it('returns false for undefined', () => expect(isCorsOriginRejectedError(undefined)).toBe(false));
+  it('returns false when flag is false', () => expect(isCorsOriginRejectedError({ isCorsOriginRejected: false })).toBe(false));
 });
 
 describe('createCorsOptions()', () => {
   let savedEnv;
   beforeEach(() => { savedEnv = { ...process.env }; });
-  // eslint-disable-next-line no-undef
+
   afterEach(() => {
     process.env.CORS_ALLOWED_ORIGINS = savedEnv.CORS_ALLOWED_ORIGINS;
-    process.env.NODE_ENV             = savedEnv.NODE_ENV;
-    if (savedEnv.CORS_ALLOWED_ORIGINS === undefined) delete process.env.CORS_ALLOWED_ORIGINS;
-    if (savedEnv.NODE_ENV             === undefined) delete process.env.NODE_ENV;
+    process.env.NODE_ENV = savedEnv.NODE_ENV;
+    if (savedEnv.CORS_ALLOWED_ORIGINS === undefined) { delete process.env.CORS_ALLOWED_ORIGINS; }
+    if (savedEnv.NODE_ENV === undefined) { delete process.env.NODE_ENV; }
   });
 
   it('allows request with no Origin header', (done) => {
@@ -427,7 +435,7 @@ describe('computeBackoff()', () => {
     expect(computeBackoff(0, 200, 5000)).toBeGreaterThanOrEqual(0);
   });
   it('increases with attempt number', () => {
-    const d0 = computeBackoff(0, 200, 5000);
+    computeBackoff(0, 200, 5000);
     const d3 = computeBackoff(3, 200, 5000);
     // With jitter d3 is almost certainly larger; we check average tendency
     expect(200 * 2 ** 3).toBeGreaterThan(200); // sanity
@@ -445,13 +453,13 @@ describe('computeBackoff()', () => {
 });
 
 describe('isRetryable()', () => {
-  it('returns false for null',                () => expect(isRetryable(null)).toBe(false));
-  it('returns false for undefined',           () => expect(isRetryable(undefined)).toBe(false));
-  it('returns true for ECONNRESET',           () => expect(isRetryable({ code: 'ECONNRESET' })).toBe(true));
-  it('returns true for ETIMEDOUT',            () => expect(isRetryable({ code: 'ETIMEDOUT' })).toBe(true));
-  it('returns false for 400',                 () => expect(isRetryable({ status: 400 })).toBe(false));
-  it('returns false for 404',                 () => expect(isRetryable({ status: 404 })).toBe(false));
-  it('returns false for 500',                 () => expect(isRetryable({ status: 500 })).toBe(false));
+  it('returns false for null', () => expect(isRetryable(null)).toBe(false));
+  it('returns false for undefined', () => expect(isRetryable(undefined)).toBe(false));
+  it('returns true for ECONNRESET', () => expect(isRetryable({ code: 'ECONNRESET' })).toBe(true));
+  it('returns true for ETIMEDOUT', () => expect(isRetryable({ code: 'ETIMEDOUT' })).toBe(true));
+  it('returns false for 400', () => expect(isRetryable({ status: 400 })).toBe(false));
+  it('returns false for 404', () => expect(isRetryable({ status: 404 })).toBe(false));
+  it('returns false for 500', () => expect(isRetryable({ status: 500 })).toBe(false));
   it.each([...RETRYABLE_STATUS_CODES])('returns true for status %i', (code) => {
     expect(isRetryable({ status: code })).toBe(true);
   });
@@ -544,9 +552,9 @@ describe('handleCorsError()', () => {
   });
 
   it('calls next for non-CORS errors', () => {
-    const err  = new Error('something else');
+    const err = new Error('something else');
     const next = vi.fn();
-    const res  = { status: vi.fn().mockReturnThis(), json: vi.fn() };
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() };
     handleCorsError(err, {}, res, next);
     expect(next).toHaveBeenCalledWith(err);
     expect(res.status).not.toHaveBeenCalled();
@@ -557,7 +565,7 @@ describe('handleInternalError()', () => {
   it('responds 500 with generic message', () => {
     const err = new Error('boom');
     const res = { status: vi.fn().mockReturnThis(), json: vi.fn() };
-    handleInternalError(err, {}, res, () => {});
+    handleInternalError(err, {}, res, () => { });
     expect(res.status).toHaveBeenCalledWith(500);
     expect(res.json).toHaveBeenCalledWith({ error: 'Internal server error' });
   });
@@ -572,7 +580,7 @@ describe('createApp() integration', () => {
 
   beforeAll(() => {
     process.env.CORS_ALLOWED_ORIGINS = 'http://localhost:3000';
-    process.env.NODE_ENV             = 'test';
+    process.env.NODE_ENV = 'test';
     app = createApp();
   });
 

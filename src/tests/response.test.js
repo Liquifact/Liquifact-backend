@@ -1,5 +1,6 @@
 const request = require('supertest');
-const app = require('../app');
+const { createApp } = require('../app');
+const app = createApp();
 
 describe('Standard Response Envelope (Issue 19)', () => {
   it('Success response should have data, meta, and error=null', async () => {
@@ -23,7 +24,7 @@ describe('Standard Response Envelope (Issue 19)', () => {
     expect(res.body.error.code).toBe('NOT_FOUND');
     expect(res.body.error).toHaveProperty('message');
   });
-  
+
   it('POST /api/invoices should return 201 and standardized success envelope', async () => {
     const res = await request(app).post('/api/invoices').send({});
     expect(res.status).toBe(201);

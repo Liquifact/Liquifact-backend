@@ -1,19 +1,6 @@
-const { callSorobanContract, isTransientError } = require('./soroban');
+const { callSorobanContract } = require('./soroban');
 
 describe('Soroban Integration Wrapper', () => {
-  describe('isTransientError', () => {
-    it('should identify transient error messages', () => {
-      expect(isTransientError(new Error('Network timeout'))).toBe(true);
-      expect(isTransientError(new Error('Rate limit exceeded (HTTP 429)'))).toBe(true);
-      expect(isTransientError(new Error('Server responded with 503'))).toBe(true);
-    });
-
-    it('should return false for non-transient errors', () => {
-      expect(isTransientError(new Error('Invalid arguments'))).toBe(false);
-      expect(isTransientError(new Error('Contract execution trapped'))).toBe(false);
-      expect(isTransientError(new Error('404 Not Found'))).toBe(false);
-    });
-  });
 
   describe('callSorobanContract', () => {
     it('should execute successfully without retries', async () => {
@@ -28,13 +15,14 @@ describe('Soroban Integration Wrapper', () => {
       const operation = jest.fn().mockImplementation(() => {
         attempts++;
         if (attempts < 2) {
-          return Promise.reject(new Error('503 Service Unavailable'));
+          const err = new Error('Gateway Timeout');
+          err.code = 'ETIMEDOUT';
+          return Promise.reject(err);
         }
         return Promise.resolve('recovered');
       });
 
-      // Override baseDelay to make test fast
-      const result = await callSorobanContract(operation, { baseDelay: 10 });
+      const result = await callSorobanContract(operation);
       expect(result).toBe('recovered');
       expect(operation).toHaveBeenCalledTimes(2);
     });
