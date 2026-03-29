@@ -32,6 +32,7 @@ const {
 const invoiceService = require('./services/invoice.service');
 const { validateInvoiceQueryParams } = require('./utils/validators');
 const asyncHandler = require('./utils/asyncHandler');
+const { validateStatusTransition } = require('./utils/invoiceStateMachine');
 
 /**
  * Returns a 403 JSON response only for the dedicated blocked-origin CORS error.
@@ -112,18 +113,48 @@ function createApp() {
   });
 
   // Invoices — GET (list)
-  app.get('/api/invoices', (req, res) => {
+  app.get('/api/invoices', asyncHandler(async (req, res) => {
+    const { isValid, errors, validatedParams } = validateInvoiceQueryParams(req.query);
+    if (!isValid) {
+      return res.status(400).json({ errors });
+    }
+    
+    const invoices = await invoiceService.getInvoices(validatedParams);
     res.json({
-      data:    [],
-      message: 'Invoice service will list tokenized invoices here.',
+      data: invoices,
+      message: 'Invoices retrieved successfully.',
     });
   }));
 
   // Invoices — POST (create) with strict 512 KB body limit
   app.post('/api/invoices', ...invoiceBodyLimit(), (req, res) => {
     res.status(201).json({
-      data:    { id: 'placeholder', status: 'pending_verification' },
+      data: { id: 'placeholder', status: 'draft' },
       message: 'Invoice upload will be implemented with verification and tokenization.',
+    });
+  });
+
+  // Invoices — PATCH (status transition)
+  app.patch('/api/invoices/:id/status', ...invoiceBodyLimit(), (req, res) => {
+    const { id } = req.params;
+    const { currentStatus, nextStatus } = req.body;
+
+    if (!currentStatus || !nextStatus) {
+      return res.status(400).json({ error: 'Both currentStatus and nextStatus are required in request body' });
+    }
+
+    try {
+      // Validate the transition
+      validateStatusTransition(currentStatus, nextStatus);
+    } catch (error) {
+      return res.status(400).json({ error: error.message });
+    }
+
+    // In a real implementation, we would update the database here.
+    // We would also ensure the current status from the DB matches currentStatus.
+    res.json({
+      data: { id, status: nextStatus },
+      message: 'Invoice status successfully transitioned',
     });
   });
 

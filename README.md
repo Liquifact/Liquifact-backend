@@ -317,6 +317,56 @@ To ensure reliable communication with Soroban contract provider APIs, this backe
 
 ---
 
+## Invoice Status State Machine
+
+To enforce a deterministic lifecycle, invoice statuses follow a strict state machine.
+
+### Allowed Statuses
+- `draft`: Initial upload, not yet verified.
+- `pending_verification`: Undergoing manual or automated review.
+- `approved`: Validated and available on the platform for funding.
+- `funded`: Funds allocated/escrowed from buyer or investors.
+- `settled`: Completed transaction on Stellar.
+- `closed`: Terminal state for cancellation or completion.
+
+### Valid Transitions
+| Current Status | Allowed Next Status(es) |
+|---|---|
+| `draft` | `pending_verification` |
+| `pending_verification` | `approved` |
+| `approved` | `funded` |
+| `funded` | `settled` |
+| `settled` | `closed` |
+| `closed` | *(Terminal, no transitions permitted)* |
+
+### Example API Request
+To transition an invoice status, send a `PATCH` request to:
+**`PATCH /api/invoices/:id/status`**
+
+```json
+// Request Body
+{
+  "currentStatus": "draft",
+  "nextStatus": "pending_verification"
+}
+
+// Sucessful Response (200 OK)
+{
+  "data": {
+    "id": "123",
+    "status": "pending_verification"
+  },
+  "message": "Invoice status successfully transitioned"
+}
+
+// Invalid Transition Response (400 Bad Request)
+{
+  "error": "Invalid status transition from draft to funded"
+}
+```
+
+---
+
 ## Invoice Filtering & Sorting
 
 Endpoint: GET /invoices

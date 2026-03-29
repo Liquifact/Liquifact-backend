@@ -5,9 +5,7 @@
  * Express server bootstrap for invoice financing, auth, and Stellar integration.
  */
 
- * Express app configuration for invoice financing, auth, and Stellar integration.
- * Server startup lives in server.js so this module can be imported cleanly in tests.
- */
+
 
 const express = require('express');
 const cors = require('cors');
@@ -25,7 +23,7 @@ const { callSorobanContract } = require('./services/soroban');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-const app = express();
+
 
 /**
  * Global Middlewares

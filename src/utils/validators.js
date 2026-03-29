@@ -4,6 +4,8 @@
  * Provides functions to validate incoming query parameters.
  */
 
+const { ALLOWED_STATUSES } = require('./invoiceStateMachine');
+
 /**
  * Validates invoice query parameters.
  * 
@@ -29,11 +31,10 @@ function validateInvoiceQueryParams(query) {
 
   // Validate status
   if (status !== undefined) {
-    const validStatuses = ['paid', 'pending', 'overdue'];
-    if (validStatuses.includes(status)) {
+    if (ALLOWED_STATUSES.includes(status)) {
       validatedParams.filters.status = status;
     } else {
-      errors.push(`Invalid status. Must be one of: ${validStatuses.join(', ')}`);
+      errors.push(`Invalid status. Must be one of: ${ALLOWED_STATUSES.join(', ')}`);
     }
   }
 

@@ -32,11 +32,11 @@ describe('Invoice API Integration', () => {
     it('should filter by status', async () => {
       invoiceService.getInvoices.mockResolvedValue([]);
       
-      const res = await request(app).get('/api/invoices?status=paid');
+      const res = await request(app).get('/api/invoices?status=draft');
 
       expect(res.statusCode).toBe(200);
       expect(invoiceService.getInvoices).toHaveBeenCalledWith({
-        filters: { status: 'paid' },
+        filters: { status: 'draft' },
         sorting: {}
       });
     });
@@ -81,7 +81,7 @@ describe('Invoice API Integration', () => {
       const res = await request(app).get('/api/invoices?status=invalid');
 
       expect(res.statusCode).toBe(400);
-      expect(res.body.errors).toContain('Invalid status. Must be one of: paid, pending, overdue');
+      expect(res.body.errors).toContain('Invalid status. Must be one of: draft, pending_verification, approved, funded, settled, closed');
       expect(invoiceService.getInvoices).not.toHaveBeenCalled();
     });
 
@@ -106,6 +106,45 @@ describe('Invoice API Integration', () => {
 
       expect(res.statusCode).toBe(500);
       expect(res.body.error).toBe('Internal server error');
+    });
+  });
+
+  describe('PATCH /api/invoices/:id/status', () => {
+    it('should allow valid status transition', async () => {
+      const res = await request(app)
+        .patch('/api/invoices/123/status')
+        .send({ currentStatus: 'draft', nextStatus: 'pending_verification' });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.body.message).toBe('Invoice status successfully transitioned');
+      expect(res.body.data).toEqual({ id: '123', status: 'pending_verification' });
+    });
+
+    it('should reject transition if fields are missing', async () => {
+      const res = await request(app)
+        .patch('/api/invoices/123/status')
+        .send({ currentStatus: 'draft' }); // missing nextStatus
+
+      expect(res.statusCode).toBe(400);
+      expect(res.body.error).toBe('Both currentStatus and nextStatus are required in request body');
+    });
+
+    it('should reject algorithmically invalid transition', async () => {
+      const res = await request(app)
+        .patch('/api/invoices/123/status')
+        .send({ currentStatus: 'draft', nextStatus: 'funded' });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.body.error).toBe('Invalid status transition from draft to funded');
+    });
+
+    it('should reject unknown statuses', async () => {
+      const res = await request(app)
+        .patch('/api/invoices/123/status')
+        .send({ currentStatus: 'unknown', nextStatus: 'draft' });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.body.error).toBe('Invalid current status: unknown');
     });
   });
 });
