@@ -36,7 +36,14 @@ function legalHoldGate(options = {}) {
     }
 
     try {
-      const held = await fetchLegalHold(invoiceId.trim(), legalHoldAdapter);
+      let held;
+      if (legalHoldAdapter) {
+        // Use adapter directly so errors propagate to next(err)
+        const result = await legalHoldAdapter(invoiceId.trim());
+        held = result === true || result === 1 || result === 'true';
+      } else {
+        held = await fetchLegalHold(invoiceId.trim());
+      }
 
       if (held) {
         logger.warn(
@@ -48,8 +55,6 @@ function legalHoldGate(options = {}) {
 
       return next();
     } catch (err) {
-      // Surface unexpected errors through the standard error handler;
-      // never leak stack traces to the client.
       logger.error(
         { errCode: err && err.code },
         'legalHoldGate: unexpected error during legal-hold check',

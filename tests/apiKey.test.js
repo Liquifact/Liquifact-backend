@@ -4,12 +4,14 @@
  * Tests for API key authentication middleware.
  */
 
-const { apiKeyAuth, hashApiKey, initDb } = require('../src/middleware/apiKey');
-const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 
-// Mock DB for tests
+// Set DB path before requiring the middleware so it uses the test DB.
 const testDbPath = path.join(__dirname, 'test_api_keys.db');
+process.env.API_KEYS_DB_PATH = testDbPath;
+
+const { apiKeyAuth, hashApiKey, initDb } = require('../src/middleware/apiKey');
+const sqlite3 = require('sqlite3').verbose();
 
 describe('API Key Middleware', () => {
   beforeAll(async () => {

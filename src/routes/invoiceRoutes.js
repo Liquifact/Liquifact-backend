@@ -7,22 +7,22 @@ const invoiceService = require('../services/invoiceService');
  * Retrieve a single invoice by its ID.
  * Performs robust validation and authorization checks.
  */
-router.get('/:id', (req, res, next) => {
+router.get('/:id', async (req, res, next) => {
   const { id } = req.params;
-  const userId = req.headers['x-user-id']; // In a real app, this would be from auth/JWT middleware
+  const tenantId = req.tenantId; // From extractTenant middleware
 
-  // 1. Validation for missing user info (placeholder for auth middleware)
-  if (!userId) {
-    return res.status(401).json({ error: 'Unauthorized', message: 'User identification required' });
+  // 1. Validation for missing tenant info
+  if (!tenantId) {
+    return res.status(400).json({ error: 'Bad Request', message: 'Tenant context required' });
   }
 
-  // 2. Validation for input (simplified for this task)
+  // 2. Validation for input
   if (!id || id.trim() === '') {
     return res.status(400).json({ error: 'Bad Request', message: 'Missing or invalid invoice ID' });
   }
 
   try {
-    const invoice = invoiceService.getInvoiceById(id, userId);
+    const invoice = await invoiceService.getInvoiceById(id, tenantId);
 
     // 3. Not Found Handling
     if (!invoice) {
@@ -35,12 +35,7 @@ router.get('/:id', (req, res, next) => {
         message: 'Invoice retrieved successfully',
     });
   } catch (error) {
-    // 5. Authorization / Business Logic Error Handling
-    if (error.status === 403) {
-        return res.status(403).json({ error: 'Forbidden', message: 'You do not have access to this invoice.' });
-    }
-
-    // Pass unexpected errors to express error handler
+    // 5. Error Handling
     next(error);
   }
 });

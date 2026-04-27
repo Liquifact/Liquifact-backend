@@ -54,6 +54,8 @@ const opportunities = [
   },
 ];
 
+const { batchReadEscrowStates } = require('./escrowBatchRead');
+
 /**
  * Retrieves paginated list of investment opportunities.
  *
@@ -82,7 +84,64 @@ async function getOpportunities({ page = 1, limit = 10 } = {}) {
   };
 }
 
+/**
+ * Retrieves paginated list of investment opportunities using cursor-based
+ * pagination and enriches them with fresh on-chain data via batched reads.
+ *
+ * @param {Object} [options={}] - Pagination options.
+ * @param {string} [options.cursor] - The invoiceId cursor to start after.
+ * @param {number} [options.limit=10] - Number of items to retrieve.
+ * @returns {Promise<{data: Object[], meta: Object}>}
+ */
+async function listInvestments({ cursor, limit = 10 } = {}) {
+  const limitSize = Math.max(1, Math.min(100, parseInt(limit, 10) || 10));
+  
+  let startIndex = 0;
+  if (cursor) {
+    const index = opportunities.findIndex(o => o.invoiceId === cursor);
+    if (index !== -1) {
+      startIndex = index + 1;
+    }
+  }
+  
+  const paginatedItems = opportunities.slice(startIndex, startIndex + limitSize);
+  const invoiceIds = paginatedItems.map(o => o.invoiceId);
+  
+  // Batch read on-chain state for the current page
+  const { results, errors } = await batchReadEscrowStates(invoiceIds);
+  
+  // Merge on-chain state into the opportunity objects
+  const data = paginatedItems.map(item => {
+    const onChainState = results.find(r => r.invoiceId === item.invoiceId);
+    const errorState = errors.find(e => e.invoiceId === item.invoiceId);
+    
+    return {
+      ...item,
+      onChain: {
+        ...item.onChain,
+        ...(onChainState || {}),
+        syncError: errorState ? errorState.error : null,
+      }
+    };
+  });
+  
+  const nextCursor = data.length > 0 && (startIndex + data.length < opportunities.length)
+    ? data[data.length - 1].invoiceId
+    : null;
+
+  return {
+    data,
+    meta: {
+      limit: limitSize,
+      next_cursor: nextCursor,
+      count: data.length,
+      has_more: !!nextCursor,
+    },
+  };
+}
+
 module.exports = {
   getOpportunities,
+  listInvestments,
   opportunities, // Export for tests
 };

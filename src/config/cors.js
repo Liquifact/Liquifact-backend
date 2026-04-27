@@ -74,7 +74,8 @@ function parseAllowedOrigins(raw) {
  * @returns {string[]} Origins to allow for browser requests with an Origin header.
  */
 function getAllowedOriginsFromEnv(env = process.env) {
-  const fromEnv = parseAllowedOrigins(env.CORS_ORIGINS);
+  // Accept both CORS_ALLOWED_ORIGINS and CORS_ORIGINS for compatibility.
+  const fromEnv = parseAllowedOrigins(env.CORS_ALLOWED_ORIGINS || env.CORS_ORIGINS);
   if (fromEnv.length > 0) {
     return fromEnv;
   }
