@@ -7,6 +7,13 @@ const MAX_TTL_SECONDS = 300;
 const DEFAULT_LEDGER_GAP_THRESHOLD = 3;
 const MAX_LEDGER_GAP_THRESHOLD = 1000;
 
+/**
+ *
+ * @param rawValue
+ * @param fallback
+ * @param min
+ * @param max
+ */
 function parsePositiveInt(rawValue, fallback, min, max) {
   const parsed = Number.parseInt(String(rawValue || ''), 10);
   if (!Number.isFinite(parsed)) {
@@ -15,6 +22,10 @@ function parsePositiveInt(rawValue, fallback, min, max) {
   return Math.min(Math.max(parsed, min), max);
 }
 
+/**
+ *
+ * @param env
+ */
 function parseRedisEscrowCacheConfig(env = process.env) {
   const enabled = String(env.REDIS_ESCROW_CACHE_ENABLED || '').toLowerCase() === 'true';
   const redisUrl = env.REDIS_URL || '';
@@ -37,6 +48,11 @@ function parseRedisEscrowCacheConfig(env = process.env) {
   };
 }
 
+/**
+ *
+ * @param config
+ * @param RedisCtor
+ */
 function createRedisClient(config = parseRedisEscrowCacheConfig(), RedisCtor) {
   if (!config.enabled) {
     return null;
@@ -50,11 +66,23 @@ function createRedisClient(config = parseRedisEscrowCacheConfig(), RedisCtor) {
   });
 }
 
+/**
+ *
+ * @param invoiceId
+ */
 function isValidInvoiceId(invoiceId) {
   return typeof invoiceId === 'string' && /^[a-zA-Z0-9:_-]{1,128}$/.test(invoiceId);
 }
 
 class RedisEscrowSummaryCache {
+  /**
+   *
+   * @param root0
+   * @param root0.client
+   * @param root0.ttlSeconds
+   * @param root0.ledgerGapThreshold
+   * @param root0.keyPrefix
+   */
   constructor({
     client,
     ttlSeconds = DEFAULT_TTL_SECONDS,
@@ -67,10 +95,19 @@ class RedisEscrowSummaryCache {
     this.keyPrefix = keyPrefix;
   }
 
+  /**
+   *
+   * @param invoiceId
+   */
   key(invoiceId) {
     return `${this.keyPrefix}:${invoiceId}`;
   }
 
+  /**
+   *
+   * @param invoiceId
+   * @param currentLedger
+   */
   async getSummary(invoiceId, currentLedger) {
     if (!this.client || !isValidInvoiceId(invoiceId)) {
       return { hit: false, reason: 'invalid_input' };
@@ -100,6 +137,12 @@ class RedisEscrowSummaryCache {
     }
   }
 
+  /**
+   *
+   * @param invoiceId
+   * @param summary
+   * @param currentLedger
+   */
   async setSummary(invoiceId, summary, currentLedger) {
     if (!this.client || !isValidInvoiceId(invoiceId)) {
       return false;
@@ -121,6 +164,13 @@ class RedisEscrowSummaryCache {
   }
 }
 
+/**
+ *
+ * @param root0
+ * @param root0.env
+ * @param root0.client
+ * @param root0.RedisCtor
+ */
 function createRedisEscrowSummaryCache({ env = process.env, client, RedisCtor } = {}) {
   const config = parseRedisEscrowCacheConfig(env);
   const redisClient = client || createRedisClient(config, RedisCtor);

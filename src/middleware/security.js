@@ -138,6 +138,10 @@
 'use strict';
 
 const helmet = require('helmet');
+/**
+ *
+ * @param options
+ */
 function createSecurityMiddleware(options = {}) {
   const isTest = process.env.NODE_ENV === 'test';
 

@@ -75,6 +75,10 @@ const paginationQuerySchema = z.object({
   }).optional(),
 });
 
+/**
+ *
+ * @param zodError
+ */
 function parseValidationErrors(zodError) {
   const fieldErrors = {};
   
@@ -90,6 +94,10 @@ function parseValidationErrors(zodError) {
   return fieldErrors;
 }
 
+/**
+ *
+ * @param schema
+ */
 function validateBody(schema) {
   return (req, res, next) => {
     try {
@@ -109,6 +117,10 @@ function validateBody(schema) {
   };
 }
 
+/**
+ *
+ * @param schema
+ */
 function validateQuery(schema) {
   return (req, res, next) => {
     try {

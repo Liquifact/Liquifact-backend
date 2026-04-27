@@ -11,6 +11,10 @@ const DEFAULT_CONFIG = {
   feeBumpMultiplier: Math.min(parseFloat(process.env.SOROBAN_TX_FEE_BUMP_MULTIPLIER || '2'), 10),
 };
 
+/**
+ *
+ * @param err
+ */
 function isRetryableSubmitError(err) {
   if (!err || typeof err !== 'object') {
     return false;
@@ -34,11 +38,22 @@ function isRetryableSubmitError(err) {
   return false;
 }
 
+/**
+ *
+ * @param attempt
+ * @param baseDelay
+ * @param maxDelay
+ */
 function computeTxBackoff(attempt, baseDelay, maxDelay) {
   const delay = Math.min(baseDelay * 2 ** attempt, maxDelay);
   return Math.max(0, delay);
 }
 
+/**
+ *
+ * @param operation
+ * @param config
+ */
 async function submitWithRetry(operation, config = {}) {
   const cfg = { ...DEFAULT_CONFIG, ...config };
   let lastError;
@@ -61,6 +76,12 @@ async function submitWithRetry(operation, config = {}) {
   throw lastError;
 }
 
+/**
+ *
+ * @param job
+ * @param submitTransactionFn
+ * @param config
+ */
 async function handleTxSubmitJob(job, submitTransactionFn, config = {}) {
   if (!job || typeof job.payload !== 'object' || job.payload === null) {
     throw new Error('Invalid tx submit job payload');
@@ -79,6 +100,11 @@ async function handleTxSubmitJob(job, submitTransactionFn, config = {}) {
   }, config);
 }
 
+/**
+ *
+ * @param submitTransactionFn
+ * @param options
+ */
 function createTxSubmitterWorker(submitTransactionFn, options = {}) {
   const txQueue = new JobQueue({ maxRetries: 0 });
   const txWorker = new BackgroundWorker({ jobQueue: txQueue, pollIntervalMs: options.pollIntervalMs ?? 100, maxConcurrency: options.maxConcurrency ?? 1 });

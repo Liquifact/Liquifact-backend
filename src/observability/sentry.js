@@ -20,6 +20,10 @@ const SENSITIVE_FIELD_NAMES = [
 const REDACTED = '[REDACTED]';
 const REDACTED_INVOICE = '[REDACTED-INVOICE]';
 
+/**
+ *
+ * @param key
+ */
 function isSensitiveField(key) {
   if (!key || typeof key !== 'string') {
     return false;
@@ -28,6 +32,11 @@ function isSensitiveField(key) {
   return SENSITIVE_FIELD_NAMES.some((name) => key.toLowerCase().includes(name));
 }
 
+/**
+ *
+ * @param key
+ * @param value
+ */
 function redactValue(key, value) {
   if (value == null) {
     return value;
@@ -56,6 +65,10 @@ function redactValue(key, value) {
   return value;
 }
 
+/**
+ *
+ * @param value
+ */
 function looksLikeSensitiveToken(value) {
   if (typeof value !== 'string') {
     return false;
@@ -70,6 +83,10 @@ function looksLikeSensitiveToken(value) {
   return tokenPatterns.some((pattern) => pattern.test(value));
 }
 
+/**
+ *
+ * @param obj
+ */
 function scrubObject(obj) {
   if (obj == null || typeof obj !== 'object') {
     return obj;
@@ -91,6 +108,10 @@ function scrubObject(obj) {
   return output;
 }
 
+/**
+ *
+ * @param headers
+ */
 function scrubHeaders(headers) {
   if (!headers || typeof headers !== 'object') {
     return headers;
@@ -108,6 +129,10 @@ function scrubHeaders(headers) {
   return scrubbed;
 }
 
+/**
+ *
+ * @param event
+ */
 function scrubEvent(event) {
   if (!event || typeof event !== 'object') {
     return event;
@@ -146,6 +171,9 @@ function scrubEvent(event) {
   return safeEvent;
 }
 
+/**
+ *
+ */
 function initSentry() {
   if (!SENTRY_DSN) {
     return;
@@ -168,11 +196,14 @@ function initSentry() {
   } catch (err) {
     enabled = false;
     // Avoid breaking startup if Sentry cannot be loaded or initialized.
-    // eslint-disable-next-line no-console
+     
     console.warn('Sentry initialization failed:', err.message || err);
   }
 }
 
+/**
+ *
+ */
 function requestHandler() {
   if (!enabled || !Sentry || !Sentry.Handlers || !Sentry.Handlers.requestHandler) {
     return (req, res, next) => next();
@@ -181,6 +212,11 @@ function requestHandler() {
   return Sentry.Handlers.requestHandler();
 }
 
+/**
+ *
+ * @param error
+ * @param req
+ */
 function captureException(error, req) {
   if (!enabled || !Sentry || !Sentry.withScope || !Sentry.captureException) {
     return;

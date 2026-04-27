@@ -135,7 +135,7 @@ function adminAuth(req, res, next) {
 //     const { amount, customer } = req.body;
 
 //     if (!amount || !customer) {
-//       return res.status(400).json({ error: 'Amount and customer are required' });
+//         return res.status(400).json({ error: 'Amount and customer are required' });
 //     }
 
 //     const newInvoice = {
@@ -354,6 +354,10 @@ const PORT = process.env.PORT || 3001;
 // In-memory storage
 let invoices = [];
 
+/**
+ *
+ * @param value
+ */
 function parseLedgerSequence(value) {
   if (value === undefined || value === null || value === '') {
     return null;
@@ -365,6 +369,10 @@ function parseLedgerSequence(value) {
   return parsed;
 }
 
+/**
+ *
+ * @param options
+ */
 function createApp(options = {}) {
   const { enableTestRoutes = false } = options;
 
@@ -379,8 +387,8 @@ function createApp(options = {}) {
       logger,
       genReqId: (req) => req.id,
       customLogLevel: (req, res, err) => {
-        if (res.statusCode >= 500 || err) return 'error';
-        if (res.statusCode >= 400) return 'warn';
+        if (res.statusCode >= 500 || err) {return 'error';}
+        if (res.statusCode >= 400) {return 'warn';}
         return 'info';
       },
       serializers: {
@@ -600,12 +608,18 @@ const app = createApp({
   enableTestRoutes: process.env.NODE_ENV === 'test',
 });
 
+/**
+ *
+ */
 function startServer() {
   return app.listen(PORT, () => {
     logger.warn(`API running at http://localhost:${PORT}`);
   });
 }
 
+/**
+ *
+ */
 function resetStore() {
   invoices.length = 0;
 }
