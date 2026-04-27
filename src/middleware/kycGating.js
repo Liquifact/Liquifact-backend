@@ -25,6 +25,7 @@ const logger = require('../logger');
  * @param {Object} req - Express request object
  * @param {Object} res - Express response object  
  * @param {Function} next - Express next middleware
+ * @returns {void}
  * @throws {AppError} 403 if KYC requirements not met
  */
 async function requireKycForFunding(req, res, next) {
@@ -123,6 +124,10 @@ async function requireKycForFunding(req, res, next) {
 /**
  * Optional: Middleware to log KYC checks for audit trails
  * Attach to general routes to track KYC interactions
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @param {Function} next - Express next middleware
+ * @returns {void}
  */
 async function auditKycAccess(req, res, next) {
   // Extract KYC info if available

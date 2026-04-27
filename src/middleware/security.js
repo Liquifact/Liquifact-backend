@@ -4,12 +4,10 @@ const helmet = require('helmet');
 
 /**
  * Creates and returns configured Helmet security middleware.
- * @param {Object} [options={}] Optional middleware configuration.
+ * @param {Object} [_options={}] Optional middleware configuration.
  * @returns {Function} Express middleware that sets secure HTTP response headers.
  */
-function createSecurityMiddleware(options = {}) {
-  const isTest = process.env.NODE_ENV === 'test';
-
+function createSecurityMiddleware(_options = {}) {
   return helmet({
     contentSecurityPolicy: {
       directives: {

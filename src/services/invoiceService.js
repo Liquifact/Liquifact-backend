@@ -5,6 +5,7 @@
  */
 
 const logger = require('../logger');
+const db = require('../db/knex');
 
 // Placeholder mock database (this would normally be a real database like PostgreSQL)
 const mockInvoices = [
@@ -144,6 +145,8 @@ const updateInvoiceStatus = async (id, status, tenantId) => {
  * @param {Object} options - Filter options
  * @param {string} options.userId - User ID for authorization
  * @param {string} options.kycStatus - Filter by KYC status (optional)
+ * @param userId
+ * @param kycStatus
  * @returns {Array} Invoices matching criteria
  */
 const getInvoicesByKycStatus = (userId, kycStatus) => {
@@ -195,6 +198,9 @@ const updateInvoiceKycStatus = (invoiceId, newKycStatus, kycRecordId = null) => 
 
 module.exports = {
   getInvoiceById,
+  getInvoices,
+  createInvoice,
+  updateInvoiceStatus,
   getInvoicesByKycStatus,
   updateInvoiceKycStatus,
   mockInvoices, // Exported for testing purposes

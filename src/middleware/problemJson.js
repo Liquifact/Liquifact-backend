@@ -208,14 +208,10 @@ function notFoundHandler(req, _res, next) {
  * @param {Object} [options={}] - Configuration options
  * @param {string} [options.problemBase] - Base URI for problem types
  * @param {boolean} [options.includeStackInDev=true] - Include stack traces in development
+ * @param _options
  * @returns {Function} Express error handler middleware
  */
-function createProblemJsonHandler(options = {}) {
-  const {
-    problemBase = LIQUifact_PROBLEM_BASE,
-    includeStackInDev = true,
-  } = options;
-
+function createProblemJsonHandler(_options = {}) {
   return (error, req, res, next) => {
     // Custom configuration can be handled here
     problemJsonHandler(error, req, res, next);

@@ -9,7 +9,6 @@
 const crypto = require('crypto');
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
-const AppError = require('../errors/AppError');
 const logger = require('../logger');
 
 // Database path - use environment variable or default
@@ -83,6 +82,7 @@ function updateAudit(keyId, action) {
  * @param {object} req - Express request.
  * @param {object} res - Express response.
  * @param {function} next - Next middleware.
+ * @returns {void}
  */
 async function apiKeyAuth(req, res, next) {
   const apiKey = req.headers['x-api-key'];

@@ -21,8 +21,9 @@ const REDACTED = '[REDACTED]';
 const REDACTED_INVOICE = '[REDACTED-INVOICE]';
 
 /**
- *
- * @param key
+ * Checks if a field key is sensitive.
+ * @param {string} key - Field key to check
+ * @returns {boolean} True if field is sensitive
  */
 function isSensitiveField(key) {
   if (!key || typeof key !== 'string') {
@@ -33,9 +34,10 @@ function isSensitiveField(key) {
 }
 
 /**
- *
- * @param key
- * @param value
+ * Redacts sensitive values based on field key.
+ * @param {string} key - Field key
+ * @param {*} value - Value to potentially redact
+ * @returns {*} Redacted value
  */
 function redactValue(key, value) {
   if (value == null) {
@@ -65,8 +67,9 @@ function redactValue(key, value) {
 }
 
 /**
- *
- * @param value
+ * Checks if a value looks like a sensitive token.
+ * @param {*} value - Value to check
+ * @returns {boolean} True if value looks like a token
  */
 function looksLikeSensitiveToken(value) {
   if (typeof value !== 'string') {
@@ -83,8 +86,9 @@ function looksLikeSensitiveToken(value) {
 }
 
 /**
- *
- * @param obj
+ * Scrubs sensitive data from an object.
+ * @param {Object} obj - Object to scrub
+ * @returns {Object} Scrubbed object
  */
 function scrubObject(obj) {
   if (obj == null || typeof obj !== 'object') {
@@ -108,8 +112,9 @@ function scrubObject(obj) {
 }
 
 /**
- *
- * @param headers
+ * Scrubs sensitive data from HTTP headers.
+ * @param {Object} headers - HTTP headers object
+ * @returns {Object} Scrubbed headers
  */
 function scrubHeaders(headers) {
   if (!headers || typeof headers !== 'object') {
@@ -129,8 +134,9 @@ function scrubHeaders(headers) {
 }
 
 /**
- *
- * @param event
+ * Scrubs sensitive data from Sentry event.
+ * @param {Object} event - Sentry event object
+ * @returns {Object} Scrubbed event
  */
 function scrubEvent(event) {
   if (!event || typeof event !== 'object') {
@@ -171,7 +177,8 @@ function scrubEvent(event) {
 }
 
 /**
- *
+ * Initializes Sentry error tracking.
+ * @returns {void}
  */
 function initSentry() {
   if (!SENTRY_DSN) {
@@ -201,7 +208,8 @@ function initSentry() {
 }
 
 /**
- *
+ * Returns Sentry request handler middleware.
+ * @returns {Function} Express middleware
  */
 function requestHandler() {
   if (!enabled || !Sentry || !Sentry.Handlers || !Sentry.Handlers.requestHandler) {
@@ -212,9 +220,10 @@ function requestHandler() {
 }
 
 /**
- *
- * @param error
- * @param req
+ * Captures exception with Sentry and request context.
+ * @param {Error} error - Error to capture
+ * @param {Object} req - Express request object
+ * @returns {void}
  */
 function captureException(error, req) {
   if (!enabled || !Sentry || !Sentry.withScope || !Sentry.captureException) {

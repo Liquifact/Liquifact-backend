@@ -387,6 +387,7 @@ describe('Invest Routes - KYC Gating Tests', () => {
           },
         });
       });
+  });
 
   describe('POST /api/invest/fund-invoice - KYC Verification', () => {
     it('should fund invoice when KYC is verified', async () => {
@@ -620,3 +621,5 @@ describe('Invoice Schema Validation Tests', () => {
     });
   });
 });
+
+

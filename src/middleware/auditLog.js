@@ -4,6 +4,11 @@ const { appendAuditEvent, redactValue } = require('../services/auditLogStore');
 
 const MUTATION_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
+/**
+ * Extracts actor information from request.
+ * @param {Object} req - Express request object
+ * @returns {Object} Actor type and ID
+ */
 function getActor(req) {
   if (req.user && typeof req.user === 'object') {
     if (req.user.id) {
@@ -21,10 +26,20 @@ function getActor(req) {
   return { actorType: 'system', actorId: req.ip || 'unknown' };
 }
 
+/**
+ * Checks if request is an admin action.
+ * @param {Object} req - Express request object
+ * @returns {boolean} True if admin action
+ */
 function isAdminAction(req) {
   return req.path.startsWith('/api/admin/');
 }
 
+/**
+ * Builds base audit event from request.
+ * @param {Object} req - Express request object
+ * @returns {Object} Base audit event
+ */
 function buildBaseEvent(req) {
   const actor = getActor(req);
   return {
@@ -37,6 +52,11 @@ function buildBaseEvent(req) {
   };
 }
 
+/**
+ * Creates audit context with logging methods.
+ * @param {Object} req - Express request object
+ * @returns {Object} Audit context with logAdminAction and logWebhookDelivery methods
+ */
 function createAuditContext(req) {
   const baseEvent = buildBaseEvent(req);
 
@@ -79,6 +99,13 @@ function createAuditContext(req) {
   };
 }
 
+/**
+ * Audit log middleware that attaches audit context to request.
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @param {Function} next - Express next middleware
+ * @returns {void}
+ */
 function auditLogMiddleware(req, res, next) {
   req.audit = createAuditContext(req);
 

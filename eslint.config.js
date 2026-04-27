@@ -22,7 +22,7 @@ module.exports = [
       'jsdoc/require-description': 'error',
       'jsdoc/require-returns': 'error',
       'jsdoc/require-param': 'error',
-      'no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+      'no-unused-vars': ['error', { argsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
       'no-undef': 'error',
       'curly': 'error',
     },

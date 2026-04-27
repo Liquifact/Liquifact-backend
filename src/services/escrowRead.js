@@ -234,12 +234,6 @@ async function readEscrowStateWithAttestations(invoiceId, options = {}) {
  * @param {string} invoiceId - Validated invoice identifier.
  * @param {Function} [adapter] - Optional async function for testing.
  * @returns {Promise<FundingCloseSnapshot | null>} Funding close snapshot data or null.
- */
- * Returns the snapshot data when it exists (Some), or null when it doesn't (None).
- *
- * @param {string} invoiceId - Validated invoice identifier.
- * @param {Function} [adapter] - Optional async function for testing.
- * @returns {Promise<FundingCloseSnapshot | null>} Funding close snapshot data or null.
  *
  * @typedef {object} FundingCloseSnapshot
  * @property {string|number} totalPrincipal - Total principal amount at funding close.

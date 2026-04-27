@@ -56,7 +56,7 @@ async function checkDatabaseHealth() {
  * 
  * @returns {Promise<{status: string, lastRun?: string, mismatches?: number, error?: string}>} Reconciliation health status.
  */
-async function checkReconciliationHealth() {
+async function _checkReconciliationHealth() {
   try {
     const { getReconciliationSummary } = require('../jobs/reconcileEscrow');
     const summary = getReconciliationSummary();
@@ -89,7 +89,7 @@ async function checkReconciliationHealth() {
  * @returns {Promise<{healthy: boolean, checks: Object}>}
  */
 async function performHealthChecks() {
-  const [soroban, database, reconciliation] = await Promise.all([
+  const [soroban, database] = await Promise.all([
     checkSorobanHealth(),
     checkDatabaseHealth(),
   ]);

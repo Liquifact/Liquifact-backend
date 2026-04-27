@@ -136,9 +136,10 @@ async function performReconciliation() {
  * Executed by the background worker.
  *
  * @param {Object} payload - Job payload (unused for now)
+ * @param _payload
  * @returns {Promise<Object>} Job result
  */
-async function handleReconciliationJob(payload) {
+async function handleReconciliationJob(_payload) {
   try {
     const summary = await performReconciliation();
     return { success: true, summary };
@@ -158,6 +159,7 @@ reconciliationWorker.registerHandler('reconcile_escrow', handleReconciliationJob
 /**
  * Schedule nightly reconciliation job.
  * In production, this would be called by a cron scheduler.
+ * @returns {string} Job ID of scheduled reconciliation
  */
 function scheduleNightlyReconciliation() {
   // For demo purposes, run immediately. In production, schedule for nightly run.

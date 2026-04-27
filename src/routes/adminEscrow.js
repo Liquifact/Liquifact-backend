@@ -18,6 +18,10 @@ const logger = require('../logger');
 
 /**
  * Accepts either a valid admin JWT or a valid API key.
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @param {Function} next - Express next middleware
+ * @returns {void}
  */
 function adminAuth(req, res, next) {
   if (req.headers['x-api-key']) {

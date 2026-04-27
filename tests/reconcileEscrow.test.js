@@ -1,3 +1,4 @@
+const { callSorobanContract } = require('../src/services/soroban');
 const {
   performReconciliation,
   reconcileInvoice,
@@ -6,11 +7,16 @@ const {
   RECONCILE_STATUS,
 } = require('../src/jobs/reconcileEscrow');
 
+jest.mock('../src/services/soroban', () => ({
+  callSorobanContract: jest.fn((op) => op()),
+}));
+
 describe('Escrow Reconciliation Job', () => {
   beforeEach(() => {
     // Clear global state
     delete global.reconciliationSummary;
     jest.clearAllMocks();
+    callSorobanContract.mockImplementation((op) => op());
   });
 
   describe('reconcileInvoice', () => {
@@ -38,8 +44,7 @@ describe('Escrow Reconciliation Job', () => {
 
     it('returns ERROR status when on-chain call fails', async () => {
       // Mock the soroban service to throw
-      const originalCallSorobanContract = require('../src/services/soroban').callSorobanContract;
-      require('../src/services/soroban').callSorobanContract = jest.fn().mockRejectedValue(new Error('Network error'));
+      callSorobanContract.mockRejectedValue(new Error('Network error'));
 
       const result = await reconcileInvoice('inv_1', 1000);
       expect(result).toEqual({
@@ -50,9 +55,6 @@ describe('Escrow Reconciliation Job', () => {
         error: 'Network error',
         reconciledAt: expect.any(String),
       });
-
-      // Restore
-      require('../src/services/soroban').callSorobanContract = originalCallSorobanContract;
     });
   });
 
@@ -79,8 +81,7 @@ describe('Escrow Reconciliation Job', () => {
 
     it('handles errors in reconciliation', async () => {
       // Mock soroban to fail for all
-      const originalCallSorobanContract = require('../src/services/soroban').callSorobanContract;
-      require('../src/services/soroban').callSorobanContract = jest.fn().mockRejectedValue(new Error('RPC down'));
+      callSorobanContract.mockRejectedValue(new Error('RPC down'));
 
       const summary = await performReconciliation();
 
@@ -88,9 +89,6 @@ describe('Escrow Reconciliation Job', () => {
       expect(summary.errors).toBe(3);
       expect(summary.matches).toBe(0);
       expect(summary.mismatches).toBe(0);
-
-      // Restore
-      require('../src/services/soroban').callSorobanContract = originalCallSorobanContract;
     });
   });
 

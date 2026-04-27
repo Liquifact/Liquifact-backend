@@ -14,6 +14,11 @@ const SENSITIVE_KEY_PATTERNS = [
   /mnemonic/i,
 ];
 
+/**
+ * Redacts sensitive values from data.
+ * @param {*} value - Value to redact
+ * @returns {*} Redacted value
+ */
 function redactValue(value) {
   if (value === null || value === undefined) {
     return value;
@@ -38,6 +43,11 @@ function redactValue(value) {
   return sanitized;
 }
 
+/**
+ * Normalizes and redacts metadata object.
+ * @param {Object} metadata - Metadata to normalize
+ * @returns {Object} Normalized metadata
+ */
 function normalizeMetadata(metadata) {
   if (!metadata || typeof metadata !== 'object') {
     return {};
@@ -45,6 +55,11 @@ function normalizeMetadata(metadata) {
   return redactValue(metadata);
 }
 
+/**
+ * Appends an audit event to the database.
+ * @param {Object} event - Audit event data
+ * @returns {Promise<Object>} Created audit event record
+ */
 async function appendAuditEvent(event) {
   const record = {
     event_type: event.eventType,

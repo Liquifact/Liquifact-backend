@@ -54,7 +54,7 @@ async function batchReadEscrowStates(invoiceIds, options = {}) {
   let cfg;
   try {
     cfg = config.get();
-  } catch (err) {
+  } catch (_err) {
     // Fallback for tests or before config is validated
     cfg = {
       SOROBAN_BATCH_CONCURRENCY: 5,
@@ -80,7 +80,7 @@ async function batchReadEscrowStates(invoiceIds, options = {}) {
   async function worker() {
     while (remainingIds.length > 0) {
       const id = remainingIds.shift();
-      if (!id) continue;
+      if (!id) {continue;}
 
       try {
         // Isolation: Each call is wrapped in its own try/catch and timeout

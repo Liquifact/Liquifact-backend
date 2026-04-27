@@ -26,9 +26,9 @@ const EscrowMappingEntrySchema = z.object({
     .min(1, 'Escrow address cannot be empty')
     .regex(/^G[A-Z0-9]{55}$/, 'Invalid Stellar address format - must start with G and be 56 characters'),
   environment: z.string()
+    .regex(/^(development|staging|production)$/, 'Environment must be development, staging, or production')
     .optional()
-    .default('development')
-    .regex(/^(development|staging|production)$/, 'Environment must be development, staging, or production'),
+    .default('development'),
   isActive: z.boolean()
     .default(true)
 });
@@ -42,8 +42,8 @@ const EscrowMappingConfigSchema = z.object({
     .min(0, 'Mappings array cannot be negative')
     .max(1000, 'Too many mappings - maximum 1000 allowed'),
   defaultEnvironment: z.string()
-    .default('development')
-    .regex(/^(development|staging|production)$/, 'Default environment must be valid'),
+    .regex(/^(development|staging|production)$/, 'Default environment must be valid')
+    .default('development'),
   allowlistEnabled: z.boolean()
     .default(true),
   cacheEnabled: z.boolean()
@@ -106,7 +106,7 @@ function getCurrentEnvironment() {
   try {
     const config = getConfig();
     return config.NODE_ENV || 'development';
-  } catch (error) {
+  } catch (_error) {
     // Config not validated, fall back to environment variable
     return process.env.NODE_ENV || 'development';
   }

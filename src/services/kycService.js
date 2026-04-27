@@ -23,6 +23,7 @@ const mockKycRecords = new Map();
 /**
  * Configuration for external KYC provider
  * Loaded from environment variables
+ * @returns {Object} KYC provider configuration
  */
 const getKycProviderConfig = () => {
   return {
@@ -39,9 +40,10 @@ const getKycProviderConfig = () => {
  * 
  * @param {string} smeId - The SME identifier
  * @param {Object} smeData - SME data (name, email, etc.)
+ * @param _smeData
  * @returns {Promise<{status: string, recordId: string, verifiedAt: string}>}
  */
-async function verifyWithExternalProvider(smeId, smeData) {
+async function verifyWithExternalProvider(smeId, _smeData) {
   const config = getKycProviderConfig();
   
   if (!config.enabled) {
@@ -221,6 +223,10 @@ function canFundWithKycStatus(kycStatus) {
   return kycStatus === KYC_STATUSES.VERIFIED || kycStatus === KYC_STATUSES.EXEMPTED;
 }
 
+/**
+ * Resets mock KYC records (for testing).
+ * @returns {void}
+ */
 function resetMockRecords() {
   mockKycRecords.clear();
 }

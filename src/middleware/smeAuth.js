@@ -7,6 +7,10 @@ const STELLAR_ADDRESS_RE = /^G[A-Z2-7]{55}$/;
 /**
  * Middleware: verifies the authenticated user has a bound Stellar wallet address.
  * Accepts wallet from req.user.walletAddress or x-stellar-address header (stub).
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @param {Function} next - Express next middleware
+ * @returns {void}
  */
 function authorizeSmeWallet(req, res, next) {
   if (!req.user) {
@@ -45,6 +49,7 @@ function authorizeSmeWallet(req, res, next) {
 /**
  * Middleware factory: verifies the authenticated user owns the invoice.
  * @param {Array} invoices - Invoice collection to check against.
+ * @returns {Function} Express middleware function
  */
 function verifyInvoiceOwner(invoices) {
   return function (req, res, next) {

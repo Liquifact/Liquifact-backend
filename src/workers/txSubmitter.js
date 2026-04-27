@@ -12,8 +12,9 @@ const DEFAULT_CONFIG = {
 };
 
 /**
- *
- * @param err
+ * Determines if a transaction submission error is retryable.
+ * @param {Error} err - Error to check
+ * @returns {boolean} True if error is retryable
  */
 function isRetryableSubmitError(err) {
   if (!err || typeof err !== 'object') {
@@ -39,10 +40,11 @@ function isRetryableSubmitError(err) {
 }
 
 /**
- *
- * @param attempt
- * @param baseDelay
- * @param maxDelay
+ * Computes exponential backoff delay for transaction retries.
+ * @param {number} attempt - Current attempt number
+ * @param {number} baseDelay - Base delay in milliseconds
+ * @param {number} maxDelay - Maximum delay in milliseconds
+ * @returns {number} Delay in milliseconds
  */
 function computeTxBackoff(attempt, baseDelay, maxDelay) {
   const delay = Math.min(baseDelay * 2 ** attempt, maxDelay);
@@ -50,9 +52,10 @@ function computeTxBackoff(attempt, baseDelay, maxDelay) {
 }
 
 /**
- *
- * @param operation
- * @param config
+ * Executes a transaction submission operation with retry logic.
+ * @param {Function} operation - Operation to execute
+ * @param {Object} [config] - Retry configuration
+ * @returns {Promise<*>} Operation result
  */
 async function submitWithRetry(operation, config = {}) {
   const cfg = { ...DEFAULT_CONFIG, ...config };
@@ -77,10 +80,11 @@ async function submitWithRetry(operation, config = {}) {
 }
 
 /**
- *
- * @param job
- * @param submitTransactionFn
- * @param config
+ * Handles a transaction submission job from the queue.
+ * @param {Object} job - Job payload
+ * @param {Function} submitTransactionFn - Transaction submission function
+ * @param {Object} [config] - Retry configuration
+ * @returns {Promise<Object>} Job result
  */
 async function handleTxSubmitJob(job, submitTransactionFn, config = {}) {
   if (!job || typeof job.payload !== 'object' || job.payload === null) {
@@ -101,9 +105,10 @@ async function handleTxSubmitJob(job, submitTransactionFn, config = {}) {
 }
 
 /**
- *
- * @param submitTransactionFn
- * @param options
+ * Creates a transaction submitter worker instance.
+ * @param {Function} submitTransactionFn - Transaction submission function
+ * @param {Object} [options] - Worker configuration options
+ * @returns {Object} Transaction submitter worker
  */
 function createTxSubmitterWorker(submitTransactionFn, options = {}) {
   const txQueue = new JobQueue({ maxRetries: 0 });
