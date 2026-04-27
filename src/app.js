@@ -199,6 +199,59 @@ function createApp() {
     }
   });
 
+  // Escrow Snapshot — GET funding close snapshot by invoiceId
+  app.get('/api/escrow/:invoiceId/snapshot', async (req, res) => {
+    const invoiceId = String(req.params.invoiceId || '')
+      .trim()
+      .replace(/\s+/g, '');
+
+    try {
+      // Import the escrowRead service
+      const { fetchFundingCloseSnapshot, validateInvoiceId } = require('./services/escrowRead');
+      
+      // Validate invoice ID
+      const { valid, reason } = validateInvoiceId(invoiceId);
+      if (!valid) {
+        return res.status(400).json({ 
+          error: 'Invalid invoice ID',
+          details: reason 
+        });
+      }
+
+      // Fetch funding close snapshot
+      const snapshot = await fetchFundingCloseSnapshot(invoiceId);
+
+      res.json({
+        data: {
+          snapshot
+        },
+        message: snapshot 
+          ? 'Funding close snapshot retrieved successfully.' 
+          : 'No funding close snapshot found for this invoice.',
+      });
+    } catch (error) {
+      // Handle specific error types
+      if (error.code === 'INVALID_INVOICE_ID') {
+        return res.status(400).json({ 
+          error: 'Invalid invoice ID',
+          details: error.message 
+        });
+      }
+      
+      // Log the error for debugging
+      const logger = require('./logger');
+      logger.error({ 
+        invoiceId, 
+        error: error.message,
+        stack: error.stack 
+      }, 'Error fetching funding close snapshot');
+
+      res.status(500).json({ 
+        error: 'Internal server error while fetching funding snapshot' 
+      });
+    }
+  });
+
   /**
    * Simulated error route for testing error handling middleware.
    *

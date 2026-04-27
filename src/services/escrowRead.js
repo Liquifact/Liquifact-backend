@@ -229,10 +229,134 @@ async function readEscrowStateWithAttestations(invoiceId, options = {}) {
   };
 }
 
+/**
+ * Fetches the funding close snapshot from the Soroban contract.
+ * Returns the snapshot data when it exists (Some), or null when it doesn't (None).
+ *
+ * @param {string} invoiceId - Validated invoice identifier.
+ * @param {Function} [adapter] - Optional async function for testing.
+ * @returns {Promise<FundingCloseSnapshot | null>} Funding close snapshot data or null.
+ *
+ * @typedef {object} FundingCloseSnapshot
+ * @property {string|number} totalPrincipal - Total principal amount at funding close.
+ * @property {string|number} fundingTarget - Funding target amount.
+ * @property {number} closedAtLedger - Ledger sequence number when funding closed.
+ * @property {number} closedAtSeq - Sequence number when funding closed.
+ */
+async function fetchFundingCloseSnapshot(invoiceId, adapter) {
+  const operation = adapter
+    ? () => adapter(invoiceId)
+    : async () => {
+        // Production stub — replace with real Soroban RPC invocation:
+        //   return sorobanClient.invokeContract(contractId, 'get_funding_close_snapshot', [invoiceId]);
+        // Expected return: Some({...}) or None
+        return {
+          Some: {
+            total_principal: '1000000000',
+            funding_target: '2000000000', 
+            closed_at_ledger: 123456,
+            closed_at_seq: 789
+          }
+        };
+      };
+
+  try {
+    const result = await callSorobanContract(operation);
+    
+    // Handle None case
+    if (result === null || result === undefined || result === 'None') {
+      return null;
+    }
+    
+    // Handle Some case
+    if (result.Some) {
+      const snapshot = result.Some;
+      return {
+        totalPrincipal: snapshot.total_principal,
+        fundingTarget: snapshot.funding_target,
+        closedAtLedger: snapshot.closed_at_ledger,
+        closedAtSeq: snapshot.closed_at_seq
+      };
+    }
+    
+    // Handle raw object case (if contract returns the snapshot directly)
+    if (result.total_principal !== undefined) {
+      return {
+        totalPrincipal: result.total_principal,
+        fundingTarget: result.funding_target,
+        closedAtLedger: result.closed_at_ledger,
+        closedAtSeq: result.closed_at_seq
+      };
+    }
+    
+    // Unknown response format
+    logger.warn({ invoiceId, result }, 'escrowRead: get_funding_close_snapshot returned unexpected format');
+    return null;
+    
+  } catch (err) {
+    logger.warn(
+      { invoiceId, errCode: err && err.code },
+      'escrowRead: get_funding_close_snapshot call failed — returning null',
+    );
+    return null;
+  }
+}
+
+/**
+ * Reads the full escrow state including funding close snapshot for pro-rata calculations.
+ *
+ * @param {string} invoiceId - Invoice identifier (validated internally).
+ * @param {object} [options={}]
+ * @param {Function} [options.legalHoldAdapter] - Injected adapter for `get_legal_hold`.
+ * @param {Function} [options.escrowAdapter] - Injected adapter for base escrow state.
+ * @param {Function} [options.attestationAdapter] - Injected adapter for attestation log.
+ * @param {Function} [options.snapshotAdapter] - Injected adapter for funding close snapshot.
+ * @returns {Promise<EscrowStateWithSnapshot>} Enriched escrow state with funding snapshot.
+ * @throws {EscrowReadError} When `invoiceId` is invalid.
+ *
+ * @typedef {object} EscrowStateWithSnapshot
+ * @property {string} invoiceId - The invoice identifier.
+ * @property {string} status - On-chain escrow status string.
+ * @property {number} fundedAmount - Amount currently held in escrow.
+ * @property {boolean} legal_hold - Whether the escrow is under legal hold.
+ * @property {Array<{index: number, digest: string}>} attestations - Append-only attestation digests.
+ * @property {FundingCloseSnapshot | null} fundingCloseSnapshot - Funding close snapshot data.
+ */
+async function readEscrowStateWithSnapshot(invoiceId, options = {}) {
+  const { legalHoldAdapter, escrowAdapter, attestationAdapter, snapshotAdapter } = options;
+
+  const { valid, reason } = validateInvoiceId(invoiceId);
+  if (!valid) {
+    const err = new Error(reason);
+    err.code = 'INVALID_INVOICE_ID';
+    err.status = 400;
+    throw err;
+  }
+
+  const safeId = invoiceId.trim();
+
+  // Fetch all data concurrently
+  const [baseState, legalHold, attestations, snapshot] = await Promise.all([
+    _fetchBaseEscrowState(safeId, escrowAdapter),
+    fetchLegalHold(safeId, legalHoldAdapter),
+    fetchAttestationAppendLog(safeId, attestationAdapter),
+    fetchFundingCloseSnapshot(safeId, snapshotAdapter),
+  ]);
+
+  return {
+    ...baseState,
+    legal_hold: legalHold,
+    attestations,
+    fundingCloseSnapshot: snapshot,
+  };
+}
+
 module.exports = {
   readEscrowState,
   readEscrowStateWithAttestations,
+  readEscrowStateWithSnapshot,
   fetchLegalHold,
   fetchAttestationAppendLog,
+  fetchFundingCloseSnapshot,
   validateInvoiceId,
 };
