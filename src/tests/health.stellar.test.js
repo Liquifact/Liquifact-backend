@@ -1,5 +1,5 @@
 const request = require('supertest');
-const { createApp } = require('../src/index');
+const { createApp } = require('../index');
 
 describe('Stellar Health Checks', () => {
   let app;

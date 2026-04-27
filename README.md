@@ -69,6 +69,45 @@ Do not store secrets in source control. Use `.env` locally and deployment secret
 
 ---
 
+## Stellar Network Configuration
+
+The API enforces a strict matching between `STELLAR_NETWORK` and `SOROBAN_RPC_URL` at boot time. This prevents misconfiguration where a passphrase (network identity) is paired with an incompatible RPC endpoint, which would cause on-chain validation failures.
+
+### Supported networks
+
+| Network | Passphrase | RPC URL |
+| --- | --- | --- |
+| TESTNET | `Test SDF Network ; September 2015` | `https://soroban-testnet.stellar.org` |
+| MAINNET | `Public Global Stellar Network ; September 2014` | `https://soroban.stellar.org` |
+| FUTURENET | `Test SDF Future Network ; October 2022` | `https://rpc-futurenet.stellar.org` |
+
+### Configuration
+
+Set both variables in your `.env`:
+
+```bash
+STELLAR_NETWORK=TESTNET
+SOROBAN_RPC_URL=https://soroban-testnet.stellar.org
+```
+
+Do NOT use custom RPC URLs. The validation will reject any deviation from the expected RPC for the selected network.
+
+### Boot-time validation
+
+On startup, `src/index.js` calls `validateStellarConfig()` from `src/config/stellar.js`. If the network/RPC combination is invalid, the server fails to start with a clear error message:
+
+```
+Error: Mismatch: STELLAR_NETWORK=TESTNET requires SOROBAN_RPC_URL="https://soroban-testnet.stellar.org", but got "https://custom-rpc.example.com". This combination would cause on-chain validation failures.
+```
+
+### Security notes
+
+- The validation is a hard fail - no partial or degraded operation is permitted.
+- This ensures the backend never signs transactions with a mismatched network, which could result in fund loss.
+- The passphrase is derived from the network constant and is not user-configurable.
+
+---
+
 ## Development
 
 | Command | Description |
@@ -82,6 +121,8 @@ Do not store secrets in source control. Use `.env` locally and deployment secret
 | `npm run lint` | Run ESLint on `src/` |
 | `npm test` | Run load helper tests and structured error tests |
 | `npm run db:migrate` | Run database migrations |
+| `npm run db:rollback` | Rollback last migration |
+| `npm run db:seed` | Run database seeds |
 | `npm run db:migrate:down` | Rollback last migration |
 | `npm run db:migrate:create <name>` | Create new migration file |
 | `npm run db:migrate:reset` | Reset database (drop & re-run) |
@@ -142,7 +183,7 @@ Core routes currently covered:
 
 - Health: `GET /health`
 - API Info: `GET /api`
-- Invoices: `GET /api/invoices`, `GET /api/invoices/:id`, `POST /api/invoices`, `DELETE /api/invoices/:id`, `PATCH /api/invoices/:id/restore`
+- Invoices: `GET /api/invoices` (with optional status filter), `GET /api/invoices/:id`, `POST /api/invoices`
 - Escrow: `GET /api/escrow/:invoiceId`, `POST /api/escrow`
 - Investment: `GET /api/invest/opportunities`
 - SME Metrics: `GET /api/sme/metrics`
@@ -164,6 +205,65 @@ liquifact-backend/
 ├── .env.example
 ├── eslint.config.js
 └── package.json
+```
+
+---
+
+## Escrow Address Mapping
+
+The API supports invoice-to-escrow contract address resolution using environment-based configuration for early phases. This allows mapping invoice IDs to their corresponding Stellar escrow contract addresses without requiring on-chain registry lookups.
+
+### Configuration
+
+Configure escrow mappings using the `ESCROW_ADDR_BY_INVOICE` environment variable:
+
+```bash
+ESCROW_ADDR_BY_INVOICE='{"mappings":[{"invoiceId":"inv_demo_001","escrowAddress":"GABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCDEFGHIJKLM","environment":"development","isActive":true}],"defaultEnvironment":"development","allowlistEnabled":true,"cacheEnabled":true,"cacheTtlSeconds":300}'
+```
+
+### Security Features
+
+- **Allowlist Validation**: Only mapped invoices can be resolved
+- **Environment Separation**: Different mappings for development, staging, production
+- **Address Validation**: Ensures Stellar addresses are properly formatted
+- **Caching**: In-memory caching with configurable TTL
+- **Input Validation**: Strict validation of invoice IDs and addresses
+
+### Usage Examples
+
+The mapping system is automatically used by escrow endpoints. When resolving `/api/escrow/:invoiceId`, the system:
+
+1. Validates the invoice ID format
+2. Checks if the invoice is in the allowlist for the current environment
+3. Returns the corresponding Stellar escrow contract address
+4. Caches the result for subsequent requests
+
+### Rotation and Multi-Environment Support
+
+For production deployments:
+
+1. **Environment Separation**: Use different mappings per environment
+2. **Key Rotation**: Update mappings by modifying the environment variable
+3. **Monitoring**: Use health checks to validate mapping configuration
+4. **Security**: Only map invoices you own or have explicit permission to map
+
+### Configuration Schema
+
+```json
+{
+  "mappings": [
+    {
+      "invoiceId": "inv_123",
+      "escrowAddress": "GABC...123",
+      "environment": "development",
+      "isActive": true
+    }
+  ],
+  "defaultEnvironment": "development",
+  "allowlistEnabled": true,
+  "cacheEnabled": true,
+  "cacheTtlSeconds": 300
+}
 ```
 
 ---
@@ -426,6 +526,48 @@ Unexpected error:
   }
 }
 ```
+
+---
+
+## Security audit log (Issue #116)
+
+The backend now supports a database-backed append-only audit log for:
+
+- admin actions (for example, KYC state transitions or key-rotation operations)
+- webhook dispatch outcomes (success/failure with redacted payload fields)
+
+### Database migrations
+
+Run SQL migrations in order:
+
+- `migrations/202604260001_create_audit_log_events.sql`
+- `migrations/202604260002_enforce_audit_log_append_only.sql`
+
+`audit_log_events` is enforced as append-only at the database layer via triggers that reject `UPDATE` and `DELETE`.
+
+### Runtime behavior
+
+- `src/middleware/auditLog.js` attaches `req.audit` helpers:
+  - `req.audit.logAdminAction(...)`
+  - `req.audit.logWebhookDelivery(...)`
+- successful `POST|PUT|PATCH|DELETE` requests under `/api/admin/*` are auto-logged
+- sensitive fields are redacted before persistence (`password`, `token`, `secret`, `apiKey`, `privateKey`, etc.)
+
+### Example API usage
+
+Admin action example:
+
+```bash
+curl -X POST http://localhost:3001/api/admin/kyc/cus_42/approve \
+  -H "Authorization: Bearer <admin-jwt>" \
+  -H "x-admin-action: kyc.approve" \
+  -H "x-audit-target-type: kyc_profile" \
+  -H "x-audit-target-id: cus_42" \
+  -H "Content-Type: application/json" \
+  -d '{"reason":"manual review","privateKey":"redacted-at-write-time"}'
+```
+
+Webhook delivery logging is typically called internally from delivery workers/routes via `req.audit.logWebhookDelivery(...)`.
 
 ---
 

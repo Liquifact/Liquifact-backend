@@ -22,6 +22,7 @@ const express = require('express');
 const cors = require('cors');
 const { callSorobanContract } = require('./services/soroban');
 const invoiceService = require('./services/invoice.service');
+const { resolveEscrowAddress } = require('./config/escrowMap');
 const { createCorsOptions, isCorsOriginRejectedError } = require('./config/cors');
 const { validateInvoiceQueryParams, validateInvoicePayload } = require('./utils/validators');
 const {
@@ -177,19 +178,40 @@ function createApp() {
     });
   });
 
-  // Escrow — GET by invoiceId (proxied through Soroban retry wrapper)
+  // Escrow — GET by invoiceId (proxied through Soroban retry wrapper with address mapping)
   app.get('/api/escrow/:invoiceId', async (req, res) => {
     const invoiceId = String(req.params.invoiceId || '')
       .trim()
       .replace(/\s+/g, '');
 
     try {
+      // Resolve escrow contract address using the mapping system
+      const escrowAddress = resolveEscrowAddress(invoiceId);
+      
+      if (!escrowAddress) {
+        return res.status(404).json({ 
+          error: `No escrow contract mapping found for invoice ID '${invoiceId}'` 
+        });
+      }
+
+      /**
+       * Soroban operation for escrow lookup using resolved contract address.
+       * 
+       * @returns {Promise<object>} Escrow state with contract address
+       */
       const operation = async () => {
-        return { invoiceId, status: 'not_found', fundedAmount: 0 };
+        return { 
+          invoiceId, 
+          escrowAddress,
+          status: 'not_found', 
+          fundedAmount: 0 
+        };
       };
 
       const data = await callSorobanContract(operation);
 
+      // Include escrow address in response headers
+      res.set('X-Escrow-Address', escrowAddress);
       res.json({
         data,
         message: 'Escrow state read from Soroban contract via robust integration wrapper.',

@@ -18,6 +18,8 @@ const ConfigSchema = z.object({
   CORS_ALLOWED_ORIGINS: z.string().optional(), // Comma-separated, optional for dev fallbacks
   SOROBAN_RPC_URL: z.string().url().default('https://soroban-testnet.stellar.org'),
   NETWORK_PASSPHRASE: z.string().default('Test SDF Network ; September 2015'),
+  SOROBAN_BATCH_CONCURRENCY: z.coerce.number().min(1).max(50).default(5),
+  SOROBAN_BATCH_TIMEOUT_MS: z.coerce.number().min(100).max(30000).default(5000),
 });
 
 /**

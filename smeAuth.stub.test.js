@@ -1,7 +1,7 @@
 'use strict';
 
-const { authorizeSmeWallet, verifyInvoiceOwner } = require('../src/middleware/smeAuth');
-const AppError = require('../src/errors/AppError');
+const { authorizeSmeWallet, verifyInvoiceOwner } = require('./src/middleware/smeAuth');
+const AppError = require('./src/errors/AppError');
 
 describe('SME Auth Middleware Stub', () => {
   let req, res, next;

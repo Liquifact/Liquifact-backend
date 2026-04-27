@@ -33,15 +33,14 @@ function redactValue(key, value) {
     return value;
   }
 
-  if (typeof value === 'string') {
-    if (isSensitiveField(key)) {
-      return key.toLowerCase().includes('invoice') ? REDACTED_INVOICE : REDACTED;
-    }
+  if (isSensitiveField(key)) {
+    return key.toLowerCase().includes('invoice') ? REDACTED_INVOICE : REDACTED;
+  }
 
+  if (typeof value === 'string') {
     if (looksLikeSensitiveToken(value)) {
       return REDACTED;
     }
-
     return value;
   }
 
@@ -187,15 +186,19 @@ function captureException(error, req) {
   }
 
   Sentry.withScope((scope) => {
-    if (req) {
-      scope.setTag('request_id', req.id || 'unknown');
-      scope.setTag('method', req.method || 'unknown');
-      scope.setTag('url', req.originalUrl || req.url || 'unknown');
-      scope.setExtra('headers', scrubHeaders(req.headers || {}));
-      scope.setExtra('query', scrubObject(req.query || {}));
-      scope.setExtra('body', scrubObject(req.body || {}));
+    if (req && scope) {
+      const setTag = scope.setTag ? scope.setTag.bind(scope) : () => {};
+      const setExtra = scope.setExtra ? scope.setExtra.bind(scope) : () => {};
+      const setUser = scope.setUser ? scope.setUser.bind(scope) : () => {};
+
+      setTag('request_id', req.id || 'unknown');
+      setTag('method', req.method || 'unknown');
+      setTag('url', req.originalUrl || req.url || 'unknown');
+      setExtra('headers', scrubHeaders(req.headers || {}));
+      setExtra('query', scrubObject(req.query || {}));
+      setExtra('body', scrubObject(req.body || {}));
       if (req.user) {
-        scope.setUser(scrubObject(req.user));
+        setUser(scrubObject(req.user));
       }
     }
 
