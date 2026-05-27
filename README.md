@@ -218,6 +218,10 @@ liquifact-backend/
 
 ---
 
+## Escrow integration
+
+For the full end-to-end model (indexer → projection → `GET /api/escrow`, funding via `escrowSubmit`, reconciliation, signing modes, and env contracts), see **[`docs/escrow-integration-overview.md`](./docs/escrow-integration-overview.md)**.
+
 ## Escrow Address Mapping
 
 The API supports invoice-to-escrow contract address resolution using environment-based configuration for early phases. This allows mapping invoice IDs to their corresponding Stellar escrow contract addresses without requiring on-chain registry lookups.

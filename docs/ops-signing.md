@@ -5,6 +5,8 @@ escrow funding and document custody. The current backend implementation is a
 design stub: it validates funding requests and returns a funding intent, but it
 does not build, sign, or submit a live Stellar/Soroban transaction.
 
+> **See also:** [Escrow Integration Overview](./escrow-integration-overview.md) — funding flow, signing modes, and how `escrowSubmit` fits with indexing and reconciliation.
+
 ## Goals
 
 - Keep private signing material out of the repository, logs, request bodies, and

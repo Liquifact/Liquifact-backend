@@ -1,5 +1,7 @@
 # Escrow Reconciliation Operations
 
+> **See also:** [Escrow Integration Overview](./escrow-integration-overview.md) — full escrow pipeline including reconciliation and health checks.
+
 ## Overview
 
 The escrow reconciliation job performs nightly reconciliation between on-chain funded amounts and database funded totals for all invoices. This critical operation detects drift between the blockchain state and internal records, ensuring data consistency and triggering alerts for mismatches.

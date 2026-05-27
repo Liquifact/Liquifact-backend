@@ -573,6 +573,7 @@ This document and the associated design **explicitly exclude**:
 
 ## Appendix B: Related Documentation
 
+- [Escrow Integration Overview](./escrow-integration-overview.md) — End-to-end indexer, read API, funding, and reconciliation
 - [Wasm Deployment Operations](./wasm-ops.md) — Operational guide for escrow wasm upgrades
 - [Ops Signing Design](./ops-signing.md) — Server-orchestrated signing interface
 - [API Examples](./API-Examples.md) — Backend API usage examples

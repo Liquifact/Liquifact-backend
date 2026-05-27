@@ -1,5 +1,7 @@
 # Escrow Event Ingest Strategy (Issue #102)
 
+> **See also:** [Escrow Integration Overview](./escrow-integration-overview.md) — end-to-end flow from chain events through projection tables to the API.
+
 ## Goal
 Persist a durable, replayable feed of latest Liquifact escrow contract events by `invoiceId`.
 
