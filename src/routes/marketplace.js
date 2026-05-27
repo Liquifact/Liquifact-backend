@@ -93,20 +93,11 @@ const logger = require('../logger');
  *         content:
  *           application/json:
  *             schema:
- *               type: object
- *               properties:
- *                 data:
- *                   type: array
- *                   items:
- *                     type: object
- *                 meta:
- *                   type: object
- *                 message:
- *                   type: string
+ *               $ref: '#/components/schemas/MarketplaceListResponse'
  *       400:
- *         description: Invalid query parameters
+ *         $ref: '#/components/responses/Problem400'
  *       401:
- *         description: Unauthorized
+ *         $ref: '#/components/responses/Problem401'
  */
 router.get('/', authenticateToken, async (req, res, next) => {
   try {

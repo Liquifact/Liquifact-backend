@@ -45,26 +45,9 @@ const AppError = require('../errors/AppError');
  *         content:
  *           application/json:
  *             schema:
- *               type: object
- *               properties:
- *                 data:
- *                   type: array
- *                   items:
- *                     type: object
- *                     description: Investment opportunity object
- *                 meta:
- *                   type: object
- *                   properties:
- *                     total:
- *                       type: integer
- *                     page:
- *                       type: integer
- *                     limit:
- *                       type: integer
- *                 message:
- *                   type: string
+ *               $ref: '#/components/schemas/StandardEnvelope'
  *       401:
- *         description: Unauthorized
+ *         $ref: '#/components/responses/Problem401'
  */
 /**
  * @swagger
@@ -174,26 +157,13 @@ router.get('/opportunities', authenticateToken, async (req, res, next) => {
  *         content:
  *           application/json:
  *             schema:
- *               type: object
- *               properties:
- *                 data:
- *                   type: object
- *                   properties:
- *                     investmentId:
- *                       type: string
- *                     invoiceId:
- *                       type: string
- *                     status:
- *                       type: string
- *                       enum: [pending, confirmed, escrow, settled]
- *                 meta:
- *                   type: object
+ *               $ref: '#/components/schemas/FundInvoiceResponse'
  *       400:
- *         description: Validation error
+ *         $ref: '#/components/responses/Problem400'
  *       401:
- *         description: Unauthorized
+ *         $ref: '#/components/responses/Problem401'
  *       403:
- *         description: KYC verification required or failed
+ *         $ref: '#/components/responses/Problem403'
  *       500:
  *         description: Server error
  */
