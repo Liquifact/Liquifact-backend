@@ -78,7 +78,7 @@ sequenceDiagram
 
   Contract->>Horizon: contract events
   Horizon->>Indexer: GET /events order=asc
-  Indexer->>DB: INSERT escrow_events ON CONFLICT IGNORE
+  Indexer->>DB: INSERT escrow_events ON CONFLICT DO NOTHING
   Indexer->>DB: UPSERT escrow_event_projection
   Indexer->>DB: UPDATE escrow_indexer_state cursor
   API->>ReadSvc: readEscrowState optional
