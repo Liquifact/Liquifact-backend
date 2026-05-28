@@ -565,6 +565,8 @@ Run SQL migrations in order:
   - `req.audit.logWebhookDelivery(...)`
 - successful `POST|PUT|PATCH|DELETE` requests under `/api/admin/*` are auto-logged
 - sensitive fields are redacted before persistence (`password`, `token`, `secret`, `apiKey`, `privateKey`, etc.)
+- See [`docs/compliance.md`](./docs/compliance.md) for the full audit + retention compliance model
+- See [`docs/retention.md`](./docs/retention.md) for retention policy, legal hold, dry-run, and purge schedule details
 
 ### Example API usage
 
