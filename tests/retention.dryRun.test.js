@@ -179,6 +179,54 @@ describe('Retention Purge Job - Dry Run Tests', () => {
       expect(executions[0].invoices_purged).toBe(1);
     });
 
+    test('should return a dry-run preview with sample rows', async () => {
+      process.env.RETENTION_MAX_ROWS_PER_RUN = '10';
+
+      const createdDate = new Date();
+      createdDate.setDate(createdDate.getDate() - 40);
+
+      const [invoice] = await db('invoices')
+        .insert({
+          tenant_id: testTenantId,
+          invoice_number: 'INV-DRY-PREVIEW',
+          amount: 1200.00,
+          currency: 'USD',
+          customer_name: 'Preview Customer',
+          customer_email: 'preview@example.com',
+          customer_tax_id: 'PREVIEW-789',
+          due_date: new Date(),
+          issue_date: new Date(),
+          status: 'completed',
+          sme_id: uuidv4(),
+          created_at: createdDate
+        })
+        .returning('*');
+
+      const preview = await retentionJob.previewRetentionPurge({
+        tenantId: testTenantId,
+        policyId: testPolicyId,
+        retentionDays: 30,
+        piiFields: ['customer_name', 'customer_email'],
+        performedBy: testUserId,
+        batchSize: 10
+      });
+
+      expect(preview.dryRun).toBe(true);
+      expect(preview.totalProcessed).toBe(1);
+      expect(preview.totalPurged).toBe(1);
+      expect(preview.sampleRows).toHaveLength(1);
+      expect(preview.sampleRows[0]).toMatchObject({
+        invoiceId: invoice.id,
+        invoiceNumber: invoice.invoice_number
+      });
+
+      const auditLogs = await db('retention_audit_log')
+        .where({ tenant_id: testTenantId, invoice_id: invoice.id, operation: 'dry_run' });
+      expect(auditLogs).toHaveLength(1);
+
+      delete process.env.RETENTION_MAX_ROWS_PER_RUN;
+    });
+
     test('should respect legal holds during dry run', async () => {
       // Create test invoice
       const createdDate = new Date();
@@ -371,6 +419,94 @@ describe('Retention Purge Job - Dry Run Tests', () => {
 
       expect(executions).toHaveLength(1);
       expect(executions[0].invoices_processed).toBeLessThanOrEqual(2);
+    });
+
+    test('should cap retention processing to RETENTION_MAX_ROWS_PER_RUN', async () => {
+      process.env.RETENTION_MAX_ROWS_PER_RUN = '2';
+      const createdDate = new Date();
+      createdDate.setDate(createdDate.getDate() - 40);
+
+      for (let i = 0; i < 3; i++) {
+        await db('invoices')
+          .insert({
+            tenant_id: testTenantId,
+            invoice_number: `INV-CAP-${i}`,
+            amount: 1000.00 + i,
+            currency: 'USD',
+            customer_name: `Cap Customer ${i}`,
+            customer_email: `cap${i}@example.com`,
+            due_date: new Date(),
+            issue_date: new Date(),
+            status: 'completed',
+            sme_id: uuidv4(),
+            created_at: createdDate
+          })
+          .returning('*');
+      }
+
+      const jobId = retentionJob.scheduleRetentionPurge({
+        tenantId: testTenantId,
+        policyId: testPolicyId,
+        dryRun: true,
+        performedBy: testUserId,
+        batchSize: 100
+      });
+
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      const executions = await db('retention_job_executions')
+        .where({ tenant_id: testTenantId, dry_run: true });
+
+      expect(executions).toHaveLength(1);
+      expect(executions[0].invoices_processed).toBe(2);
+      expect(executions[0].invoices_purged).toBe(2);
+
+      delete process.env.RETENTION_MAX_ROWS_PER_RUN;
+    });
+
+    test('should purge PII and create audit record on real run', async () => {
+      const createdDate = new Date();
+      createdDate.setDate(createdDate.getDate() - 40);
+
+      const [invoice] = await db('invoices')
+        .insert({
+          tenant_id: testTenantId,
+          invoice_number: 'INV-REAL-001',
+          amount: 1500.00,
+          currency: 'USD',
+          customer_name: 'Real Customer',
+          customer_email: 'real@example.com',
+          customer_tax_id: 'REAL-123',
+          due_date: new Date(),
+          issue_date: new Date(),
+          status: 'completed',
+          sme_id: uuidv4(),
+          created_at: createdDate
+        })
+        .returning('*');
+
+      const jobId = retentionJob.scheduleRetentionPurge({
+        tenantId: testTenantId,
+        policyId: testPolicyId,
+        dryRun: false,
+        performedBy: testUserId,
+        batchSize: 10
+      });
+
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      const updatedInvoice = await db('invoices')
+        .where('id', invoice.id)
+        .first();
+
+      expect(updatedInvoice.customer_name).toBeNull();
+      expect(updatedInvoice.customer_email).toBeNull();
+
+      const auditLogs = await db('retention_audit_log')
+        .where({ tenant_id: testTenantId, invoice_id: invoice.id, operation: 'pii_purged' });
+
+      expect(auditLogs).toHaveLength(1);
+      expect(auditLogs[0].pii_fields).toEqual(['customer_name', 'customer_email']);
     });
   });
 

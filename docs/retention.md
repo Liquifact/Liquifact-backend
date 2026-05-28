@@ -147,6 +147,7 @@ This is enforced both during invoice selection and immediately before purging ea
 
 - `POST /api/retention/jobs/schedule` — schedule a retention purge
 - `GET /api/retention/jobs/{executionId}` — get job status
+- Dry-run preview jobs can be executed immediately (`dryRun=true` with `delayMs=0`) to return row counts and sample purge targets without modifying invoices.
 
 ## Security and validation
 
@@ -154,6 +155,7 @@ This is enforced both during invoice selection and immediately before purging ea
 - `adminAuth` permits JWT or `x-api-key` authentication for retention management.
 - `sensitiveLimiter` protects retention policy and legal hold endpoints.
 - Purge fields are explicitly validated to one of `customer_name`, `customer_email`, `customer_tax_id`.
+- `RETENTION_MAX_ROWS_PER_RUN` caps the number of retention rows processed per job to prevent runaway purges.
 
 ## Compliance review question
 

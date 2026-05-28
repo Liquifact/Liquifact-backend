@@ -6,6 +6,22 @@ const BackgroundWorker = require('../workers/worker');
 const logger = require('../logger');
 const { z } = require('zod');
 
+const DEFAULT_RETENTION_MAX_ROWS_PER_RUN = 1000;
+const DRY_RUN_SAMPLE_SIZE = 10;
+
+function getRetentionMaxRowsPerRun() {
+  const configured = Number.parseInt(process.env.RETENTION_MAX_ROWS_PER_RUN, 10);
+  if (Number.isInteger(configured) && configured > 0) {
+    return configured;
+  }
+  return DEFAULT_RETENTION_MAX_ROWS_PER_RUN;
+}
+
+function getEffectiveBatchSize(batchSize) {
+  const maxRowsPerRun = getRetentionMaxRowsPerRun();
+  return Math.min(batchSize, maxRowsPerRun);
+}
+
 /**
  * Schema for retention job payload validation
  */
@@ -122,16 +138,14 @@ async function purgeInvoicePii(invoiceId, piiFields, dryRun = false) {
   const updateData = {};
   const oldValues = {};
 
-  // Get current values for audit
-  if (!dryRun) {
-    const current = await db('invoices').where('id', invoiceId).first();
-    if (current) {
-      piiFields.forEach(field => {
-        if (current[field] !== null) {
-          oldValues[field] = current[field];
-        }
-      });
-    }
+  // Get current values for audit regardless of dry run
+  const current = await db('invoices').where('id', invoiceId).first();
+  if (current) {
+    piiFields.forEach(field => {
+      if (current[field] !== null) {
+        oldValues[field] = current[field];
+      }
+    });
   }
 
   // Prepare update data (set to null for purging)
@@ -214,44 +228,54 @@ async function updateJobExecution(executionId, updateData) {
     });
 }
 
-/**
- * Main retention purge job handler
- */
-retentionWorker.registerHandler('retention_purge', async (job) => {
-  const { payload } = job;
+async function executeRetentionPurge(payload, { createExecution = true, capturePreview = false } = {}) {
+  const validatedPayload = RetentionJobSchema.parse(payload);
+  const {
+    tenantId,
+    policyId,
+    dryRun = false,
+    retentionDays,
+    piiFields,
+    performedBy,
+    batchSize = 100
+  } = validatedPayload;
+
+  const maxRowsPerRun = getRetentionMaxRowsPerRun();
+  const effectiveBatchSize = Math.min(batchSize, maxRowsPerRun);
+  const jobMetadata = {
+    policyId,
+    retentionDays,
+    piiFields,
+    requestedBatchSize: batchSize,
+    effectiveBatchSize,
+    maxRowsPerRun
+  };
+
   let executionId = null;
   const errors = [];
+  let totalProcessed = 0;
+  let totalPurged = 0;
+  const allPurgedFields = new Set();
+  const sampleRows = [];
 
-  try {
-    // Validate job payload
-    const validatedPayload = RetentionJobSchema.parse(payload);
-    const {
-      tenantId,
-      policyId,
-      dryRun = false,
-      retentionDays,
-      piiFields,
-      performedBy,
-      batchSize = 100
-    } = validatedPayload;
-
-    // Create job execution record
+  if (createExecution) {
     executionId = await createJobExecution({
       tenantId,
       dryRun,
       performedBy,
       jobType: policyId ? 'manual_purge' : 'scheduled_purge',
-      metadata: { policyId, retentionDays, piiFields, batchSize }
+      metadata: jobMetadata
     });
+  }
 
-    // Get applicable policies
+  try {
     let policies;
     if (policyId) {
       const policy = await db('retention_policies')
         .where({ id: policyId, tenant_id: tenantId, is_active: true })
         .whereNull('deleted_at')
         .first();
-      
+
       if (!policy) {
         throw new Error(`Retention policy ${policyId} not found or inactive`);
       }
@@ -264,36 +288,34 @@ retentionWorker.registerHandler('retention_purge', async (job) => {
       throw new Error('No active retention policies found');
     }
 
-    let totalProcessed = 0;
-    let totalPurged = 0;
-    const allPurgedFields = new Set();
-
-    // Process each policy
     for (const policy of policies) {
+      if (totalProcessed >= effectiveBatchSize) {
+        break;
+      }
+
       const policyPiiFields = piiFields || policy.pii_fields;
       const validatedFields = validatePiiFields(policyPiiFields);
       const policyRetentionDays = retentionDays || policy.retention_days;
+      const remainingRows = effectiveBatchSize - totalProcessed;
 
       logger.info({
         tenantId,
         policyId: policy.id,
         dryRun,
         retentionDays: policyRetentionDays,
-        piiFields: validatedFields
+        piiFields: validatedFields,
+        maxRowsPerRun: effectiveBatchSize
       }, 'Processing retention policy');
 
-      // Get eligible invoices
       const eligibleInvoices = await getEligibleInvoices(tenantId, {
         ...policy,
         retention_days: policyRetentionDays
-      }, batchSize);
+      }, remainingRows);
 
       totalProcessed += eligibleInvoices.length;
 
-      // Process each invoice
       for (const invoice of eligibleInvoices) {
         try {
-          // Check legal hold again (in case it was added after initial query)
           const underHold = await isUnderLegalHold(tenantId, invoice.id);
           if (underHold) {
             logger.debug({
@@ -304,20 +326,28 @@ retentionWorker.registerHandler('retention_purge', async (job) => {
             continue;
           }
 
-          // Purge PII
           const result = await purgeInvoicePii(invoice.id, validatedFields, dryRun);
 
           if (result.success) {
             totalPurged++;
             result.purgedFields.forEach(field => allPurgedFields.add(field));
 
-            // Log audit trail
+            if (capturePreview && sampleRows.length < DRY_RUN_SAMPLE_SIZE) {
+              sampleRows.push({
+                invoiceId: invoice.id,
+                invoiceNumber: invoice.invoice_number,
+                createdAt: invoice.created_at,
+                purgedFields: result.purgedFields
+              });
+            }
+
             await logRetentionOperation({
               tenantId,
               invoiceId: invoice.id,
               operation: dryRun ? 'dry_run' : 'pii_purged',
               piiFields: result.purgedFields,
               oldValues: result.oldValues,
+              newValues: dryRun ? {} : Object.fromEntries(result.purgedFields.map(field => [field, null])),
               reason: `Retention policy: ${policy.name} (${policyRetentionDays} days)`,
               performedBy,
               metadata: {
@@ -342,20 +372,21 @@ retentionWorker.registerHandler('retention_purge', async (job) => {
             error: error.message
           };
           errors.push(errorInfo);
-          
+
           logger.error(errorInfo, 'Error processing invoice in retention job');
         }
       }
     }
 
-    // Update job execution record
-    await updateJobExecution(executionId, {
-      status: errors.length > 0 ? 'completed_with_errors' : 'completed',
-      invoices_processed: totalProcessed,
-      invoices_purged: totalPurged,
-      pii_fields_purged: Array.from(allPurgedFields),
-      errors: errors.length > 0 ? errors : null
-    });
+    if (createExecution) {
+      await updateJobExecution(executionId, {
+        status: errors.length > 0 ? 'completed_with_errors' : 'completed',
+        invoices_processed: totalProcessed,
+        invoices_purged: totalPurged,
+        pii_fields_purged: Array.from(allPurgedFields),
+        errors: errors.length > 0 ? errors : null
+      });
+    }
 
     logger.info({
       tenantId,
@@ -364,9 +395,20 @@ retentionWorker.registerHandler('retention_purge', async (job) => {
       totalProcessed,
       totalPurged,
       purgedFields: Array.from(allPurgedFields),
-      errors: errors.length
+      errors: errors.length,
+      maxRowsPerRun: effectiveBatchSize
     }, `Retention job ${dryRun ? 'dry run ' : ''}completed`);
 
+    return {
+      executionId,
+      dryRun,
+      totalProcessed,
+      totalPurged,
+      purgedFields: Array.from(allPurgedFields),
+      sampleRows,
+      maxRowsPerRun: effectiveBatchSize,
+      errors
+    };
   } catch (error) {
     logger.error({ 
       tenantId: payload.tenantId, 
@@ -382,12 +424,18 @@ retentionWorker.registerHandler('retention_purge', async (job) => {
     }
 
     throw error;
-  } finally {
-    // Clean up execution context
-    if (job.id) {
-      jobExecutions.delete(job.id);
-    }
   }
+}
+
+/**
+ * Main retention purge job handler
+ */
+retentionWorker.registerHandler('retention_purge', async (job) => {
+  const result = await executeRetentionPurge(job.payload, { createExecution: true, capturePreview: false });
+  if (job.id) {
+    jobExecutions.delete(job.id);
+  }
+  return result;
 });
 
 /**
@@ -407,6 +455,11 @@ function scheduleRetentionPurge(options) {
     delayMs = 0
   } = options;
 
+  const effectiveBatchSize = getEffectiveBatchSize(batchSize);
+  if (batchSize > effectiveBatchSize) {
+    logger.warn({ batchSize, effectiveBatchSize }, 'Retention job batch size exceeds RETENTION_MAX_ROWS_PER_RUN and will be capped');
+  }
+
   const payload = {
     tenantId,
     policyId,
@@ -414,7 +467,7 @@ function scheduleRetentionPurge(options) {
     retentionDays,
     piiFields,
     performedBy,
-    batchSize
+    batchSize: effectiveBatchSize
   };
 
   const jobId = retentionQueue.enqueue('retention_purge', payload, { delayMs });
@@ -428,6 +481,10 @@ function scheduleRetentionPurge(options) {
   });
 
   return jobId;
+}
+
+async function previewRetentionPurge(options) {
+  return executeRetentionPurge({ ...options, dryRun: true }, { createExecution: true, capturePreview: true });
 }
 
 /**
@@ -502,5 +559,7 @@ module.exports = {
   logRetentionOperation,
   jobExecutions,
   retentionQueue,
-  retentionWorker
+  retentionWorker,
+  getRetentionMaxRowsPerRun,
+  previewRetentionPurge
 };

@@ -574,6 +574,36 @@ router.post('/jobs/schedule', adminAuth, sensitiveLimiter, async (req, res) => {
       retentionJob.validatePiiFields(validatedData.piiFields);
     }
 
+    const maxRowsPerRun = retentionJob.getRetentionMaxRowsPerRun();
+    if (validatedData.batchSize > maxRowsPerRun) {
+      logger.warn({
+        tenantId,
+        requestedBatchSize: validatedData.batchSize,
+        maxRowsPerRun
+      }, 'Retention job batch size exceeds RETENTION_MAX_ROWS_PER_RUN and will be capped');
+    }
+
+    const effectiveBatchSize = Math.min(validatedData.batchSize, maxRowsPerRun);
+
+    if (validatedData.dryRun && validatedData.delayMs === 0) {
+      const preview = await retentionJob.previewRetentionPurge({
+        tenantId,
+        policyId: validatedData.policyId,
+        retentionDays: validatedData.retentionDays,
+        piiFields: validatedData.piiFields,
+        performedBy: req.userId,
+        batchSize: effectiveBatchSize
+      });
+
+      return res.status(200).json({
+        data: {
+          preview,
+          maxRowsPerRun: effectiveBatchSize
+        },
+        message: 'Retention dry-run preview generated successfully'
+      });
+    }
+
     const jobId = retentionJob.scheduleRetentionPurge({
       tenantId,
       policyId: validatedData.policyId,
@@ -581,7 +611,7 @@ router.post('/jobs/schedule', adminAuth, sensitiveLimiter, async (req, res) => {
       retentionDays: validatedData.retentionDays,
       piiFields: validatedData.piiFields,
       performedBy: req.userId,
-      batchSize: validatedData.batchSize,
+      batchSize: effectiveBatchSize,
       delayMs: validatedData.delayMs
     });
 
