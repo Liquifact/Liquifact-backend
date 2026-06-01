@@ -81,7 +81,7 @@
       "<rootDir>/tests/retention.comprehensive.test.js",
       "<rootDir>/tests/retention.coverage-boost.test.js",
       "<rootDir>/tests/retention.coverage.test.js",
-      "<rootDir>/tests/retention.dryRun.test.js",
+      
       "<rootDir>/tests/retention.final-95-coverage.test.js",
       "<rootDir>/tests/retention.final-95.test.js",
       "<rootDir>/tests/retention.final-coverage.test.js",
