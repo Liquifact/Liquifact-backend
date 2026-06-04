@@ -620,3 +620,128 @@ Before production deployment:
 **Last Updated**: May 28, 2026  
 **Maintained By**: LiquiFact Backend Team  
 **Related Issues**: #222 — Enforce KYC gating on all capital-movement endpoints
+
+---
+
+## Invoice Audit Trail & State-Transition History API
+
+**Status**: Implemented  
+**Date**: May 2026  
+**Relates to**: Issue #208 — Add admin endpoint for invoice audit trail and state-transition history export
+
+### Overview
+
+Compliance operators can retrieve and export the full audit history for any invoice, including all mutations and state transitions. All endpoints are admin-gated and tenant-isolated.
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/admin/audit/invoices/:invoiceId` | Paginated audit trail |
+| GET | `/api/admin/audit/invoices/:invoiceId/transitions` | State-transition history |
+| GET | `/api/admin/audit/invoices/:invoiceId/export` | Export as JSON or CSV |
+
+### Authentication
+
+All endpoints accept either:
+- `Authorization: Bearer <JWT>` — admin JWT with `tenantId` claim
+- `X-API-KEY: <key>` — service-to-service API key
+
+Tenant context is resolved from the `x-tenant-id` header (highest priority) or the `tenantId` JWT claim. Requests without a resolvable tenant are rejected with `400`.
+
+### Tenant Isolation
+
+Every query is scoped to the authenticated operator's tenant. An operator cannot retrieve audit records belonging to another tenant.
+
+### Pagination
+
+Query params: `limit` (1–500, default 50) and `offset` (default 0).
+
+```bash
+GET /api/admin/audit/invoices/inv-001?limit=20&offset=40
+```
+
+Response includes a `meta` object:
+```json
+{
+  "data": [...],
+  "meta": { "invoiceId": "inv-001", "limit": 20, "offset": 40, "total": 87 }
+}
+```
+
+### Export Formats
+
+#### JSON (default)
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+     -H "x-tenant-id: tenant-alpha" \
+     "http://localhost:3001/api/admin/audit/invoices/inv-001/export"
+```
+
+Returns `application/json` — a JSON array of audit log entries.
+
+#### CSV
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+     -H "x-tenant-id: tenant-alpha" \
+     "http://localhost:3001/api/admin/audit/invoices/inv-001/export?format=csv" \
+     -o audit-inv-001.csv
+```
+
+Returns `text/csv` with `Content-Disposition: attachment`. CSV columns:
+
+```
+id,timestamp,actor,action,resourceType,resourceId,statusCode,ipAddress,userAgent
+```
+
+Fields containing commas, double-quotes, or newlines are RFC 4180-escaped (wrapped in double-quotes, internal quotes doubled).
+
+### Secret Redaction
+
+Sensitive fields (`password`, `token`, `secret`, `apiKey`, `privateKey`, etc.) are redacted to `***REDACTED***` before any log entry is stored or exported. This is enforced at write time by `sanitizeSensitiveData` in `src/services/auditLog.js` and `redactValue` in `src/services/auditLogStore.js`.
+
+### State-Transition History
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+     -H "x-tenant-id: tenant-alpha" \
+     "http://localhost:3001/api/admin/audit/invoices/inv-001/transitions"
+```
+
+Response:
+```json
+{
+  "data": [
+    {
+      "id": "AUDIT-...",
+      "timestamp": "2026-05-30T10:00:00.000Z",
+      "actor": "admin-1",
+      "fromState": "pending",
+      "toState": "approved",
+      "reason": null,
+      "ipAddress": "127.0.0.1"
+    }
+  ],
+  "meta": { "invoiceId": "inv-001" }
+}
+```
+
+### Security Notes
+
+- Endpoints are read-only; no mutations are possible through this API.
+- Input validation rejects `invoiceId` values longer than 128 characters.
+- Pagination bounds are clamped server-side (max 500 per page).
+- All responses omit internal stack traces and infrastructure details.
+- The audit log store is append-only at the database layer (see `migrations/202604260002_enforce_audit_log_append_only.sql`).
+
+### Deployment Checklist
+
+- [ ] Ensure `JWT_SECRET` is set in deployment secrets
+- [ ] Confirm `x-tenant-id` header is forwarded by API gateway / load balancer
+- [ ] Verify audit log DB migrations have run (`npm run db:migrate`)
+- [ ] Run tests: `npx jest tests/auditTrail.api.test.js`
+
+**Last Updated**: May 30, 2026  
+**Relates to**: Issue #208

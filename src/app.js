@@ -23,6 +23,7 @@ const cors = require('cors');
 const { callSorobanContract } = require('./services/soroban');
 const invoiceService = require('./services/invoiceService');
 const { resolveEscrowAddress } = require('./config/escrowMap');
+const { getEscrowStateWithProjection } = require('./services/escrowRead');
 const { createCorsOptions, isCorsOriginRejectedError } = require('./config/cors');
 const { validateInvoiceQueryParams, validateInvoicePayload } = require('./utils/validators');
 const {
@@ -37,6 +38,7 @@ const logger = require('./logger');
 const { metricsAuth, metricsHandler } = require('./metrics');
 const smeRoutes = require('./routes/sme');
 const invoiceFileRoutes = require('./routes/invoiceFile');
+const auditTrailRoutes = require('./routes/auditTrail');
 
 /**
  * Returns a 403 JSON response only for the dedicated blocked-origin CORS error.
@@ -198,27 +200,21 @@ function createApp() {
         });
       }
 
-      /**
-       * Soroban operation for escrow lookup using resolved contract address.
-       * 
-       * @returns {Promise<object>} Escrow state with contract address
-       */
-      const operation = async () => {
-        return { 
-          invoiceId, 
-          escrowAddress,
-          status: 'not_found', 
-          fundedAmount: 0 
-        };
-      };
+      // Read from projection, cache, or live read fallback
+      const state = await getEscrowStateWithProjection(invoiceId);
 
-      const data = await callSorobanContract(operation);
+      const data = {
+        ...state,
+        escrowAddress
+      };
 
       // Include escrow address in response headers
       res.set('X-Escrow-Address', escrowAddress);
       res.json({
         data,
-        message: 'Escrow state read from Soroban contract via robust integration wrapper.',
+        message: state.fromProjection 
+          ? 'Escrow state read from event projection.'
+          : 'Escrow state read from live Soroban contract.',
       });
     } catch (error) {
       res.status(500).json({ error: error.message || 'Error fetching escrow state' });
@@ -248,6 +244,7 @@ function createApp() {
   // ── 5. SME & Invoice File routes ─────────────────────────────────────────
   app.use('/api/sme', smeRoutes);
   app.use('/api/invoices', invoiceFileRoutes);
+  app.use('/api/admin/audit', auditTrailRoutes);
 
   // ── 6. Prometheus metrics ────────────────────────────────────────────────
   app.get('/metrics', metricsAuth, metricsHandler);

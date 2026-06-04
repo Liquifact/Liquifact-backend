@@ -36,6 +36,51 @@ if (typeof client.collectDefaultMetrics === 'function') {
 }
 
 /**
+ * Counter: Escrow events successfully processed by the indexer per cycle.
+ * Incremented by the number of events persisted in each indexer cycle.
+ * @type {import('prom-client').Counter}
+ */
+const escrowIndexerEventsProcessedTotal = new client.Counter({
+  name: 'escrow_indexer_events_processed_total',
+  help: 'Total number of escrow events successfully processed and persisted by the indexer',
+  registers: [registry],
+});
+
+/**
+ * Counter: Escrow events skipped (invalid) by the indexer per cycle.
+ * Incremented when an event fails validation or persistence.
+ * @type {import('prom-client').Counter}
+ */
+const escrowIndexerEventsSkippedTotal = new client.Counter({
+  name: 'escrow_indexer_events_skipped_total',
+  help: 'Total number of escrow events skipped due to validation or persistence errors',
+  registers: [registry],
+});
+
+/**
+ * Counter: Escrow indexer cycle failures.
+ * Incremented when a cycle throws an unhandled exception or receives invalid metric data.
+ * @type {import('prom-client').Counter}
+ */
+const escrowIndexerCycleFailuresTotal = new client.Counter({
+  name: 'escrow_indexer_cycle_failures_total',
+  help: 'Total number of escrow indexer cycles that failed with an exception',
+  registers: [registry],
+});
+
+/**
+ * Gauge: Unix timestamp (seconds) of the last successful cursor advance.
+ * Updated when a cycle completes and cursorAfter !== cursorBefore.
+ * Used by health check to detect indexer staleness.
+ * @type {import('prom-client').Gauge}
+ */
+const escrowIndexerLastCursorAdvanceTimestampSeconds = new client.Gauge({
+  name: 'escrow_indexer_last_cursor_advance_timestamp_seconds',
+  help: 'Unix timestamp (seconds) of the last cycle where the cursor advanced (cursorAfter !== cursorBefore)',
+  registers: [registry],
+});
+
+/**
  * Express middleware that enforces metrics auth.
  *
  * @param {import('express').Request} req
@@ -48,7 +93,7 @@ function metricsAuth(req, res, next) {
 
   if (token) {
     const auth = req.headers['authorization'] || '';
-    if (auth === `Bearer ${token}`) { return next(); }
+    if (safeEqual(auth, `Bearer ${token}`)) {return next();}
     res.status(401).json({ error: 'Unauthorized' });
     return;
   }
@@ -71,4 +116,12 @@ async function metricsHandler(_req, res) {
   res.end(await registry.metrics());
 }
 
-module.exports = { registry, metricsAuth, metricsHandler };
+module.exports = {
+  registry,
+  metricsAuth,
+  metricsHandler,
+  escrowIndexerEventsProcessedTotal,
+  escrowIndexerEventsSkippedTotal,
+  escrowIndexerCycleFailuresTotal,
+  escrowIndexerLastCursorAdvanceTimestampSeconds,
+};

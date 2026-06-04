@@ -1,7 +1,5 @@
 # Escrow Reconciliation Operations
 
-> **See also:** [Escrow Integration Overview](./escrow-integration-overview.md) — full escrow pipeline including reconciliation and health checks.
-
 ## Overview
 
 The escrow reconciliation job performs nightly reconciliation between on-chain funded amounts and database funded totals for all invoices. This critical operation detects drift between the blockchain state and internal records, ensuring data consistency and triggering alerts for mismatches.
@@ -11,17 +9,22 @@ The escrow reconciliation job performs nightly reconciliation between on-chain f
 ### Components
 
 - **Job Scheduler**: `src/jobs/reconcileEscrow.js` - Core reconciliation logic
-- **Health Integration**: `src/services/health.js` - Health check integration
+- **DB Source**: `src/db/knex.js` - Paginated `invoices` query joined to `escrow_summaries` for the DB `fundedTotal`
+- **On-Chain Source**: `src/services/escrowRead.js` (`readFundedAmount`) - Reads `funded_amount` via `callSorobanContract`
+- **Persistence**: `reconciliation_runs` table - One row per run (replaces the former `global.reconciliationSummary`)
+- **Metrics**: `src/metrics.js` - `escrow_reconciliation_mismatches_total` Prometheus counter
+- **Health Integration**: `src/services/health.js` - Reads the latest persisted run
 - **Background Processing**: Uses the existing job queue and worker infrastructure
 
 ### Data Flow
 
 1. **Trigger**: Nightly cron job or manual execution
-2. **Data Collection**: Query all invoices from database with `fundedTotal`
-3. **On-Chain Verification**: Call Soroban contract to get `funded_amount` for each invoice
-4. **Comparison**: Compare DB and on-chain values
-5. **Alerting**: Log mismatches and send notifications
-6. **Health Update**: Update health check status
+2. **Data Collection**: Paginate the `invoices` table (keyset on `id`) for rows in `linked_escrow` / `funded` / `partially_funded` states that are not soft-deleted, joining `escrow_summaries.total_funded` as `fundedTotal`
+3. **On-Chain Verification**: Call `readFundedAmount(invoiceId)` for each invoice, which routes through `callSorobanContract` (retry + error mapping) to read the contract `funded_amount`
+4. **Comparison**: Classify each invoice as `match`, `mismatch`, or `error`
+5. **Alerting**: On `mismatch`, emit a structured warning log (`invoiceId`, `dbFundedTotal`, `onChainAmount`) and increment `escrow_reconciliation_mismatches_total`
+6. **Persistence**: Insert the run summary into `reconciliation_runs`
+7. **Health Update**: `/health` reads the most recent run row
 
 ## Configuration
 
@@ -68,7 +71,7 @@ The reconciliation status is included in the `/health` endpoint:
   "service": "liquifact-api",
   "checks": {
     "soroban": { "status": "healthy" },
-    "database": { "status": "not_implemented" },
+    "database": { "status": "healthy" },
     "reconciliation": {
       "status": "healthy",
       "lastRun": "2026-04-25T02:00:00.000Z"
@@ -119,9 +122,15 @@ Response:
 
 When `dbFundedTotal !== onChainAmount`, the system:
 
-1. Logs a warning: `Escrow mismatch for invoice inv_123: DB=10000, OnChain=9500`
-2. Increments mismatch counter in health status
-3. TODO: Send email alert to operations team
+1. Emits a structured warning log: `Escrow mismatch for invoice <id>: DB=<n>, OnChain=<m>` with `{ invoiceId, dbFundedTotal, onChainAmount }`
+2. Increments the `escrow_reconciliation_mismatches_total` Prometheus counter (scraped via `/metrics`)
+3. Records the mismatch in the persisted run summary (`reconciliation_runs.mismatches` and `results`)
+
+Suggested Prometheus alert (drift appearing between nightly runs):
+
+```promql
+increase(escrow_reconciliation_mismatches_total[26h]) > 0
+```
 
 ### Error Handling
 
@@ -129,21 +138,42 @@ When `dbFundedTotal !== onChainAmount`, the system:
 - Individual invoice errors don't stop the entire reconciliation
 - Errors are logged and counted in the summary
 
+## Persistence
+
+Each run is written as one row to the `reconciliation_runs` table (migration `migrations/20260429000000_create_reconciliation_runs.js`):
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | uuid | Primary key |
+| `total` / `matches` / `mismatches` / `errors` | integer | Per-run counts |
+| `results` | jsonb | Full per-invoice results array |
+| `reconciled_at` | timestamptz | Run timestamp (indexed; health reads the latest) |
+| `created_at` | timestamptz | Insert timestamp |
+
+`getReconciliationSummary()` returns the most recent row (or `null` if none). This replaces the previous in-process `global.reconciliationSummary`, so the latest summary survives restarts and a run history is queryable. Persistence failures are logged and swallowed — they never mask a detected mismatch (the metric and warning log fire first).
+
+Apply the migration with:
+
+```bash
+npm run db:migrate
+```
+
 ## Security Considerations
 
 - **Authentication**: Internal routes require admin authentication
 - **Rate Limiting**: Soroban calls use exponential backoff
-- **Input Validation**: Invoice IDs are validated
+- **Input Validation**: Invoice IDs are validated against the shared `INVOICE_ID_RE` before any contract call; page size is clamped to `[1, 1000]`
 - **Secrets**: No secrets stored in code, use environment variables
+- **Idempotency**: Reads are side-effect-free; each run appends exactly one summary row
 
 ## Monitoring
 
 ### Metrics
 
-- Reconciliation success/failure rate
-- Number of mismatches over time
+- `escrow_reconciliation_mismatches_total` (Prometheus counter) - cumulative mismatches detected; the primary drift signal
+- Per-run counts (`total`, `matches`, `mismatches`, `errors`) persisted in `reconciliation_runs`
 - Time to complete reconciliation
-- Soroban RPC latency
+- Soroban RPC latency (via the shared Soroban call path)
 
 ### Logs
 

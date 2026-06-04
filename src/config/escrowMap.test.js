@@ -40,7 +40,7 @@ describe('Escrow Address Mapping', () => {
     // Validate config to prevent errors in getCurrentEnvironment()
     try {
       validateConfig();
-    } catch (error) {
+    } catch (_error) {
       // Config validation might fail due to missing JWT_SECRET, but that's ok for tests
       // We'll fall back to NODE_ENV in getCurrentEnvironment()
     }

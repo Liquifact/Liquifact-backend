@@ -21,6 +21,9 @@ const ConfigSchema = z
     NETWORK_PASSPHRASE: z.string().default('Test SDF Network ; September 2015'),
     SOROBAN_BATCH_CONCURRENCY: z.coerce.number().min(1).max(50).default(5),
     SOROBAN_BATCH_TIMEOUT_MS: z.coerce.number().min(100).max(30000).default(5000),
+    // Escrow indexer configuration
+    ESCROW_INDEXER_ENABLED: z.enum(['true', 'false']).default('false'),
+    ESCROW_INDEXER_STALE_THRESHOLD_SECONDS: z.coerce.number().min(1).default(300),
     // KYC provider — all optional, but URL+key must be provided together in non-test envs
     KYC_PROVIDER_URL: z.string().url().optional(),
     KYC_PROVIDER_API_KEY: z.string().min(1).optional(),

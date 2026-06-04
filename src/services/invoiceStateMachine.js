@@ -239,7 +239,7 @@ function validateTransition({ invoiceId, currentState, targetState, actor, reaso
  * @returns {Object} Transition result with success status and audit log
  * @throws {Error} If transition validation fails
  */
-function executeTransition({
+async function executeTransition({
   invoiceId,
   currentState,
   targetState,
@@ -268,7 +268,7 @@ function executeTransition({
   const normalizedReason = normalizeTransitionReason(reason);
 
   // Create audit log for state transition
-  const auditLog = createAuditLog({
+  const auditLog = await createAuditLog({
     actor,
     action: 'STATE_TRANSITION',
     resourceType: 'invoice',
@@ -311,8 +311,8 @@ function executeTransition({
  * @param {Function} getAuditLogsFn Function to retrieve audit logs
  * @returns {Array<Object>} Array of state transitions
  */
-function getTransitionHistory(invoiceId, getAuditLogsFn) {
-  const logs = getAuditLogsFn({
+async function getTransitionHistory(invoiceId, getAuditLogsFn) {
+  const logs = await getAuditLogsFn({
     resourceId: invoiceId,
     resourceType: 'invoice',
     action: 'STATE_TRANSITION',

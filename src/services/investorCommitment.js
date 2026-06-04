@@ -1,178 +1,122 @@
+/**
+ * src/services/investorCommitment.js
+ *
+ * Persists investor commitment records produced by the fund-invoice flow.
+ * Uses Knex (the project's existing query builder) so the implementation works
+ * with both PostgreSQL (production) and SQLite (test/CI).
+ *
+ * Table: investor_commitments
+ * Schema is created by migration: migrations/YYYYMMDDHHII_create_investor_commitments.js
+ *
+ * Idempotency: callers may supply an idempotencyKey (e.g. sha256 of
+ * investor + invoiceId + amount). Duplicate submissions with the same key
+ * return the existing row rather than inserting a second one.
+ */
+
 'use strict';
 
+const db = require('../db'); // project's shared Knex instance
+
+const TABLE = 'investor_commitments';
+
 /**
- * Investor Commitment Service
- * Manages investor commitment data including claimNotBefore and effective yield
- * from the DB mirror (with stale flag for non-indexed data).
+ * @typedef {Object} CommitmentRecord
+ * @property {string}  id
+ * @property {string}  invoice_id
+ * @property {string}  investor_address
+ * @property {string}  escrow_address
+ * @property {string}  amount_stroops      — integer string
+ * @property {'requires_signature'|'submitted'|'stubbed'} status
+ * @property {string|null} unsigned_xdr
+ * @property {string|null} tx_hash
+ * @property {string|null} ledger
+ * @property {string|null} idempotency_key
+ * @property {Date}    created_at
+ * @property {Date}    updated_at
+ */
+
+/**
+ * Persist a new commitment, or return the existing one when the idempotency
+ * key matches a prior row.
  *
- * @module services/investorCommitment
+ * @param {Object} params
+ * @param {string} params.invoiceId
+ * @param {string} params.investorAddress
+ * @param {string} params.escrowAddress
+ * @param {string|number} params.amountStroops
+ * @param {'requires_signature'|'submitted'|'stubbed'} params.status
+ * @param {string|null} [params.unsignedXdr]
+ * @param {string|null} [params.txHash]
+ * @param {string|null} [params.ledger]
+ * @param {string|null} [params.idempotencyKey]
+ * @returns {Promise<CommitmentRecord>}
  */
-
-const logger = require('../logger');
-
-/**
- * Validates a Stellar/Soroban address (G... or C... prefix).
- *
- * @param {unknown} address - Address to validate.
- * @returns {{ valid: boolean, reason?: string }}
- */
-function validateAddress(address) {
-  if (typeof address !== 'string' || address.trim() === '') {
-    return { valid: false, reason: 'address must be a non-empty string' };
-  }
-  const trimmed = address.trim();
-  if (!/^[GC][A-Z0-9]{55}$/.test(trimmed)) {
-    return {
-      valid: false,
-      reason: 'invalid Stellar address format (expected G... or C... with 56 chars)',
-    };
-  }
-  return { valid: true };
-}
-
-/**
- * @typedef {Object} InvestorLock
- * @property {string} funderAddress - Stellar address of the funder.
- * @property {string} claimNotBefore - ISO timestamp when claims become valid.
- * @property {number} investorEffectiveYieldBps - Effective yield in basis points.
- * @property {string} invoiceId - Associated invoice ID.
- * @property {boolean} stale - Whether data is from DB mirror (not live on-chain).
- */
-
-/**
- * In-memory store for investor locks (DB mirror placeholder).
- * In production, this would be synced from on-chain events.
- *
- * @type {InvestorLock[]}
- */
-const investorLocks = [];
-
-/**
- * Adds or updates an investor lock record.
- *
- * @param {Object} params - Lock parameters.
- * @param {string} params.funderAddress - Stellar address of the funder.
- * @param {string} params.claimNotBefore - ISO timestamp for claim start.
- * @param {number} params.investorEffectiveYieldBps - Effective yield in bps.
- * @param {string} params.invoiceId - Associated invoice ID.
- * @returns {InvestorLock} The created/updated lock record.
- */
-function setInvestorLock({ funderAddress, claimNotBefore, investorEffectiveYieldBps, invoiceId }) {
-  const existingIndex = investorLocks.findIndex(
-    (lock) => lock.funderAddress === funderAddress && lock.invoiceId === invoiceId
-  );
-
-  const lock = {
-    funderAddress,
-    claimNotBefore,
-    investorEffectiveYieldBps,
-    invoiceId,
-    stale: true,
-    updatedAt: new Date().toISOString(),
-  };
-
-  if (existingIndex >= 0) {
-    investorLocks[existingIndex] = lock;
-  } else {
-    investorLocks.push(lock);
+async function persistCommitment({
+  invoiceId,
+  investorAddress,
+  escrowAddress,
+  amountStroops,
+  status,
+  unsignedXdr = null,
+  txHash = null,
+  ledger = null,
+  idempotencyKey = null,
+}) {
+  // Idempotency check: return early if we've already processed this exact request
+  if (idempotencyKey) {
+    const existing = await db(TABLE).where({ idempotency_key: idempotencyKey }).first();
+    if (existing) {
+      return existing;
+    }
   }
 
-  logger.info({ funderAddress, invoiceId }, 'Investor lock updated (stale=true)');
+  const [row] = await db(TABLE)
+    .insert({
+      invoice_id: invoiceId,
+      investor_address: investorAddress,
+      escrow_address: escrowAddress,
+      amount_stroops: String(amountStroops),
+      status,
+      unsigned_xdr: unsignedXdr,
+      tx_hash: txHash,
+      ledger,
+      idempotency_key: idempotencyKey,
+    })
+    .returning('*');
 
-  return lock;
+  return row;
 }
 
 /**
- * Retrieves investor locks for a specific funder address.
+ * Update the status of an existing commitment (e.g. once the investor submits
+ * the signed XDR and we observe the ledger result).
  *
- * @param {string} funderAddress - Stellar address to query.
- * @param {Object} [options={}] - Query options.
- * @param {string} [options.invoiceId] - Optional filter by invoice ID.
- * @returns {InvestorLock[]} Array of matching lock records.
+ * @param {string} id        — commitment UUID
+ * @param {Partial<CommitmentRecord>} fields
+ * @returns {Promise<CommitmentRecord>}
  */
-function getInvestorLocksByAddress(funderAddress, options = {}) {
-  const { invoiceId } = options;
-
-  let locks = investorLocks.filter((lock) => lock.funderAddress === funderAddress);
-
-  if (invoiceId) {
-    locks = locks.filter((lock) => lock.invoiceId === invoiceId);
-  }
-
-  return locks;
+async function updateCommitment(id, fields) {
+  const [row] = await db(TABLE)
+    .where({ id })
+    .update({ ...fields, updated_at: db.fn.now() })
+    .returning('*');
+  if (!row) throw new Error(`Commitment not found: ${id}`);
+  return row;
 }
 
 /**
- * Retrieves all investor locks, optionally filtered by invoice.
+ * Find commitments for a given investor and invoice.
  *
- * @param {Object} [options={}] - Query options.
- * @param {string} [options.invoiceId] - Optional filter by invoice ID.
- * @returns {InvestorLock[]} Array of lock records.
+ * @param {string} investorAddress
+ * @param {string} invoiceId
+ * @returns {Promise<CommitmentRecord[]>}
  */
-function getAllInvestorLocks(options = {}) {
-  const { invoiceId } = options;
-
-  if (invoiceId) {
-    return investorLocks.filter((lock) => lock.invoiceId === invoiceId);
-  }
-
-  return [...investorLocks];
-}
-
-/**
- * Retrieves an investor lock by invoice ID and funder.
- *
- * @param {string} invoiceId - Invoice identifier.
- * @param {string} funderAddress - Funder Stellar address.
- * @returns {InvestorLock|undefined} The lock record if found.
- */
-function getInvestorLock(invoiceId, funderAddress) {
-  return investorLocks.find(
-    (lock) => lock.invoiceId === invoiceId && lock.funderAddress === funderAddress
-  );
-}
-
-/**
- * Clears all investor locks (for testing).
- *
- * @returns {void}
- */
-function clearInvestorLocks() {
-  investorLocks.length = 0;
-}
-
-/**
- * Populates sample data for testing/development.
- *
- * @returns {void}
- */
-function seedInvestorLocks() {
-  const samples = [
-    {
-      funderAddress: 'GDRXE2BQUC3AZNPVFSCEZ76NJ3WWL25FYFK6RGZGIEKWE4SOUJ3LNLRK',
-      claimNotBefore: '2026-01-01T00:00:00Z',
-      investorEffectiveYieldBps: 850,
-      invoiceId: 'inv_7788',
-    },
-    {
-      funderAddress: 'GDGQVOKHW4VEJRU2TETD8G6RWJ3TVM3VROMV7I3ESNITIBLL6QL6RAIL',
-      claimNotBefore: '2026-02-01T00:00:00Z',
-      investorEffectiveYieldBps: 700,
-      invoiceId: 'inv_2244',
-    },
-  ];
-
-  samples.forEach((sample) => {
-    setInvestorLock(sample);
-  });
+async function findCommitments(investorAddress, invoiceId) {
+  return db(TABLE).where({ investor_address: investorAddress, invoice_id: invoiceId }).orderBy('created_at', 'desc');
 }
 
 module.exports = {
-  validateAddress,
-  setInvestorLock,
-  getInvestorLocksByAddress,
-  getAllInvestorLocks,
-  getInvestorLock,
-  clearInvestorLocks,
-  seedInvestorLocks,
+  persistCommitment,
+  updateCommitment,
+  findCommitments,
 };
