@@ -34,7 +34,8 @@ async function withRetry(operation, options = {}) {
     maxRetries: rawMaxRetries = 3,
     baseDelay: rawBaseDelay = 500,
     maxDelay: rawMaxDelay = 10000,
-    shouldRetry = () => true
+    shouldRetry = () => true,
+    onRetry = null, // optional callback invoked on each failed attempt: ({ attempt, error })
   } = options;
 
   // Validate and cap configuration to prevent accidental resource exhaustion
@@ -48,7 +49,19 @@ async function withRetry(operation, options = {}) {
     try {
       return await operation();
     } catch (error) {
-      if (attempt >= maxRetries || !shouldRetry(error)) {
+      const willRetry = attempt < maxRetries && shouldRetry(error);
+
+      // Invoke onRetry callback so callers can record the failed attempt
+      try {
+        if (typeof onRetry === 'function') {
+          // expose attempt number as 1-based
+          onRetry({ attempt: attempt + 1, error });
+        }
+      } catch (cbErr) {
+        // Swallow callback errors to avoid interfering with retry behavior
+      }
+
+      if (!willRetry) {
         throw error;
       }
 

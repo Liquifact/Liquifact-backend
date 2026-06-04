@@ -1,3 +1,36 @@
+Webhooks
+========
+
+Retry policy
+------------
+
+- Retries are performed only for network/timeouts or 5xx HTTP responses.
+- 4xx responses are considered permanent failures and are not retried.
+- Configurable via environment variables:
+  - `WEBHOOK_MAX_RETRIES` (default 3) — number of retry attempts (total attempts = retries + 1)
+  - `WEBHOOK_BASE_DELAY` (default 500ms) — initial backoff base
+  - `WEBHOOK_MAX_DELAY` (default 10000ms) — maximum backoff delay
+  - `WEBHOOK_TIMEOUT_MS` (default 5000ms) — per-request timeout
+- Backoff is exponential with jitter; bounds are enforced to prevent unbounded delays.
+
+Dead-letter queue
+-----------------
+
+- Exhausted deliveries are persisted to the `webhook_dead_letters` table for later inspection and replay.
+- Stored fields include `tenant_id`, `invoice_id`, `event`, `payload`, `last_error`, `attempts`, and `created_at`.
+
+Observability
+-------------
+
+- Each delivery attempt is recorded as an `webhook_delivery` audit event (via `auditLogStore.appendAuditEvent`) with redaction applied to sensitive fields.
+- A Prometheus counter `webhook_delivery_failures_total` is incremented when a delivery is exhausted and written to the dead-letter queue.
+
+Security notes
+--------------
+
+- Webhook payloads are signed using HMAC-SHA256. The signature header is `X-Signature` and follows the format `t=<timestamp>,v1=<signature>`.
+- Secrets are never logged directly; audit events use redaction rules.
+- Replay of dead-lettered events should be performed in a controlled, authenticated process to avoid leaking secrets.
 # Webhooks
 
 This document describes the webhook system for LiquiFact escrow events.

@@ -12,14 +12,28 @@
  * @module metrics
  */
 
-const client = require('prom-client');
+let client;
+try {
+  client = require('prom-client');
+} catch (e) {
+  // Fallback shim for environments without prom-client (tests)
+  client = {
+    Registry: class {
+      constructor() { this.contentType = 'text/plain'; }
+      metrics() { return ''; }
+    },
+    collectDefaultMetrics: () => {},
+  };
+}
 
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 
 /** Shared registry — exported so tests can reset it between runs. */
 const registry = new client.Registry();
 
-client.collectDefaultMetrics({ register: registry });
+if (typeof client.collectDefaultMetrics === 'function') {
+  client.collectDefaultMetrics({ register: registry });
+}
 
 /**
  * Express middleware that enforces metrics auth.
