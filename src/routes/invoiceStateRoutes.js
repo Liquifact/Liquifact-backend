@@ -119,7 +119,7 @@ function conditionalKycGate(req, res, next) {
   return next();
 }
 
-router.post('/:id/transition', conditionalKycGate, (req, res, next) => {
+router.post('/:id/transition', conditionalKycGate, async (req, res, next) => {
   const { id } = req.params;
   const { targetState, reason } = req.body;
 
@@ -148,7 +148,7 @@ router.post('/:id/transition', conditionalKycGate, (req, res, next) => {
     const userAgent = req.get('user-agent') || 'unknown';
 
     // Execute transition
-    const result = executeTransition({
+    const result = await executeTransition({
       invoiceId: id,
       currentState,
       targetState,
@@ -198,7 +198,7 @@ router.post('/:id/transition', conditionalKycGate, (req, res, next) => {
  * POST /api/invoices/:id/approve
  * Convenience endpoint to approve an invoice
  */
-router.post('/:id/approve', (req, res, next) => {
+router.post('/:id/approve', async (req, res, next) => {
   const { id } = req.params;
   const { reason } = req.body;
 
@@ -217,7 +217,7 @@ router.post('/:id/approve', (req, res, next) => {
     const ipAddress = req.ip || req.socket.remoteAddress || 'unknown';
     const userAgent = req.get('user-agent') || 'unknown';
 
-    const result = executeTransition({
+    const result = await executeTransition({
       invoiceId: id,
       currentState,
       targetState: INVOICE_STATES.APPROVED,
@@ -266,7 +266,7 @@ router.post('/:id/approve', (req, res, next) => {
  * This is a capital-movement endpoint: it initiates the escrow funding
  * lifecycle. KYC must be verified before the link can be made.
  */
-router.post('/:id/link-escrow', requireKycForFunding, (req, res, next) => {
+router.post('/:id/link-escrow', requireKycForFunding, async (req, res, next) => {
   const { id } = req.params;
   const { escrowId, reason } = req.body;
 
@@ -294,7 +294,7 @@ router.post('/:id/link-escrow', requireKycForFunding, (req, res, next) => {
     const ipAddress = req.ip || req.socket.remoteAddress || 'unknown';
     const userAgent = req.get('user-agent') || 'unknown';
 
-    const result = executeTransition({
+    const result = await executeTransition({
       invoiceId: id,
       currentState,
       targetState: INVOICE_STATES.LINKED_ESCROW,
@@ -343,7 +343,7 @@ router.post('/:id/link-escrow', requireKycForFunding, (req, res, next) => {
  * GET /api/invoices/:id/history
  * Get state transition history for an invoice
  */
-router.get('/:id/history', (req, res) => {
+router.get('/:id/history', async (req, res) => {
   const { id } = req.params;
 
   // Check if invoice exists
@@ -356,7 +356,7 @@ router.get('/:id/history', (req, res) => {
     });
   }
 
-  const history = getTransitionHistory(id, getAuditLogs);
+  const history = await getTransitionHistory(id, getAuditLogs);
 
   res.json({
     data: {
@@ -373,7 +373,7 @@ router.get('/:id/history', (req, res) => {
  * POST /api/invoices/:id/reject
  * Convenience endpoint to reject an invoice
  */
-router.post('/:id/reject', (req, res, next) => {
+router.post('/:id/reject', async (req, res, next) => {
   const { id } = req.params;
   const { reason } = req.body;
 
@@ -399,7 +399,7 @@ router.post('/:id/reject', (req, res, next) => {
     const ipAddress = req.ip || req.socket.remoteAddress || 'unknown';
     const userAgent = req.get('user-agent') || 'unknown';
 
-    const result = executeTransition({
+    const result = await executeTransition({
       invoiceId: id,
       currentState,
       targetState: INVOICE_STATES.REJECTED,

@@ -11,9 +11,12 @@
 "use strict";
 
 const { callSorobanContract } = require("./soroban");
-const { emitWebhook } = require("./webhooks");
 const logger = require("../logger");
 const { getTokenMetadata } = require("./tokenMeta");
+const db = require("../db/knex");
+const { createRedisEscrowSummaryCache } = require("../cache/redis");
+
+const cache = createRedisEscrowSummaryCache();
 
 /**
  * Regex that a valid invoice ID must satisfy.
@@ -147,15 +150,6 @@ async function readEscrowState(invoiceId, options = {}) {
     legal_hold: legalHold,
     funding_token: tokenMetadata,
   };
-
-  // Emit webhook for funded or settled escrows
-  if (baseState.status === 'funded') {
-    await emitWebhook('escrow_funded', safeId, { fundedAmount: baseState.fundedAmount });
-  } else if (baseState.status === 'settled') {
-    await emitWebhook('escrow_settled', safeId, { fundedAmount: baseState.fundedAmount });
-  }
-
-  return enrichedState;
 }
 
 /**
@@ -299,10 +293,52 @@ async function readEscrowStateWithAttestations(invoiceId, options = {}) {
   };
 }
 
+/**
+ * Reads only the on-chain `funded_amount` for an invoice from the
+ * LiquifactEscrow contract via {@link callSorobanContract}.
+ *
+ * This is a focused read used by the nightly reconciliation job, which only
+ * needs the funded amount and not the full enriched escrow state (legal hold,
+ * token metadata, attestations). It reuses the same validation and retry path
+ * as the rest of the escrow read surface so behaviour stays consistent.
+ *
+ * @param {string} invoiceId - Invoice identifier (validated internally).
+ * @param {object} [options={}]
+ * @param {Function} [options.escrowAdapter] - Injected adapter
+ *   `(invoiceId) => { fundedAmount } | number` for tests. Defaults to the
+ *   production base-state stub.
+ * @returns {Promise<number>} The on-chain funded amount as a finite number.
+ * @throws {Error} With `code = 'INVALID_INVOICE_ID'` and `status = 400` when
+ *   `invoiceId` is invalid. Soroban/transport errors propagate from
+ *   {@link callSorobanContract} so callers can classify them as `error`.
+ */
+async function readFundedAmount(invoiceId, options = {}) {
+  const { escrowAdapter } = options;
+
+  const { valid, reason } = validateInvoiceId(invoiceId);
+  if (!valid) {
+    const err = new Error(reason);
+    err.code = 'INVALID_INVOICE_ID';
+    err.status = 400;
+    throw err;
+  }
+
+  const safeId = invoiceId.trim();
+  const baseState = await _fetchBaseEscrowState(safeId, escrowAdapter);
+
+  // Adapters may return either the full base-state object or a bare number.
+  const raw =
+    baseState && typeof baseState === 'object' ? baseState.fundedAmount : baseState;
+  const amount = Number(raw);
+  return Number.isFinite(amount) ? amount : 0;
+}
+
 module.exports = {
   readEscrowState,
   readEscrowStateWithAttestations,
+  readFundedAmount,
   fetchLegalHold,
   fetchAttestationAppendLog,
   validateInvoiceId,
+  getEscrowStateWithProjection,
 };

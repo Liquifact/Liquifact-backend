@@ -19,7 +19,7 @@ describe('Standard Response Envelope (Issue 19)', () => {
   });
 
   it('POST /api/invoices returns 201', async () => {
-    const res = await request(app).post('/api/invoices').send({});
+    const res = await request(app).post('/api/invoices').set('Authorization', 'Bearer token').send({ amount: 1000, buyer: 'Acme', seller: 'Seller', dueDate: '2025-12-31', currency: 'USD' });
     expect(res.status).toBe(201);
     expect(res.body.data.id).toBe('placeholder');
   });
