@@ -12,8 +12,8 @@ try {
   // In test environments where prom-client may not be installed, provide a noop shim
   client = {
     Counter: class {
-      constructor() {}
-      inc() {}
+      constructor() { }
+      inc() { }
     },
   };
 }

@@ -68,7 +68,7 @@ async function withRetry(operation, options = {}) {
       // Calculate exponential backoff
       const exponentialDelay = baseDelay * Math.pow(2, attempt);
       const delay = Math.min(exponentialDelay, maxDelay);
-      
+
       // Add Jitter (±20%)
       const jitteredDelay = delay * (0.8 + Math.random() * 0.4);
 
