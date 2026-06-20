@@ -10,6 +10,8 @@
 const DANGEROUS_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 const DEFAULT_MAX_DEPTH = 20;
 const DEFAULT_MAX_STRING_LENGTH = 4096;
+const DEFAULT_MAX_ARRAY_LENGTH = 1000;
+const DEFAULT_MAX_OBJECT_KEYS = 1000;
 
 /**
  * Sanitizes and normalizes a user-supplied string.
@@ -45,6 +47,8 @@ function sanitizeUserString(value, options = {}) {
  * @param {object} [options] Tree sanitization options.
  * @param {number} [options.maxDepth=20] Maximum recursion depth.
  * @param {number} [options.maxStringLength=4096] Maximum string length.
+ * @param {number} [options.maxArrayLength=1000] Maximum array items to keep.
+ * @param {number} [options.maxObjectKeys=1000] Maximum object keys to keep.
  * @returns {*} Sanitized value tree.
  */
 function sanitizeValue(input, options = {}) {
@@ -52,8 +56,19 @@ function sanitizeValue(input, options = {}) {
   const maxStringLength = Number.isInteger(options.maxStringLength)
     ? options.maxStringLength
     : DEFAULT_MAX_STRING_LENGTH;
+  const maxArrayLength = Number.isInteger(options.maxArrayLength)
+    ? options.maxArrayLength
+    : DEFAULT_MAX_ARRAY_LENGTH;
+  const maxObjectKeys = Number.isInteger(options.maxObjectKeys)
+    ? options.maxObjectKeys
+    : DEFAULT_MAX_OBJECT_KEYS;
 
-  return sanitizeValueAtDepth(input, 0, { maxDepth, maxStringLength });
+  return sanitizeValueAtDepth(input, 0, {
+    maxArrayLength,
+    maxDepth,
+    maxObjectKeys,
+    maxStringLength,
+  });
 }
 
 /**
@@ -61,7 +76,12 @@ function sanitizeValue(input, options = {}) {
  *
  * @param {*} input Value to sanitize.
  * @param {number} depth Current recursion depth.
- * @param {{ maxDepth: number, maxStringLength: number }} options Sanitization options.
+ * @param {{
+ *   maxArrayLength: number,
+ *   maxDepth: number,
+ *   maxObjectKeys: number,
+ *   maxStringLength: number
+ * }} options Sanitization options.
  * @returns {*} Sanitized value.
  */
 function sanitizeValueAtDepth(input, depth, options) {
@@ -74,13 +94,14 @@ function sanitizeValueAtDepth(input, depth, options) {
   }
 
   if (Array.isArray(input)) {
-    return input
+    return input.slice(0, options.maxArrayLength)
       .map((item) => sanitizeValueAtDepth(item, depth + 1, options))
       .filter((item) => item !== undefined);
   }
 
   if (input && typeof input === 'object') {
-    const sanitizedObject = {};
+    const sanitizedObject = Object.create(null);
+    let copiedKeys = 0;
 
     for (const [key, value] of Object.entries(input)) {
       if (DANGEROUS_KEYS.has(key)) {
@@ -90,6 +111,11 @@ function sanitizeValueAtDepth(input, depth, options) {
       const sanitizedValue = sanitizeValueAtDepth(value, depth + 1, options);
       if (sanitizedValue !== undefined) {
         sanitizedObject[key] = sanitizedValue;
+        copiedKeys += 1;
+      }
+
+      if (copiedKeys >= options.maxObjectKeys) {
+        break;
       }
     }
 

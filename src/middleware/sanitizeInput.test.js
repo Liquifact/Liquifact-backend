@@ -60,4 +60,34 @@ describe('sanitizeInput middleware', () => {
       customer: 'Test',
     });
   });
+
+  it('strips nested prototype-pollution keys from body and query payloads', async () => {
+    const response = await request(app)
+      .post('/echo/inv-002?constructor=drop&prototype=drop&safe=%20ok%20')
+      .send(JSON.parse(`{
+        "customer": "Test",
+        "metadata": {
+          "__proto__": { "polluted": true },
+          "safe": "  keep  "
+        },
+        "items": [
+          { "prototype": "drop", "name": "  first  " }
+        ]
+      }`));
+
+    expect(response.status).toBe(200);
+    expect(response.body.body).toEqual({
+      customer: 'Test',
+      metadata: {
+        safe: 'keep',
+      },
+      items: [
+        { name: 'first' },
+      ],
+    });
+    expect(response.body.query).toEqual({
+      safe: 'ok',
+    });
+    expect(Object.prototype.polluted).toBeUndefined();
+  });
 });

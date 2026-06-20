@@ -675,6 +675,11 @@ All API failures return a structured error payload:
 - Internal stack traces and raw exception details are never returned to clients.
 - Correlation IDs are sanitized.
 - Retry hints are generic and do not leak infrastructure details.
+- Request body, query, and route-param sanitization recursively drops
+  `__proto__`, `constructor`, and `prototype` keys, returns sanitized plain
+  objects with no prototype, and caps nested payload traversal to reduce
+  prototype-pollution and oversized-input risk before handlers build Knex
+  filters or spread request data.
 
 ---
 
