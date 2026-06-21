@@ -1,175 +1,180 @@
-# Database Migrations
+# Database Migration Workflow
 
-This project uses multiple migration systems to support development (SQLite) and production (Postgres) workflows. The purpose of this document is to describe the canonical migration workflow so contributors apply migrations consistently and avoid schema drift.
+Liquifact keeps both PostgreSQL and local-development migration tooling in the
+repository. This guide defines the canonical workflow so contributors can add,
+apply, review, and roll back schema changes without creating drift between
+local SQLite helpers and the production PostgreSQL schema.
 
-Key components
---------------
+## Canonical Runner
 
-- `knexfile.js` — configuration used by some local tooling and historic JS migrations; not the primary runner for production migrations.
-- `migrator-config.js` + `node-pg-migrate` — the authoritative runner for Postgres migrations (SQL files under `migrations/` and JS migrations created for node-pg-migrate).
-- `migrations/*.sql` — canonical SQL migrations targeting Postgres features (JSONB, append-only triggers, indexes).
-- `migrations/001_create_invoices_table.js` — legacy JS migration (knex-style); kept for historical reasons. New schema changes should prefer SQL or node-pg-migrate JS format and be added to the Postgres runner.
-- `src/db/migrations/*.js` — helper migration scripts used by local tooling; they are not authoritative for production.
-- `db.sqlite3` — a developer convenience SQLite database used for quick local iteration. This file is not the source of truth for schema or production migrations.
+Use `node-pg-migrate` for all production PostgreSQL schema changes.
 
-Authoritative migration runner
-------------------------------
+- `migrator-config.js` points `node-pg-migrate` at the `migrations/` directory.
+- `npm run db:setup` and `npm run db:migrate` both run `node-pg-migrate up`.
+- `npm run db:migrate:down` runs `node-pg-migrate down`.
+- `npm run db:migrate:create <name>` creates a new migration file.
+- `npm run db:migrate:reset` resets and reapplies the migration set.
 
-The canonical migration runner for production is `node-pg-migrate` (configured via `migrator-config.js`). New migrations must be authored to run under `node-pg-migrate` and tested against a Postgres instance. This runner is used in CI and deployment pipelines to ensure consistent ordering and behavior.
+`knexfile.js` and `npm run db:rollback` remain for legacy/local workflows, but
+new migrations should not depend on Knex as the primary runner. Prefer
+`db:migrate:down` when documenting or testing rollback behavior for new changes.
 
-Why Postgres is authoritative
------------------------------
+## Migration Systems In This Repo
 
-- Production uses Postgres and relies on Postgres-only features: `JSONB` columns, append-only triggers for audit logs, `BIGSERIAL` primary keys, and advanced index types. These features do not translate exactly to SQLite.
-- Using Postgres in CI and local testing ensures migrations exercise the same semantics as production (e.g., JSONB indexes and constraints).
+| Location or file | Purpose | Ownership |
+| --- | --- | --- |
+| `migrator-config.js` | Configuration for `node-pg-migrate` environments | Authoritative for PostgreSQL migrations |
+| `migrations/*.sql` | SQL-first PostgreSQL migrations | Preferred for schema changes that map cleanly to SQL |
+| `migrations/*.js` | Programmatic migrations run from the main migration directory | Allowed when a migration needs JavaScript logic |
+| `migrations/001_create_invoices_table.js` | Older Knex-style migration kept for history | Legacy; do not copy for new work |
+| `knexfile.js` | Knex configuration for legacy/local tooling and seeds | Compatibility only |
+| `src/db/migrations/*.js` | App/local helper migrations | Not authoritative for production schema |
+| `db.sqlite3` | Local convenience database when present | Never treat as the source of truth |
 
-Local development with SQLite
-----------------------------
+## Recommended Command Order
 
-- `db.sqlite3` is provided for fast local iteration and lightweight tests. It is convenient, but it diverges from Postgres in several important ways (types, constraints, triggers, indexes). DO NOT treat the SQLite schema file as the canonical schema.
-- When developing a migration locally, test it against both SQLite (if needed for quick iteration) and Postgres (recommended) before submitting a PR.
+Start from a clean environment and run the canonical setup before developing a
+database-backed change:
 
-Recommended workflow (creating and applying migrations)
-------------------------------------------------------
+```bash
+npm install
+cp .env.example .env
+# Set DATABASE_URL to a local PostgreSQL database.
+npm run db:setup
+npm test
+```
 
-1. Create a new migration (prefer SQL or node-pg-migrate JS):
+For day-to-day migration work:
 
-	 - SQL: create a new file in `migrations/` using the established naming convention (`YYYYMMDDHHMMSS_description.sql`).
-	 - JS (node-pg-migrate): use `node-pg-migrate create description --migrations-dir migrations` and author `exports.up`/`exports.down` in the generated file.
+```bash
+# Apply all pending migrations.
+npm run db:migrate
 
-2. Run against a local Postgres to validate (recommended):
+# Roll back the most recent node-pg-migrate migration.
+npm run db:migrate:down
 
-	 - Start a local Postgres (Docker recommended):
+# Create a new migration.
+npm run db:migrate:create add_new_table
 
-		 ```powershell
-		 docker run --rm -e POSTGRES_PASSWORD=pass -e POSTGRES_DB=liquifact -p 5432:5432 -d postgres:15
-		 ```
+# Reset the database in a disposable local/test database.
+npm run db:migrate:reset
+```
 
-	 - Configure `DATABASE_URL` or the appropriate `.env` values to point to your local Postgres.
+Avoid `npm run db:rollback` for new migration documentation. It uses Knex and is
+kept only for historical compatibility with older local workflows.
 
-	 - Run migrations (node-pg-migrate):
+## Creating A New Migration
 
-		 ```bash
-		 npx node-pg-migrate up -d migrator-config.js
-		 ```
+1. Choose the right format.
+   - Use SQL in `migrations/YYYYMMDDHHMMSS_description.sql` for straightforward
+     DDL, indexes, triggers, constraints, and extensions.
+   - Use `node-pg-migrate` JavaScript in `migrations/` when the change needs
+     programmatic branching or data backfill logic.
+2. Include both forward and rollback behavior.
+   - SQL migrations should be written so reviewers can identify the matching
+     rollback path or operational undo steps.
+   - JavaScript migrations should provide both `up` and `down` exports.
+3. Test on PostgreSQL, not only SQLite.
+   - Production relies on PostgreSQL features such as `JSONB`, `BIGSERIAL`,
+     triggers, constraints, and index behavior that SQLite does not fully match.
+4. Update documentation when the workflow or required environment variables
+   change.
 
-3. Validate the schema and any Postgres-specific features (JSONB, triggers, indexes).
+## Existing Migration Inventory
 
-4. Run the test suite (CI will run migrations against Postgres as part of integration):
+| Migration | Scope |
+| --- | --- |
+| `001_create_invoices_table.js` | Legacy Knex-style invoice table migration |
+| `20240101000000_initial_schema.sql` | Initial invoice-management schema |
+| `20240425000000_create_invoices_table.sql` | PostgreSQL invoice table |
+| `20240425000001_create_users_and_tenants.sql` | Users and tenants |
+| `20240425000002_add_tenant_to_invoices.sql` | Tenant linkage for invoices |
+| `20240425000003_create_escrow_operations.sql` | Escrow operation tables |
+| `20240426000000_add_marketplace_fields_to_invoices.sql` | Marketplace invoice fields |
+| `20240426000000_create_audit_logs_table.sql` | Invoice state audit logs |
+| `20250425000000_create_retention_system.sql` | Retention policies and legal holds |
+| `202604260001_create_audit_log_events.sql` | Append-only audit event ledger |
+| `202604260002_enforce_audit_log_append_only.sql` | Database-level append-only enforcement |
+| `20260427123000_create_escrow_event_index_tables.sql` | Escrow event index tables |
+| `20260429000000_create_reconciliation_runs.js` | Reconciliation run persistence |
+| `20260601000000_create_idempotency_keys.sql` | Idempotency key storage |
+| `20260601000001_create_investor_commitments.js` | Investor commitment storage |
+| `20260602000000_create_webhook_dead_letters.sql` | Webhook dead-letter queue |
 
-	 ```bash
-	 npm test
-	 npm run test:coverage
-	 ```
+`src/db/migrations/20260425_add_kyc_status.js` is a local/application helper
+migration and should not be considered part of the canonical production
+migration history.
 
-Commands reference
-------------------
+## Local PostgreSQL Setup
 
-- Create a node-pg-migrate migration:
-	```bash
-	npx node-pg-migrate create add_some_table -d migrations --migrations-dir migrations
-	```
- # Migrations
+Use any local PostgreSQL service that exposes a database matching
+`DATABASE_URL`. A disposable Docker instance is enough for migration validation:
 
- This project uses multiple migration systems to support development (SQLite) and production (Postgres) workflows. The purpose of this document is to describe the canonical migration workflow so contributors apply migrations consistently and avoid schema drift.
+```bash
+docker run --rm \
+  --name liquifact-postgres \
+  -e POSTGRES_PASSWORD=pass \
+  -e POSTGRES_DB=liquifact_dev \
+  -p 5432:5432 \
+  postgres:15
+```
 
- Key components
- --------------
+Then set:
 
- - `knexfile.js` — configuration used by some local tooling and historic JS migrations; not the primary runner for production migrations.
- - `migrator-config.js` + `node-pg-migrate` — the authoritative runner for Postgres migrations (SQL files under `migrations/` and JS migrations created for node-pg-migrate).
- - `migrations/*.sql` — canonical SQL migrations targeting Postgres features (JSONB, append-only triggers, indexes).
- - `migrations/001_create_invoices_table.js` — legacy JS migration (knex-style); kept for historical reasons. New schema changes should prefer SQL or node-pg-migrate JS format and be added to the Postgres runner.
- - `src/db/migrations/*.js` — helper migration scripts used by local tooling; they are not authoritative for production.
- - `db.sqlite3` — a developer convenience SQLite database used for quick local iteration. This file is not the source of truth for schema or production migrations.
+```bash
+DATABASE_URL=postgresql://postgres:pass@localhost:5432/liquifact_dev
+```
 
- Authoritative migration runner
- ------------------------------
+Apply migrations with:
 
- The canonical migration runner for production is `node-pg-migrate` (configured via `migrator-config.js`). New migrations must be authored to run under `node-pg-migrate` and tested against a Postgres instance. This runner is used in CI and deployment pipelines to ensure consistent ordering and behavior.
+```bash
+npm run db:migrate
+```
 
- Why Postgres is authoritative
- -----------------------------
+## CI And Deployment Notes
 
- - Production uses Postgres and relies on Postgres-only features: `JSONB` columns, append-only triggers for audit logs, `BIGSERIAL` primary keys, and advanced index types. These features do not translate exactly to SQLite.
- - Using Postgres in CI and local testing ensures migrations exercise the same semantics as production (e.g., JSONB indexes and constraints).
+- Run migrations against PostgreSQL in CI and deployment environments.
+- Use the same `node-pg-migrate` command path as local development:
+  `npm run db:migrate`.
+- Run seeds only after schema migrations have completed successfully.
+- Never deploy a migration that was validated only against SQLite.
+- Treat `db:migrate:reset` as a disposable local/test command only. Do not use it
+  against shared staging or production databases.
 
- Local development with SQLite
- ----------------------------
+## Reviewer Checklist
 
- - `db.sqlite3` is provided for fast local iteration and lightweight tests. It is convenient, but it diverges from Postgres in several important ways (types, constraints, triggers, indexes). DO NOT treat the SQLite schema file as the canonical schema.
- - When developing a migration locally, test it against both SQLite (if needed for quick iteration) and Postgres (recommended) before submitting a PR.
+- The migration lives in `migrations/` and is ordered by timestamp.
+- The migration was tested with `npm run db:migrate` against PostgreSQL.
+- Rollback behavior was tested with `npm run db:migrate:down` or documented as
+  an explicit operational rollback when a destructive reverse migration is not
+  safe.
+- The change avoids editing `db.sqlite3` as a schema source.
+- Any new required environment variables are documented in `.env.example` and
+  relevant setup docs.
+- Application tests or focused database tests cover the schema change when
+  behavior changes.
 
- Recommended workflow (creating and applying migrations)
- ------------------------------------------------------
+## Troubleshooting
 
- 1. Create a new migration (prefer SQL or node-pg-migrate JS):
+### `DATABASE_URL` is missing
 
-		- SQL: create a new file in `migrations/` using the established naming convention (`YYYYMMDDHHMMSS_description.sql`).
-		- JS (node-pg-migrate): use `node-pg-migrate create description --migrations-dir migrations` and author `exports.up`/`exports.down` in the generated file.
+Set `DATABASE_URL` in `.env` or the shell before running migration commands.
+`migrator-config.js` falls back to local database names for development and
+test, but explicit URLs make CI and local debugging easier to reason about.
 
- 2. Run against a local Postgres to validate (recommended):
+### Migration succeeds locally but fails in CI
 
-		- Start a local Postgres (Docker recommended):
+Confirm the local run used PostgreSQL. SQLite may accept different types,
+constraints, or index definitions and should not be used as the final migration
+validation target.
 
-			```powershell
-			docker run --rm -e POSTGRES_PASSWORD=pass -e POSTGRES_DB=liquifact -p 5432:5432 -d postgres:15
-			```
+### Rollback uses a different tool
 
-		- Configure `DATABASE_URL` or the appropriate `.env` values to point to your local Postgres.
+Use `npm run db:migrate:down` for node-pg-migrate rollback checks. The
+`db:rollback` script invokes Knex and exists only for legacy compatibility.
 
-		- Run migrations (node-pg-migrate):
+### Duplicate or conflicting timestamps
 
-			```bash
-			npx node-pg-migrate up -d migrator-config.js
-			```
-
- 3. Validate the schema and any Postgres-specific features (JSONB, triggers, indexes).
-
- 4. Run the test suite (CI will run migrations against Postgres as part of integration):
-
-		```bash
-		npm test
-		npm run test:coverage
-		```
-
- Commands reference
- ------------------
-
- - Create a node-pg-migrate migration:
-	 ```bash
-	 npx node-pg-migrate create add_some_table -d migrations --migrations-dir migrations
-	 ```
- - Apply migrations (up):
-	 ```bash
-	 npx node-pg-migrate up -d migrator-config.js
-	 ```
- - Rollback last batch (down):
-	 ```bash
-	 npx node-pg-migrate down -d migrator-config.js
-	 ```
- - Reset (drop and re-run):
-	 ```bash
-	 npx node-pg-migrate reset -d migrator-config.js
-	 ```
-
- CI notes
- --------
-
- - CI should run migrations against a Postgres test database (not SQLite). Use the same `node-pg-migrate` commands as above.
- - The pipeline should seed any required test data after migration.
-
- Important guidance
- ------------------
-
- - Do not modify `db.sqlite3` to propagate schema changes. Instead author migrations and run them against Postgres; if local dev requires a refreshed SQLite, re-create it from migrations but treat Postgres as the source of truth.
- - Prefer SQL or `node-pg-migrate` JS migrations over legacy `knex` JS files.
- - Keep migrations idempotent and reversible (`down` migration) where possible.
-
- FAQ
- ---
-
- Q: Why are there both SQL and JS migrations?
-
- A: SQL files are explicit and map closely to Postgres features; JS migrations (node-pg-migrate) are used for logic that requires programmatic changes. Both run under the Postgres runner.
-
+Create a fresh timestamped migration and keep the earlier committed history in
+place. Do not rename already-merged migration files unless the team explicitly
+coordinates a migration-history rewrite.
