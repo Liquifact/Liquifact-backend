@@ -33,8 +33,12 @@ Part of the LiquiFact stack: frontend (Next.js) | backend (this repo) | contract
 
    ```bash
    cp .env.example .env
-   # Edit .env with your database configuration
+   # Edit .env with your local configuration
    ```
+
+   See [`docs/configuration.md`](./docs/configuration.md) for the complete
+   environment variable reference, required secrets, defaults, and known
+   `.env.example` drift.
 
 4. Start database services
 
