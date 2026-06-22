@@ -1,5 +1,8 @@
 # Invoice Lifecycle State Machine API
 
+For the end-to-end invoice state, KYC gate, and escrow funding sequence, see
+[`invoice-funding-lifecycle.md`](./invoice-funding-lifecycle.md).
+
 ## Overview
 
 The Invoice Lifecycle API implements a secure state machine for managing invoice transitions through the LiquiFact platform. The state machine enforces strict transition rules and maintains a complete audit trail of all state changes.
