@@ -5,6 +5,86 @@
  * @jest-environment node
  */
 
+jest.mock('../src/db/knex', () => {
+  const auditRows = [];
+
+  function mapWhereArgs(column, value) {
+    if (typeof column === 'object' && column !== null) {
+      return Object.entries(column);
+    }
+    return [[column, value]];
+  }
+
+  function createQuery(tableName) {
+    const filters = [];
+    let rowLimit = Infinity;
+    let rowOffset = 0;
+    let orderDirection = null;
+
+    const readRows = () => {
+      if (tableName !== 'audit_log_events') {
+        return [];
+      }
+
+      const rows = auditRows
+        .filter((row) => filters.every(([column, value]) => row[column] === value));
+
+      if (orderDirection === 'desc') {
+        rows.reverse();
+      }
+
+      return rows.slice(rowOffset, rowLimit === Infinity ? undefined : rowOffset + rowLimit);
+    };
+
+    const query = {
+      select: jest.fn(() => query),
+      orderBy: jest.fn((_column, direction) => {
+        orderDirection = direction;
+        return query;
+      }),
+      where: jest.fn((column, value) => {
+        filters.push(...mapWhereArgs(column, value));
+        return query;
+      }),
+      limit: jest.fn((limit) => {
+        rowLimit = limit;
+        return query;
+      }),
+      offset: jest.fn((offset) => {
+        rowOffset = offset;
+        return query;
+      }),
+      insert: jest.fn(async (record) => {
+        auditRows.push({
+          id: `audit-${auditRows.length + 1}`,
+          created_at: new Date().toISOString(),
+          ...record,
+        });
+        return [1];
+      }),
+      del: jest.fn(async () => {
+        auditRows.length = 0;
+        return 1;
+      }),
+      returning: jest.fn(async () => readRows()),
+      first: jest.fn(async () => readRows()[0] || null),
+      then: (resolve, reject) => Promise.resolve(readRows()).then(resolve, reject),
+      catch: (reject) => Promise.resolve(readRows()).catch(reject),
+    };
+
+    return query;
+  }
+
+  const db = jest.fn((tableName) => createQuery(tableName));
+  db.raw = jest.fn(async () => undefined);
+  return db;
+});
+
+jest.mock('../src/middleware/kycGating', () => ({
+  requireKycForFunding: (_req, _res, next) => next(),
+  auditKycAccess: (_req, _res, next) => next(),
+}));
+
 const request = require('supertest');
 const express = require('express');
 const {
@@ -23,8 +103,8 @@ const { clearAuditLogs, getAuditLogs } = require('../src/services/auditLog');
 const invoiceStateRoutes = require('../src/routes/invoiceStateRoutes');
 
 describe('Invoice State Machine', () => {
-  beforeEach(() => {
-    clearAuditLogs();
+  beforeEach(async () => {
+    await clearAuditLogs();
   });
 
   describe('State Validation', () => {
@@ -109,13 +189,16 @@ describe('Invoice State Machine', () => {
           const expectedCode = getExpectedValidationCode({ fromState, targetState });
 
           it(`isTransitionAllowed/validateTransition/executeTransition: ${fromState} → ${targetState}`, () => {
+            return (async () => {
             expect(isTransitionAllowed(fromState, targetState)).toBe(expectedAllowed);
 
+            const reason = `Reason ${fromState}-${targetState}`;
             const validation = validateTransition({
               invoiceId: 'inv-matrix',
               currentState: fromState,
               targetState,
               actor: 'matrix-user',
+              reason,
             });
 
             if (expectedCode === null) {
@@ -129,11 +212,11 @@ describe('Invoice State Machine', () => {
               }
             }
 
-            clearAuditLogs();
+            await clearAuditLogs();
 
             if (expectedCode === null) {
               const reason = `Reason ${fromState}→${targetState}`;
-              const exec = executeTransition({
+              const exec = await executeTransition({
                 invoiceId: 'inv-matrix-exec',
                 currentState: fromState,
                 targetState,
@@ -148,14 +231,14 @@ describe('Invoice State Machine', () => {
               expect(exec.previousState).toBe(fromState);
               expect(exec.newState).toBe(targetState);
 
-              const logs = getAuditLogs({ resourceId: 'inv-matrix-exec', action: 'STATE_TRANSITION' });
+              const logs = await getAuditLogs({ resourceId: 'inv-matrix-exec', action: 'STATE_TRANSITION' });
               expect(logs).toHaveLength(1);
               expect(logs[0].changes.before.state).toBe(fromState);
               expect(logs[0].changes.after.state).toBe(targetState);
               expect(logs[0].metadata.transitionType).toBe(`${fromState}_to_${targetState}`);
               expect(logs[0].metadata.reason).toBe(reason);
             } else {
-              expect(() =>
+              await expect(
                 executeTransition({
                   invoiceId: 'inv-matrix-exec',
                   currentState: fromState,
@@ -165,8 +248,9 @@ describe('Invoice State Machine', () => {
                   ipAddress: '192.0.2.1',
                   userAgent: 'Test-UA',
                 })
-              ).toThrow(expectedCode);
+              ).rejects.toMatchObject({ code: expectedCode });
             }
+            })();
           });
         });
       });
@@ -335,8 +419,8 @@ describe('Invoice State Machine', () => {
   });
 
   describe('Transition Execution', () => {
-    it('should execute valid transition and create audit log', () => {
-      const result = executeTransition({
+    it('should execute valid transition and create audit log', async () => {
+      const result = await executeTransition({
         invoiceId: 'inv-001',
         currentState: 'pending',
         targetState: 'approved',
@@ -354,15 +438,15 @@ describe('Invoice State Machine', () => {
       expect(result.auditLog.action).toBe('STATE_TRANSITION');
 
       // Verify audit log was created
-      const logs = getAuditLogs({ resourceId: 'inv-001' });
+      const logs = await getAuditLogs({ resourceId: 'inv-001' });
       expect(logs.length).toBe(1);
       expect(logs[0].changes.before.state).toBe('pending');
       expect(logs[0].changes.after.state).toBe('approved');
       expect(logs[0].metadata.reason).toBe('Invoice verified');
     });
 
-    it('should persist terminal transition reason in audit metadata', () => {
-      const result = executeTransition({
+    it('should persist terminal transition reason in audit metadata', async () => {
+      const result = await executeTransition({
         invoiceId: 'inv-001',
         currentState: 'pending',
         targetState: 'rejected',
@@ -372,23 +456,23 @@ describe('Invoice State Machine', () => {
 
       expect(result.success).toBe(true);
       expect(result.newState).toBe('rejected');
-      const logs = getAuditLogs({ resourceId: 'inv-001' });
+      const logs = await getAuditLogs({ resourceId: 'inv-001' });
       expect(logs[0].metadata.reason).toBe('Failed KYC checks');
     });
 
-    it('should throw error for invalid transition', () => {
-      expect(() => {
+    it('should throw error for invalid transition', async () => {
+      await expect(
         executeTransition({
           invoiceId: 'inv-001',
           currentState: 'pending',
           targetState: 'linked_escrow',
           actor: 'user-123',
-        });
-      }).toThrow();
+        })
+      ).rejects.toThrow();
     });
 
-    it('should include metadata in audit log', () => {
-      executeTransition({
+    it('should include metadata in audit log', async () => {
+      await executeTransition({
         invoiceId: 'inv-002',
         currentState: 'approved',
         targetState: 'linked_escrow',
@@ -400,16 +484,16 @@ describe('Invoice State Machine', () => {
         },
       });
 
-      const logs = getAuditLogs({ resourceId: 'inv-002' });
+      const logs = await getAuditLogs({ resourceId: 'inv-002' });
       expect(logs[0].metadata.escrowId).toBe('escrow-123');
       expect(logs[0].metadata.method).toBe('POST');
     });
   });
 
   describe('Transition History', () => {
-    it('should retrieve transition history for an invoice', () => {
+    it('should retrieve transition history for an invoice', async () => {
       // Execute multiple transitions
-      executeTransition({
+      await executeTransition({
         invoiceId: 'inv-003',
         currentState: 'pending',
         targetState: 'approved',
@@ -417,7 +501,7 @@ describe('Invoice State Machine', () => {
         reason: 'First approval',
       });
 
-      executeTransition({
+      await executeTransition({
         invoiceId: 'inv-003',
         currentState: 'approved',
         targetState: 'linked_escrow',
@@ -425,7 +509,7 @@ describe('Invoice State Machine', () => {
         reason: 'Linked to escrow',
       });
 
-      const history = getTransitionHistory('inv-003', getAuditLogs);
+      const history = await getTransitionHistory('inv-003', getAuditLogs);
 
       expect(history).toHaveLength(2);
       expect(history[0].fromState).toBe('approved');
@@ -434,8 +518,8 @@ describe('Invoice State Machine', () => {
       expect(history[1].toState).toBe('approved');
     });
 
-    it('should return empty array for invoice with no transitions', () => {
-      const history = getTransitionHistory('inv-999', getAuditLogs);
+    it('should return empty array for invoice with no transitions', async () => {
+      const history = await getTransitionHistory('inv-999', getAuditLogs);
       expect(history).toEqual([]);
     });
   });
@@ -468,8 +552,8 @@ describe('Invoice State Machine', () => {
 describe('Invoice State API Routes', () => {
   let app;
 
-  beforeEach(() => {
-    clearAuditLogs();
+  beforeEach(async () => {
+    await clearAuditLogs();
     
     // Reset mock invoices
     const { mockInvoices } = require('../src/routes/invoiceStateRoutes');
@@ -536,7 +620,7 @@ describe('Invoice State API Routes', () => {
       expect(res.body.data.auditLogId).toBeDefined();
 
       // Verify audit log was created
-      const logs = getAuditLogs({ resourceId: 'inv-001' });
+      const logs = await getAuditLogs({ resourceId: 'inv-001' });
       expect(logs.length).toBe(1);
     });
 
@@ -742,7 +826,7 @@ describe('Invoice State API Routes', () => {
         .set('User-Agent', 'Test Client/1.0')
         .send({ reason: 'Comprehensive audit test' });
 
-      const logs = getAuditLogs({ resourceId: 'inv-001' });
+      const logs = await getAuditLogs({ resourceId: 'inv-001' });
       
       expect(logs).toHaveLength(1);
       expect(logs[0].actor).toBe('test-user-123');
@@ -764,7 +848,7 @@ describe('Invoice State API Routes', () => {
         .post('/api/invoices/inv-001/link-escrow')
         .send({ reason: 'Step 2', escrowId: 'escrow-001' });
 
-      const logs = getAuditLogs({ resourceId: 'inv-001' });
+      const logs = await getAuditLogs({ resourceId: 'inv-001' });
       
       expect(logs).toHaveLength(2);
       // Logs are in reverse chronological order
@@ -796,7 +880,7 @@ describe('Invoice State API Routes', () => {
         });
 
       expect(res.status).toBe(200);
-      const logs = getAuditLogs({ resourceId: 'inv-001' });
+      const logs = await getAuditLogs({ resourceId: 'inv-001' });
       expect(logs[0].metadata.reason).toContain('Special chars');
     });
 

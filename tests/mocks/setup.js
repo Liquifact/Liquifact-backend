@@ -8,6 +8,7 @@ jest.mock('../../src/db/knex', () => {
   m.leftJoin = jest.fn().mockReturnThis();
   m.orderBy = jest.fn().mockReturnThis();
   m.limit = jest.fn().mockReturnThis();
+  m.offset = jest.fn().mockReturnThis();
   m.select = jest.fn().mockReturnThis();
   m.insert = jest.fn().mockReturnThis();
   m.update = jest.fn().mockReturnThis();

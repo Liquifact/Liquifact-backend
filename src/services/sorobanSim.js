@@ -164,7 +164,7 @@ function createSimulationError(error, context = {}) {
   const errorType = parseSimulationError(error);
   const isRetryable = errorType === SIMULATION_ERROR_TYPES.NETWORK_ERROR;
 
-  return new AppError({
+  const appError = new AppError({
     type: 'https://liquifact.com/probs/soroban-simulation-failed',
     title: 'Soroban Transaction Simulation Failed',
     status: isRetryable ? 503 : 400,
@@ -179,6 +179,11 @@ function createSimulationError(error, context = {}) {
       ...context,
     },
   });
+  appError.context = {
+    errorType,
+    ...context,
+  };
+  return appError;
 }
 
 /**
@@ -257,28 +262,29 @@ function validateSimulationParams(params) {
  * });
  * // result: { status: 'success', footprint: {...}, cached: false }
  */
-async function simulateOrThrow(params) {
-  validateSimulationParams(params);
-
+async function simulateOrThrow(params = {}) {
   const { operation, invoiceId, funderPublicKey, transactionXdr, options = {} } = params;
-  const useCache = options.useCache !== false;
-  const cacheKey = generateCacheKey(operation, invoiceId, funderPublicKey);
 
-  // Check cache first
-  if (useCache) {
-    const cachedFootprint = getCachedFootprint(cacheKey);
-    if (cachedFootprint) {
-      return {
-        status: SIMULATION_STATUS.SUCCESS,
-        footprint: cachedFootprint,
-        cached: true,
-        errorType: null,
-      };
-    }
-  }
-
-  // Perform simulation
   try {
+    validateSimulationParams(params);
+
+    const useCache = options.useCache !== false;
+    const cacheKey = generateCacheKey(operation, invoiceId, funderPublicKey);
+
+    // Check cache first
+    if (useCache) {
+      const cachedFootprint = getCachedFootprint(cacheKey);
+      if (cachedFootprint) {
+        return {
+          status: SIMULATION_STATUS.SUCCESS,
+          footprint: cachedFootprint,
+          cached: true,
+          errorType: null,
+        };
+      }
+    }
+
+    // Perform simulation
     const simulationOperation = async () => {
       // In a real implementation, this would call the Soroban RPC simulateTransaction endpoint
       // For now, we mock the simulation logic
@@ -322,8 +328,11 @@ async function simulateOrThrow(params) {
       errorType: null,
     };
   } catch (error) {
-    const errorType = parseSimulationError(error);
-    const simulationError = createSimulationError(error, {
+    const isParameterValidationError = error instanceof AppError && error.code === 'VALIDATION_ERROR';
+    const errorType = isParameterValidationError
+      ? SIMULATION_ERROR_TYPES.VALIDATION_ERROR
+      : parseSimulationError(error);
+    const simulationError = isParameterValidationError ? error : createSimulationError(error, {
       operation,
       invoiceId,
       funderPublicKey,

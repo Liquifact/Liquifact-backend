@@ -86,26 +86,13 @@ describe('sorobanSim - Simulation Utility', () => {
     });
 
     it('enforces maximum cache size', () => {
-      // Set a small max size for testing
-      const originalMaxSize = require('../src/services/sorobanSim').MAX_CACHE_SIZE;
-      Object.defineProperty(require('../src/services/sorobanSim'), 'MAX_CACHE_SIZE', {
-        value: 3,
-        writable: true,
-      });
-
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i <= 10000; i++) {
         cacheFootprint(`key${i}`, { read: [`addr${i}`] });
       }
 
       // First key should be evicted
       expect(getCachedFootprint('key0')).toBeNull();
-      expect(getCachedFootprint('key4')).not.toBeNull();
-
-      // Restore original
-      Object.defineProperty(require('../src/services/sorobanSim'), 'MAX_CACHE_SIZE', {
-        value: originalMaxSize,
-        writable: true,
-      });
+      expect(getCachedFootprint('key10000')).not.toBeNull();
     });
   });
 
