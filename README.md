@@ -212,6 +212,7 @@ The API is documented using OpenAPI 3.0 specification.
 - **OpenAPI JSON**: `GET /openapi.json` - Machine-readable API specification
 - **Interactive Docs**: `GET /docs` - Swagger UI for exploring and testing the API
 - **Correlation Strategy**: See [`docs/invoice-correlation.md`](./docs/invoice-correlation.md) for details on how `invoiceId` correlates with on-chain Stellar and Soroban data.
+- **Signing Modes**: See [`docs/ops-signing.md`](./docs/ops-signing.md) for details on the escrow transaction signing modes (delegated, custodial, stubbed).
 
 The documentation covers all public endpoints including health checks, invoice management, escrow operations, and investment opportunities.
 

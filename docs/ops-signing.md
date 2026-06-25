@@ -1,173 +1,109 @@
-# LiquiFact Ops Signing Design
+# Escrow Transaction Signing Modes
 
-This document defines the server-orchestrated signing interface for Soroban
-escrow funding and document custody. The current backend implementation is a
-design stub: it validates funding requests and returns a funding intent, but it
-does not build, sign, or submit a live Stellar/Soroban transaction.
+This document defines the server-orchestrated signing interface and behaviors for Soroban escrow funding using the LiquifactEscrow contract. The system supports three execution/signing modes: **Delegated**, **Custodial**, and **Stubbed**, which are controlled via the `ESCROW_SIGNING_MODE` environment variable.
 
-> **See also:** [Escrow Integration Overview](./escrow-integration-overview.md) — funding flow, signing modes, and how `escrowSubmit` fits with indexing and reconciliation.
-
-## Goals
-
-- Keep private signing material out of the repository, logs, request bodies, and
-  API responses.
-- Support delegated signing first, where the funder signs with their own
-  Stellar wallet and the server only orchestrates validation and submission.
-- Support a future custodial path only through explicit environment gates and a
-  managed KMS/HSM signer.
-- Separate escrow fund-signing keys from document custody or attestation keys.
-- Preserve idempotency and auditability for funding operations.
-
-## Runtime Modes
-
-`ESCROW_SIGNING_MODE=delegated` is the recommended default.
-
-| Mode | Current behavior | Future live behavior |
-| --- | --- | --- |
-| `delegated` | Validates the request and reports that a client signature is required unless `signedTransactionXdr` is supplied. It still does not submit. | Server builds a Soroban transaction for the LiquifactEscrow `fund_escrow` operation, returns unsigned XDR, receives signed XDR from the client, simulates and submits through Soroban RPC. |
-| `custodial` | Validates the request and reports missing configuration unless every custodial env gate is present. It still does not sign or submit. | Server asks KMS/HSM to sign the transaction with an approved custodial fund key, then simulates and submits through Soroban RPC. |
+---
 
 ## Environment Variables
 
-These variables are intentionally configuration references, not secrets. Raw
-Stellar secret keys or mnemonic material must never be stored in `.env`.
+The escrow submission module consumes the following environment variables:
 
-| Variable | Required for live delegated | Required for live custodial | Notes |
-| --- | --- | --- | --- |
-| `ESCROW_SIGNING_MODE` | Yes | Yes | `delegated` or `custodial`. Defaults to `delegated` in the stub. |
-| `SOROBAN_RPC_URL` | Yes | Yes | Soroban RPC endpoint for simulation and submission. |
-| `STELLAR_NETWORK_PASSPHRASE` | Yes | Yes | Network passphrase, for example testnet or public network. |
-| `LIQUIFACT_ESCROW_CONTRACT_ID` | Yes | Yes | Soroban `C...` contract ID for LiquifactEscrow. |
-| `ESCROW_CUSTODIAL_SIGNING_ENABLED` | No | Yes | Must be exactly `true` before custodial signing can be considered. |
-| `ESCROW_CUSTODIAL_KMS_PROVIDER` | No | Yes | Provider identifier such as `aws-kms`, `gcp-kms`, `azure-key-vault`, or `hsm`. |
-| `ESCROW_CUSTODIAL_KEY_ID` | No | Yes | KMS/HSM key alias or ARN for escrow funding. Do not store raw secret keys. |
-| `ESCROW_DOCUMENT_CUSTODIAL_KEY_ID` | No | Optional | Separate KMS/HSM key alias or ARN for document custody and attestation. |
+| Variable | Required in Mode | Description |
+| --- | --- | --- |
+| `ESCROW_SIGNING_MODE` | All Modes | `"delegated" \| "custodial" \| "stubbed"` (default: `stubbed`). |
+| `SOROBAN_RPC_URL` | Delegated, Custodial | The endpoint of the Soroban RPC server (e.g., `https://soroban-testnet.stellar.org`). |
+| `STELLAR_NETWORK_PASSPHRASE` | Delegated, Custodial | Passphrase matching the target Stellar network (configured automatically at boot). |
+| `ESCROW_PLATFORM_ADDRESS` | Delegated, Custodial | The Stellar public key of the platform account used as the transaction source. |
+| `ESCROW_PLATFORM_SECRET` | Custodial Only | The secret key of the platform account. Highly sensitive; only loaded dynamically in-memory during signature execution. |
 
-## Key Management Interface
+---
 
-Fund and document keys must be separate trust domains.
+## Runtime Modes
 
-| Key class | Purpose | Allowed operations | Rotation name example |
-| --- | --- | --- | --- |
-| Escrow fund key | Sign Soroban funding transactions for server-custodial flows. | `signTransactionHash`, never export private key material. | `liquifact/escrow/fund/v1` |
-| Document custody key | Sign document hashes, receipt attestations, or encrypted document metadata. | `signDigest`, `encrypt`, `decrypt` as approved by the document pipeline. | `liquifact/docs/custody/v1` |
+### 1. Delegated Mode (`delegated`)
+*   **Status:** `requires_signature`
+*   **Overview:** Builds the unsigned `fund_escrow` Soroban contract transaction, performs simulation to populate the required ledger footprint, prepares the transaction, and returns the unsigned XDR string to the client.
+*   **Execution Flow:**
+    1.  The client invokes the funding endpoint.
+    2.  The backend server builds the `fund_escrow` transaction sequence with `ESCROW_PLATFORM_ADDRESS` as the source account.
+    3.  The server simulates the transaction against the Soroban RPC endpoint to populate fee and transaction footprints.
+    4.  The server returns the unsigned prepared transaction XDR to the client.
+    5.  The client-side wallet (e.g., Freighter, Albedo) signs and broadcasts the transaction independently.
 
-Operational requirements:
+### 2. Custodial Mode (`custodial`)
+*   **Status:** `submitted`
+*   **Overview:** The backend server orchestrates transaction creation, footprint preparation, in-memory signing with the platform secret key (`ESCROW_PLATFORM_SECRET`), and direct submission to the Soroban RPC network.
+*   **Execution Flow:**
+    1.  The client invokes the funding endpoint.
+    2.  The server builds and simulates the `fund_escrow` transaction identically to delegated mode.
+    3.  The server dynamically loads `ESCROW_PLATFORM_SECRET` into memory to instantiate a temporary `Keypair`.
+    4.  The server signs the prepared transaction and transmits it directly to the Soroban RPC.
+    5.  Returns the status `submitted`, transaction hash (`txHash`), and the submission ledger to the client.
 
-- Use KMS/HSM key handles only. No Stellar secret seeds in source, `.env`, CI
-  logs, test fixtures, or API payloads.
-- Require dual control for custodial fund key creation, policy edits, and
-  deletion scheduling.
-- Allow the application role to sign only with the escrow fund key, not with the
-  document custody key.
-- Emit an audit event for every signing request containing request ID,
-  authenticated user/client, invoice ID, public key, asset, amount,
-  idempotency key, key alias, and Soroban transaction hash when available.
-- Rotate keys by adding a new alias version, deploying the new key ID, waiting
-  for pending requests to drain, and disabling the old key. Never overwrite
-  historical audit records.
-- Keep break-glass access outside the application role and require incident
-  review after use.
+### 3. Stubbed Mode (`stubbed`)
+*   **Status:** `stubbed`
+*   **Overview:** A test and staging fallback mode. It completely bypasses all Soroban RPC calls, cryptographic operations, and platform address/secret requirements.
+*   **Execution Flow:**
+    1.  The client invokes the funding endpoint.
+    2.  The server detects that `ESCROW_SIGNING_MODE` is set to `stubbed` (or undefined).
+    3.  The server immediately returns a deterministic mock/stub response indicating success in a mock environment.
 
-## Funding API
+---
 
-Authenticated route:
+## Mermaid Sequence Diagrams
 
-```http
-POST /api/escrow
-Authorization: Bearer <jwt>
-Idempotency-Key: fund-inv-123-0001
-Content-Type: application/json
+### Delegated Mode Flow
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as Client / Investor Wallet
+    participant Backend as Backend Server
+    participant RPC as Soroban RPC Server
+
+    Client->>Backend: Request fund escrow (amount, invoiceId, etc.)
+    Note over Backend: Validate input & verify mode is "delegated"
+    Backend->>RPC: getAccount(ESCROW_PLATFORM_ADDRESS)
+    RPC-->>Backend: Account sequence details
+    Note over Backend: Build fund_escrow invocation
+    Backend->>RPC: simulateTransaction(tx)
+    RPC-->>Backend: Transaction Footprint & Simulated Costs
+    Note over Backend: prepareTransaction(tx) with footprints
+    Backend-->>Client: Return status: "requires_signature" & unsignedXdr
+    Client->>Client: Sign transaction via wallet (Freighter/Albedo)
+    Client->>RPC: Submit signed transaction
 ```
 
-Delegated signing request:
+### Custodial Mode Flow
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as Client / Investor
+    participant Backend as Backend Server
+    participant RPC as Soroban RPC Server
 
-```bash
-curl -X POST http://localhost:3001/api/escrow \
-  -H "Authorization: Bearer $JWT" \
-  -H "Idempotency-Key: fund-inv-123-0001" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "invoiceId": "inv_123",
-    "funderPublicKey": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-    "amount": "100.0000000",
-    "asset": { "code": "XLM" },
-    "signingMode": "delegated",
-    "memo": "inv_123"
-  }'
+    Client->>Backend: Request fund escrow (amount, invoiceId, etc.)
+    Note over Backend: Validate input & verify mode is "custodial"
+    Backend->>RPC: getAccount(ESCROW_PLATFORM_ADDRESS)
+    RPC-->>Backend: Account sequence details
+    Note over Backend: Build fund_escrow invocation
+    Backend->>RPC: simulateTransaction(tx)
+    RPC-->>Backend: Transaction Footprint & Simulated Costs
+    Note over Backend: prepareTransaction(tx)
+    Note over Backend: Load ESCROW_PLATFORM_SECRET & sign preparedTx
+    Backend->>RPC: sendTransaction(preparedTx)
+    RPC-->>Backend: Submission Result (status, hash, ledger)
+    Backend-->>Client: Return status: "submitted", txHash, ledger
 ```
 
-Stub response:
+### Stubbed Mode Flow
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as Client / Investigator
+    participant Backend as Backend Server
 
-```json
-{
-  "data": {
-    "status": "requires_signature",
-    "submitted": false,
-    "signingMode": "delegated",
-    "transaction": {
-      "unsignedXdr": null,
-      "signedXdrAccepted": false,
-      "hash": null
-    },
-    "controls": {
-      "liveSubmissionEnabled": false
-    }
-  },
-  "message": "Escrow funding transaction prepared; no live transaction was signed or submitted."
-}
+    Client->>Backend: Request fund escrow (amount, invoiceId, etc.)
+    Note over Backend: Detect ESCROW_SIGNING_MODE = "stubbed" (fallback)
+    Note over Backend: Generate mock/stub result
+    Backend-->>Client: Return status: "stubbed", escrowAddress
 ```
-
-Custodial request shape:
-
-```bash
-curl -X POST http://localhost:3001/api/escrow \
-  -H "Authorization: Bearer $JWT" \
-  -H "Idempotency-Key: fund-inv-123-0002" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "invoiceId": "inv_123",
-    "funderPublicKey": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-    "amount": "100.0000000",
-    "asset": {
-      "code": "USDC",
-      "issuer": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-    },
-    "signingMode": "custodial"
-  }'
-```
-
-The stub returns `requires_configuration` unless all custodial env gates are
-present, and it still never signs or submits a transaction.
-
-## Validation And Security Notes
-
-- `invoiceId` is limited to URL-safe invoice identifiers.
-- `funderPublicKey` and asset issuers must be Stellar `G...` public keys.
-- `amount` must be positive and use at most seven decimal places, matching
-  Stellar amount precision.
-- Native XLM must not include an issuer. Issued assets require an issuer.
-- `signedTransactionXdr` is accepted only as bounded base64 text and is not
-  submitted by the stub.
-- `Idempotency-Key` is accepted from the header or body and should be required
-  by the live implementation before transaction submission.
-- The authenticated caller is taken from the existing JWT middleware on
-  `src/index.js`.
-- Sensitive operations remain behind the existing sensitive rate limiter.
-
-## Future Live Submission Checklist
-
-Before replacing the stub with live submission:
-
-1. Add Stellar SDK/Soroban transaction building with deterministic operation
-   parameters for LiquifactEscrow.
-2. Simulate every transaction before signing or submission.
-3. Bind idempotency keys to invoice ID, amount, asset, funder, and transaction
-   hash.
-4. Add replay protection for already-funded invoice states.
-5. Add audit logging around build, signature request, simulation, submission,
-   and final ledger status.
-6. Add KMS/HSM signer integration tests with a fake signer and contract tests
-   for delegated signed-XDR submission.
-7. Keep `liveSubmissionEnabled` false until the production signer and network
-   controls are reviewed.
