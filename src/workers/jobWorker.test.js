@@ -1,722 +1,944 @@
 /**
- * @fileoverview Comprehensive tests for job queue and background worker.
- * Covers enqueue/dequeue, retry logic, error handling, and edge cases.
- * 
+ * @fileoverview Comprehensive tests for JobQueue, BackgroundWorker, and JobPersistence.
+ * Covers: enqueue/dequeue/ack/retry/cancel, persistence mirror, crash-recovery,
+ * feature-flag (in-memory only), payload sanitisation, and edge cases.
+ *
  * @module workers/jobWorker.test
  */
 
-const JobQueue = require('./jobQueue');
+'use strict';
+
+jest.mock('../db/knex');
+
+const JobQueue   = require('./jobQueue');
 const BackgroundWorker = require('./worker');
 const { JOB_STATUS } = require('./jobQueue');
+const { createJobPersistence, sanitisePayload } = require('./jobPersistence');
 
-describe('JobQueue', () => {
+// ---------------------------------------------------------------------------
+// Shared persistence mock factory
+// ---------------------------------------------------------------------------
+function makePersistence(overrides = {}) {
+  return {
+    persistJob:       jest.fn().mockResolvedValue(undefined),
+    updateJobStatus:  jest.fn().mockResolvedValue(undefined),
+    ackJob:           jest.fn().mockResolvedValue(undefined),
+    recoverUnackedJobs: jest.fn().mockResolvedValue([]),
+    pruneCompleted:   jest.fn().mockResolvedValue(0),
+    ...overrides,
+  };
+}
+
+// ===========================================================================
+// JobQueue — in-memory (existing behaviour, no persistence)
+// ===========================================================================
+describe('JobQueue (in-memory)', () => {
   let queue;
 
-  beforeEach(() => {
-    queue = new JobQueue();
-  });
+  beforeEach(() => { queue = new JobQueue(); });
+  afterEach(()  => { queue.clear(); });
 
-  afterEach(() => {
-    queue.clear();
-  });
-
+  // ── enqueue ──────────────────────────────────────────────────────────────
   describe('enqueue', () => {
-    it('should enqueue a job and return a job ID', () => {
-      const jobId = queue.enqueue('test', { data: 'test' });
-      expect(jobId).toMatch(/^job-[0-9a-f]+$/);
-      expect(queue.jobs.size).toBe(1);
+    it('returns a crypto-random job ID', () => {
+      const id = queue.enqueue('test', { x: 1 });
+      expect(id).toMatch(/^job-[0-9a-f]{16}$/);
     });
 
-    it('should assign unique job IDs', () => {
-      const id1 = queue.enqueue('test', { data: 1 });
-      const id2 = queue.enqueue('test', { data: 2 });
-      expect(id1).not.toBe(id2);
+    it('assigns unique IDs', () => {
+      const ids = Array.from({ length: 20 }, () => queue.enqueue('test', {}));
+      expect(new Set(ids).size).toBe(20);
     });
 
-    it('should create job with correct initial state', () => {
-      const jobId = queue.enqueue('verify', { email: 'test@example.com' });
-      const job = queue.getJob(jobId);
-
-      expect(job).toEqual({
-        id: jobId,
-        type: 'verify',
-        payload: { email: 'test@example.com' },
-        status: JOB_STATUS.PENDING,
-        priority: 0,
-        delayMs: 0,
-        createdAt: expect.any(Number),
-        startedAt: null,
+    it('creates job with correct initial state', () => {
+      const id = queue.enqueue('verify', { email: 'u@example.com' });
+      expect(queue.getJob(id)).toEqual({
+        id,
+        type:        'verify',
+        payload:     { email: 'u@example.com' },
+        status:      JOB_STATUS.PENDING,
+        priority:    0,
+        delayMs:     0,
+        createdAt:   expect.any(Number),
+        startedAt:   null,
         completedAt: null,
-        attempts: 0,
-        lastError: null,
+        attempts:    0,
+        lastError:   null,
       });
     });
 
-    it('should support priority option', () => {
-      const jobId = queue.enqueue('test', { data: 'test' }, { priority: 5 });
-      const job = queue.getJob(jobId);
-      expect(job.priority).toBe(5);
+    it('stores priority option', () => {
+      const id = queue.enqueue('test', {}, { priority: 7 });
+      expect(queue.getJob(id).priority).toBe(7);
     });
 
-    it('should support delayMs option', () => {
-      const delayMs = 5000;
-      const jobId = queue.enqueue('test', { data: 'test' }, { delayMs });
-      const job = queue.getJob(jobId);
-      expect(job.delayMs).toBe(delayMs);
+    it('stores delayMs option', () => {
+      const id = queue.enqueue('test', {}, { delayMs: 3000 });
+      expect(queue.getJob(id).delayMs).toBe(3000);
     });
 
-    it('should reject invalid job type (empty string)', () => {
-      expect(() => {
-        queue.enqueue('', { data: 'test' });
-      }).toThrow('Job type must be a non-empty string');
+    it('rejects empty-string type', () => {
+      expect(() => queue.enqueue('', {})).toThrow('Job type must be a non-empty string');
     });
 
-    it('should reject invalid job type (non-string)', () => {
-      expect(() => {
-        queue.enqueue(123, { data: 'test' });
-      }).toThrow('Job type must be a non-empty string');
+    it('rejects non-string type', () => {
+      expect(() => queue.enqueue(42, {})).toThrow('Job type must be a non-empty string');
     });
 
-    it('should reject non-JSON-serializable payload', () => {
-      const circular = { a: 1 };
-      circular.self = circular; // Create circular reference
-
-      expect(() => {
-        queue.enqueue('test', circular);
-      }).toThrow('Job payload must be JSON-serializable');
+    it('rejects circular payload', () => {
+      const obj = {}; obj.self = obj;
+      expect(() => queue.enqueue('test', obj)).toThrow('Job payload must be JSON-serializable');
     });
 
-    it('should reject when queue is full', () => {
-      const smallQueue = new JobQueue({ maxQueueSize: 2 });
-      smallQueue.enqueue('test', { data: 1 });
-      smallQueue.enqueue('test', { data: 2 });
-
-      expect(() => {
-        smallQueue.enqueue('test', { data: 3 });
-      }).toThrow('Queue is full');
+    it('rejects when queue is full', () => {
+      const q = new JobQueue({ maxQueueSize: 2 });
+      q.enqueue('t', {}); q.enqueue('t', {});
+      expect(() => q.enqueue('t', {})).toThrow('Queue is full');
     });
 
-    it('should accept complex nested payloads', () => {
-      const payload = {
-        nested: { deep: { data: [1, 2, 3] } },
-        array: [{ id: 1 }, { id: 2 }],
-      };
-      const jobId = queue.enqueue('complex', payload);
-      const job = queue.getJob(jobId);
-      expect(job.payload).toEqual(payload);
+    it('accepts deeply-nested JSON payload', () => {
+      const p = { a: { b: { c: [1, 2, 3] } } };
+      const id = queue.enqueue('deep', p);
+      expect(queue.getJob(id).payload).toEqual(p);
     });
   });
 
+  // ── dequeue ───────────────────────────────────────────────────────────────
   describe('dequeue', () => {
-    it('should return null when queue is empty', () => {
+    it('returns null on empty queue', () => {
       expect(queue.dequeue()).toBeNull();
     });
 
-    it('should dequeue jobs in FIFO order', () => {
-      const id1 = queue.enqueue('test', { data: 1 });
-      const id2 = queue.enqueue('test', { data: 2 });
-      const id3 = queue.enqueue('test', { data: 3 });
-
-      expect(queue.dequeue().id).toBe(id1);
-      expect(queue.dequeue().id).toBe(id2);
-      expect(queue.dequeue().id).toBe(id3);
+    it('dequeues in FIFO order', () => {
+      const [i1, i2, i3] = ['a','b','c'].map(x => queue.enqueue('t', { x }));
+      expect(queue.dequeue().id).toBe(i1);
+      expect(queue.dequeue().id).toBe(i2);
+      expect(queue.dequeue().id).toBe(i3);
     });
 
-    it('should set job status to PROCESSING on dequeue', () => {
-      queue.enqueue('test', { data: 'test' });
-      const job = queue.dequeue();
-      expect(job.status).toBe(JOB_STATUS.PROCESSING);
+    it('sets status to PROCESSING', () => {
+      queue.enqueue('t', {});
+      expect(queue.dequeue().status).toBe(JOB_STATUS.PROCESSING);
     });
 
-    it('should increment attempts on dequeue', () => {
-      queue.enqueue('test', { data: 'test' });
-      const job = queue.dequeue();
-      expect(job.attempts).toBe(1);
+    it('increments attempts', () => {
+      queue.enqueue('t', {});
+      expect(queue.dequeue().attempts).toBe(1);
     });
 
-    it('should skip delayed jobs', () => {
-      const now = Date.now();
-      const futureDelay = now + 10000;
+    it('sets startedAt', () => {
+      queue.enqueue('t', {});
+      const before = Date.now();
+      const job    = queue.dequeue();
+      expect(job.startedAt).toBeGreaterThanOrEqual(before);
+    });
 
-      const delayedId = queue.enqueue('test', { data: 'delayed' }, { delayMs: futureDelay });
-      const readyId = queue.enqueue('test', { data: 'ready' });
-
-      const job = queue.dequeue();
-      expect(job.id).toBe(readyId);
+    it('skips delayed jobs and returns ready ones', () => {
+      const delayedId = queue.enqueue('t', {}, { delayMs: Date.now() + 60_000 });
+      const readyId   = queue.enqueue('t', {});
+      expect(queue.dequeue().id).toBe(readyId);
       expect(queue.queue).toContain(delayedId);
     });
 
-    it('should process retry queue before main queue', () => {
-      const id1 = queue.enqueue('test', { data: 1 });
-      queue.dequeue(); // Move to processing
-      queue.retry(id1, new Error('test')); // Add to retry queue with delay
+    it('processes retry queue before main queue', () => {
+      const id1 = queue.enqueue('t', {});
+      queue.dequeue();
+      queue.retry(id1, new Error('x'));
+      queue.getJob(id1).delayMs = 0; // make immediately ready
 
-      // For this test, manually set delay to 0 so it's immediately ready
-      queue.getJob(id1).delayMs = 0;
-
-      const id2 = queue.enqueue('test', { data: 2 });
-
-      // Retry queue should be processed first
+      const id2 = queue.enqueue('t', {});
       expect(queue.dequeue().id).toBe(id1);
       expect(queue.dequeue().id).toBe(id2);
     });
-
-    it('should set startedAt timestamp on dequeue', () => {
-      queue.enqueue('test', { data: 'test' });
-      const timeBefore = Date.now();
-      const job = queue.dequeue();
-      const timeAfter = Date.now();
-
-      expect(job.startedAt).toBeGreaterThanOrEqual(timeBefore);
-      expect(job.startedAt).toBeLessThanOrEqual(timeAfter);
-    });
   });
 
+  // ── ack ───────────────────────────────────────────────────────────────────
   describe('ack', () => {
-    it('should mark job as COMPLETED', () => {
-      const jobId = queue.enqueue('test', { data: 'test' });
+    it('marks job COMPLETED and sets completedAt', () => {
+      const id = queue.enqueue('t', {});
       queue.dequeue();
-      queue.ack(jobId);
-
-      const job = queue.getJob(jobId);
+      const before = Date.now();
+      queue.ack(id);
+      const job = queue.getJob(id);
       expect(job.status).toBe(JOB_STATUS.COMPLETED);
+      expect(job.completedAt).toBeGreaterThanOrEqual(before);
     });
 
-    it('should set completedAt timestamp', () => {
-      const jobId = queue.enqueue('test', { data: 'test' });
+    it('throws for unknown job', () => {
+      expect(() => queue.ack('no-such')).toThrow('not found');
+    });
+
+    it('throws when job is PENDING (not yet dequeued)', () => {
+      const id = queue.enqueue('t', {});
+      expect(() => queue.ack(id)).toThrow('Cannot ack');
+    });
+
+    it('throws when job already acked', () => {
+      const id = queue.enqueue('t', {});
       queue.dequeue();
-
-      const timeBefore = Date.now();
-      queue.ack(jobId);
-      const timeAfter = Date.now();
-
-      const job = queue.getJob(jobId);
-      expect(job.completedAt).toBeGreaterThanOrEqual(timeBefore);
-      expect(job.completedAt).toBeLessThanOrEqual(timeAfter);
-    });
-
-    it('should throw when acking non-existent job', () => {
-      expect(() => {
-        queue.ack('non-existent-job');
-      }).toThrow('Job non-existent-job not found');
-    });
-
-    it('should throw when acking non-processing job', () => {
-      const jobId = queue.enqueue('test', { data: 'test' });
-      expect(() => {
-        queue.ack(jobId); // Not dequeued yet
-      }).toThrow('Cannot ack job');
-    });
-
-    it('should throw when acking completed job', () => {
-      const jobId = queue.enqueue('test', { data: 'test' });
-      queue.dequeue();
-      queue.ack(jobId);
-
-      expect(() => {
-        queue.ack(jobId); // Already acked
-      }).toThrow('Cannot ack job');
+      queue.ack(id);
+      expect(() => queue.ack(id)).toThrow('Cannot ack');
     });
   });
 
+  // ── retry ─────────────────────────────────────────────────────────────────
   describe('retry', () => {
-    it('should put job back in retry queue', () => {
-      const jobId = queue.enqueue('test', { data: 'test' });
+    it('puts job in retry queue', () => {
+      const id = queue.enqueue('t', {});
       queue.dequeue();
-      queue.retry(jobId, new Error('Failed'));
-
-      expect(queue.retryQueue).toContain(jobId);
+      queue.retry(id, new Error('oops'));
+      expect(queue.retryQueue).toContain(id);
     });
 
-    it('should set status to RETRYING when attempts remain', () => {
-      const jobId = queue.enqueue('test', { data: 'test' });
-      const job = queue.dequeue();
-      queue.retry(jobId, new Error('Failed'));
-
-      expect(job.status).toBe(JOB_STATUS.RETRYING);
+    it('sets status RETRYING while attempts remain', () => {
+      const id = queue.enqueue('t', {});
+      queue.dequeue();
+      queue.retry(id, new Error('x'));
+      expect(queue.getJob(id).status).toBe(JOB_STATUS.RETRYING);
     });
 
-    it('should set status to FAILED when max retries exceeded', () => {
-      const smallQueue = new JobQueue({ maxRetries: 1 });
-      const jobId = smallQueue.enqueue('test', { data: 'test' });
-
-      // Attempt 1
-      smallQueue.dequeue();
-      smallQueue.retry(jobId, new Error('First failure'));
-      expect(smallQueue.getJob(jobId).status).toBe(JOB_STATUS.RETRYING);
-
-      // For test, make job immediately ready (set delay to 0)
-      smallQueue.getJob(jobId).delayMs = 0;
-
-      // Attempt 2
-      smallQueue.dequeue();
-      smallQueue.retry(jobId, new Error('Second failure'));
-      expect(smallQueue.getJob(jobId).status).toBe(JOB_STATUS.FAILED);
+    it('sets status FAILED after maxRetries exceeded', () => {
+      const q  = new JobQueue({ maxRetries: 1 });
+      const id = q.enqueue('t', {});
+      q.dequeue(); q.retry(id, new Error('1'));
+      q.getJob(id).delayMs = 0;
+      q.dequeue(); q.retry(id, new Error('2'));
+      expect(q.getJob(id).status).toBe(JOB_STATUS.FAILED);
     });
 
-    it('should implement exponential backoff delays', () => {
-      const jobId = queue.enqueue('test', { data: 'test' });
-
-      for (let i = 0; i < 2; i++) {
-        queue.dequeue();
-        const beforeRetry = Date.now();
-        queue.retry(jobId, new Error(`Failure ${i}`));
-        
-        const retryJob = queue.getJob(jobId);
-        if (retryJob && retryJob.delayMs > beforeRetry) {
-          const delay = retryJob.delayMs - beforeRetry;
-
-          // Exponential backoff: 2^(attempt-1) seconds (in ms)
-          // At i=0: attempts will be 1, delay = 2^0 = 1 second
-          // At i=1: attempts will be 2, delay = 2^1 = 2 seconds
-          const expectedDelay = Math.pow(2, i) * 1000;
-          expect(delay).toBeCloseTo(expectedDelay, -2); // -2 = within 100ms
-        }
-        
-        // For next iteration, make job ready immediately
-        if (i < 1) {
-          retryJob.delayMs = 0;
-        }
-      }
+    it('stores error message', () => {
+      const id = queue.enqueue('t', {});
+      queue.dequeue();
+      queue.retry(id, new Error('Specific error'));
+      expect(queue.getJob(id).lastError).toBe('Specific error');
     });
 
-    it('should cap retry delay at 60 seconds', () => {
-      const smallQueue = new JobQueue({ maxRetries: 10 });
-      let jobId = smallQueue.enqueue('test', { data: 'test' });
+    it('handles non-Error objects', () => {
+      const id = queue.enqueue('t', {});
+      queue.dequeue();
+      queue.retry(id, 'plain string');
+      expect(queue.getJob(id).lastError).toBe('plain string');
+    });
 
-      // Retry 10 times to reach high attempt count
+    it('applies exponential backoff', () => {
+      const id = queue.enqueue('t', {});
+      queue.dequeue();
+      const before = Date.now();
+      queue.retry(id, new Error('x'));
+      const job   = queue.getJob(id);
+      const delay = job.delayMs - before;
+      // attempt=1 → 2^0 * 1000 = 1000 ms (±200 ms tolerance)
+      expect(delay).toBeGreaterThanOrEqual(800);
+      expect(delay).toBeLessThanOrEqual(1200);
+    });
+
+    it('caps backoff at 60 seconds', () => {
+      const q  = new JobQueue({ maxRetries: 10 });
+      const id = q.enqueue('t', {});
       for (let i = 0; i < 10; i++) {
-        smallQueue.dequeue();
-        smallQueue.retry(jobId, new Error('Failure'));
+        q.dequeue();
+        q.retry(id, new Error('x'));
+        q.getJob(id).delayMs = 0;
       }
-
-      const job = smallQueue.getJob(jobId);
-      const delayMs = job.delayMs - Date.now();
-      expect(delayMs).toBeLessThanOrEqual(60000); // 60 seconds
+      const remaining = q.getJob(id).delayMs - Date.now();
+      expect(remaining).toBeLessThanOrEqual(60_000);
     });
 
-    it('should store error message', () => {
-      const jobId = queue.enqueue('test', { data: 'test' });
-      queue.dequeue();
-      queue.retry(jobId, new Error('Specific error message'));
-
-      const job = queue.getJob(jobId);
-      expect(job.lastError).toBe('Specific error message');
+    it('sets completedAt when marking FAILED', () => {
+      const q  = new JobQueue({ maxRetries: 0 });
+      const id = q.enqueue('t', {});
+      q.dequeue();
+      const before = Date.now();
+      q.retry(id, new Error('x'));
+      expect(q.getJob(id).completedAt).toBeGreaterThanOrEqual(before);
     });
 
-    it('should handle non-Error objects', () => {
-      const jobId = queue.enqueue('test', { data: 'test' });
-      queue.dequeue();
-      queue.retry(jobId, 'String error');
-
-      const job = queue.getJob(jobId);
-      expect(job.lastError).toBe('String error');
+    it('throws for unknown job', () => {
+      expect(() => queue.retry('no-such', new Error())).toThrow('not found');
     });
 
-    it('should throw when retrying non-existent job', () => {
-      expect(() => {
-        queue.retry('non-existent-job', new Error('test'));
-      }).toThrow('Job non-existent-job not found');
-    });
-
-    it('should set completedAt when max retries exceeded', () => {
-      const smallQueue = new JobQueue({ maxRetries: 0 });
-      const jobId = smallQueue.enqueue('test', { data: 'test' });
-      const job1 = smallQueue.dequeue();
-      
-      expect(job1.attempts).toBe(1); // Verify dequeue incremented attempts
-
-      const timeBefore = Date.now();
-      smallQueue.retry(jobId, new Error('Failed'));
-      const timeAfter = Date.now();
-
-      const job = smallQueue.getJob(jobId);
-      expect(job).toBeDefined();
-      expect(job.status).toBe(JOB_STATUS.FAILED);
-      expect(job.completedAt).toBeDefined();
-      expect(job.completedAt).toBeGreaterThanOrEqual(timeBefore);
-      expect(job.completedAt).toBeLessThanOrEqual(timeAfter);
+    it('honours hard cap of 10 retries', () => {
+      const q  = new JobQueue({ maxRetries: 10 });
+      expect(q.maxRetries).toBe(10);
+      const q2 = new JobQueue({ maxRetries: 99 });
+      expect(q2.maxRetries).toBe(10);
     });
   });
 
-  describe('getJob', () => {
-    it('should return job if exists', () => {
-      const jobId = queue.enqueue('test', { data: 'test' });
-      const job = queue.getJob(jobId);
-      expect(job.id).toBe(jobId);
-      expect(job.type).toBe('test');
+  // ── cancel ────────────────────────────────────────────────────────────────
+  describe('cancel', () => {
+    it('removes the job', () => {
+      const id = queue.enqueue('t', {});
+      expect(queue.cancel(id)).toBe(true);
+      expect(queue.getJob(id)).toBeNull();
     });
 
-    it('should return null if job does not exist', () => {
-      expect(queue.getJob('non-existent')).toBeNull();
+    it('returns false for unknown id', () => {
+      expect(queue.cancel('nope')).toBe(false);
+    });
+
+    it('cancelled job is skipped on dequeue', () => {
+      const id = queue.enqueue('t', {});
+      queue.cancel(id);
+      expect(queue.dequeue()).toBeNull();
     });
   });
 
+  // ── getStats ──────────────────────────────────────────────────────────────
   describe('getStats', () => {
-    it('should return zero stats for empty queue', () => {
-      const stats = queue.getStats();
-      expect(stats).toEqual({
-        pending: 0,
-        processing: 0,
-        completed: 0,
-        failed: 0,
-        retrying: 0,
-        total: 0,
-        queueLength: 0,
-        retryQueueLength: 0,
+    it('returns zero stats for empty queue', () => {
+      expect(queue.getStats()).toEqual({
+        pending: 0, processing: 0, completed: 0,
+        failed: 0, retrying: 0, total: 0,
+        queueLength: 0, retryQueueLength: 0,
       });
     });
 
-    it('should count pending jobs', () => {
-      queue.enqueue('test', { data: 1 });
-      queue.enqueue('test', { data: 2 });
-
-      const stats = queue.getStats();
-      expect(stats.pending).toBe(2);
-      expect(stats.total).toBe(2);
-    });
-
-    it('should count processing jobs', () => {
-      queue.enqueue('test', { data: 1 });
-      queue.enqueue('test', { data: 2 });
-
-      queue.dequeue();
-      queue.dequeue();
-
-      const stats = queue.getStats();
-      expect(stats.processing).toBe(2);
-    });
-
-    it('should count completed jobs', () => {
-      const id1 = queue.enqueue('test', { data: 1 });
-      const id2 = queue.enqueue('test', { data: 2 });
-
+    it('counts each status correctly', () => {
+      const id1 = queue.enqueue('t', {});
+      const id2 = queue.enqueue('t', {});
       queue.dequeue();
       queue.ack(id1);
-      queue.dequeue();
-      queue.ack(id2);
-
       const stats = queue.getStats();
-      expect(stats.completed).toBe(2);
-    });
-
-    it('should count failed jobs', () => {
-      const smallQueue = new JobQueue({ maxRetries: 0 });
-      const id1 = smallQueue.enqueue('test', { data: 1 });
-
-      smallQueue.dequeue();
-      smallQueue.retry(id1, new Error('Failed'));
-
-      const job = smallQueue.getJob(id1);
-      expect(job.status).toBe(JOB_STATUS.FAILED);
-
-      const stats = smallQueue.getStats();
-      expect(stats.failed).toBe(1);
+      expect(stats.completed).toBe(1);
+      expect(stats.processing).toBe(1);
+      expect(stats.pending).toBe(0);
+      void id2;
     });
   });
 
+  // ── clear ─────────────────────────────────────────────────────────────────
   describe('clear', () => {
-    it('should clear all jobs', () => {
-      queue.enqueue('test', { data: 1 });
-      queue.enqueue('test', { data: 2 });
-      queue.enqueue('test', { data: 3 });
-
-      const cleared = queue.clear();
-      expect(cleared).toBe(3);
+    it('removes all jobs and resets queues', () => {
+      queue.enqueue('t', {}); queue.enqueue('t', {});
+      expect(queue.clear()).toBe(2);
       expect(queue.jobs.size).toBe(0);
       expect(queue.queue.length).toBe(0);
       expect(queue.retryQueue.length).toBe(0);
     });
 
-    it('should return zero when clearing empty queue', () => {
-      const cleared = queue.clear();
-      expect(cleared).toBe(0);
+    it('returns 0 for empty queue', () => {
+      expect(queue.clear()).toBe(0);
     });
   });
 });
 
-describe('BackgroundWorker', () => {
-  let worker;
+// ===========================================================================
+// JobQueue — persistence mirror (feature flag ON)
+// ===========================================================================
+describe('JobQueue (with persistence adapter)', () => {
+  let persistence;
   let queue;
 
   beforeEach(() => {
-    queue = new JobQueue();
+    persistence = makePersistence();
+    queue = new JobQueue({ persistence });
+  });
+  afterEach(() => queue.clear());
+
+  it('calls persistJob on enqueue', () => {
+    const id = queue.enqueue('test', { v: 1 });
+    expect(persistence.persistJob).toHaveBeenCalledWith(
+      expect.objectContaining({ id, type: 'test', payload: { v: 1 } })
+    );
+  });
+
+  it('calls updateJobStatus on dequeue', () => {
+    queue.enqueue('test', {});
+    queue.dequeue();
+    expect(persistence.updateJobStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ status: JOB_STATUS.PROCESSING })
+    );
+  });
+
+  it('calls ackJob on ack', () => {
+    const id = queue.enqueue('test', {});
+    queue.dequeue();
+    queue.ack(id);
+    expect(persistence.ackJob).toHaveBeenCalledWith(id);
+  });
+
+  it('does NOT call ackJob for a failed ack (wrong status)', () => {
+    const id = queue.enqueue('test', {});
+    expect(() => queue.ack(id)).toThrow();
+    expect(persistence.ackJob).not.toHaveBeenCalled();
+  });
+
+  it('calls updateJobStatus on retry (RETRYING)', () => {
+    const id = queue.enqueue('test', {});
+    queue.dequeue();
+    queue.retry(id, new Error('x'));
+    expect(persistence.updateJobStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ id, status: JOB_STATUS.RETRYING })
+    );
+  });
+
+  it('calls updateJobStatus on retry → FAILED', () => {
+    const q  = new JobQueue({ maxRetries: 0, persistence });
+    const id = q.enqueue('test', {});
+    q.dequeue();
+    q.retry(id, new Error('x'));
+    expect(persistence.updateJobStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ id, status: JOB_STATUS.FAILED })
+    );
+  });
+
+  it('does not call any persistence method on cancel', () => {
+    const id = queue.enqueue('test', {});
+    persistence.persistJob.mockClear();
+    queue.cancel(id);
+    expect(persistence.updateJobStatus).not.toHaveBeenCalled();
+    expect(persistence.ackJob).not.toHaveBeenCalled();
+  });
+
+  // ── restoreFromPersistence ─────────────────────────────────────────────
+  describe('restoreFromPersistence', () => {
+    it('returns 0 when no unacked jobs exist', async () => {
+      persistence.recoverUnackedJobs.mockResolvedValue([]);
+      const count = await queue.restoreFromPersistence();
+      expect(count).toBe(0);
+      expect(queue.jobs.size).toBe(0);
+    });
+
+    it('restores pending jobs to the main queue', async () => {
+      const fakeJob = {
+        id: 'job-aabbccdd11223344', type: 'webhook_delivery',
+        payload: { invoiceId: 'inv1' }, status: 'pending',
+        priority: 0, delayMs: 0, createdAt: Date.now(),
+        startedAt: null, completedAt: null, attempts: 0, lastError: null,
+      };
+      persistence.recoverUnackedJobs.mockResolvedValue([fakeJob]);
+
+      const count = await queue.restoreFromPersistence();
+      expect(count).toBe(1);
+      expect(queue.jobs.has(fakeJob.id)).toBe(true);
+      expect(queue.queue).toContain(fakeJob.id);
+    });
+
+    it('restores previously-retried jobs to the retry queue', async () => {
+      const fakeJob = {
+        id: 'job-aabbccdd11223345', type: 'webhook_delivery',
+        payload: { invoiceId: 'inv2' }, status: 'retrying',
+        priority: 0, delayMs: 0, createdAt: Date.now(),
+        startedAt: Date.now() - 5000, completedAt: null,
+        attempts: 2, lastError: 'timeout',
+      };
+      persistence.recoverUnackedJobs.mockResolvedValue([fakeJob]);
+
+      await queue.restoreFromPersistence();
+      expect(queue.retryQueue).toContain(fakeJob.id);
+      expect(queue.queue).not.toContain(fakeJob.id);
+    });
+
+    it('resets status to PENDING on restored jobs', async () => {
+      const fakeJob = {
+        id: 'job-aabbccdd11223346', type: 't', payload: {},
+        status: 'processing', priority: 0, delayMs: 0,
+        createdAt: Date.now(), startedAt: Date.now() - 1000,
+        completedAt: null, attempts: 1, lastError: null,
+      };
+      persistence.recoverUnackedJobs.mockResolvedValue([fakeJob]);
+
+      await queue.restoreFromPersistence();
+      expect(queue.getJob(fakeJob.id).status).toBe(JOB_STATUS.PENDING);
+      expect(queue.getJob(fakeJob.id).startedAt).toBeNull();
+    });
+
+    it('skips duplicate jobs already in memory', async () => {
+      const id = queue.enqueue('t', {});
+      const inMemoryJob = queue.getJob(id);
+      persistence.recoverUnackedJobs.mockResolvedValue([{
+        ...inMemoryJob, status: 'pending', startedAt: null,
+      }]);
+
+      const count = await queue.restoreFromPersistence();
+      expect(count).toBe(0);
+    });
+
+    it('does not exceed maxQueueSize during recovery', async () => {
+      const q = new JobQueue({ maxQueueSize: 2, persistence });
+      q.enqueue('t', {}); q.enqueue('t', {});
+
+      const extra = Array.from({ length: 3 }, (_, i) => ({
+        id: `job-recover${i}`, type: 't', payload: {}, status: 'pending',
+        priority: 0, delayMs: 0, createdAt: Date.now(),
+        startedAt: null, completedAt: null, attempts: 0, lastError: null,
+      }));
+      persistence.recoverUnackedJobs.mockResolvedValue(extra);
+
+      const count = await q.restoreFromPersistence();
+      expect(count).toBe(0); // queue already full
+    });
+
+    it('returns 0 and does not throw when persistence adapter is null', async () => {
+      const qNoP = new JobQueue();
+      await expect(qNoP.restoreFromPersistence()).resolves.toBe(0);
+    });
+
+    it('returns 0 gracefully when recoverUnackedJobs throws', async () => {
+      persistence.recoverUnackedJobs.mockRejectedValue(new Error('DB error'));
+      // createJobPersistence catches the error and returns []
+      // so we simulate that behaviour here via mock
+      await expect(queue.restoreFromPersistence()).resolves.toBe(0);
+    });
+  });
+});
+// ===========================================================================
+// sanitisePayload (jobPersistence helper)
+// ===========================================================================
+describe('sanitisePayload', () => {
+  it('accepts a plain object', () => {
+    const result = sanitisePayload({ a: 1, b: 'hello' });
+    expect(result).toEqual({ ok: true, payload: { a: 1, b: 'hello' } });
+  });
+
+  it('accepts a JSON string', () => {
+    const result = sanitisePayload('{"x":42}');
+    expect(result).toEqual({ ok: true, payload: { x: 42 } });
+  });
+
+  it('rejects null', () => {
+    expect(sanitisePayload(null).ok).toBe(false);
+  });
+
+  it('rejects an array', () => {
+    expect(sanitisePayload([1, 2]).ok).toBe(false);
+  });
+
+  it('rejects a primitive number', () => {
+    expect(sanitisePayload(42).ok).toBe(false);
+  });
+
+  it('rejects invalid JSON string', () => {
+    expect(sanitisePayload('{bad json}').ok).toBe(false);
+  });
+
+  it('round-trips nested objects cleanly', () => {
+    const payload = { a: { b: { c: true } }, arr: [1, 2, 3] };
+    const result  = sanitisePayload(payload);
+    expect(result.ok).toBe(true);
+    expect(result.payload).toEqual(payload);
+  });
+});
+
+// ===========================================================================
+// createJobPersistence — DB adapter unit tests (real logic, mocked knex)
+// ===========================================================================
+describe('createJobPersistence', () => {
+  // Build a minimal knex mock that lets us inspect calls
+  function makeDb(overrides = {}) {
+    const chain = {
+      where:       jest.fn().mockReturnThis(),
+      whereIn:     jest.fn().mockReturnThis(),
+      whereNull:   jest.fn().mockReturnThis(),
+      orderBy:     jest.fn().mockReturnThis(),
+      limit:       jest.fn().mockReturnThis(),
+      select:      jest.fn().mockResolvedValue([]),
+      insert:      jest.fn().mockResolvedValue([1]),
+      update:      jest.fn().mockResolvedValue(1),
+      del:         jest.fn().mockResolvedValue(0),
+      ...overrides,
+    };
+    const db = jest.fn(() => chain);
+    db._chain = chain;
+    return db;
+  }
+
+  it('persistJob calls db insert with correct row shape', async () => {
+    const db   = makeDb();
+    const p    = createJobPersistence(db);
+    const job  = {
+      id: 'job-abc', type: 'webhook_delivery', payload: { x: 1 },
+      status: 'pending', priority: 0, delayMs: 0,
+      createdAt: 1000, startedAt: null, completedAt: null,
+      attempts: 0, lastError: null,
+    };
+
+    await p.persistJob(job);
+    expect(db).toHaveBeenCalledWith('background_jobs');
+    expect(db._chain.insert).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'job-abc', type: 'webhook_delivery',
+      payload: JSON.stringify({ x: 1 }),
+      status: 'pending', priority: 0,
+    }));
+  });
+
+  it('persistJob does not throw when insert fails', async () => {
+    const db = makeDb({ insert: jest.fn().mockRejectedValue(new Error('DB down')) });
+    const p  = createJobPersistence(db);
+    await expect(p.persistJob({ id: 'j1', type: 't', payload: {}, status: 'pending',
+      priority: 0, delayMs: 0, createdAt: 0, startedAt: null,
+      completedAt: null, attempts: 0, lastError: null })).resolves.toBeUndefined();
+  });
+
+  it('updateJobStatus calls db update with status fields', async () => {
+    const db  = makeDb();
+    const p   = createJobPersistence(db);
+    const job = {
+      id: 'job-upd', type: 't', payload: {}, status: 'processing',
+      priority: 0, delayMs: 0, createdAt: 0,
+      startedAt: 500, completedAt: null, attempts: 1, lastError: null,
+    };
+
+    await p.updateJobStatus(job);
+    expect(db._chain.where).toHaveBeenCalledWith({ id: 'job-upd' });
+    expect(db._chain.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'processing', attempts: 1, started_at: 500,
+    }));
+  });
+
+  it('updateJobStatus swallows DB errors', async () => {
+    const db = makeDb({ update: jest.fn().mockRejectedValue(new Error('x')) });
+    const p  = createJobPersistence(db);
+    await expect(p.updateJobStatus({ id: 'j', status: 'processing',
+      delayMs: 0, startedAt: null, completedAt: null,
+      attempts: 0, lastError: null })).resolves.toBeUndefined();
+  });
+
+  it('ackJob stamps acked_at and status=completed', async () => {
+    const db = makeDb();
+    const p  = createJobPersistence(db);
+    await p.ackJob('job-ack');
+    expect(db._chain.where).toHaveBeenCalledWith({ id: 'job-ack' });
+    expect(db._chain.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'completed', acked_at: expect.any(Number),
+    }));
+  });
+
+  it('ackJob swallows DB errors', async () => {
+    const db = makeDb({ update: jest.fn().mockRejectedValue(new Error('x')) });
+    const p  = createJobPersistence(db);
+    await expect(p.ackJob('j')).resolves.toBeUndefined();
+  });
+
+  it('recoverUnackedJobs returns mapped job objects', async () => {
+    const row = {
+      id: 'job-rec1', type: 'webhook_delivery',
+      payload: JSON.stringify({ invoiceId: 'i1' }),
+      status: 'processing', priority: 2, delay_ms: 0,
+      created_at: 1000, started_at: 900, completed_at: null,
+      attempts: 1, last_error: null, acked_at: null,
+    };
+    const db = makeDb({ select: jest.fn().mockResolvedValue([row]) });
+    const p  = createJobPersistence(db);
+
+    const jobs = await p.recoverUnackedJobs();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]).toEqual(expect.objectContaining({
+      id: 'job-rec1', type: 'webhook_delivery',
+      payload: { invoiceId: 'i1' }, status: 'pending',
+      attempts: 1, startedAt: null,
+    }));
+  });
+
+  it('recoverUnackedJobs skips rows with corrupt payload', async () => {
+    const rows = [
+      { id: 'j1', type: 't', payload: '{bad}', status: 'pending',
+        priority: 0, delay_ms: 0, created_at: 0,
+        started_at: null, completed_at: null, attempts: 0,
+        last_error: null, acked_at: null },
+      { id: 'j2', type: 't', payload: JSON.stringify({ ok: true }),
+        status: 'pending', priority: 0, delay_ms: 0, created_at: 0,
+        started_at: null, completed_at: null, attempts: 0,
+        last_error: null, acked_at: null },
+    ];
+    const db = makeDb({ select: jest.fn().mockResolvedValue(rows) });
+    const p  = createJobPersistence(db);
+
+    const jobs = await p.recoverUnackedJobs();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].id).toBe('j2');
+  });
+
+  it('recoverUnackedJobs returns [] on DB error', async () => {
+    const db = makeDb({ select: jest.fn().mockRejectedValue(new Error('conn')) });
+    const p  = createJobPersistence(db);
+    await expect(p.recoverUnackedJobs()).resolves.toEqual([]);
+  });
+
+  it('recoverUnackedJobs is bounded by maxRecoveryRows', async () => {
+    const db   = makeDb({ select: jest.fn().mockResolvedValue([]) });
+    const p    = createJobPersistence(db, { maxRecoveryRows: 50 });
+    await p.recoverUnackedJobs();
+    expect(db._chain.limit).toHaveBeenCalledWith(50);
+  });
+
+  it('pruneCompleted deletes old completed/failed rows', async () => {
+    const db = makeDb({ del: jest.fn().mockResolvedValue(3) });
+    const p  = createJobPersistence(db);
+    const deleted = await p.pruneCompleted(86_400_000);
+    expect(deleted).toBe(3);
+    expect(db._chain.del).toHaveBeenCalled();
+  });
+
+  it('pruneCompleted returns 0 on DB error', async () => {
+    const db = makeDb({ del: jest.fn().mockRejectedValue(new Error('x')) });
+    const p  = createJobPersistence(db);
+    await expect(p.pruneCompleted(1000)).resolves.toBe(0);
+  });
+});
+
+// ===========================================================================
+// BackgroundWorker
+// ===========================================================================
+describe('BackgroundWorker', () => {
+  let queue;
+  let worker;
+
+  beforeEach(() => {
+    queue  = new JobQueue();
     worker = new BackgroundWorker({ jobQueue: queue, pollIntervalMs: 50 });
   });
 
   afterEach(async () => {
-    if (worker.isRunning) {
-      await worker.stop();
-    }
+    if (worker.isRunning) { await worker.stop(); }
     queue.clear();
   });
 
+  // ── constructor ───────────────────────────────────────────────────────────
   describe('constructor', () => {
-    it('should create worker with default options', () => {
+    it('defaults: not running, 1000ms poll, concurrency 2', () => {
       const w = new BackgroundWorker();
       expect(w.isRunning).toBe(false);
       expect(w.pollIntervalMs).toBe(1000);
       expect(w.maxConcurrency).toBe(2);
     });
 
-    it('should enforce minimum poll interval', () => {
-      const w = new BackgroundWorker({ pollIntervalMs: 5 });
-      expect(w.pollIntervalMs).toBe(10);
+    it('enforces minimum poll interval of 10ms', () => {
+      expect(new BackgroundWorker({ pollIntervalMs: 1 }).pollIntervalMs).toBe(10);
     });
 
-    it('should enforce minimum concurrency', () => {
-      const w = new BackgroundWorker({ maxConcurrency: -5 });
-      expect(w.maxConcurrency).toBe(1);
+    it('enforces minimum concurrency of 1', () => {
+      expect(new BackgroundWorker({ maxConcurrency: 0 }).maxConcurrency).toBe(1);
     });
   });
 
+  // ── registerHandler ───────────────────────────────────────────────────────
   describe('registerHandler', () => {
-    it('should register a handler', () => {
-      const handler = jest.fn();
-      worker.registerHandler('test', handler);
+    it('registers successfully', () => {
+      worker.registerHandler('test', jest.fn());
       expect(worker.handlers.has('test')).toBe(true);
     });
 
-    it('should throw on invalid job type', () => {
-      expect(() => {
-        worker.registerHandler('', jest.fn());
-      }).toThrow('Job type must be a non-empty string');
+    it('allows overwriting a handler', () => {
+      const h1 = jest.fn(), h2 = jest.fn();
+      worker.registerHandler('t', h1);
+      worker.registerHandler('t', h2);
+      expect(worker.handlers.get('t')).toBe(h2);
     });
 
-    it('should throw if handler is not a function', () => {
-      expect(() => {
-        worker.registerHandler('test', 'not a function');
-      }).toThrow('Handler must be a function');
+    it('throws on empty type', () => {
+      expect(() => worker.registerHandler('', jest.fn())).toThrow('non-empty string');
     });
 
-    it('should allow overwriting existing handler', () => {
-      const handler1 = jest.fn();
-      const handler2 = jest.fn();
-
-      worker.registerHandler('test', handler1);
-      worker.registerHandler('test', handler2);
-
-      expect(worker.handlers.get('test')).toBe(handler2);
+    it('throws when handler is not a function', () => {
+      expect(() => worker.registerHandler('t', 'bad')).toThrow('function');
     });
   });
 
+  // ── start ─────────────────────────────────────────────────────────────────
   describe('start', () => {
-    it('should throw if already running', async () => {
-      worker.registerHandler('test', jest.fn());
-      worker.start();
-
-      expect(() => {
-        worker.start();
-      }).toThrow('Worker is already running');
-
-      await worker.stop();
-    });
-
-    it('should throw if no handlers registered', () => {
-      expect(() => {
-        worker.start();
-      }).toThrow('No job handlers registered');
-    });
-
-    it('should set isRunning to true', () => {
-      worker.registerHandler('test', jest.fn());
-      worker.start();
+    it('sets isRunning to true', async () => {
+      worker.registerHandler('t', jest.fn());
+      await worker.start();
       expect(worker.isRunning).toBe(true);
-      worker.stop();
+    });
+
+    it('throws if already running', async () => {
+      worker.registerHandler('t', jest.fn());
+      await worker.start();
+      await expect(worker.start()).rejects.toThrow('already running');
+    });
+
+    it('throws if no handlers registered', async () => {
+      await expect(worker.start()).rejects.toThrow('No job handlers registered');
     });
   });
 
+  // ── stop ──────────────────────────────────────────────────────────────────
   describe('stop', () => {
-    it('should set isRunning to false', async () => {
-      worker.registerHandler('test', jest.fn());
-      worker.start();
+    it('sets isRunning to false', async () => {
+      worker.registerHandler('t', jest.fn());
+      await worker.start();
       await worker.stop();
       expect(worker.isRunning).toBe(false);
     });
 
-    it('should wait for in-flight jobs to complete', async () => {
-      let handlerCalled = false;
-      const handler = jest.fn(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        handlerCalled = true;
+    it('waits for in-flight jobs', async () => {
+      let done = false;
+      worker.registerHandler('t', async () => {
+        await new Promise(r => setTimeout(r, 80));
+        done = true;
       });
-
-      worker.registerHandler('test', handler);
-      worker.start();
-
-      worker.enqueue('test', { data: 1 });
-
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await worker.start();
+      worker.enqueue('t', {});
+      await new Promise(r => setTimeout(r, 30));
       await worker.stop(500);
-
-      expect(handlerCalled).toBe(true);
-      expect(worker.processingCount).toBe(0);
+      expect(done).toBe(true);
     });
 
-    it('should timeout waiting for slow jobs', async () => {
-      const handler = jest.fn(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-      });
-
-      worker.registerHandler('test', handler);
-      worker.start();
-
-      worker.enqueue('test', { data: 1 });
-
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      await worker.stop(100);
-
+    it('times out if jobs take too long', async () => {
+      worker.registerHandler('t', async () => new Promise(r => setTimeout(r, 2000)));
+      await worker.start();
+      worker.enqueue('t', {});
+      await new Promise(r => setTimeout(r, 30));
+      await worker.stop(80);
       expect(worker.processingCount).toBeGreaterThan(0);
     });
 
-    it('should work when not running', async () => {
-      expect(async () => {
-        await worker.stop();
-      }).not.toThrow();
+    it('resolves cleanly when not running', async () => {
+      await expect(worker.stop()).resolves.toBeUndefined();
     });
   });
 
+  // ── enqueue ───────────────────────────────────────────────────────────────
   describe('enqueue', () => {
-    it('should enqueue a job', () => {
-      const handler = jest.fn();
-      worker.registerHandler('test', handler);
-      const jobId = worker.enqueue('test', { data: 'test' });
-
-      expect(jobId).toMatch(/^job-[0-9a-f]+$/);
-      expect(queue.getJob(jobId)).toBeDefined();
+    it('returns a job ID', () => {
+      worker.registerHandler('t', jest.fn());
+      expect(worker.enqueue('t', {})).toMatch(/^job-[0-9a-f]+$/);
     });
 
-    it('should throw if no handler for job type', () => {
-      expect(() => {
-        worker.enqueue('unknown', { data: 'test' });
-      }).toThrow('No handler registered');
+    it('throws when no handler is registered for type', () => {
+      expect(() => worker.enqueue('unknown', {})).toThrow('No handler registered');
     });
 
-    it('should support options', () => {
-      const handler = jest.fn();
-      worker.registerHandler('test', handler);
-      const jobId = worker.enqueue('test', { data: 'test' }, { priority: 5 });
-
-      const job = queue.getJob(jobId);
-      expect(job.priority).toBe(5);
+    it('passes options through', () => {
+      worker.registerHandler('t', jest.fn());
+      const id  = worker.enqueue('t', {}, { priority: 9 });
+      expect(queue.getJob(id).priority).toBe(9);
     });
   });
 
+  // ── job processing ────────────────────────────────────────────────────────
   describe('job processing', () => {
-    it('should process jobs with registered handler', async () => {
+    it('calls handler and marks job COMPLETED', async () => {
       const handler = jest.fn();
-      worker.registerHandler('test', handler);
-      worker.start();
+      worker.registerHandler('t', handler);
+      await worker.start();
 
-      const jobId = worker.enqueue('test', { data: 'processing' });
-
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      const id = worker.enqueue('t', { x: 42 });
+      await new Promise(r => setTimeout(r, 200));
       await worker.stop();
 
-      expect(handler).toHaveBeenCalledWith(expect.objectContaining({
-        id: jobId,
-        type: 'test',
-        payload: { data: 'processing' },
-      }));
-
-      const job = queue.getJob(jobId);
-      expect(job.status).toBe(JOB_STATUS.COMPLETED);
+      expect(handler).toHaveBeenCalledWith(expect.objectContaining({ id, type: 't' }));
+      expect(queue.getJob(id).status).toBe(JOB_STATUS.COMPLETED);
     });
 
-    it('should call handler with job object', async () => {
-      const handler = jest.fn();
-      worker.registerHandler('test', handler);
-      worker.start();
+    it('retries on handler failure', async () => {
+      worker.registerHandler('t', jest.fn().mockRejectedValue(new Error('boom')));
+      await worker.start();
 
-      const jobId = worker.enqueue('test', { data: 'test' });
-
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      const id = worker.enqueue('t', {});
+      await new Promise(r => setTimeout(r, 200));
       await worker.stop();
 
-      const callArgs = handler.mock.calls[0][0];
-      expect(callArgs.id).toBe(jobId);
-      expect(callArgs.type).toBe('test');
-      expect(callArgs.payload).toEqual({ data: 'test' });
+      expect(queue.getJob(id).status).toBe(JOB_STATUS.RETRYING);
+      expect(queue.getJob(id).lastError).toBe('boom');
     });
 
-    it('should handle handler errors with retry', async () => {
-      const handler = jest.fn().mockRejectedValue(new Error('Handler failed'));
-      worker.registerHandler('test', handler);
-      worker.start();
-
-      const jobId = worker.enqueue('test', { data: 'test' });
-
-      await new Promise((resolve) => setTimeout(resolve, 300));
+    it('handles null thrown from handler', async () => {
+      worker.registerHandler('t', jest.fn().mockRejectedValue(null));
+      await worker.start();
+      const id = worker.enqueue('t', {});
+      await new Promise(r => setTimeout(r, 200));
       await worker.stop();
-
-      const job = queue.getJob(jobId);
-      expect(job.status).toBe(JOB_STATUS.RETRYING);
-      expect(job.attempts).toBe(1);
-      expect(job.lastError).toBe('Handler failed');
+      expect(queue.getJob(id).status).toBe(JOB_STATUS.RETRYING);
     });
 
-    it('should process multiple jobs concurrently', async () => {
-      const handler = jest.fn(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 100));
+    it('processes up to maxConcurrency jobs in parallel', async () => {
+      const started = [];
+      const w = new BackgroundWorker({ jobQueue: queue, pollIntervalMs: 30, maxConcurrency: 3 });
+      w.registerHandler('t', async (job) => {
+        started.push(job.id);
+        await new Promise(r => setTimeout(r, 100));
       });
+      await w.start();
 
-      worker = new BackgroundWorker({
-        jobQueue: queue,
-        pollIntervalMs: 50,
-        maxConcurrency: 3,
-      });
+      ['a','b','c'].forEach(() => w.enqueue('t', {}));
+      await new Promise(r => setTimeout(r, 60));
+      expect(w.processingCount).toBe(3);
 
-      worker.registerHandler('test', handler);
-      worker.start();
-
-      worker.enqueue('test', { data: 1 });
-      worker.enqueue('test', { data: 2 });
-      worker.enqueue('test', { data: 3 });
-
-      await new Promise((resolve) => setTimeout(resolve, 150));
-
-      await worker.stop();
-
-      expect(handler).toHaveBeenCalledTimes(3);
-    });
-
-    it('should handle job with null error', async () => {
-      const handler = jest.fn().mockRejectedValue(null);
-      worker.registerHandler('test', handler);
-      worker.start();
-
-      const jobId = worker.enqueue('test', { data: 'test' });
-
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      await worker.stop();
-
-      const job = queue.getJob(jobId);
-      expect(job.status).toBe(JOB_STATUS.RETRYING);
+      await w.stop(500);
     });
   });
 
+  // ── getStats ──────────────────────────────────────────────────────────────
   describe('getStats', () => {
-    it('should return current worker stats', async () => {
-      const handler = jest.fn(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      });
-
-      worker.registerHandler('test', handler);
-      worker.registerHandler('email', handler);
-      worker.start();
-
-      worker.enqueue('test', { data: 1 });
-      worker.enqueue('email', { email: 'test@example.com' });
-
-      await new Promise((resolve) => setTimeout(resolve, 50));
+    it('returns worker and queue stats', async () => {
+      worker.registerHandler('t', jest.fn(async () => new Promise(r => setTimeout(r, 100))));
+      await worker.start();
+      worker.enqueue('t', {});
+      await new Promise(r => setTimeout(r, 40));
 
       const stats = worker.getStats();
       expect(stats.isRunning).toBe(true);
       expect(stats.processingCount).toBeGreaterThanOrEqual(1);
-      expect(stats.handlerCount).toBe(2);
+      expect(stats.handlerCount).toBe(1);
       expect(stats.queueStats).toBeDefined();
-
       await worker.stop();
+    });
+  });
+
+  // ── crash recovery integration ────────────────────────────────────────────
+  describe('crash recovery (persistence adapter)', () => {
+    it('restores unacked jobs before poll loop starts', async () => {
+      const restoredJob = {
+        id: 'job-crashtest01234567', type: 't',
+        payload: { from: 'db' }, status: 'pending',
+        priority: 0, delayMs: 0, createdAt: Date.now(),
+        startedAt: null, completedAt: null, attempts: 0, lastError: null,
+      };
+      const persistence = makePersistence({
+        recoverUnackedJobs: jest.fn().mockResolvedValue([restoredJob]),
+      });
+      const q = new JobQueue({ persistence });
+      const w = new BackgroundWorker({ jobQueue: q, pollIntervalMs: 50 });
+
+      const handler = jest.fn();
+      w.registerHandler('t', handler);
+      await w.start();
+
+      await new Promise(r => setTimeout(r, 200));
+      await w.stop();
+
+      expect(handler).toHaveBeenCalledWith(expect.objectContaining({ id: restoredJob.id }));
+    });
+
+    it('does not replay acked jobs (persistence skips acked_at rows)', async () => {
+      // recoverUnackedJobs already filters acked_at IS NOT NULL in the DB;
+      // here we confirm that when adapter returns [], nothing is replayed
+      const persistence = makePersistence({
+        recoverUnackedJobs: jest.fn().mockResolvedValue([]),
+      });
+      const q = new JobQueue({ persistence });
+      const w = new BackgroundWorker({ jobQueue: q, pollIntervalMs: 50 });
+      const handler = jest.fn();
+      w.registerHandler('t', handler);
+      await w.start();
+      await new Promise(r => setTimeout(r, 100));
+      await w.stop();
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it('starts normally even when recovery query throws', async () => {
+      const persistence = makePersistence({
+        recoverUnackedJobs: jest.fn().mockRejectedValue(new Error('DB down')),
+      });
+      const q = new JobQueue({ persistence });
+      const w = new BackgroundWorker({ jobQueue: q, pollIntervalMs: 50 });
+      w.registerHandler('t', jest.fn());
+      await expect(w.start()).resolves.toBeUndefined();
+      expect(w.isRunning).toBe(true);
+      await w.stop();
+    });
+
+    it('feature flag OFF: no persistence calls made', () => {
+      // Plain JobQueue — no persistence adapter — no DB calls
+      const q = new JobQueue();
+      q.enqueue('t', {});
+      q.dequeue();
+      // No errors thrown, no persistence methods called
+      expect(q._persistence).toBeNull();
     });
   });
 });

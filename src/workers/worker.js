@@ -1,70 +1,74 @@
 /**
  * @fileoverview Background worker for processing asynchronous jobs.
  * Provides a worker loop that dequeues jobs and executes them with proper error handling.
- * 
+ *
+ * Crash recovery
+ * --------------
+ * When the attached JobQueue has a persistence adapter configured, calling
+ * `start()` automatically restores unacked jobs from the DB before the poll
+ * loop begins.  Recovery is bounded (see `JobQueue.restoreFromPersistence`)
+ * and never blocks indefinitely.
+ *
  * Security Considerations:
  * - Handler execution is wrapped in try-catch to prevent uncaught exceptions
  * - Worker validates that handlers are functions before executing
  * - Processing count prevents stack overflow from chained promises
  * - Poll interval is bounded (minimum 10ms) to prevent CPU spinning
  * - Graceful shutdown allows in-flight jobs to complete
- * 
+ *
  * @module workers/worker
  */
 
 const JobQueue = require('./jobQueue');
-const logger = require('../logger');
+const logger   = require('../logger');
 
 /**
- * Background worker that processes queued jobs
- * 
+ * Background worker that processes queued jobs.
+ *
  * Features:
  * - Asynchronous job processing with configurable handlers
  * - Automatic retry with exponential backoff
  * - Graceful start/stop with in-flight job handling
+ * - Optional crash recovery via JobQueue persistence adapter
  * - Processing statistics and monitoring
  * - Security validation of job handlers
- * 
+ *
  * @class BackgroundWorker
  */
 class BackgroundWorker {
   /**
-   * Creates a new BackgroundWorker instance
-   * 
+   * Creates a new BackgroundWorker instance.
+   *
    * @param {Object} options - Worker configuration
-   * @param {JobQueue} [options.jobQueue] - Job queue instance (creates new if not provided)
-   * @param {number} [options.pollIntervalMs=1000] - How often to check queue (min 10ms)
-   * @param {number} [options.maxConcurrency=2] - Max concurrent job processing
+   * @param {JobQueue} [options.jobQueue]       - Job queue instance (creates new if not provided)
+   * @param {number}   [options.pollIntervalMs=1000] - How often to check queue (min 10ms)
+   * @param {number}   [options.maxConcurrency=2]    - Max concurrent job processing
    */
   constructor(options = {}) {
     this.jobQueue = options.jobQueue || new JobQueue();
-    
-    // Security: Bound poll interval to prevent CPU spinning
+
+    // Security: bound poll interval to prevent CPU spinning
     this.pollIntervalMs = Math.max(options.pollIntervalMs ?? 1000, 10);
-    
-    // Security: Limit concurrency to prevent resource exhaustion
-    this.maxConcurrency = Math.max(
-      options.maxConcurrency ?? 2,
-      1
-    );
-    
-    // Handler registry: map of job type to handler function
+
+    // Security: limit concurrency to prevent resource exhaustion
+    this.maxConcurrency = Math.max(options.maxConcurrency ?? 2, 1);
+
+    /** @type {Map<string,Function>} Handler registry: job type → async function */
     this.handlers = new Map();
-    
-    // Worker state
-    this.isRunning = false;
+
+    this.isRunning      = false;
     this.processingCount = 0;
-    this.pollTimer = null;
+    this.pollTimer      = null;
   }
 
+  // ---------------------------------------------------------------------------
+  // Public API
+  // ---------------------------------------------------------------------------
+
   /**
-   * Register a handler for a specific job type
-   * 
-   * Security Validation:
-   * - Handler must be a function
-   * - Job type must be a non-empty string
-   * 
-   * @param {string} jobType - The job type (e.g., 'verify', 'webhook_retry')
+   * Register a handler for a specific job type.
+   *
+   * @param {string}   jobType - The job type (e.g., 'webhook_delivery')
    * @param {Function} handler - Async function(job) to handle the job
    * @throws {Error} If handler is not a function or jobType is invalid
    */
@@ -72,29 +76,42 @@ class BackgroundWorker {
     if (typeof jobType !== 'string' || jobType.trim().length === 0) {
       throw new Error('Job type must be a non-empty string');
     }
-
     if (typeof handler !== 'function') {
       throw new Error(`Handler must be a function, got ${typeof handler}`);
     }
-
     this.handlers.set(jobType, handler);
   }
 
   /**
-   * Start the worker loop
-   * 
-   * Once started, the worker will continuously poll the queue and process jobs
-   * using registered handlers. Worker runs until stop() is called.
-   * 
+   * Start the worker loop.
+   *
+   * When the attached queue has a persistence adapter, unacked jobs are
+   * restored from the DB before the poll loop begins (crash recovery).
+   * Recovery is async; `start()` returns a Promise in that case and resolves
+   * once recovery is complete and the poll loop has started.
+   *
+   * @returns {Promise<void>}
    * @throws {Error} If already running or no handlers registered
    */
-  start() {
+  async start() {
     if (this.isRunning) {
       throw new Error('Worker is already running');
     }
-
     if (this.handlers.size === 0) {
       throw new Error('No job handlers registered');
+    }
+
+    // Crash recovery: restore unacked jobs from DB before polling begins.
+    if (this.jobQueue._persistence) {
+      try {
+        const restored = await this.jobQueue.restoreFromPersistence();
+        if (restored > 0) {
+          logger.info({ restored }, '[worker] Crash recovery: restored unacked jobs from DB');
+        }
+      } catch (err) {
+        // Recovery failure must not prevent startup.
+        logger.error({ err }, '[worker] Crash recovery failed; starting with empty queue');
+      }
     }
 
     this.isRunning = true;
@@ -102,11 +119,11 @@ class BackgroundWorker {
   }
 
   /**
-   * Stop the worker loop gracefully
-   * 
+   * Stop the worker loop gracefully.
+   *
    * Stops accepting new jobs but allows in-flight jobs to complete.
    * Resolves when all in-flight jobs are done (or timeout).
-   * 
+   *
    * @param {number} [timeoutMs=10000] - Max time to wait for in-flight jobs
    * @returns {Promise<void>}
    */
@@ -118,7 +135,6 @@ class BackgroundWorker {
       this.pollTimer = null;
     }
 
-    // Wait for in-flight jobs to complete
     const startTime = Date.now();
     while (this.processingCount > 0 && Date.now() - startTime < timeoutMs) {
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -133,10 +149,10 @@ class BackgroundWorker {
   }
 
   /**
-   * Enqueue a job for processing
-   * 
-   * @param {string} jobType - The job type
-   * @param {Object} payload - The job payload
+   * Enqueue a job for processing.
+   *
+   * @param {string} jobType     - The job type
+   * @param {Object} payload     - The job payload
    * @param {Object} [options={}] - Additional options (priority, delayMs)
    * @returns {string} The job ID
    * @throws {Error} If job type has no registered handler
@@ -148,67 +164,55 @@ class BackgroundWorker {
         `Registered types: ${Array.from(this.handlers.keys()).join(', ')}`
       );
     }
-
     return this.jobQueue.enqueue(jobType, payload, options);
   }
 
   /**
-   * Get statistics about worker state and queue
-   * 
+   * Get statistics about worker state and queue.
+   *
    * @returns {Object} Worker stats including running status, processing count, queue stats
    */
   getStats() {
     return {
-      isRunning: this.isRunning,
+      isRunning:       this.isRunning,
       processingCount: this.processingCount,
-      handlerCount: this.handlers.size,
-      queueStats: this.jobQueue.getStats(),
+      handlerCount:    this.handlers.size,
+      queueStats:      this.jobQueue.getStats(),
     };
   }
 
+  // ---------------------------------------------------------------------------
+  // Private helpers
+  // ---------------------------------------------------------------------------
+
   /**
-   * Poll the queue and process available jobs
-   * 
-   * This runs continuously when the worker is started.
-   * It processes up to maxConcurrency jobs at a time.
-   * 
+   * Poll the queue and process available jobs.
+   * Runs continuously while isRunning is true.
+   *
    * @private
    */
   _poll() {
-    if (!this.isRunning) {
-      return;
-    }
+    if (!this.isRunning) { return; }
 
-    // Process jobs up to concurrency limit
     while (this.processingCount < this.maxConcurrency) {
       const job = this.jobQueue.dequeue();
-      if (!job) {
-        break; // Queue is empty
-      }
+      if (!job) { break; }
 
       this.processingCount += 1;
 
-      // Process job asynchronously (don't await, let it run in background)
       this._processJob(job).catch((err) => {
         logger.error({ err, jobId: job.id }, 'Unexpected error processing job');
       });
     }
 
-    // Schedule next poll
     if (this.isRunning) {
       this.pollTimer = setTimeout(() => this._poll(), this.pollIntervalMs);
     }
   }
 
   /**
-   * Process a single job with its registered handler
-   * 
-   * Security & Error Handling:
-   * - Handler must exist for job type (validated at registration time)
-   * - Handler execution is wrapped in try-catch
-   * - Errors trigger retry logic with exponential backoff
-   * - Job ID is validated before processing
-   * 
+   * Process a single job with its registered handler.
+   *
    * @private
    * @param {Object} job - The job to process
    * @returns {Promise<void>}
@@ -224,13 +228,10 @@ class BackgroundWorker {
         throw new Error(`No handler for job type "${job.type}"`);
       }
 
-      // Execute the handler
       await handler(job);
 
-      // Job succeeded
       this.jobQueue.ack(job.id);
     } catch (err) {
-      // Job failed, attempt retry
       this.jobQueue.retry(job.id, err);
     } finally {
       this.processingCount -= 1;

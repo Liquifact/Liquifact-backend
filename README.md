@@ -1123,5 +1123,78 @@ WHERE id = 'your-tenant-id';
 
 ---
 
+## Job Queue Durability
+
+The background job queue (`src/workers/jobQueue.js`) is in-memory by default. An optional
+durable backing persists every job transition to the `background_jobs` table so that queued
+and in-flight jobs survive a process crash.
+
+### Enabling persistence
+
+```bash
+# .env
+JOB_QUEUE_PERSISTENCE_ENABLED=true
+DATABASE_URL=postgresql://user:pass@localhost:5432/liquifact
+```
+
+Run the migration before starting the server:
+
+```bash
+npm run db:migrate   # applies migrations/20260625000000_create_background_jobs.sql
+```
+
+### How it works
+
+| Event | In-memory | With persistence |
+|-------|-----------|-----------------|
+| `enqueue` | adds to queue | + INSERT into `background_jobs` |
+| `dequeue` | marks PROCESSING | + UPDATE status → processing |
+| `ack` | marks COMPLETED | + UPDATE status + stamps `acked_at` |
+| `retry` | marks RETRYING / FAILED | + UPDATE status |
+| **restart** | queue is empty | unacked rows are requeued automatically |
+
+On startup, `worker.start()` calls `JobQueue.restoreFromPersistence()` which SELECTs rows
+where `status IN ('pending','processing','retrying') AND acked_at IS NULL`, then requeues
+them into the in-memory structures before the poll loop begins.
+
+### Guarantees and limits
+
+- **At-least-once delivery** — jobs that were dequeued but never acked (in-flight at crash
+  time) are requeued on the next startup.
+- **No double-run of acked jobs** — `acked_at` is stamped atomically with status=completed;
+  recovery unconditionally skips any row with `acked_at IS NOT NULL`.
+- **Bounded recovery** — at most `JOB_QUEUE_MAX_RECOVERY_ROWS` (default 1 000) rows are
+  fetched per startup, preventing an unbounded DB scan from blocking the process.
+- **Hard retry cap preserved** — `maxRetries` (default 3, hard max 10) is enforced
+  identically whether persistence is on or off.
+- **Payload validation on restore** — each recovered payload is round-tripped through
+  `JSON.parse(JSON.stringify())` before re-enqueueing; rows with corrupt payloads are
+  skipped and logged.
+- **DB failures are non-fatal** — all persistence calls are fire-and-forget with internal
+  error logging. A DB outage degrades to the in-memory path; it never crashes the worker.
+
+### Architecture
+
+```
+JobQueue (options.persistence = adapter)
+    │
+    ├── enqueue()  ──► persistJob(job)
+    ├── dequeue()  ──► updateJobStatus(job)   status → processing
+    ├── ack()      ──► ackJob(jobId)          status → completed, acked_at = now
+    ├── retry()    ──► updateJobStatus(job)   status → retrying | failed
+    └── restoreFromPersistence()
+              └──► recoverUnackedJobs()  SELECT … WHERE acked_at IS NULL
+
+BackgroundWorker.start()
+    └── if queue._persistence → restoreFromPersistence() → then _poll()
+```
+
+The persistence adapter is created by `createJobPersistence(db, options)` from
+`src/workers/jobPersistence.js` and injected into `JobQueue` via `options.persistence`.
+The feature flag wiring lives in whichever bootstrap file initialises the queue
+(e.g. `src/jobs/webhookDelivery.js`, `src/jobs/retentionPurge.js`).
+
+---
+
 ## License
 MIT (see root LiquiFact project for full license).

@@ -31,6 +31,7 @@ Key components
 | `20260601000000_create_idempotency_keys.sql` | SQL | **node-pg-migrate** | Idempotency keys table |
 | `20260601000001_create_investor_commitments.js` | JS | **node-pg-migrate** | Investor commitments |
 | `20260602000000_create_webhook_dead_letters.sql` | SQL | **node-pg-migrate** | Dead‑letter queue for webhooks |
+| `20260625000000_create_background_jobs.sql` | SQL | **node-pg-migrate** | Durable backing for job queue (opt-in via `JOB_QUEUE_PERSISTENCE_ENABLED`) |
 
 **Authoritative scripts**
 - `npm run db:setup` → runs `node-pg-migrate up` (same as `db:migrate`).
