@@ -50,7 +50,7 @@ const env = process.env.NODE_ENV || 'development';
 function attachPoolErrorHandlers(instance) {
   // `instance.client.pool` is exposed by tarn (the pool library knex uses).
   const pool = instance.client && instance.client.pool;
-  if (!pool) return;
+  if (!pool) { return; }
 
   pool.on('createFail', (eventId, err) => {
     logger.error({ err, eventId }, '[db] Pool: failed to create connection');
