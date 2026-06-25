@@ -50,6 +50,29 @@ Part of the LiquiFact stack: frontend (Next.js) | backend (this repo) | contract
 
 ---
 
+## Database connection and test isolation
+
+`src/db/knex.js` is the single Knex connection factory. It selects the correct
+config block from `knexfile.js` based on `NODE_ENV` and enforces strict isolation:
+
+| NODE_ENV | Config block | Backend |
+|----------|-------------|---------|
+| `test` | `test` | SQLite `:memory:` — never touches a shared file or network DB |
+| `development` | `development` | SQLite `db.sqlite3` (local convenience) |
+| `production` | `production` | PostgreSQL — `DATABASE_URL` required |
+
+The factory **throws** on start-up if:
+- `NODE_ENV=test` and the `test` block is missing from `knexfile.js`
+- `NODE_ENV=production` and `DATABASE_URL` is unset
+
+Pool error events (`createFail`, `acquireFail`, `destroyFail`) are logged via
+the application logger rather than surfacing as unhandled promise rejections.
+
+Unit tests mock the DB module via `src/db/__mocks__/knex.js` and never create
+a real connection. See [`DB_MIGRATIONS.md`](./DB_MIGRATIONS.md) for full details.
+
+---
+
 ## Observability
 
 Optional Sentry error tracking is supported through the `SENTRY_DSN` environment variable. When enabled, the server scrubs sensitive values before sending events, including:
