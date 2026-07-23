@@ -15,6 +15,7 @@ const ConfigSchema = z
   .object({
     NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
     PORT: z.coerce.number().min(1).max(65535).default(3001),
+    INVOICE_FILE_MAX_SIZE: z.string().min(1).default('5mb'),
     JWT_SECRET: z.string().min(32), // No default for security
     JWT_ALGORITHMS: z.string().optional().default('HS256'), // Comma-separated allowlist, e.g. HS256,RS256
     JWT_ISSUER: z.string().optional(), // Optional issuer claim to enforce
@@ -146,6 +147,26 @@ function get() {
   return config;
 }
 
+/**
+ * Returns the validated invoice upload size limit.
+ *
+ * Route modules are loaded while the application is being assembled, before
+ * the boot-time validation call runs. During that narrow window, resolve the
+ * same value from the environment so route construction remains side-effect
+ * free; the normal startup validation still rejects invalid configuration.
+ *
+ * @returns {string} Maximum invoice upload size accepted by Express.
+ */
+function getInvoiceFileMaxSize() {
+  if (config) {
+    return /** @type {string} */ (config.INVOICE_FILE_MAX_SIZE);
+  }
+  const configuredValue = process.env.INVOICE_FILE_MAX_SIZE;
+  return typeof configuredValue === 'string' && configuredValue.length > 0
+    ? configuredValue
+    : '5mb';
+}
+
 const securityHeaders = {
   contentSecurityPolicy: {
     directives: {
@@ -185,6 +206,7 @@ const securityHeaders = {
 module.exports = {
   validate,
   get,
+  getInvoiceFileMaxSize,
   logRedactedSummary,
   ConfigSchema,
   securityHeaders,

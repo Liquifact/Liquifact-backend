@@ -2,7 +2,7 @@
  * Tests for centralized config module.
  */
 
-const { validate, get, logRedactedSummary, ConfigSchema } = require('./index');
+const { validate, get, getInvoiceFileMaxSize, logRedactedSummary, ConfigSchema } = require('./index');
 
 describe('Config Validation', () => {
   const originalEnv = { ...process.env };
@@ -28,6 +28,7 @@ describe('Config Validation', () => {
     expect(config.JWT_ISSUER).toBe('liquifact-platform');
     expect(config.JWT_AUDIENCE).toBe('liquifact-client');
     expect(config.JWT_ALGORITHMS).toBe('HS256');
+    expect(config.INVOICE_FILE_MAX_SIZE).toBe('5mb');
   });
 
   test('overrides defaults', () => {
@@ -44,6 +45,31 @@ describe('Config Validation', () => {
     expect(config.JWT_ISSUER).toBe('custom-issuer');
     expect(config.JWT_AUDIENCE).toBe('custom-audience');
     expect(config.JWT_ALGORITHMS).toBe('HS256,HS384');
+  });
+
+  test('validates and exposes a custom invoice file size through the typed accessor', () => {
+    process.env.NODE_ENV = 'test';
+    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
+    process.env.INVOICE_FILE_MAX_SIZE = '10mb';
+
+    validate();
+
+    expect(getInvoiceFileMaxSize()).toBe('10mb');
+  });
+
+  test('resolves the invoice file size before boot validation', () => {
+    jest.isolateModules(() => {
+      process.env.INVOICE_FILE_MAX_SIZE = '2mb';
+      const { getInvoiceFileMaxSize: resolveInvoiceFileMaxSize } = require('./index');
+
+      expect(resolveInvoiceFileMaxSize()).toBe('2mb');
+    });
+  });
+
+  test('rejects an empty invoice file size at boot validation', () => {
+    process.env.INVOICE_FILE_MAX_SIZE = '';
+
+    expect(() => validate()).toThrow(/INVOICE_FILE_MAX_SIZE/);
   });
 
   test('rejects short JWT_SECRET', () => {
