@@ -144,12 +144,29 @@ describe('KYC Service Database Persistence', () => {
       process.env.KYC_PROVIDER_API_KEY = 'test-api-key';
     };
 
-    const mockProvider = (status) =>
-      jest.fn().mockResolvedValue({
+    /**
+     * Builds a fetch mock that resolves with a Response-shaped object carrying
+     * the fields {@link kycService.verifyWithExternalProvider} actually reads:
+     *   - `text()` — used as the raw body for response-signature verification
+     *     and as the source for JSON.parse
+     *   - `headers.get(name)` — used to read X-KYC-Signature / X-KYC-Response-Signature
+     *   - `ok`, `status` — used to short-circuit non-2xx and to populate KycProviderError
+     *
+     * The previous version of this helper omitted `text()` and `headers.get()`,
+     * which silently broke once issue #592 wired the real upstream call into
+     * `verifyWithExternalProvider` (the call now reads the raw body and looks
+     * for an `X-KYC-Signature` header).
+     */
+    const mockProvider = (status) => {
+      const body = { status, recordId: `rec_${status}`, verifiedAt: null };
+      return jest.fn().mockResolvedValue({
         ok: true,
         status: 200,
-        json: () => Promise.resolve({ status, recordId: `rec_${status}`, verifiedAt: null }),
+        text: () => Promise.resolve(JSON.stringify(body)),
+        json: () => Promise.resolve(body),
+        headers: { get: () => null },
       });
+    };
 
     afterEach(() => {
       global.fetch = originalFetch;
@@ -171,23 +188,32 @@ describe('KYC Service Database Persistence', () => {
 
     it('cache hit within TTL: the second read reuses cache and skips the provider', async () => {
       enableProvider();
-      global.fetch = mockProvider('verified');
+      // Capture the first fetch mock by reference so we can assert on it after
+      // `global.fetch` is replaced for the second read. Asserting on
+      // `global.fetch` directly would silently check the NEW mock (0 calls).
+      const firstFetchMock = mockProvider('verified');
+      global.fetch = firstFetchMock;
       const smeId = 'sme_cache_hit';
 
       const first = await kycService.getKycStatus(smeId);
       expect(first.status).toBe(kycService.KYC_STATUSES.VERIFIED);
+      expect(firstFetchMock).toHaveBeenCalledTimes(1);
 
       // The provider would now report a different status, but within the TTL the
       // cached value must win and the provider must not be called again.
-      global.fetch.mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve({ status: 'rejected', recordId: 'rec_x', verifiedAt: null }),
-      });
+      // Route through the helper so the Response shape (text/headers) is always
+      // in lockstep with mockProvider — a future cache regression that lets the
+      // second call reach the provider must surface as a real assertion failure,
+      // not as a silently swallowed PENDING fallback.
+      const secondFetchMock = mockProvider('rejected');
+      global.fetch = secondFetchMock;
 
       const second = await kycService.getKycStatus(smeId);
 
-      expect(global.fetch).toHaveBeenCalledTimes(1);
+      // The first mock was called exactly once (cache miss); the second mock
+      // must not be invoked at all (cache hit on the second read).
+      expect(firstFetchMock).toHaveBeenCalledTimes(1);
+      expect(secondFetchMock).toHaveBeenCalledTimes(0);
       expect(second.status).toBe(kycService.KYC_STATUSES.VERIFIED);
     });
 
