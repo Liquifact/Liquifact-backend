@@ -614,6 +614,43 @@ curl -H "Authorization: Bearer <token>" \
      "http://localhost:3001/api/marketplace?yieldBpsMin=500&sortBy=yield_bps&order=desc&page=2&limit=10"
 ```
 
+- **Investment Opportunities**: `GET /api/invest/opportunities` — List open investment opportunities available for funding. Returns tenant-scoped invoices enriched with live on-chain escrow state via batched Soroban reads.
+
+  **Response DTO fields**
+
+  | Field | Type | Description |
+  |---|---|---|
+  | `invoiceId` | string | Unique identifier of the underlying invoice |
+  | `fundedBpsOfTarget` | number | Funding progress in basis points (10000 = 100%) |
+  | `maturityAt` | string (ISO 8601) | Investment maturity timestamp |
+  | `yieldBpsDisplay` | number | Expected return in basis points (e.g. 500 = 5%) |
+  | `onChain` | object | Live blockchain state pointers |
+  | `onChain.escrowAddress` | string | Stellar/Soroban escrow contract address |
+  | `onChain.ledgerIndex` | string \| null | Last synchronized ledger index |
+
+  **Pagination**
+
+  | Param | Type | Default | Range | Description |
+  |---|---|---|---|---|
+  | `page` | integer | 1 | ≥ 1 | 1-based page number |
+  | `limit` | integer | 20 | 1–100 | Items per page |
+
+  **Security**
+
+  - Tenant-scoped: requires `x-tenant-id` header or JWT `tenantId` claim.
+  - Non-investable invoice statuses (draft, cancelled, etc.) are never exposed.
+  - Per-invoice on-chain read failures silently skip enrichment for that invoice; the full list is never 500'd.
+  - Cross-tenant invoice IDs are filtered before any escrow read is made.
+
+  **Example**
+  ```bash
+  curl -H "Authorization: Bearer <token>" \
+       "http://localhost:3001/api/invest/opportunities?page=1&limit=10"
+  # Response: { data: [...], meta: { total, page, limit, totalPages } }
+  ```
+
+  **Funding endpoint**: `POST /api/invest/fund-invoice` — Submit a funding commitment to an escrow contract. Requires KYC verification, validates the investor address, and enforces idempotency to prevent double-funding. See [`docs/escrow-integration-overview.md`](./docs/escrow-integration-overview.md) for the full funding flow.
+
 ---
 
 ## SME Wallet Authorization
