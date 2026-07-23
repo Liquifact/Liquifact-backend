@@ -71,7 +71,7 @@ const {
  */
 function handleCorsError(err, req, res, next) {
   if (isCorsOriginRejectedError(err)) {
-    res.status(403).json({ error: err.message });
+    res.status(403).json({ error: err.message, code: err.code });
     return;
   }
   next(err);

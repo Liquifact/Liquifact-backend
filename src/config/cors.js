@@ -28,6 +28,9 @@
  */
 const CORS_REJECTION_MESSAGE = 'CORS policy: origin is not allowed.';
 
+/** Machine-readable code returned for blocked-origin responses. */
+const CORS_REJECTION_CODE = 'CORS_ORIGIN_REJECTED';
+
 /** @type {string[]} Origins allowed when no env var is set during development. */
 const DEV_DEFAULT_ORIGINS = [
   'http://localhost:3000',
@@ -163,6 +166,7 @@ function isAllowedOrigin(origin, allowlist) {
  */
 function createCorsRejectionError(_origin) {
   const err = new Error(CORS_REJECTION_MESSAGE);
+  err.code = CORS_REJECTION_CODE;
   err.isCorsOriginRejected = true;
   err.isCorsOriginRejectedError = true;
   err.status = 403;
@@ -355,6 +359,7 @@ function createCorsOptions(env = process.env) {
 }
 
 module.exports = {
+  CORS_REJECTION_CODE,
   CORS_REJECTION_MESSAGE,
   DEV_DEFAULT_ORIGINS,
   createCorsOptions,
