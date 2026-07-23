@@ -130,6 +130,97 @@ Key properties:
 All endpoints require either `Authorization: Bearer <admin-jwt>` or
 `X-API-Key: <key>`.
 
+Every endpoint is tenant-scoped: results are filtered to the tenant resolved
+from the `x-tenant-id` header or the `tenantId` JWT claim. No cross-tenant
+data is ever returned.
+
+#### List dead-letter rows (filterable, cursor-paginated)
+
+```
+GET /api/admin/webhooks/dead-letters
+```
+
+Discovers dead-letter row IDs without querying the database directly.
+Results are ordered by `created_at` descending (newest first).
+
+**Query parameters**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `limit` | integer | 20 | Page size. Range: 1–100. |
+| `cursor` | string | – | Opaque cursor from a previous response's `nextCursor`. |
+| `event` | string | – | Exact match on the `event` column (e.g. `invoice.approved`). |
+| `targetUrl` | string | – | Exact match on the `webhook_url` column. |
+| `resolved` | boolean | – | `true` to list resolved rows; `false` for unresolved only. |
+| `createdAfter` | ISO 8601 | – | Lower bound on `created_at` (inclusive). |
+| `createdBefore` | ISO 8601 | – | Upper bound on `created_at` (exclusive). |
+
+**Example — first page, unresolved only:**
+
+```bash
+curl -H "Authorization: Bearer <admin-jwt>" \
+     -H "x-tenant-id: t_123" \
+     "http://localhost:3001/api/admin/webhooks/dead-letters?resolved=false&limit=20"
+```
+
+**Example response (200):**
+
+```json
+{
+  "data": [
+    {
+      "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "tenant_id": "t_123",
+      "invoice_id": "inv_abc",
+      "event": "invoice.approved",
+      "webhook_url": "https://merchant.example.com/webhook",
+      "attempts": 4,
+      "last_error": "connect ECONNREFUSED 93.184.216.34:443",
+      "resolved": false,
+      "resolved_at": null,
+      "created_at": "2026-07-20T14:32:00.000Z",
+      "payload": "{\"event\":\"invoice.approved\",\"invoiceId\":\"inv_abc\"}"
+    }
+  ],
+  "meta": {
+    "limit": 20,
+    "hasMore": true,
+    "nextCursor": "<opaque-cursor-string>",
+    "timestamp": "2026-07-22T03:00:00.000Z",
+    "version": "0.1.0"
+  },
+  "error": null,
+  "message": "Dead-letter rows retrieved successfully."
+}
+```
+
+**Example — next page using cursor:**
+
+```bash
+curl -H "Authorization: Bearer <admin-jwt>" \
+     -H "x-tenant-id: t_123" \
+     "http://localhost:3001/api/admin/webhooks/dead-letters?resolved=false&limit=20&cursor=<nextCursor>"
+```
+
+**Error responses**
+
+| Status | Code | Cause |
+|--------|------|-------|
+| 400 | `INVALID_PAGINATION` | `limit` outside 1–100 range or non-numeric |
+| 400 | `INVALID_FILTER` | `resolved` not `true`/`false`, or `createdAfter`/`createdBefore` not ISO 8601 |
+| 400 | `INVALID_CURSOR` | Cursor is malformed or has an invalid HMAC signature |
+| 401 | – | Missing or invalid credentials |
+| 400 | – | Missing tenant context |
+
+**Security notes**
+
+- HMAC secrets and any field matching a sensitive-key pattern (`secret`,
+  `token`, `password`, `apiKey`, `privateKey`, etc.) are stripped from every
+  row before it is returned.
+- Cursors are HMAC-signed with `CURSOR_SECRET` (or `JWT_SECRET`) and verified
+  using constant-time comparison — tampering returns 400 immediately.
+- Page size is hard-capped at 100 to limit per-request DB load.
+
 #### Replay a single row
 
 ```

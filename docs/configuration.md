@@ -13,6 +13,25 @@ Secret values are marked **Secret** and must come from local `.env` files, deplo
 - `ESCROW_PLATFORM_ADDRESS` is required only when `ESCROW_SIGNING_MODE` is `delegated` or `custodial` in [`src/services/escrowSubmit.js`](../src/services/escrowSubmit.js).
 - `ESCROW_PLATFORM_SECRET` is required only when `ESCROW_SIGNING_MODE=custodial`. It is a Stellar secret key and must never be committed.
 
+## OpenAPI Server URLs
+
+The published OpenAPI spec derives its `servers` array from `PUBLIC_API_BASE_URL` rather than hardcoding a value. This ensures generated clients, SDK generators, and Swagger UI always call the correct host.
+
+| Environment | `PUBLIC_API_BASE_URL` set? | Spec `servers[0].url` |
+| --- | --- | --- |
+| `production` | Yes (required) | The configured value |
+| `production` | No | **Startup fails** — config validation aborts with a clear error message |
+| `development` / `test` | Yes | The configured value |
+| `development` / `test` | No | `http://localhost:3001` (safe fallback) |
+
+**Production constraints** (enforced by both `src/config/index.js` at boot time and `src/openapi/openapiSpec.js` as a defense-in-depth guard):
+
+1. `PUBLIC_API_BASE_URL` must be present.
+2. Must use the `https:` scheme — plaintext `http:` is rejected.
+3. Must not resolve to a loopback address (`localhost`, `127.x.x.x`, `::1`).
+
+Any violation causes a fast startup failure with a clear, redacted error message logged to stderr. The spec is never built with an invalid or insecure server entry.
+
 ## Environment Variables
 
 <!-- env-reference:start -->
@@ -20,6 +39,7 @@ Secret values are marked **Secret** and must come from local `.env` files, deplo
 | --- | --- | --- | --- | --- | --- |
 | `NODE_ENV` | enum: `development`, `production`, `test` | `development` | No | No | [`src/config/index.js`](../src/config/index.js), [`src/app.js`](../src/app.js), [`src/index.js`](../src/index.js) |
 | `PORT` | integer port | `3001` | No | No | [`src/config/index.js`](../src/config/index.js), [`src/index.js`](../src/index.js), [`src/server.js`](../src/server.js) |
+| `PUBLIC_API_BASE_URL` | HTTPS URL | `http://localhost:3001` fallback in development/test | Required in production | No | [`src/config/index.js`](../src/config/index.js), [`src/openapi/openapiSpec.js`](../src/openapi/openapiSpec.js) |
 | `HELMET_CSP` | boolean string | `false` in template; app defaults vary by environment | No | No | [`src/app.js`](../src/app.js) |
 | `JWT_SECRET` | string, min 32 chars for config validation | None | Yes | **Secret** | [`src/config/index.js`](../src/config/index.js), [`src/middleware/auth.js`](../src/middleware/auth.js) |
 | `CURSOR_SECRET` | string, min 32 chars when set | Falls back to `JWT_SECRET`; public dev fallback only in development/test | No | **Secret** | [`src/config/index.js`](../src/config/index.js), [`src/utils/cursorPagination.js`](../src/utils/cursorPagination.js) |

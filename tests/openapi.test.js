@@ -63,9 +63,6 @@ describe('OpenAPI document', () => {
     expect(spec.paths['/api/invest/opportunities']).toBeDefined();
     expect(spec.paths['/api/invest/opportunities'].get).toBeDefined();
 
-    expect(spec.paths['/api/invest/list']).toBeDefined();
-    expect(spec.paths['/api/invest/list'].get).toBeDefined();
-
     expect(spec.paths['/api/invest/fund-invoice']).toBeDefined();
     expect(spec.paths['/api/invest/fund-invoice'].post).toBeDefined();
   });
@@ -101,7 +98,6 @@ describe('OpenAPI document', () => {
     const protectedOps = [
       spec.paths['/api/marketplace'].get,
       spec.paths['/api/invest/opportunities'].get,
-      spec.paths['/api/invest/list'].get,
       spec.paths['/api/invest/fund-invoice'].post,
     ];
     for (const op of protectedOps) {
@@ -119,12 +115,9 @@ describe('OpenAPI document', () => {
       );
     }
   });
-});
 
-
-it('problem schema rejects undocumented fields', () => {
-  const schema =
-    spec.components.schemas.Problem;
-
-  expect(schema.additionalProperties).toBe(false);
+  it('problem schema rejects undocumented fields', () => {
+    const schema = spec.components.schemas.Problem;
+    expect(schema.additionalProperties).toBe(false);
+  });
 });

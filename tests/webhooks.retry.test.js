@@ -43,8 +43,8 @@ jest.mock('../src/middleware/auth', () => ({
   },
 }));
 
-jest.mock('../src/middleware/apiKey', () => ({
-  apiKeyAuth: (req, res, next) => {
+jest.mock('../src/middleware/apiKeyAuth', () => ({
+  authenticateApiKey: () => (req, res, next) => {
     if (req.headers['x-api-key'] === 'valid-admin-key') {
       req.apiKey = { id: 1, name: 'test-admin' };
       return next();

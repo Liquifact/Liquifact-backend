@@ -34,6 +34,7 @@ const cacheLock = cacheResponse({
  * @swagger
  * /api/investor/locks:
  *   get:
+ *     operationId: listInvestorLocks
  *     summary: Get investor commitment locks (paginated)
  *     description: |
  *       Retrieve a paginated list of investor lock records
@@ -219,6 +220,7 @@ router.get('/locks', authenticateToken, extractTenant, cacheLocks, async (req, r
  * @swagger
  * /api/investor/locks/{invoiceId}:
  *   get:
+ *     operationId: getInvestorLockByInvoice
  *     summary: Get investor lock for specific invoice
  *     description: Get lock details for a specific invoice and funder
  *     tags: [Investor]

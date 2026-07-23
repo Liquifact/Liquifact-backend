@@ -28,6 +28,7 @@ const cacheMiddleware = cacheResponse({
  * @swagger
  * /api/marketplace:
  *   get:
+ *     operationId: listMarketplaceInvoices
  *     summary: Search and sort marketplace invoices
  *     description: |
  *       Retrieve a paginated list of invoices available in the marketplace with

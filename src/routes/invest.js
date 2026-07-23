@@ -80,6 +80,43 @@ function validateFundInvoiceBody(body) {
 
 /**
  * GET /api/invest/opportunities — list open investment opportunities
+ *
+ * @swagger
+ * /api/invest/opportunities:
+ *   get:
+ *     operationId: listInvestOpportunities
+ *     summary: List open investment opportunities
+ *     description: |
+ *       Retrieve a paginated list of invoices available for funding.
+ *       Returns tenant-scoped invoices with verified status and open funding slots.
+ *     tags: [Invest]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           default: 1
+ *         description: Page number (1-based)
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           maximum: 100
+ *           default: 20
+ *         description: Items per page
+ *     responses:
+ *       200:
+ *         description: Investment opportunities retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/StandardEnvelope'
+ *       401:
+ *         $ref: '#/components/responses/Problem401'
  */
 router.get(
   '/opportunities',
@@ -106,6 +143,7 @@ router.get(
  * @swagger
  * /api/invest/fund-invoice:
  *   post:
+ *     operationId: fundInvoice
  *     summary: Fund an invoice through the configured escrow contract
  *     tags: [Invest]
  *     security:
@@ -133,7 +171,7 @@ router.get(
  *                 maxLength: 19
  *                 description: Digits-only stroop amount, no signs/decimals/scientific notation/leading zeros, and <= 10^18.
  *     responses:
- *       200:
+ *       201:
  *         description: Funding request accepted
  *         content:
  *           application/json:

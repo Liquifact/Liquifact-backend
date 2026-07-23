@@ -36,6 +36,9 @@ const ConfigSchema = z
     KYC_PROVIDER_URL: z.string().url().optional(),
     KYC_PROVIDER_API_KEY: z.string().min(1).optional(),
     KYC_PROVIDER_SECRET: z.string().min(1).optional(),
+    // Public base URL for the API, used in the OpenAPI spec servers array.
+    // Required in production and must use HTTPS. Falls back to localhost in development/test.
+    PUBLIC_API_BASE_URL: z.string().url().optional(),
   })
   .superRefine((data, ctx) => {
     if (data.NODE_ENV === 'test') { return; }
@@ -55,6 +58,41 @@ const ConfigSchema = z
           'KYC_PROVIDER_URL and KYC_PROVIDER_API_KEY must both be set or both be absent.',
         path: hasUrl ? ['KYC_PROVIDER_API_KEY'] : ['KYC_PROVIDER_URL'],
       });
+    }
+    if (data.NODE_ENV === 'production') {
+      const baseUrl = data.PUBLIC_API_BASE_URL;
+      // Require the variable to be present in production
+      if (!baseUrl) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            'PUBLIC_API_BASE_URL must be set in production. It is used in the OpenAPI spec servers array.',
+          path: ['PUBLIC_API_BASE_URL'],
+        });
+        return;
+      }
+      // Require HTTPS — never allow plaintext in production
+      let parsed;
+      try { parsed = new URL(baseUrl); } catch (_) { parsed = null; }
+      if (!parsed || parsed.protocol !== 'https:') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            'PUBLIC_API_BASE_URL must use HTTPS in production.',
+          path: ['PUBLIC_API_BASE_URL'],
+        });
+        return;
+      }
+      // Reject loopback addresses (127.x.x.x, ::1, [::1], localhost)
+      const loopbackPattern = /^(localhost|127(?:\.\d+){3}|::1|\[::1\])$/i;
+      if (loopbackPattern.test(parsed.hostname)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            'PUBLIC_API_BASE_URL must not be a loopback address in production.',
+          path: ['PUBLIC_API_BASE_URL'],
+        });
+      }
     }
   });
 

@@ -220,12 +220,34 @@ async function checkDatabaseHealth() {
 
 /**
  * Checks escrow reconciliation status.
- * 
- * @returns {Promise<{status: string, lastRun?: string, mismatches?: number, error?: string}>} Reconciliation health status.
+ *
+ * Returns a structured summary that includes mismatch count and drift data so
+ * the `/ready` probe can degrade when funded-amount drift exceeds the configured
+ * threshold (`RECONCILIATION_DRIFT_THRESHOLD`, default `1`).
+ *
+ * Status values:
+ * - `'healthy'`     — Last run is recent and has zero mismatches.
+ * - `'degraded'`    — Last run has mismatches but count is below the drift
+ *                     threshold; drift is present but within tolerance.
+ * - `'mismatch_threshold_breached'` — Mismatch count meets or exceeds
+ *                     `RECONCILIATION_DRIFT_THRESHOLD`; readiness should degrade.
+ * - `'stale'`       — Last run was more than 25 hours ago.
+ * - `'not_run'`     — Reconciliation has never been executed.
+ * - `'error'`       — Lookup failed.
+ *
+ * @returns {Promise<{
+ *   status: string,
+ *   lastRun?: string,
+ *   mismatches?: number,
+ *   totalDrift?: number,
+ *   threshold?: number,
+ *   thresholdBreached?: boolean,
+ *   error?: string
+ * }>} Reconciliation health status.
  */
 async function checkReconciliationHealth() {
   try {
-    const { getReconciliationSummary } = require('../jobs/reconcileEscrow');
+    const { getReconciliationSummary, getDriftThreshold } = require('../jobs/reconcileEscrow');
     const summary = await getReconciliationSummary();
 
     if (!summary) {
@@ -235,17 +257,56 @@ async function checkReconciliationHealth() {
     const lastRun = new Date(summary.reconciledAt);
     const hoursSinceLastRun = (Date.now() - lastRun.getTime()) / (1000 * 60 * 60);
 
-    // Consider unhealthy if last run was more than 25 hours ago (allowing 1 hour grace)
+    // Consider stale if last run was more than 25 hours ago (1-hour grace).
     if (hoursSinceLastRun > 25) {
-      return { status: 'stale', lastRun: summary.reconciledAt, error: 'Reconciliation not run recently' };
+      return {
+        status: 'stale',
+        lastRun: summary.reconciledAt,
+        error: 'Reconciliation not run recently',
+      };
     }
 
-    // Unhealthy if there are mismatches
-    if (summary.mismatches > 0) {
-      return { status: 'mismatches', lastRun: summary.reconciledAt, mismatches: summary.mismatches };
+    const threshold = getDriftThreshold();
+    const mismatches = summary.mismatches || 0;
+
+    // Calculate total drift from results if available.
+    const totalDrift = Array.isArray(summary.results)
+      ? summary.results.reduce((acc, r) => acc + (r.driftMagnitude || 0), 0)
+      : 0;
+
+    if (mismatches >= threshold) {
+      // Mismatch count meets or exceeds the configured drift threshold —
+      // this is a threshold breach that should degrade /ready.
+      return {
+        status: 'mismatch_threshold_breached',
+        lastRun: summary.reconciledAt,
+        mismatches,
+        totalDrift,
+        threshold,
+        thresholdBreached: true,
+      };
     }
 
-    return { status: 'healthy', lastRun: summary.reconciledAt };
+    if (mismatches > 0) {
+      // Mismatches present but below threshold — degraded but not blocking.
+      return {
+        status: 'degraded',
+        lastRun: summary.reconciledAt,
+        mismatches,
+        totalDrift,
+        threshold,
+        thresholdBreached: false,
+      };
+    }
+
+    return {
+      status: 'healthy',
+      lastRun: summary.reconciledAt,
+      mismatches: 0,
+      totalDrift: 0,
+      threshold,
+      thresholdBreached: false,
+    };
   } catch (error) {
     return { status: 'error', error: error.message };
   }
@@ -398,7 +459,8 @@ async function performHealthChecks() {
 }
 
 /**
- * Performs critical-dependency readiness checks (DB, Soroban RPC, storage).
+ * Performs critical-dependency readiness checks (DB, Soroban RPC, storage,
+ * reconciliation).
  * The KYC and indexer staleness checks are omitted because they are not
  * required for the process to serve *most* traffic — only critical
  * upstream dependencies that would prevent any business request from
@@ -408,26 +470,34 @@ async function performHealthChecks() {
  * endpoint, bad credentials, deleted bucket) is surfaced on the readiness
  * probe rather than at the first invoice upload.
  *
- * Updates the `readiness_gauge` Prometheus metric (1 = ready, 0 = not
- * ready). Degraded Soroban RPC (slow) does NOT block readiness.
+ * The reconciliation check degrades readiness when the most recent run has
+ * a mismatch count that meets or exceeds `RECONCILIATION_DRIFT_THRESHOLD`.
+ * The probe is non-blocking when reconciliation has never run (`not_run`)
+ * or when the lookup fails (`error`), so a fresh deployment is never held
+ * back by the absence of a historical run.
+ *
+ * Updates the `readiness_gauge` Prometheus metric (1 = ready, 0.5 = degraded,
+ * 0 = not ready). Degraded Soroban RPC (slow) does NOT block readiness.
  *
  * @returns {Promise<{
  *   healthy: boolean,
  *   checks: {
  *     database: Object,
  *     soroban: Object,
- *     storage: Object
+ *     storage: Object,
+ *     reconciliation: Object
  *   }
  * }>}
  */
 async function performReadinessChecks() {
-  const [database, soroban, storage] = await Promise.all([
+  const [database, soroban, storage, reconciliation] = await Promise.all([
     checkDatabaseHealth(),
     checkSorobanHealth(),
     checkStorageHealth(),
+    checkReconciliationHealth(),
   ]);
 
-  const checks = { database, soroban, storage };
+  const checks = { database, soroban, storage, reconciliation };
   // In-memory and explicitly-disabled probes are treated as readiness-OK.
   // Production deployments missing the bucket or with an unreachable
   // bucket DO block readiness.
@@ -440,15 +510,23 @@ async function performReadinessChecks() {
   // - DB degraded (pool saturated) still allows traffic but signals pressure → ready.
   // - DB unhealthy/not_configured → not ready.
   // - Soroban degraded (slow) does NOT block readiness.
+  // - Reconciliation threshold breach → degrades readiness.
+  // - Reconciliation not_run / error → non-blocking (fresh deployments).
   const dbReady = database.status === 'healthy' || database.status === 'degraded';
   const sorobanReady = soroban.status === 'healthy' || soroban.status === 'degraded' || soroban.status === 'unknown';
+  const reconciliationOk = reconciliation.status !== 'mismatch_threshold_breached';
 
-  const healthy = dbReady && sorobanReady && storageOk;
+  const healthy = dbReady && sorobanReady && storageOk && reconciliationOk;
 
   // Set gauge: 1 = ready, 0.5 = degraded, 0 = not ready
   if (!dbReady || !storageOk) {
     readinessGauge.set(0);
-  } else if (database.status === 'degraded' || soroban.status === 'degraded') {
+  } else if (
+    database.status === 'degraded' ||
+    soroban.status === 'degraded' ||
+    reconciliation.status === 'mismatch_threshold_breached' ||
+    reconciliation.status === 'degraded'
+  ) {
     readinessGauge.set(0.5);
   } else {
     readinessGauge.set(healthy ? 1 : 0);

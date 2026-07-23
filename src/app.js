@@ -50,6 +50,7 @@ const marketplaceRoutes = require('./routes/marketplace');
 const retentionRoutes = require('./routes/retention');
 const invoiceStateRoutes = require('./routes/invoiceStateRoutes');
 const adminEscrowRoutes = require('./routes/adminEscrow');
+const adminWebhooksRoutes = require('./routes/adminWebhooks');
 const kycRoutes = require('./routes/kyc');
 const reconciliationRoutes = require('./routes/reconciliation');
 const v1Routes = require('./routes/v1');
@@ -357,6 +358,7 @@ function createApp() {
   mountFeatureRouter(app, '/api/retention', retentionRoutes);
   mountFeatureRouter(app, '/api/admin/audit', auditTrailRoutes);
   mountFeatureRouter(app, '/api/admin/escrow', adminEscrowRoutes);
+  mountFeatureRouter(app, '/api/admin/webhooks', adminWebhooksRoutes);
   mountFeatureRouter(app, '/api/admin/reconciliation', reconciliationRoutes);
   mountFeatureRouter(app, '/v1', v1Routes);
 

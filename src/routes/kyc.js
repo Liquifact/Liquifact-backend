@@ -28,6 +28,80 @@ function parseJsonPayload(rawBody) {
  * Verifies the webhook signature using the configured provider secret,
  * maps provider-specific statuses to internal KYC statuses, and persists
  * the result to the KYC record store.
+ *
+ * @swagger
+ * /api/kyc/webhook:
+ *   post:
+ *     operationId: ingestKycWebhook
+ *     summary: Ingest a signed KYC status update from the external provider
+ *     description: |
+ *       Receives a signed webhook payload from the configured KYC provider.
+ *       The request must carry a valid `X-Signature` HMAC header derived from
+ *       the `KYC_PROVIDER_SECRET`. The provider status is mapped to an internal
+ *       `KYC_STATUSES` value and persisted.
+ *     tags: [KYC]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [smeId, status]
+ *             properties:
+ *               smeId:
+ *                 type: string
+ *                 description: SME identifier
+ *               status:
+ *                 type: string
+ *                 description: Provider KYC status value
+ *               recordId:
+ *                 type: string
+ *                 description: Provider record ID (optional)
+ *               verifiedAt:
+ *                 type: string
+ *                 format: date-time
+ *                 description: Verification timestamp from the provider (optional)
+ *     parameters:
+ *       - in: header
+ *         name: X-Signature
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: HMAC-SHA256 signature of the raw request body using `KYC_PROVIDER_SECRET`
+ *     responses:
+ *       200:
+ *         description: KYC status update ingested successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 smeId:
+ *                   type: string
+ *                 status:
+ *                   type: string
+ *       400:
+ *         $ref: '#/components/responses/Problem400'
+ *       401:
+ *         description: Missing or invalid X-Signature header
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *       503:
+ *         description: KYC webhook ingestion is not configured
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
  */
 router.post('/webhook', async (req, res) => {
   const config = kycService.getKycProviderConfig();
