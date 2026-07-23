@@ -92,6 +92,37 @@ The following problem types are defined:
 - **Title**: "Internal Server Error"
 - **Description**: Unexpected server error
 
+## Stable Error Codes
+
+In addition to the RFC 7807 `type`/`title`/`status` fields above, every error response includes a stable, machine-readable `code` field (plus `retryable` and `retry_hint`) produced by `httpStatusToCode()` in `src/errors/mapError.js`. These codes are safe to key application logic and log searches on, since they will not change even if `title`/`detail` wording is revised.
+
+| Status | Code                    | Retryable | Retry Hint                                                   |
+|--------|-------------------------|-----------|----------------------------------------------------------------|
+| 400    | `BAD_REQUEST`            | No        | ``                                                              |
+| 401    | `UNAUTHORIZED`           | No        | ``                                                              |
+| 403    | `FORBIDDEN`              | No        | ``                                                              |
+| 404    | `NOT_FOUND`              | No        | ``                                                              |
+| 409    | `CONFLICT`               | No        | Resolve the conflicting state before retrying.                |
+| 422    | `UNPROCESSABLE_ENTITY`   | No        | Fix the validation errors and resubmit.                        |
+| 429    | `TOO_MANY_REQUESTS`      | Yes       | Wait for the rate limit window to reset before retrying.      |
+| 500    | `INTERNAL_SERVER_ERROR`  | No        | Do not retry until the issue is resolved or support is contacted. |
+| 503    | `SERVICE_UNAVAILABLE`    | Yes       | Retry the request in a few moments.                            |
+
+Any status not covered by this table (or by the `AppError` caller's explicit `code`) falls back to a generic `HTTP_<status>` label, e.g. `HTTP_418`, so no error response is ever left without a searchable code.
+
+### Special-cased 503s
+
+Two upstream-failure conditions are mapped to more specific codes than the generic `SERVICE_UNAVAILABLE`, both still at HTTP status 503 and both `retryable: true`:
+
+- A connection failure (`error.code === 'ECONNREFUSED'`) maps to `UPSTREAM_ERROR`.
+- An open circuit breaker (`error.code === 'CIRCUIT_OPEN'`) maps to `CIRCUIT_OPEN`.
+
+These take priority over the generic 503 mapping because they carry more specific diagnostic meaning for API consumers deciding how long to back off before retrying.
+
+### Rate limiting and 429
+
+`src/middleware/rateLimit.js`'s Express rate limiters (`globalLimiter`, `sensitiveLimiter`, `apiKeyLimiter`, `createRateLimiter`) currently respond directly via their own `express-rate-limit` handler rather than throwing an `AppError` that flows through `mapError.js`. This means 429 responses from the rate limiter middleware do not yet carry the `code`/`retryable`/`retry_hint` contract documented here — only errors that reach `mapError()` (e.g. an `AppError` with `status: 429` thrown elsewhere in application code) do. Wiring the rate limiter's handler to go through `AppError`/`mapError` instead is tracked as follow-up work outside the scope of this change.
+
 ## API Examples
 
 ### 1. Validation Error (Request Body)
