@@ -10,6 +10,7 @@ const router = express.Router();
 const { authenticateToken } = require('../../middleware/auth');
 const { extractTenant } = require('../../middleware/tenant');
 const invoiceService = require('../../services/invoiceService');
+const { validateMetricsRequest } = require('../../utils/metricsValidation');
 
 
 /**
@@ -72,15 +73,10 @@ const invoiceService = require('../../services/invoiceService');
  */
 router.get('/metrics', authenticateToken, extractTenant, async (req, res, next) => {
   try {
-    const userId = req.user.id || req.user.sub;
-    const tenantId = req.tenantId;
+    const ctx = validateMetricsRequest(req, res);
+    if (!ctx) { return; }
 
-    if (!tenantId) {
-      return res.status(400).json({
-        error: 'Bad Request',
-        message: 'Tenant context required'
-      });
-    }
+    const { userId, tenantId } = ctx;
 
     const metrics = await invoiceService.getSmeInvoiceCounts(tenantId, userId);
 
