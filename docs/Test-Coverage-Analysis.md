@@ -1,6 +1,13 @@
-# Test Coverage Analysis - RFC 7807 Problem+JSON Middleware
+# Test Coverage Analysis
 
-This document provides a comprehensive analysis of test coverage for the RFC 7807 Problem+JSON middleware implementation.
+This document tracks test coverage for key middleware and service modules in the
+Liquifact-backend. Each section covers a specific module with its test matrix,
+security boundary tests, and verification commands.
+
+## Modules covered
+
+- [RFC 7807 Problem+JSON Middleware](#coverage-summary)
+- [PATCH Invoice Field Guard Middleware](#patchinvoice-field-guard-middleware)
 
 ## Coverage Summary
 
@@ -302,3 +309,6 @@ npm test -- --testPathPatterns="patchInvoice.guard.test.js"
 # With coverage report
 npm run test:coverage -- --testPathPatterns="patchInvoice.guard.test.js"
 ```
+
+See [`docs/patch-invoice-guard.md`](./patch-invoice-guard.md) for the full field-mutability
+reference, function signatures, and security notes.

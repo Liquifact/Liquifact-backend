@@ -150,3 +150,9 @@ Tests:       84 passed, 84 total
 ---
 
 Closes #[INSERT_ISSUE_NUMBER]
+
+---
+
+## Related docs
+
+- [`docs/patch-invoice-guard.md`](./patch-invoice-guard.md) — full field-mutability reference and security notes added in this PR.
