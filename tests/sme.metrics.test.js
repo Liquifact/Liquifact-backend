@@ -159,4 +159,225 @@ describe('SME Metrics API', () => {
     expect(res.status).toBe(400);
     expect(res.body.error.message).toContain('Missing tenant context');
   });
+
+  // ── Cursor pagination tests ───────────────────────────────────────────────
+
+  describe('cursor pagination', () => {
+    test('returns aggregated counts only when no cursor or limit is provided (backward compat)', async () => {
+      await db('invoices').insert([
+        { invoice_id: 'c1', sme_id: userId, tenant_id: tenantId, status: 'verified', amount: 100, customer: 'C1' },
+        { invoice_id: 'c2', sme_id: userId, tenant_id: tenantId, status: 'funded', amount: 200, customer: 'C2' },
+      ]);
+
+      const res = await request(app)
+        .get('/api/sme/metrics')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data).toEqual({ open: 1, funded: 1, settled: 0, defaulted: 0 });
+      expect(res.body.meta.invoices).toBeUndefined();
+      expect(res.body.meta.nextCursor).toBeUndefined();
+      expect(res.body.meta.hasMore).toBeUndefined();
+    });
+
+    test('returns paginated invoices when limit is supplied', async () => {
+      await db('invoices').insert([
+        { invoice_id: 'p1', sme_id: userId, tenant_id: tenantId, status: 'pending_verification', amount: 100, customer: 'P1' },
+        { invoice_id: 'p2', sme_id: userId, tenant_id: tenantId, status: 'verified', amount: 200, customer: 'P2' },
+        { invoice_id: 'p3', sme_id: userId, tenant_id: tenantId, status: 'funded', amount: 300, customer: 'P3' },
+      ]);
+
+      const res = await request(app)
+        .get('/api/sme/metrics?limit=2')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data).toEqual({ open: 2, funded: 1, settled: 0, defaulted: 0 });
+      expect(res.body.meta.invoices).toHaveLength(2);
+      expect(res.body.meta.limit).toBe(2);
+      expect(res.body.meta.total).toBe(3);
+      expect(res.body.meta.hasMore).toBe(true);
+      expect(res.body.meta.nextCursor).toBeTruthy();
+      expect(res.body.meta.timestamp).toBeDefined();
+    });
+
+    test('returns empty invoices list for a user with no invoices', async () => {
+      const newUserToken = jwt.sign({ id: 'empty_user', tenantId }, JWT_SECRET);
+
+      const res = await request(app)
+        .get('/api/sme/metrics?limit=5')
+        .set('Authorization', `Bearer ${newUserToken}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data).toEqual({ open: 0, funded: 0, settled: 0, defaulted: 0 });
+      expect(res.body.meta.invoices).toEqual([]);
+      expect(res.body.meta.total).toBe(0);
+      expect(res.body.meta.hasMore).toBe(false);
+      expect(res.body.meta.nextCursor).toBeNull();
+    });
+
+    test('paginates across multiple pages correctly', async () => {
+      await db('invoices').insert([
+        { invoice_id: 'mp1', sme_id: userId, tenant_id: tenantId, status: 'pending_verification', amount: 100, customer: 'MP1' },
+        { invoice_id: 'mp2', sme_id: userId, tenant_id: tenantId, status: 'verified', amount: 200, customer: 'MP2' },
+        { invoice_id: 'mp3', sme_id: userId, tenant_id: tenantId, status: 'funded', amount: 300, customer: 'MP3' },
+        { invoice_id: 'mp4', sme_id: userId, tenant_id: tenantId, status: 'settled', amount: 400, customer: 'MP4' },
+        { invoice_id: 'mp5', sme_id: userId, tenant_id: tenantId, status: 'paid', amount: 500, customer: 'MP5' },
+      ]);
+
+      const page1 = await request(app)
+        .get('/api/sme/metrics?limit=2')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(page1.status).toBe(200);
+      expect(page1.body.meta.invoices).toHaveLength(2);
+      expect(page1.body.meta.total).toBe(5);
+      expect(page1.body.meta.hasMore).toBe(true);
+      expect(page1.body.meta.nextCursor).toBeTruthy();
+      const page1Ids = page1.body.meta.invoices.map((i) => i.invoice_id);
+      expect(page1Ids).toEqual(['mp5', 'mp4']);
+
+      const page2 = await request(app)
+        .get(`/api/sme/metrics?limit=2&cursor=${page1.body.meta.nextCursor}`)
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(page2.status).toBe(200);
+      expect(page2.body.meta.invoices).toHaveLength(2);
+      expect(page2.body.meta.total).toBe(5);
+      expect(page2.body.meta.hasMore).toBe(true);
+      expect(page2.body.meta.nextCursor).toBeTruthy();
+      const page2Ids = page2.body.meta.invoices.map((i) => i.invoice_id);
+      expect(page2Ids).toEqual(['mp3', 'mp2']);
+
+      const page3 = await request(app)
+        .get(`/api/sme/metrics?limit=2&cursor=${page2.body.meta.nextCursor}`)
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(page3.status).toBe(200);
+      expect(page3.body.meta.invoices).toHaveLength(1);
+      expect(page3.body.meta.total).toBe(5);
+      expect(page3.body.meta.hasMore).toBe(false);
+      expect(page3.body.meta.nextCursor).toBeNull();
+      const page3Ids = page3.body.meta.invoices.map((i) => i.invoice_id);
+      expect(page3Ids).toEqual(['mp1']);
+    });
+
+    test('single page when items fit within limit', async () => {
+      await db('invoices').insert([
+        { invoice_id: 'sp1', sme_id: userId, tenant_id: tenantId, status: 'verified', amount: 100, customer: 'SP1' },
+      ]);
+
+      const res = await request(app)
+        .get('/api/sme/metrics?limit=10')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.meta.invoices).toHaveLength(1);
+      expect(res.body.meta.total).toBe(1);
+      expect(res.body.meta.hasMore).toBe(false);
+      expect(res.body.meta.nextCursor).toBeNull();
+    });
+
+    test('clamps limit to maximum of 100', async () => {
+      const invoices = Array.from({ length: 50 }, (_, i) => ({
+        invoice_id: `clamp_${i}`,
+        sme_id: userId,
+        tenant_id: tenantId,
+        status: i % 2 === 0 ? 'verified' : 'funded',
+        amount: (i + 1) * 10,
+        customer: `Clamp${i}`,
+      }));
+      await db('invoices').insert(invoices);
+
+      const res = await request(app)
+        .get('/api/sme/metrics?limit=999')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.meta.limit).toBe(100);
+      expect(res.body.meta.invoices).toHaveLength(50);
+      expect(res.body.meta.hasMore).toBe(false);
+    });
+
+    test('rejects malformed cursor with 400', async () => {
+      await db('invoices').insert([
+        { invoice_id: 'mc1', sme_id: userId, tenant_id: tenantId, status: 'verified', amount: 100, customer: 'MC1' },
+      ]);
+
+      const res = await request(app)
+        .get('/api/sme/metrics?limit=5&cursor=invalid-cursor-string')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Bad Request');
+      expect(res.body.message).toContain('Malformed cursor');
+    });
+
+    test('pagination respects tenant isolation', async () => {
+      const otherTenantId = 'other_tenant_pag';
+      await db('invoices').insert([
+        { invoice_id: 'ti1', sme_id: userId, tenant_id: tenantId, status: 'verified', amount: 100, customer: 'TI1' },
+        { invoice_id: 'ti2', sme_id: userId, tenant_id: otherTenantId, status: 'funded', amount: 200, customer: 'TI2' },
+      ]);
+
+      const res = await request(app)
+        .get('/api/sme/metrics?limit=10')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.meta.invoices).toHaveLength(1);
+      expect(res.body.meta.total).toBe(1);
+      expect(res.body.meta.invoices[0].invoice_id).toBe('ti1');
+    });
+
+    test('pagination respects owner isolation', async () => {
+      const otherUserId = 'other_user_pag';
+      const otherToken = jwt.sign({ id: otherUserId, tenantId }, JWT_SECRET);
+      await db('invoices').insert([
+        { invoice_id: 'oi1', sme_id: userId, tenant_id: tenantId, status: 'verified', amount: 100, customer: 'OI1' },
+        { invoice_id: 'oi2', sme_id: otherUserId, tenant_id: tenantId, status: 'funded', amount: 200, customer: 'OI2' },
+      ]);
+
+      const res = await request(app)
+        .get('/api/sme/metrics?limit=10')
+        .set('Authorization', `Bearer ${otherToken}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.meta.invoices).toHaveLength(1);
+      expect(res.body.meta.total).toBe(1);
+      expect(res.body.meta.invoices[0].invoice_id).toBe('oi2');
+    });
+
+    test('pagination excludes soft-deleted invoices', async () => {
+      await db('invoices').insert([
+        { invoice_id: 'sd1', sme_id: userId, tenant_id: tenantId, status: 'verified', amount: 100, customer: 'SD1', deleted_at: new Date().toISOString() },
+        { invoice_id: 'sd2', sme_id: userId, tenant_id: tenantId, status: 'funded', amount: 200, customer: 'SD2' },
+      ]);
+
+      const res = await request(app)
+        .get('/api/sme/metrics?limit=10')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.meta.invoices).toHaveLength(1);
+      expect(res.body.meta.total).toBe(1);
+      expect(res.body.meta.invoices[0].invoice_id).toBe('sd2');
+    });
+
+    test('includes counts in data alongside paginated invoices', async () => {
+      await db('invoices').insert([
+        { invoice_id: 'ic1', sme_id: userId, tenant_id: tenantId, status: 'pending_verification', amount: 100, customer: 'IC1' },
+        { invoice_id: 'ic2', sme_id: userId, tenant_id: tenantId, status: 'funded', amount: 200, customer: 'IC2' },
+        { invoice_id: 'ic3', sme_id: userId, tenant_id: tenantId, status: 'settled', amount: 300, customer: 'IC3' },
+      ]);
+
+      const res = await request(app)
+        .get('/api/sme/metrics?limit=2')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data).toEqual({ open: 1, funded: 1, settled: 1, defaulted: 0 });
+      expect(res.body.meta.invoices).toHaveLength(2);
+    });
+  });
 });

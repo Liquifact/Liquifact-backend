@@ -27,6 +27,7 @@
 
 const db = require('../db/knex');
 const { applyQueryOptions } = require('../utils/queryBuilder');
+const { encodeCursor, decodeCursor, CursorError } = require('../utils/cursorPagination');
 const logger = require('../logger');
 const AppError = require('../errors/AppError');
 const { LOCKED_STATUSES } = require('../middleware/patchInvoice');
@@ -596,6 +597,94 @@ async function getSmeInvoiceCounts(tenantId, userId) {
   return result;
 }
 
+/**
+ * Retrieves a cursor-paginated list of invoices for the SME dashboard,
+ * scoped to a single tenant and SME owner.
+ *
+ * Uses keyset pagination with `created_at DESC, id DESC` so the ordering
+ * is stable under concurrent inserts.  The cursor is opaque and HMAC-signed;
+ * malformed or tampered cursors throw {@link CursorError}.
+ *
+ * When no cursor is supplied the first page is returned.
+ * The caller controls page size via `limit` (1–100, default 20).
+ *
+ * @param {string} tenantId - Tenant identifier (required).
+ * @param {string} userId   - SME owner identifier (required).
+ * @param {object} [options={}]
+ * @param {string} [options.cursor] - Opaque cursor from a prior page.
+ * @param {number} [options.limit=20] - Max rows per page (clamped to 1–100).
+ * @returns {Promise<{invoices: object[], meta: {total: number, limit: number, hasMore: boolean, nextCursor: string|null}}>}
+ * @throws {TypeError}  When tenantId or userId is missing.
+ * @throws {CursorError} When the cursor is malformed, tampered, or expired.
+ */
+async function getSmeInvoiceList(tenantId, userId, { cursor, limit = 20 } = {}) {
+  if (!tenantId || typeof tenantId !== 'string') {
+    throw new TypeError('tenantId is required');
+  }
+  if (!userId || typeof userId !== 'string') {
+    throw new TypeError('userId is required');
+  }
+
+  const MAX_LIMIT = 100;
+  const safeLimit = Math.max(1, Math.min(MAX_LIMIT, parseInt(limit, 10) || 20));
+
+  const baseQuery = () =>
+    db('invoices')
+      .where({ tenant_id: tenantId, sme_id: userId })
+      .whereNull('deleted_at');
+
+  const countRow = await baseQuery().count('* as total').first();
+  const total = parseInt(countRow?.total ?? countRow?.['count(*)'] ?? 0, 10);
+
+  let cursorData = null;
+  if (cursor) {
+    try {
+      cursorData = decodeCursor(cursor, 'created_at');
+    } catch (err) {
+      if (err instanceof CursorError) {
+        throw err;
+      }
+      throw new CursorError('Invalid cursor');
+    }
+  }
+
+  let dataQuery = baseQuery()
+    .select('*')
+    .orderBy('created_at', 'desc')
+    .orderBy('id', 'desc')
+    .limit(safeLimit + 1);
+
+  if (cursorData) {
+    dataQuery = dataQuery.where(function () {
+      this.where('created_at', '<', cursorData.sortValue)
+        .orWhere(function () {
+          this.where('created_at', cursorData.sortValue)
+            .andWhere('id', '<', parseInt(String(cursorData.id), 10) || 0);
+        });
+    });
+  }
+
+  const rows = await dataQuery;
+
+  const hasMore = rows.length > safeLimit;
+  const pageRows = hasMore ? rows.slice(0, safeLimit) : rows;
+
+  let nextCursor = null;
+  if (hasMore && pageRows.length > 0) {
+    const lastRow = pageRows[pageRows.length - 1];
+    nextCursor = encodeCursor({
+      sortField: 'created_at',
+      sortValue: lastRow.created_at,
+      id: String(lastRow.id),
+    });
+  }
+
+  return {
+    invoices: pageRows,
+    meta: { total, limit: safeLimit, hasMore, nextCursor },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // KYC helpers (in-memory — retained for backward compat with existing tests)
 // ---------------------------------------------------------------------------
@@ -668,6 +757,7 @@ module.exports = {
   parseInvoiceMetadata,
   // SME dashboard metrics
   getSmeInvoiceCounts,
+  getSmeInvoiceList,
   STATUS_CATEGORY_MAP,
   // KYC helpers (in-memory)
   getInvoicesByKycStatus,
