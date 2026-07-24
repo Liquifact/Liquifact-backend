@@ -57,6 +57,12 @@ Part of the LiquiFact stack: frontend (Next.js) | backend (this repo) | contract
 ## Configuration Reference
 
 For a complete, tested mapping of every environment variable to its type, default, consumer, and secret status, see [`docs/configuration.md`](./docs/configuration.md).
+## SME wallet authorization
+
+SME-capital routes bind authorization to the authenticated principal's wallet address. The middleware resolves the wallet from the user's authenticated profile only, so values supplied through headers, query strings, or request bodies are ignored and cannot spoof a bound wallet.
+
+When no wallet is bound to the authenticated account, the middleware returns a uniform RFC 7807-style 403 Forbidden response. Valid account addresses must still match the Stellar public-key format, as enforced by the shared validator.
+
 ## Response Caching
 
 The backend includes a TTL-based response-cache middleware backed by an in-memory store. Caching is applied to expensive read endpoints to reduce latency and database load.

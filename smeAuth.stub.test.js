@@ -55,13 +55,15 @@ describe('SME Auth Middleware Stub', () => {
       expect(req.walletAddress).toBe(validAddress);
     });
 
-    it('should succeed if wallet is provided via x-stellar-address header (stub behavior)', () => {
+    it('should ignore a wallet supplied via x-stellar-address header', () => {
       const validAddress = 'G' + 'A'.repeat(55);
       req.user = { id: 'user1' };
       req.headers['x-stellar-address'] = validAddress;
       authorizeSmeWallet(req, res, next);
-      expect(next).toHaveBeenCalledWith();
-      expect(req.walletAddress).toBe(validAddress);
+      expect(next).toHaveBeenCalledWith(expect.any(AppError));
+      const error = next.mock.calls[0][0];
+      expect(error.status).toBe(403);
+      expect(error.detail).toContain('No Stellar wallet address is bound');
     });
   });
 
