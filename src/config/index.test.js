@@ -2,7 +2,14 @@
  * Tests for centralized config module.
  */
 
-const { validate, get, logRedactedSummary, ConfigSchema } = require('./index');
+const {
+  validate,
+  get,
+  getValue,
+  getInvoiceFileMaxSize,
+  logRedactedSummary,
+  ConfigSchema,
+} = require('./index');
 
 describe('Config Validation', () => {
   const originalEnv = { ...process.env };
@@ -194,6 +201,47 @@ describe('Config Validation', () => {
     const config = get();
     expect(config).toBeDefined();
     expect(config.NODE_ENV).toBe('test');
+  });
+
+  test('typed accessors return validated and coerced values', () => {
+    process.env.NODE_ENV = 'test';
+    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
+    process.env.PORT = '4321';
+    process.env.INVOICE_FILE_MAX_SIZE = '2mb';
+    validate();
+    expect(getValue('PORT')).toBe(4321);
+    expect(getInvoiceFileMaxSize()).toBe('2mb');
+  });
+
+  test('typed accessor preserves a missing optional value', () => {
+    process.env.NODE_ENV = 'test';
+    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
+    delete process.env.PUBLIC_API_BASE_URL;
+    validate();
+    expect(getValue('PUBLIC_API_BASE_URL')).toBeUndefined();
+  });
+
+  test('upload limit accessor uses the validated default before boot validation', () => {
+    jest.isolateModules(() => {
+      delete process.env.INVOICE_FILE_MAX_SIZE;
+      const { getInvoiceFileMaxSize: getFreshLimit } = require('./index');
+      expect(getFreshLimit()).toBe('5mb');
+    });
+  });
+
+  test('rejects an invalid route value during boot validation', () => {
+    process.env.NODE_ENV = 'test';
+    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
+    process.env.INVOICE_FILE_MAX_SIZE = 'unbounded';
+    expect(() => validate()).toThrow(/INVOICE_FILE_MAX_SIZE/i);
+  });
+
+  test('upload limit accessor rejects invalid values before full validation', () => {
+    jest.isolateModules(() => {
+      process.env.INVOICE_FILE_MAX_SIZE = '-1mb';
+      const { getInvoiceFileMaxSize: getFreshLimit } = require('./index');
+      expect(() => getFreshLimit()).toThrow(/INVOICE_FILE_MAX_SIZE/i);
+    });
   });
 });
 

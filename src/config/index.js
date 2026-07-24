@@ -6,6 +6,15 @@
 
 const z = require('zod');
 
+/** Express-compatible request size string. @type {z.ZodDefault<z.ZodString>} */
+const InvoiceFileMaxSizeSchema = z
+  .string()
+  .trim()
+  .regex(/^\d+(?:\.\d+)?(?:b|kb|mb|gb)$/i, {
+    message: 'INVOICE_FILE_MAX_SIZE must be a size such as 512kb or 5mb.',
+  })
+  .default('5mb');
+
 /**
  * Complete configuration schema with defaults and validation.
  * Secrets have no defaults - must be provided.
@@ -51,6 +60,7 @@ const ConfigSchema = z
     // Public base URL for the API, used in the OpenAPI spec servers array.
     // Required in production and must use HTTPS. Falls back to localhost in development/test.
     PUBLIC_API_BASE_URL: z.string().url().optional(),
+    INVOICE_FILE_MAX_SIZE: InvoiceFileMaxSizeSchema,
   })
   .superRefine((data, ctx) => {
     if (data.NODE_ENV === 'test') { return; }
@@ -158,6 +168,27 @@ function get() {
   return config;
 }
 
+/**
+ * Returns a value from the validated configuration with key-aware JSDoc types.
+ * @template {keyof z.infer<typeof ConfigSchema>} K
+ * @param {K} key - Validated configuration key.
+ * @returns {z.infer<typeof ConfigSchema>[K]} The validated value for the key.
+ */
+function getValue(key) {
+  return get()[key];
+}
+
+/**
+ * Returns the validated invoice PDF upload limit used when routes are built.
+ * @returns {string} Express-compatible request size limit.
+ */
+function getInvoiceFileMaxSize() {
+  if (config) {
+    return config.INVOICE_FILE_MAX_SIZE;
+  }
+  return InvoiceFileMaxSizeSchema.parse(process.env.INVOICE_FILE_MAX_SIZE);
+}
+
 const securityHeaders = {
   contentSecurityPolicy: {
     directives: {
@@ -197,7 +228,10 @@ const securityHeaders = {
 module.exports = {
   validate,
   get,
+  getValue,
+  getInvoiceFileMaxSize,
   logRedactedSummary,
   ConfigSchema,
+  InvoiceFileMaxSizeSchema,
   securityHeaders,
 };

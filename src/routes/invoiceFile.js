@@ -8,16 +8,17 @@ const express = require('express');
 const crypto = require('crypto');
 const storageService = require('../services/storage');
 const logger = require('../logger');
+const { getInvoiceFileMaxSize } = require('../config');
 const router = express.Router();
 
 /** PDF magic bytes. */
 const PDF_MAGIC_BYTES = Buffer.from('%PDF');
 
 /**
- * Configurable upload size limit from env, defaults to 5mb.
+ * Validated configurable upload size limit, defaults to 5mb.
  * @type {string}
  */
-const UPLOAD_SIZE_LIMIT = process.env.INVOICE_FILE_MAX_SIZE || '5mb';
+const UPLOAD_SIZE_LIMIT = getInvoiceFileMaxSize();
 
 /**
  * Computes the SHA-256 hash of a buffer.
