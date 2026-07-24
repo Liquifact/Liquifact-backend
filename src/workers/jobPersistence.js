@@ -25,6 +25,7 @@
  */
 
 const logger = require('../logger');
+const { validatePayloadRoundTrip } = require('./persistenceValidation');
 
 /** Maximum rows fetched per recovery call (safety bound). */
 const DEFAULT_MAX_RECOVERY_ROWS = 1_000;
@@ -33,21 +34,14 @@ const DEFAULT_MAX_RECOVERY_ROWS = 1_000;
  * Sanitises a job payload so it is safe to re-enqueue after recovery.
  * Strips non-serialisable values by round-tripping through JSON.
  *
+ * Delegates to the shared {@link validatePayloadRoundTrip} helper so the
+ * validation logic is defined in one place.
+ *
  * @param {unknown} raw - The raw value read from the DB JSONB column.
  * @returns {{ ok: true, payload: object } | { ok: false, error: string }}
  */
 function sanitisePayload(raw) {
-  try {
-    // JSONB is always valid JSON, but we defensively round-trip anyway.
-    const serialised = typeof raw === 'string' ? raw : JSON.stringify(raw);
-    const parsed = JSON.parse(serialised);
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return { ok: false, error: 'payload must be a plain object' };
-    }
-    return { ok: true, payload: parsed };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
+  return validatePayloadRoundTrip(raw);
 }
 
 /**

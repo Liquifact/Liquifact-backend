@@ -21,6 +21,7 @@
 
 const JobQueue = require('./jobQueue');
 const { createJobPersistence } = require('./jobPersistence');
+const { assertJobStructure } = require('./persistenceValidation');
 const logger = require('../logger');
 const metrics = require('../metrics');
 const auditLogStore = require('../services/auditLogStore');
@@ -251,9 +252,7 @@ class BackgroundWorker {
    */
   async _processJob(job) {
     try {
-      if (!job || !job.id || !job.type) {
-        throw new Error('Invalid job structure');
-      }
+      assertJobStructure(job);
 
       const handler = this.handlers.get(job.type);
       if (!handler) {
