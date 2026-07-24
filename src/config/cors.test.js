@@ -89,6 +89,380 @@ describe('CORS configuration module', () => {
     });
   });
 
+  // ─── validateOriginEntry ────────────────────────────────────────────────
+
+  describe('validateOriginEntry', () => {
+    it('returns valid for a well-formed https origin', () => {
+      jest.isolateModules(() => {
+        const { validateOriginEntry } = require('./cors');
+        const result = validateOriginEntry('https://app.example.com');
+        expect(result).toEqual({
+          valid: true,
+          normalized: 'https://app.example.com',
+          error: null,
+        });
+      });
+    });
+
+    it('returns valid for a well-formed http origin with port', () => {
+      jest.isolateModules(() => {
+        const { validateOriginEntry } = require('./cors');
+        const result = validateOriginEntry('http://localhost:3000');
+        expect(result.valid).toBe(true);
+        expect(result.normalized).toBe('http://localhost:3000');
+        expect(result.error).toBeNull();
+      });
+    });
+
+    it('rejects a non-string entry', () => {
+      jest.isolateModules(() => {
+        const { validateOriginEntry } = require('./cors');
+        expect(validateOriginEntry(42).valid).toBe(false);
+        expect(validateOriginEntry(null).valid).toBe(false);
+        expect(validateOriginEntry(undefined).valid).toBe(false);
+        expect(validateOriginEntry({}).valid).toBe(false);
+      });
+    });
+
+    it('rejects an empty string', () => {
+      jest.isolateModules(() => {
+        const { validateOriginEntry } = require('./cors');
+        const result = validateOriginEntry('');
+        expect(result.valid).toBe(false);
+        expect(result.error).toBe('origin entry must be a non-empty string');
+      });
+    });
+
+    it('rejects the literal string "null"', () => {
+      jest.isolateModules(() => {
+        const { validateOriginEntry } = require('./cors');
+        const result = validateOriginEntry('null');
+        expect(result.valid).toBe(false);
+        expect(result.error).toBe(
+          'origin entry cannot be the literal string "null"'
+        );
+      });
+    });
+
+    it('rejects a non-URL string', () => {
+      jest.isolateModules(() => {
+        const { validateOriginEntry } = require('./cors');
+        const result = validateOriginEntry('not-a-url');
+        expect(result.valid).toBe(false);
+      });
+    });
+
+    it('rejects a string exceeding MAX_ORIGIN_LENGTH', () => {
+      jest.isolateModules(() => {
+        const { validateOriginEntry, MAX_ORIGIN_LENGTH } = require('./cors');
+        const longOrigin = 'https://a.com/' + 'x'.repeat(MAX_ORIGIN_LENGTH);
+        const result = validateOriginEntry(longOrigin);
+        expect(result.valid).toBe(false);
+        expect(result.error).toContain('exceeds maximum length');
+      });
+    });
+
+    it('accepts an origin at exactly MAX_ORIGIN_LENGTH characters', () => {
+      jest.isolateModules(() => {
+        const { validateOriginEntry, MAX_ORIGIN_LENGTH } = require('./cors');
+        const padding = MAX_ORIGIN_LENGTH - 'https://a.'.length;
+        const origin = 'https://a.' + 'x'.repeat(padding);
+        const result = validateOriginEntry(origin);
+        expect(result.valid).toBe(true);
+      });
+    });
+
+    it('normalizes uppercase scheme and host to lowercase', () => {
+      jest.isolateModules(() => {
+        const { validateOriginEntry } = require('./cors');
+        const result = validateOriginEntry('HTTPS://APP.EXAMPLE.COM');
+        expect(result.valid).toBe(true);
+        expect(result.normalized).toBe('https://app.example.com');
+      });
+    });
+
+    it('normalizes origin with trailing slash', () => {
+      jest.isolateModules(() => {
+        const { validateOriginEntry } = require('./cors');
+        const result = validateOriginEntry('https://app.example.com/');
+        expect(result.valid).toBe(true);
+        expect(result.normalized).toBe('https://app.example.com');
+      });
+    });
+  });
+
+  // ─── parseAllowedOrigins – strict mode ──────────────────────────────────
+
+  describe('parseAllowedOrigins – strict mode', () => {
+    it('rejects an undefined value', () => {
+      jest.isolateModules(() => {
+        const { parseAllowedOrigins } = require('./cors');
+        const result = parseAllowedOrigins(undefined, { strict: true });
+        expect(result).toEqual({
+          origins: [],
+          rejected: [],
+          fieldErrors: [],
+          valid: true,
+        });
+      });
+    });
+
+    it('rejects an empty string', () => {
+      jest.isolateModules(() => {
+        const { parseAllowedOrigins } = require('./cors');
+        const result = parseAllowedOrigins('', { strict: true });
+        expect(result.origins).toEqual([]);
+        expect(result.valid).toBe(true);
+      });
+    });
+
+    it('parses a single valid origin', () => {
+      jest.isolateModules(() => {
+        const { parseAllowedOrigins } = require('./cors');
+        const result = parseAllowedOrigins('https://app.example.com', {
+          strict: true,
+        });
+        expect(result.origins).toEqual(['https://app.example.com']);
+        expect(result.rejected).toEqual([]);
+        expect(result.valid).toBe(true);
+      });
+    });
+
+    it('parses multiple valid comma-separated origins', () => {
+      jest.isolateModules(() => {
+        const { parseAllowedOrigins } = require('./cors');
+        const result = parseAllowedOrigins(
+          'https://a.com,https://b.com',
+          { strict: true }
+        );
+        expect(result.origins).toEqual([
+          'https://a.com',
+          'https://b.com',
+        ]);
+        expect(result.valid).toBe(true);
+      });
+    });
+
+    it('rejects an invalid origin and reports it', () => {
+      jest.isolateModules(() => {
+        const { parseAllowedOrigins } = require('./cors');
+        const result = parseAllowedOrigins('https://a.com,not-a-url', {
+          strict: true,
+        });
+        expect(result.origins).toEqual(['https://a.com']);
+        expect(result.rejected).toEqual(['not-a-url']);
+        expect(result.fieldErrors.length).toBe(1);
+        expect(result.valid).toBe(false);
+      });
+    });
+
+    it('rejects the "null" literal origin', () => {
+      jest.isolateModules(() => {
+        const { parseAllowedOrigins } = require('./cors');
+        const result = parseAllowedOrigins('https://a.com,null', {
+          strict: true,
+        });
+        expect(result.origins).toEqual(['https://a.com']);
+        expect(result.rejected).toEqual(['null']);
+        expect(result.valid).toBe(false);
+      });
+    });
+
+    it('rejects an oversized origin entry', () => {
+      jest.isolateModules(() => {
+        const { parseAllowedOrigins, MAX_ORIGIN_LENGTH } = require('./cors');
+        const longOrigin = 'https://a.com/' + 'x'.repeat(MAX_ORIGIN_LENGTH);
+        const result = parseAllowedOrigins(`https://a.com,${longOrigin}`, {
+          strict: true,
+        });
+        expect(result.origins).toEqual(['https://a.com']);
+        expect(result.rejected.length).toBe(1);
+        expect(result.valid).toBe(false);
+      });
+    });
+
+    it('rejects all entries when every entry is invalid', () => {
+      jest.isolateModules(() => {
+        const { parseAllowedOrigins } = require('./cors');
+        const result = parseAllowedOrigins('not-a-url,null,also-bad', {
+          strict: true,
+        });
+        expect(result.origins).toEqual([]);
+        expect(result.rejected.length).toBe(3);
+        expect(result.valid).toBe(false);
+      });
+    });
+
+    it('de-duplicates repeated valid origins', () => {
+      jest.isolateModules(() => {
+        const { parseAllowedOrigins } = require('./cors');
+        const result = parseAllowedOrigins(
+          'https://a.com,https://a.com',
+          { strict: true }
+        );
+        expect(result.origins).toEqual(['https://a.com']);
+        expect(result.valid).toBe(true);
+      });
+    });
+
+    it('maintains backward compatibility: non-strict returns string[]', () => {
+      jest.isolateModules(() => {
+        const { parseAllowedOrigins } = require('./cors');
+        const result = parseAllowedOrigins('https://a.com,https://b.com');
+        expect(Array.isArray(result)).toBe(true);
+        expect(result).toEqual(['https://a.com', 'https://b.com']);
+      });
+    });
+
+    it('non-strict mode silently filters invalid entries', () => {
+      jest.isolateModules(() => {
+        const { parseAllowedOrigins } = require('./cors');
+        const result = parseAllowedOrigins('https://a.com,not-a-url');
+        expect(result).toEqual(['https://a.com']);
+      });
+    });
+
+    it('exports MAX_ORIGIN_LENGTH constant', () => {
+      jest.isolateModules(() => {
+        const { MAX_ORIGIN_LENGTH } = require('./cors');
+        expect(typeof MAX_ORIGIN_LENGTH).toBe('number');
+        expect(MAX_ORIGIN_LENGTH).toBeGreaterThan(0);
+      });
+    });
+  });
+
+  // ─── parseMaxAge – strict mode ──────────────────────────────────────────
+
+  describe('parseMaxAge – strict mode', () => {
+    it('returns valid structured result for a valid value', () => {
+      jest.isolateModules(() => {
+        const { parseMaxAge } = require('./cors');
+        const result = parseMaxAge('1800', { strict: true });
+        expect(result).toEqual({
+          value: 1800,
+          valid: true,
+          error: null,
+        });
+      });
+    });
+
+    it('defaults to 600 for undefined', () => {
+      jest.isolateModules(() => {
+        const { parseMaxAge } = require('./cors');
+        const result = parseMaxAge(undefined, { strict: true });
+        expect(result.value).toBe(600);
+        expect(result.valid).toBe(true);
+      });
+    });
+
+    it('defaults to 600 for null', () => {
+      jest.isolateModules(() => {
+        const { parseMaxAge } = require('./cors');
+        const result = parseMaxAge(null, { strict: true });
+        expect(result.value).toBe(600);
+        expect(result.valid).toBe(true);
+      });
+    });
+
+    it('defaults to 600 for empty string', () => {
+      jest.isolateModules(() => {
+        const { parseMaxAge } = require('./cors');
+        const result = parseMaxAge('', { strict: true });
+        expect(result.value).toBe(600);
+        expect(result.valid).toBe(true);
+      });
+    });
+
+    it('rejects a non-string type', () => {
+      jest.isolateModules(() => {
+        const { parseMaxAge } = require('./cors');
+        const result = parseMaxAge(42, { strict: true });
+        expect(result.valid).toBe(false);
+        expect(result.error).toBe('max-age must be a string');
+      });
+    });
+
+    it('rejects a non-integer string', () => {
+      jest.isolateModules(() => {
+        const { parseMaxAge } = require('./cors');
+        const result = parseMaxAge('notanumber', { strict: true });
+        expect(result.valid).toBe(false);
+        expect(result.error).toBe('max-age must be an integer');
+      });
+    });
+
+    it('rejects a float string', () => {
+      jest.isolateModules(() => {
+        const { parseMaxAge } = require('./cors');
+        const result = parseMaxAge('720.5', { strict: true });
+        expect(result.valid).toBe(false);
+        expect(result.error).toBe('max-age must be an integer');
+      });
+    });
+
+    it('rejects zero', () => {
+      jest.isolateModules(() => {
+        const { parseMaxAge } = require('./cors');
+        const result = parseMaxAge('0', { strict: true });
+        expect(result.valid).toBe(false);
+        expect(result.error).toBe('max-age must be a positive integer');
+      });
+    });
+
+    it('rejects a negative value', () => {
+      jest.isolateModules(() => {
+        const { parseMaxAge } = require('./cors');
+        const result = parseMaxAge('-100', { strict: true });
+        expect(result.valid).toBe(false);
+        expect(result.error).toBe('max-age must be a positive integer');
+      });
+    });
+
+    it('rejects a value exceeding MAX_MAX_AGE', () => {
+      jest.isolateModules(() => {
+        const { parseMaxAge, MAX_MAX_AGE } = require('./cors');
+        const result = parseMaxAge(String(MAX_MAX_AGE + 1), { strict: true });
+        expect(result.valid).toBe(false);
+        expect(result.error).toContain('must not exceed');
+      });
+    });
+
+    it('accepts the boundary value of MAX_MAX_AGE', () => {
+      jest.isolateModules(() => {
+        const { parseMaxAge, MAX_MAX_AGE } = require('./cors');
+        const result = parseMaxAge(String(MAX_MAX_AGE), { strict: true });
+        expect(result.valid).toBe(true);
+        expect(result.value).toBe(MAX_MAX_AGE);
+      });
+    });
+
+    it('accepts the boundary value of 1', () => {
+      jest.isolateModules(() => {
+        const { parseMaxAge } = require('./cors');
+        const result = parseMaxAge('1', { strict: true });
+        expect(result.valid).toBe(true);
+        expect(result.value).toBe(1);
+      });
+    });
+
+    it('maintains backward compatibility: non-strict returns number', () => {
+      jest.isolateModules(() => {
+        const { parseMaxAge } = require('./cors');
+        expect(parseMaxAge('1800')).toBe(1800);
+        expect(parseMaxAge(undefined)).toBe(600);
+        expect(parseMaxAge('notanumber')).toBe(600);
+      });
+    });
+
+    it('exports MAX_MAX_AGE constant', () => {
+      jest.isolateModules(() => {
+        const { MAX_MAX_AGE } = require('./cors');
+        expect(typeof MAX_MAX_AGE).toBe('number');
+        expect(MAX_MAX_AGE).toBe(86400);
+      });
+    });
+  });
+
   describe('parseMaxAge', () => {
     it('returns 600 for undefined', () => {
       jest.isolateModules(() => {
@@ -674,6 +1048,9 @@ describe('CORS configuration module', () => {
         expect(cors).toHaveProperty('parseMaxAge');
         expect(cors).toHaveProperty('reloadCorsOrigins');
         expect(cors).toHaveProperty('resolveAllowlist');
+        expect(cors).toHaveProperty('validateOriginEntry');
+        expect(cors).toHaveProperty('MAX_ORIGIN_LENGTH');
+        expect(cors).toHaveProperty('MAX_MAX_AGE');
       });
     });
 
