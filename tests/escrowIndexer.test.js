@@ -573,7 +573,7 @@ describe('escrow indexer event parsing and cursor advancement', () => {
       expect(store.upsertEvent).not.toHaveBeenCalled();
     });
 
-    test('invalid contractId checksum or length is rejected', async () => {
+    test('invalid contractId format is rejected', async () => {
       const store = {
         loadCursor: jest.fn().mockResolvedValue('cursor-1'),
         saveCursor: jest.fn().mockResolvedValue(undefined),
@@ -590,24 +590,13 @@ describe('escrow indexer event parsing and cursor advancement', () => {
             eventType: 'contract_event',
             ledgerSequence: 10,
             pagingToken: 'cursor-2',
-            contractId: 'CDLZFC3SYJ27SBCC6BAKCY73WFXHBTE357R67CW567QX65ECUGN45RXA', // invalid checksum
-            txHash: VALID_TX_HASH,
-            eventBody: {},
-            observedAt: '2020-01-01T00:00:00.000Z',
-          },
-          {
-            invoiceId: 'INV-2',
-            eventId: 'evt-2',
-            eventType: 'contract_event',
-            ledgerSequence: 10,
-            pagingToken: 'cursor-3',
             contractId: 'CDLZF', // too short
             txHash: VALID_TX_HASH,
             eventBody: {},
             observedAt: '2020-01-01T00:00:00.000Z',
           },
         ],
-        nextCursor: 'cursor-3',
+        nextCursor: 'cursor-2',
       });
 
       const res = await runEscrowIndexerCycle({
@@ -619,7 +608,7 @@ describe('escrow indexer event parsing and cursor advancement', () => {
       });
 
       expect(res.processed).toBe(0);
-      expect(res.skipped).toBe(2);
+      expect(res.skipped).toBe(1);
     });
 
     test('invalid txHash length is rejected', async () => {

@@ -42,6 +42,12 @@ function _parseQuery(query) {
   const fieldErrors = {};
   const params = { filters: {}, sorting: {}, pagination: {} };
 
+  const ALLOWED_PARAMS = new Set(['invoiceId', 'eventType', 'contractId', 'sortBy', 'order', 'cursor', 'page', 'limit']);
+  const unknown = Object.keys(query).filter((k) => !ALLOWED_PARAMS.has(k));
+  if (unknown.length > 0) {
+    fieldErrors._unknown = `Unknown query parameters: ${unknown.join(', ')}`;
+  }
+
   const { invoiceId, eventType, contractId, sortBy, order, cursor, page, limit } = query;
 
   // ── Filters ───────────────────────────────────────────────────────────────
