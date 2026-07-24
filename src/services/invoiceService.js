@@ -115,21 +115,8 @@ function nowValue() {
  * @returns {Promise<{previousState: string, newState: string}>}
  */
 async function executeTransition(ctx) {
-  // Minimal stub — the real state machine belongs in its own module.
-  // For now this just returns the target state so the rest of the
-  // transitionInvoice pipeline (status update, audit logging) works.
-  const { currentState, targetState } = ctx;
-
-  if (!currentState || !targetState) {
-    const err = new Error('Invalid state transition context');
-    err.code = 'INVALID_TRANSITION';
-    throw err;
-  }
-
-  return {
-    previousState: currentState,
-    newState: targetState,
-  };
+  const { executeTransition: machineTransition } = require('./invoiceStateMachine');
+  return machineTransition(ctx);
 }
 
 // ---------------------------------------------------------------------------
