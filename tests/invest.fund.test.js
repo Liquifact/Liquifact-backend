@@ -478,4 +478,37 @@ describe('POST /api/invest/fund-invoice — happy path', () => {
       })
     );
   });
+
+  it('returns 500 when persistCommitment throws an unexpected error', async () => {
+    persistCommitment.mockRejectedValueOnce(new Error('DB connection lost'));
+
+    const res = await agent()
+      .post('/api/invest/fund-invoice')
+      .set('Authorization', `Bearer ${token()}`)
+      .set('x-tenant-id', TENANT_ID)
+      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: '500' });
+    expect(res.status).toBe(500);
+    // The actual error message must not leak to the client
+    expect(JSON.stringify(res.body)).not.toContain('DB connection lost');
+  });
+
+  it('handles duplicate request gracefully (idempotent at service layer)', async () => {
+    const body = { invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: '5000' };
+    const firstRes  = await agent()
+      .post('/api/invest/fund-invoice')
+      .set('Authorization', `Bearer ${token()}`)
+      .set('x-tenant-id', TENANT_ID)
+      .send(body);
+    expect(firstRes.status).toBe(200);
+
+    persistCommitment.mockResolvedValueOnce({ id: 'cmt-dup', status: 'stubbed' });
+
+    const secondRes = await agent()
+      .post('/api/invest/fund-invoice')
+      .set('Authorization', `Bearer ${token()}`)
+      .set('x-tenant-id', TENANT_ID)
+      .send(body);
+    expect(secondRes.status).toBe(200);
+    expect(secondRes.body.commitmentId).toBe('cmt-dup');
+  });
 });
