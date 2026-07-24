@@ -34,7 +34,12 @@
   "jest": {
     "testEnvironment": "node",
     "transformIgnorePatterns": [],
-    "testPathIgnorePatterns": [],
+    "testPathIgnorePatterns": [
+      "<rootDir>/dist/"
+    ],
+    "modulePathIgnorePatterns": [
+      "<rootDir>/dist/"
+    ],
     "moduleNameMapper": {
       "^node:test$": "<rootDir>/tests/mocks/node_test_shim.js",
       "^node:assert/strict$": "<rootDir>/tests/mocks/node_assert_shim.js"

@@ -951,4 +951,96 @@ describe('CORS configuration module', () => {
       });
     });
   });
+
+  // ─── Express middleware integration (driving cors(createCorsOptions())) ──
+
+  describe('express CORS middleware integration', () => {
+    function setupApp(corsOrigins) {
+      const express = require('express');
+      const cors = require('cors');
+      const { createCorsOptions } = require('./cors');
+
+      const app = express();
+      app.use(
+        cors(
+          createCorsOptions({
+            NODE_ENV: 'production',
+            CORS_ORIGINS: corsOrigins,
+          })
+        )
+      );
+      app.get('/test', (req, res) => res.json({ ok: true }));
+      app.use((err, req, res, _next) => {
+        if (err && err.isCorsOriginRejected) {
+          return res.status(403).json({ error: { message: err.message } });
+        }
+        return res.status(500).json({ error: { message: err.message } });
+      });
+      return app;
+    }
+
+    it('allows exact allowlisted origin', async () => {
+      const request = require('supertest');
+      const app = setupApp('https://app.example.com');
+      const res = await request(app).get('/test').set('Origin', 'https://app.example.com');
+      expect(res.statusCode).toBe(200);
+    });
+
+    it('allows trailing-slash variant of allowlisted origin', async () => {
+      const request = require('supertest');
+      const app = setupApp('https://app.example.com');
+      const res = await request(app).get('/test').set('Origin', 'https://app.example.com/');
+      expect(res.statusCode).toBe(200);
+    });
+
+    it('allows upper-case host variant of allowlisted origin', async () => {
+      const request = require('supertest');
+      const app = setupApp('https://app.example.com');
+      const res = await request(app).get('/test').set('Origin', 'HTTPS://APP.EXAMPLE.COM');
+      expect(res.statusCode).toBe(200);
+    });
+
+    it('rejects literal "null" origin with 403', async () => {
+      const request = require('supertest');
+      const app = setupApp('https://app.example.com');
+      const res = await request(app).get('/test').set('Origin', 'null');
+      expect(res.statusCode).toBe(403);
+      expect(res.body.error.message).toBe('CORS policy: origin is not allowed.');
+    });
+
+    it('rejects disallowed origin with 403', async () => {
+      const request = require('supertest');
+      const app = setupApp('https://app.example.com');
+      const res = await request(app).get('/test').set('Origin', 'https://evil.com');
+      expect(res.statusCode).toBe(403);
+    });
+
+    it('rejects trailing-slash variant of disallowed origin with 403', async () => {
+      const request = require('supertest');
+      const app = setupApp('https://app.example.com');
+      const res = await request(app).get('/test').set('Origin', 'https://evil.com/');
+      expect(res.statusCode).toBe(403);
+    });
+
+    it('rejects upper-case variant of disallowed origin with 403', async () => {
+      const request = require('supertest');
+      const app = setupApp('https://app.example.com');
+      const res = await request(app).get('/test').set('Origin', 'HTTPS://EVIL.COM');
+      expect(res.statusCode).toBe(403);
+    });
+
+    it('rejects subdomain bypass attempt with 403', async () => {
+      const request = require('supertest');
+      const app = setupApp('https://app.example.com');
+      const res = await request(app).get('/test').set('Origin', 'https://app.example.com.evil.com');
+      expect(res.statusCode).toBe(403);
+    });
+
+    it('handles CORS_ORIGINS configured with trailing slash or uppercase characters', async () => {
+      const request = require('supertest');
+      const app = setupApp('HTTPS://APP.EXAMPLE.COM/');
+      const res = await request(app).get('/test').set('Origin', 'https://app.example.com');
+      expect(res.statusCode).toBe(200);
+    });
+  });
 });
