@@ -94,8 +94,9 @@ function handleInternalError(err, req, res, _next) {
     return;
   }
 
-  // AppError: use the status it carries
-  if (err && err.status && err.status >= 400 && err.status < 500) {
+  // AppError: use the status it carries (400–599).
+  // This covers both 4xx client errors and 5xx upstream errors (e.g. 502).
+  if (err && err.status && err.status >= 400 && err.status <= 599) {
     res.status(err.status).json({
       error: {
         code: err.code || String(err.status),
