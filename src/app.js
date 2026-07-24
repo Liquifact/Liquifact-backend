@@ -25,6 +25,7 @@ const { auditMiddleware } = require('./middleware/audit');
 const requestId = require('./middleware/requestId');
 const { correlationIdMiddleware } = require('./middleware/correlationId');
 const invoiceService = require('./services/invoiceService');
+const { CursorError } = require('./utils/cursorPagination');
 const { resolveEscrowAddress } = require('./config/escrowMap');
 const { getEscrowStateWithProjection } = require('./services/escrowRead');
 const { createCorsOptions, isCorsOriginRejectedError } = require('./config/cors');
@@ -234,7 +235,7 @@ function createApp() {
     });
   });
 
-  // Invoices — GET (list)
+  // Invoices — GET (list) with cursor pagination
   app.get('/api/invoices', async (req, res) => {
     const { isValid, fieldErrors, validatedParams } = validateInvoiceQueryParams(req.query);
     if (!isValid) {
@@ -246,9 +247,28 @@ function createApp() {
         fieldErrors,
       });
     }
-    const invoices = await invoiceService.getInvoices(validatedParams);
+
+    let result;
+    try {
+      result = await invoiceService.getInvoicesWithPagination(validatedParams);
+    } catch (err) {
+      if (err instanceof CursorError) {
+        return res.status(400).json({
+          type: 'https://liquifact.io/problems/validation-error',
+          title: 'Validation Error',
+          status: 400,
+          detail: 'Query parameters contain invalid values.',
+          fieldErrors: {
+            cursor: err.message,
+          },
+        });
+      }
+      throw err;
+    }
+
     res.json({
-      data: invoices,
+      data: result.data,
+      meta: result.meta,
       message: 'Invoices retrieved successfully.',
     });
   });
