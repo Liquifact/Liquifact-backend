@@ -12,6 +12,7 @@
 
 const request = require('supertest');
 const express = require('express');
+const apiKeysRouter = require('../../src/routes/apiKeys');
 
 const {
   parseApiKeys,
@@ -365,6 +366,94 @@ describe('middleware/apiKeyAuth — malformed API_KEYS env propagates error', ()
     const res = await request(app).get('/test').set('X-API-Key', 'lf_anything000');
     // The registry load throws; Express default error handler returns 500
     expect(res.status).toBe(500);
+  });
+});
+
+describe('api-keys endpoint integration', () => {
+  let app;
+
+  beforeEach(() => {
+    apiKeysRouter.resetRuntimeEntries();
+    app = express();
+    app.locals.env = { API_KEYS: '' };
+    app.use(apiKeysRouter);
+  });
+
+  it('creates a key and returns the expected success shape', async () => {
+    const res = await request(app)
+      .post('/api-keys')
+      .send({
+        key: 'lf_newkey0001',
+        clientId: 'svc-alpha',
+        scopes: ['invoices:read'],
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({
+      message: 'API key created successfully.',
+      data: {
+        key: 'lf_newkey0001',
+        clientId: 'svc-alpha',
+        scopes: ['invoices:read'],
+        revoked: false,
+      },
+    });
+  });
+
+  it('returns 404 for a missing key', async () => {
+    const res = await request(app).get('/api-keys/lf_missingkey001');
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({
+      error: 'API key not found.',
+      code: 'NOT_FOUND',
+    });
+  });
+
+  it('returns 422 for invalid input and reports validation details', async () => {
+    const res = await request(app)
+      .post('/api-keys')
+      .send({ key: 'bad-key', clientId: '', scopes: [] });
+
+    expect(res.status).toBe(422);
+    expect(res.body).toMatchObject({
+      error: 'Validation failed.',
+      code: 'VALIDATION_ERROR',
+    });
+    expect(res.body.details).toEqual(expect.arrayContaining([
+      expect.objectContaining({ field: 'body' }),
+    ]));
+  });
+
+  it('returns an idempotent success response when the same key is created twice', async () => {
+    const first = await request(app)
+      .post('/api-keys')
+      .send({
+        key: 'lf_repeatkey01',
+        clientId: 'svc-repeat',
+        scopes: ['invoices:write'],
+      });
+
+    const second = await request(app)
+      .post('/api-keys')
+      .send({
+        key: 'lf_repeatkey01',
+        clientId: 'svc-repeat',
+        scopes: ['invoices:write'],
+      });
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(200);
+    expect(second.body).toMatchObject({
+      idempotent: true,
+      message: 'API key already exists.',
+      data: {
+        key: 'lf_repeatkey01',
+        clientId: 'svc-repeat',
+        scopes: ['invoices:write'],
+        revoked: false,
+      },
+    });
   });
 });
 
