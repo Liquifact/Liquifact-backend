@@ -187,6 +187,83 @@ Environment variables:
 
 Do not store secrets in source control. Use `.env` locally and deployment secrets in production.
 
+### API Key Auth Metrics
+
+Every request that passes through the `authenticateApiKey` middleware emits structured metrics and logs to support operational visibility. No API keys, authorization headers, secrets, or PII are ever included in metric labels or log output.
+
+#### Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `api_key_auth_duration_seconds` | Histogram | `endpoint`, `method`, `status`, `outcome` | Duration of API key authenticated requests |
+| `api_key_auth_errors_total` | Counter | `cause` | Error count by bounded cause |
+
+**Duration label values**
+
+| Label | Source | Bounded? |
+|-------|--------|----------|
+| `endpoint` | `req.path` | Yes — limited to known route paths |
+| `method` | HTTP verb (GET, POST, etc.) | Yes — finite set |
+| `status` | HTTP status code string | Yes — finite set |
+| `outcome` | `success` \| `client_error` \| `server_error` | Yes — 3 values |
+
+**Error cause label values**
+
+| `cause` value | HTTP status |
+|---------------|-------------|
+| `unauthorized` | 401 |
+| `forbidden` | 403 |
+| `internal_error` | 500+ |
+
+Cardinality is strictly bounded — raw exception messages, dynamic identifiers, or request data are never used as labels.
+
+#### Structured logs
+
+Every API key authenticated request emits one structured log line (pino JSON) on response finish:
+
+```json
+{
+  "endpoint": "/api/admin/escrow/batch",
+  "method": "POST",
+  "status": 200,
+  "duration_ms": 12.34,
+  "outcome": "success"
+}
+```
+
+For failures, an `error_type` field is included:
+
+```json
+{
+  "endpoint": "/api/admin/escrow/batch",
+  "method": "POST",
+  "status": 401,
+  "duration_ms": 3.21,
+  "outcome": "client_error",
+  "error_type": "unauthorized"
+}
+```
+
+The ambient request context (`requestId`, `correlationId`, `tenantId`, `userId`) is automatically merged into every log line by the pino proxy (`src/logger.js`) when the request runs within an `AsyncLocalStorage` context.
+
+#### Example PromQL
+
+```promql
+# 95th percentile API key auth latency by endpoint
+histogram_quantile(
+  0.95,
+  sum(rate(api_key_auth_duration_seconds_bucket[5m])) by (le, endpoint)
+)
+
+# API key auth error rate by cause
+sum(rate(api_key_auth_errors_total[5m])) by (cause)
+
+# Proportion of 401 responses across all API key auth endpoints
+sum(rate(api_key_auth_duration_seconds_count{outcome="client_error",status="401"}[5m]))
+  /
+sum(rate(api_key_auth_duration_seconds_count[5m]))
+```
+
 ### Prometheus metrics
 
 The application exposes Prometheus metrics on `GET /metrics` (subject to the same auth rules). Additional gauges added for background job observability:
@@ -196,6 +273,8 @@ The application exposes Prometheus metrics on `GET /metrics` (subject to the sam
 - `liquifact_worker_inflight_count`: Number of jobs currently being processed by registered background workers.
 - `soroban_rpc_call_duration_seconds`: Histogram of end-to-end Soroban RPC wrapper latency, labelled by bounded `method` and `outcome` values. The timing includes retry delays because it measures the full `callSorobanContract()` wrapper path.
 - `soroban_rpc_retry_causes_total`: Counter of Soroban retry attempts, labelled by bounded `cause` values (`timeout`, `429`, `5xx`, `unknown`).
+- `api_key_auth_duration_seconds`: Histogram of API key authenticated request duration, labelled by bounded `endpoint`, `method`, `status`, and `outcome` values.
+- `api_key_auth_errors_total`: Counter of API key auth errors by bounded `cause` label (`unauthorized`, `forbidden`, `internal_error`).
 
 These gauges are updated by sampling registered `JobQueue` and `BackgroundWorker` instances and are intentionally bounded to avoid high-cardinality labels.
 

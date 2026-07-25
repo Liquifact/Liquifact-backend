@@ -8,12 +8,22 @@
  * On success the authenticated client description is attached to `req.apiClient`
  * so that downstream handlers can inspect it.
  *
+ * Every request is instrumented with a duration histogram and bounded error
+ * counter, and a structured log line is emitted on response finish. No key
+ * material, secrets, or PII are ever included in metrics or log output.
+ *
  * @module middleware/apiKeyAuth
  */
 
 const crypto = require('crypto');
 const { loadApiKeyRegistry } = require('../config/apiKeys');
 const logger = require('../logger');
+const {
+  apiKeyAuthDurationSeconds,
+  apiKeyAuthErrorsTotal,
+  classifyApiKeyOutcome,
+  classifyApiKeyErrorCause,
+} = require('../metrics');
 
 /** Name of the HTTP request header that carries the API key. */
 const API_KEY_HEADER = 'x-api-key';
@@ -82,6 +92,47 @@ function authenticateApiKey(options = {}) {
   const { requiredScope, env = process.env } = options;
 
   return (req, res, next) => {
+    const startTime = process.hrtime.bigint();
+
+    res.once('finish', () => {
+      const durationMs = Number(process.hrtime.bigint() - startTime) / 1e6;
+      const statusCode = res.statusCode;
+      const outcome = classifyApiKeyOutcome(statusCode);
+      const errorCause = classifyApiKeyErrorCause(statusCode);
+
+      // Emit duration histogram with bounded labels.
+      apiKeyAuthDurationSeconds.observe(
+        {
+          endpoint: req.path,
+          method: req.method,
+          status: String(statusCode),
+          outcome,
+        },
+        durationMs / 1000,
+      );
+
+      // Emit error cause counter only when the request resulted in an error.
+      if (statusCode >= 400 && errorCause) {
+        apiKeyAuthErrorsTotal.inc({ cause: errorCause });
+      }
+
+      // Emit structured log — no keys, secrets, headers, or PII.
+      const logPayload = {
+        endpoint: req.path,
+        method: req.method,
+        status: statusCode,
+        duration_ms: Math.round(durationMs * 100) / 100,
+        outcome,
+      };
+
+      if (statusCode >= 400) {
+        logPayload.error_type = errorCause || 'unknown';
+        logger.warn(logPayload, 'API key auth request failed');
+      } else {
+        logger.info(logPayload, 'API key auth request succeeded');
+      }
+    });
+
     const rawKey = req.headers[API_KEY_HEADER];
 
     if (!rawKey || typeof rawKey !== 'string' || rawKey.trim() === '') {
