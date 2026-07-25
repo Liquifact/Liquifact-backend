@@ -37,7 +37,12 @@ const { adminConfigLimiter } = require('../middleware/rateLimit');
 const idempotencyMiddleware = require('../middleware/idempotency');
 const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
 const logger = require('../logger');
-const idempotencyMiddleware = require('../middleware/idempotency');
+const {
+  toAdminConfigRequestDto,
+  fromAdminConfigRequestDto,
+  toAdminConfigResponseDto,
+  fromConfigSectionsResponseDto,
+} = require('../dto/config');
 
 const router = express.Router();
 
@@ -193,7 +198,8 @@ const optionalIdempotency = (req, res, next) => {
  */
 router.post('/', idempotencyMiddleware, validateBody(runtimeConfigSchema), (req, res) => {
   // validateBody attaches the parsed, coerced payload to req.validated
-  const { section, config: validatedConfig } = req.validated;
+  const validatedDto = toAdminConfigRequestDto(req.validated);
+  const { section, config: validatedConfig } = fromAdminConfigRequestDto(validatedDto);
 
   // Apply runtime configuration changes for supported sections.
   if (section === 'cors') {
@@ -217,11 +223,13 @@ router.post('/', idempotencyMiddleware, validateBody(runtimeConfigSchema), (req,
     'Admin runtime config update accepted',
   );
 
-  return res.status(200).json({
+  const responseDto = toAdminConfigResponseDto({
     section,
     config: validatedConfig,
     message: `Configuration section '${section}' validated and accepted.`,
   });
+
+  return res.status(200).json(responseDto);
 });
 
 // ── GET /api/admin/config/sections ───────────────────────────────────────────
@@ -255,7 +263,8 @@ router.post('/', idempotencyMiddleware, validateBody(runtimeConfigSchema), (req,
  *         $ref: '#/components/responses/Problem403'
  */
 router.get('/sections', (req, res) => {
-  return res.status(200).json({ sections: CONFIG_SECTIONS });
+  const sectionsDto = fromConfigSectionsResponseDto({ sections: CONFIG_SECTIONS });
+  return res.status(200).json(sectionsDto);
 });
 
 module.exports = router;
