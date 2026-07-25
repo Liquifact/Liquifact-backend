@@ -18,6 +18,7 @@ jest.mock('redis', () => {
 const request = require('supertest');
 const { createApp } = require('../src/app');
 const metrics = require('../src/metrics');
+const logger = require('../src/logger');
 const JobQueue = require('../src/workers/jobQueue');
 const BackgroundWorker = require('../src/workers/worker');
 
@@ -158,6 +159,98 @@ describe('GET /metrics', () => {
       const output = await metrics.registry.metrics();
       expect(output).toMatch(/liquifact_worker_inflight_count [12]/);
       await worker.stop();
+    });
+  });
+
+  describe('metrics instrumentation', () => {
+    it('records success metrics and structured logs for successful scrapes', async () => {
+      const requestLogger = {
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+      };
+      const createRequestLoggerSpy = jest.spyOn(logger, 'createRequestLogger').mockReturnValue(requestLogger);
+
+      const res = await request(app)
+        .get('/metrics')
+        .set('Authorization', 'Bearer test-metrics-secret');
+
+      expect(res.status).toBe(200);
+      const output = await metrics.registry.metrics();
+      expect(output).toMatch(/metrics_requests_total\{status_class="2xx"\}/);
+      expect(output).toMatch(/metrics_request_duration_seconds_(?:bucket|sum|count)/);
+      expect(output).not.toMatch(/metrics_request_errors_total\{cause="none"\}/);
+      expect(requestLogger.info).toHaveBeenCalled();
+      expect(requestLogger.warn).not.toHaveBeenCalled();
+      expect(requestLogger.error).not.toHaveBeenCalled();
+
+      createRequestLoggerSpy.mockRestore();
+    });
+
+    it('records client-error metrics and structured warnings for unauthorized scrapes', async () => {
+      const requestLogger = {
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+      };
+      const createRequestLoggerSpy = jest.spyOn(logger, 'createRequestLogger').mockReturnValue(requestLogger);
+
+      const req = {
+        headers: {},
+        socket: { remoteAddress: '192.0.2.10' },
+        ip: '192.0.2.10',
+      };
+      const res = {
+        statusCode: 200,
+        headers: {},
+        body: undefined,
+        status(code) {
+          this.statusCode = code;
+          return this;
+        },
+        json(payload) {
+          this.body = payload;
+          return this;
+        },
+      };
+      const next = jest.fn();
+
+      metrics.metricsAuth(req, res, next);
+
+      expect(res.statusCode).toBe(401);
+      expect(res.body).toEqual({ error: 'Unauthorized' });
+      expect(requestLogger.warn).toHaveBeenCalled();
+      expect(requestLogger.info).not.toHaveBeenCalled();
+      expect(requestLogger.error).not.toHaveBeenCalled();
+      expect(next).not.toHaveBeenCalled();
+      expect(requestLogger.info).not.toHaveBeenCalled();
+      expect(requestLogger.error).not.toHaveBeenCalled();
+      expect(next).not.toHaveBeenCalled();
+
+      createRequestLoggerSpy.mockRestore();
+    });
+
+    it('records server-error metrics and structured error logs for handler failures', async () => {
+      const requestLogger = {
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+      };
+      const createRequestLoggerSpy = jest.spyOn(logger, 'createRequestLogger').mockReturnValue(requestLogger);
+
+      metrics.recordMetricsEndpointOutcome({
+        statusCode: 500,
+        durationSeconds: 0.01,
+        error: new Error('boom'),
+        req: { headers: {} },
+      });
+
+      const output = await metrics.registry.metrics();
+      expect(output).toMatch(/metrics_requests_total\{status_class="5xx"\}/);
+      expect(output).toMatch(/metrics_request_errors_total\{cause="internal_error"\}/);
+      expect(requestLogger.error).toHaveBeenCalled();
+
+      createRequestLoggerSpy.mockRestore();
     });
   });
 
