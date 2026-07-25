@@ -1113,15 +1113,52 @@ const sorobanRpcRetryCausesTotal = new client.Counter({
 });
 
 /**
+ * Bounded enum of allowed `endpoint` label values for persistence metrics.
+ * @readonly
+ */
+const PERSISTENCE_ENDPOINT_ENUM = Object.freeze([
+  'sme_invoice_upload',
+  'sme_invoice_presigned_url',
+]);
+
+/**
  * Bounded enum of allowed `status_class` label values.
  * @readonly
  */
+const PERSISTENCE_STATUS_CLASS_ENUM = Object.freeze(['2xx', '4xx', '5xx']);
 
 /**
  * Bounded enum of allowed `cause` label values for persistence errors.
  * Raw error messages are NEVER used as labels.
  * @readonly
  */
+const PERSISTENCE_CAUSE_ENUM = Object.freeze([
+  'none',
+  'validation',
+  'storage',
+  'internal',
+]);
+
+/**
+ * Storage-service error codes that indicate a client-side validation failure.
+ * @readonly
+ */
+const _PERSISTENCE_VALIDATION_CODES = Object.freeze([
+  'INVALID_MIME_TYPE',
+  'FILE_TOO_LARGE',
+  'INVALID_TENANT_ID',
+]);
+
+/**
+ * Storage-layer error codes that indicate an object-storage failure.
+ * @readonly
+ */
+const _PERSISTENCE_STORAGE_CODES = Object.freeze([
+  'STORAGE_WRITE_FAILED',
+  'STORAGE_READ_FAILED',
+  'ENOENT',
+  'EACCES',
+]);
 
 /**
  * Maps a raw persistence endpoint hint to a bounded metric label value.
@@ -1129,6 +1166,11 @@ const sorobanRpcRetryCausesTotal = new client.Counter({
  * @param {unknown} raw - Raw endpoint identifier.
  * @returns {string} Bounded value from {@link PERSISTENCE_ENDPOINT_ENUM}.
  */
+function normalizePersistenceEndpoint(raw) {
+  return typeof raw === 'string' && PERSISTENCE_ENDPOINT_ENUM.includes(raw)
+    ? raw
+    : 'unknown';
+}
 
 /**
  * Maps an HTTP status code to a bounded `status_class` label value.
@@ -1136,6 +1178,12 @@ const sorobanRpcRetryCausesTotal = new client.Counter({
  * @param {unknown} status - HTTP status code.
  * @returns {string} Bounded value from {'2xx'|'4xx'|'5xx'}.
  */
+function normalizePersistenceStatusClass(status) {
+  const code = Number(status);
+  if (code >= 500) { return '5xx'; }
+  if (code >= 400) { return '4xx'; }
+  return '2xx';
+}
 
 /**
  * Maps a raw persistence failure to a bounded `cause` label value.
@@ -1149,31 +1197,69 @@ const sorobanRpcRetryCausesTotal = new client.Counter({
  * @param {number} [status] - HTTP status code, used to disambiguate.
  * @returns {string} Bounded value from {'validation'|'storage'|'internal'|'none'}.
  */
+function normalizePersistenceCause(err, status) {
+  const code = Number(status);
+  if (!err && code < 400) { return 'none'; }
+
+  const errCode = err && typeof err === 'object' ? err.code : err;
+  if (typeof errCode === 'string') {
+    if (_PERSISTENCE_VALIDATION_CODES.includes(errCode)) { return 'validation'; }
+    if (_PERSISTENCE_STORAGE_CODES.includes(errCode)) { return 'storage'; }
+  }
+
+  if (code >= 400 && code < 500) { return 'validation'; }
+  return 'internal';
+}
 
 /**
  * Histogram: Wall-clock duration of persistence-endpoint requests in seconds.
  * @type {import('prom-client').Histogram}
  */
+const persistenceRequestDurationSeconds = new client.Histogram({
+  name: 'persistence_request_duration_seconds',
+  help: 'Duration of persistence endpoint requests in seconds',
+  labelNames: ['endpoint', 'status_class'],
+  buckets: [0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+  registers: [registry],
+});
 
 /**
  * Counter: Total persistence-endpoint requests.
  * @type {import('prom-client').Counter}
  */
+const persistenceRequestsTotal = new client.Counter({
+  name: 'persistence_requests_total',
+  help: 'Total persistence endpoint requests by endpoint and status class',
+  labelNames: ['endpoint', 'status_class'],
+  registers: [registry],
+});
 
 /**
  * Counter: Persistence-endpoint request errors by cause.
  * @type {import('prom-client').Counter}
  */
+const persistenceRequestErrorsTotal = new client.Counter({
+  name: 'persistence_request_errors_total',
+  help: 'Total persistence endpoint request errors by endpoint and cause',
+  labelNames: ['endpoint', 'cause'],
+  registers: [registry],
+});
 
 /**
  * Bounded enum of allowed `status_class` label values for metrics endpoint.
  * @readonly
  */
+const _METRICS_ENDPOINT_STATUS_CLASS_ENUM = Object.freeze(['2xx', '4xx', '5xx']);
 
 /**
  * Bounded enum of allowed `cause` label values for metrics endpoint errors.
  * @readonly
  */
+const _METRICS_ENDPOINT_CAUSE_ENUM = Object.freeze([
+  'none',
+  'auth_failure',
+  'internal_error',
+]);
 
 /**
  * Maps an HTTP status code to a bounded `status_class` label value.
@@ -1213,6 +1299,69 @@ const metricsRequestDurationSeconds = new client.Histogram({
   buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5],
   registers: [registry],
 });
+
+/**
+ * Counter: Metrics endpoint scrapes by bounded status class.
+ * @type {import('prom-client').Counter}
+ */
+const metricsRequestsTotal = new client.Counter({
+  name: 'metrics_requests_total',
+  help: 'Total metrics endpoint requests by status class',
+  labelNames: ['status_class'],
+  registers: [registry],
+});
+
+/**
+ * Counter: Metrics endpoint failures by bounded cause. Only incremented for
+ * non-`none` causes so a healthy scrape never emits an error series.
+ * @type {import('prom-client').Counter}
+ */
+const metricsRequestErrorsTotal = new client.Counter({
+  name: 'metrics_request_errors_total',
+  help: 'Total metrics endpoint request errors by cause',
+  labelNames: ['cause'],
+  registers: [registry],
+});
+
+/**
+ * Records the outcome of a metrics endpoint request: duration histogram,
+ * request counter, bounded error counter, and one structured log line at the
+ * severity matching the status class.
+ *
+ * Labels are always drawn from the bounded normalisers — raw status codes and
+ * error messages are never used as label values (unbounded cardinality).
+ *
+ * @param {object} params
+ * @param {number} params.statusCode - Final HTTP status code.
+ * @param {number} [params.durationSeconds=0] - Wall-clock duration.
+ * @param {unknown} [params.error] - Error associated with the outcome, if any.
+ * @param {import('express').Request} [params.req] - Request, used for the
+ *   correlated request logger.
+ * @returns {void}
+ */
+function recordMetricsEndpointOutcome({ statusCode, durationSeconds = 0, error, req } = {}) {
+  const statusClass = normalizeMetricsEndpointStatusClass(statusCode);
+  const cause = normalizeMetricsEndpointCause(error, statusCode);
+
+  metricsRequestsTotal.labels(statusClass).inc();
+  metricsRequestDurationSeconds.labels(statusClass).observe(
+    Number.isFinite(durationSeconds) ? durationSeconds : 0
+  );
+  if (cause !== 'none') {
+    metricsRequestErrorsTotal.labels(cause).inc();
+  }
+
+  const requestLogger = logger.createRequestLogger(req || {});
+  const payload = { event: 'metrics.scrape', statusClass, cause, durationSeconds };
+
+  if (statusClass === '5xx') {
+    requestLogger.error({ ...payload, err: error && error.message }, 'metrics endpoint request failed');
+  } else if (statusClass === '4xx') {
+    requestLogger.warn(payload, 'metrics endpoint request rejected');
+  } else {
+    requestLogger.info(payload, 'metrics endpoint request served');
+  }
+}
 
 // ── KYC webhook metrics (issue #731) ────────────────────────────────────────
 
@@ -1522,6 +1671,13 @@ module.exports = {
   escrowReadCacheHitsTotal,
   escrowReadCacheMissesTotal,
   escrowReadCacheEvictionsTotal,
+  // Consumed by src/middleware/apiKeyAuth.js.
+  apiKeyAuthDurationSeconds,
+  apiKeyAuthErrorsTotal,
+  API_KEY_ERROR_CAUSE_ENUM,
+  API_KEY_OUTCOME_ENUM,
+  classifyApiKeyOutcome,
+  classifyApiKeyErrorCause,
   persistenceRequestDurationSeconds,
   persistenceRequestsTotal,
   persistenceRequestErrorsTotal,
