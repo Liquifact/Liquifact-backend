@@ -66,19 +66,27 @@ const DEFAULT_DOWNLOAD_URL_EXPIRY_SEC = 3600;
 /** Maximum allowed presigned URL expiry (24 hours). */
 const MAX_DOWNLOAD_URL_EXPIRY_SEC = 86400;
 
+/**
+ * Parses a human-readable size string into bytes.
+ *
+ * @param {string} sizeStr - The size string to parse.
+ * @returns {number} The equivalent size in bytes.
+ */
 function parseSize(sizeStr) {
   if (typeof sizeStr !== 'string' || sizeStr.trim() === '') {
     return DEFAULT_MAX_FILE_SIZE;
   }
   const match = sizeStr.trim().match(/^(\d+(?:\.\d+)?)\s*(b|kb|mb|gb)?$/i);
-  if (!match) return DEFAULT_MAX_FILE_SIZE;
+  if (!match) {
+    return DEFAULT_MAX_FILE_SIZE;
+  }
   const value = parseFloat(match[1]);
   const unit = (match[2] || 'b').toLowerCase();
   const multipliers = { b: 1, kb: 1024, mb: 1024 ** 2, gb: 1024 ** 3 };
   return Math.floor(value * multipliers[unit]);
 }
 
-const MAX_FILE_SIZE = parseSize(process.env.BODY_LIMIT_INVOICE || '512kb');
+const MAX_FILE_SIZE = parseSize(process.env.INVOICE_FILE_MAX_SIZE || process.env.BODY_LIMIT_INVOICE || '5mb');
 
 const s3Client = new S3Client({
   region: process.env.AWS_REGION || 'us-east-1',
@@ -91,12 +99,21 @@ const s3Client = new S3Client({
 });
 
 class StorageService {
+  /**
+   * Creates a storage service with the configured bucket and in-memory fallback map.
+   */
   constructor() {
     this.bucket = process.env.S3_BUCKET || 'liquifact-invoices';
     this.maxFileSize = MAX_FILE_SIZE;
     this._inMemoryStore = new Map();
   }
 
+  /**
+   * Sanitizes a provided filename for safe object-key generation.
+   *
+   * @param {string} filename - The raw file name.
+   * @returns {string} A sanitized file name.
+   */
   _sanitizeFilename(filename) {
     if (!filename || typeof filename !== 'string') {
       const err = new Error('Invalid filename');
@@ -118,18 +135,44 @@ class StorageService {
     return name.slice(0, 255);
   }
 
+  /**
+   * Validates that a MIME type is allowed for invoice uploads.
+   *
+   * @param {string} mimeType - The MIME type to validate.
+   * @returns {boolean} True when the MIME type is allow-listed.
+   */
   _validateMimeType(mimeType) {
     return ALLOWED_MIME_TYPES.includes(mimeType);
   }
 
+  /**
+   * Validates that a tenant ID uses the supported characters.
+   *
+   * @param {string} tenantId - The tenant identifier.
+   * @returns {boolean} True when the identifier is valid.
+   */
   _validateTenantId(tenantId) {
     return typeof tenantId === 'string' && /^[a-zA-Z0-9_-]+$/.test(tenantId);
   }
 
+  /**
+   * Validates that an invoice ID uses the supported characters.
+   *
+   * @param {string} invoiceId - The invoice identifier.
+   * @returns {boolean} True when the identifier is valid.
+   */
   _validateInvoiceId(invoiceId) {
     return typeof invoiceId === 'string' && /^[a-zA-Z0-9_-]+$/.test(invoiceId);
   }
 
+  /**
+   * Generates an object key scoped to a tenant and invoice.
+   *
+   * @param {string} tenantId - The tenant identifier.
+   * @param {string} invoiceId - The invoice identifier.
+   * @param {string} safeName - The sanitized file name.
+   * @returns {string} The generated storage key.
+   */
   _generateKey(tenantId, invoiceId, safeName) {
     if (!this._validateTenantId(tenantId)) {
       const err = new Error('Invalid tenant ID');
@@ -146,6 +189,16 @@ class StorageService {
     return `tenants/${tenantId}/invoices/${invoiceId}/${uuid}-${safeName}`;
   }
 
+  /**
+   * Uploads a file buffer to object storage or the in-memory fallback.
+   *
+   * @param {Buffer} fileBuffer - The file bytes to store.
+   * @param {string} fileName - The original file name.
+   * @param {string} mimeType - The file MIME type.
+   * @param {string} tenantId - The tenant identifier.
+   * @param {string} invoiceId - The invoice identifier.
+   * @returns {Promise<string>} The generated object key.
+   */
   async uploadFile(fileBuffer, fileName, mimeType, tenantId = 'unknown', invoiceId = 'unknown') {
     if (!this._validateTenantId(tenantId)) {
       const err = new Error('Invalid tenant ID');
@@ -173,6 +226,12 @@ class StorageService {
 
     const safeName = this._sanitizeFilename(fileName);
     const key = this._generateKey(tenantId, invoiceId, safeName);
+
+    if (process.env.NODE_ENV === 'test' || process.env.STORAGE_IN_MEMORY === 'true') {
+      await this.uploadFileInMemory({ key, body: fileBuffer, mimeType });
+      return key;
+    }
+
     const command = new PutObjectCommand({
       Bucket: this.bucket,
       Key: key,
@@ -183,6 +242,17 @@ class StorageService {
     return key;
   }
 
+  /**
+   * Builds a presigned object-upload URL for a tenant-scoped invoice file.
+   *
+   * @param {Object} params - The request parameters.
+   * @param {string} params.tenantId - The tenant identifier.
+   * @param {string} params.invoiceId - The invoice identifier.
+   * @param {string} params.fileName - The original file name.
+   * @param {string} params.mimeType - The MIME type.
+   * @param {number} params.fileSize - The file size in bytes.
+   * @returns {Promise<{url: string, key: string}>} The signed upload URL and storage key.
+   */
   async getPresignedUploadUrl({ tenantId, invoiceId, fileName, mimeType, fileSize }) {
     if (!this._validateTenantId(tenantId)) {
       const err = new Error('Invalid tenant ID');
@@ -218,6 +288,13 @@ class StorageService {
     return { url, key };
   }
 
+  /**
+   * Generates a presigned download URL for an object key.
+   *
+   * @param {string} key - The storage object key.
+   * @param {number} [expiresIn=DEFAULT_DOWNLOAD_URL_EXPIRY_SEC] - The expiry in seconds.
+   * @returns {Promise<string>} The signed download URL.
+   */
   async getSignedUrl(key, expiresIn = DEFAULT_DOWNLOAD_URL_EXPIRY_SEC) {
     const expiry = Math.floor(expiresIn);
     if (expiry < 1 || expiry > MAX_DOWNLOAD_URL_EXPIRY_SEC) {
@@ -229,6 +306,18 @@ class StorageService {
     return await getSignedUrl(s3Client, command, { expiresIn: expiry });
   }
 
+  /**
+   * Persists invoice-file metadata to the invoice_files table.
+   *
+   * @param {Object} params - The metadata to store.
+   * @param {string} params.tenantId - The tenant identifier.
+   * @param {string} params.invoiceId - The invoice identifier.
+   * @param {string} params.key - The storage object key.
+   * @param {string} params.sha256 - The file hash.
+   * @param {string} params.mimeType - The MIME type.
+   * @param {number} params.size - The file size.
+   * @returns {Promise<void>} Resolves when metadata has been inserted.
+   */
   async saveMetadata({ tenantId, invoiceId, key, sha256, mimeType, size }) {
     const now = new Date().toISOString();
     await db('invoice_files').insert({
@@ -242,14 +331,34 @@ class StorageService {
     });
   }
 
+  /**
+   * Fetches invoice-file metadata for the scoped tenant and invoice.
+   *
+   * @param {Object} params - The lookup parameters.
+   * @param {string} params.tenantId - The tenant identifier.
+   * @param {string} params.invoiceId - The invoice identifier.
+   * @returns {Promise<Object|null>} The matching metadata row, if present.
+   */
   async getMetadata({ tenantId, invoiceId }) {
     return await db('invoice_files').where({ tenant_id: tenantId, invoice_id: invoiceId }).first();
   }
 
+  /**
+   * Validates the uploaded object metadata against the declared MIME type and size.
+   *
+   * @param {string} key - The storage object key.
+   * @param {string} declaredMime - The declared MIME type.
+   * @param {number} declaredSize - The declared size.
+   * @returns {Promise<{valid: boolean, contentType: string, contentLength: number}>} Validation result.
+   */
   async validateUploadedObject(key, declaredMime, declaredSize) {
     if (process.env.NODE_ENV === 'test') {
       const entry = this._inMemoryStore.get(key);
-      if (!entry) { const err = new Error('Uploaded object not found'); err.code = 'UPLOAD_NOT_FOUND'; throw err; }
+      if (!entry) {
+        const err = new Error('Uploaded object not found');
+        err.code = 'UPLOAD_NOT_FOUND';
+        throw err;
+      }
       const valid = entry.mimeType === declaredMime && entry.body.length === declaredSize;
       return { valid, contentType: entry.mimeType, contentLength: entry.body.length };
     }
@@ -258,49 +367,57 @@ class StorageService {
     const res = await s3Client.send(cmd);
     const ct = res.ContentType || '';
     const cl = res.ContentLength || 0;
-    if (cl > this.maxFileSize) { const err = new Error(`Uploaded file size ${cl} exceeds maximum`); err.code = 'FILE_TOO_LARGE'; throw err; }
+    if (cl > this.maxFileSize) {
+      const err = new Error(`Uploaded file size ${cl} exceeds maximum`);
+      err.code = 'FILE_TOO_LARGE';
+      throw err;
+    }
     if (declaredMime === 'application/pdf' && cl > 0) {
       try {
         const { GetObjectCommand } = require('@aws-sdk/client-s3');
         const gCmd = new GetObjectCommand({ Bucket: this.bucket, Key: key, Range: 'bytes=0-4' });
         const gRes = await s3Client.send(gCmd);
-        const chunks = []; for await (const c of gRes.Body) { chunks.push(c); }
-        if (Buffer.concat(chunks).toString('utf8') !== '%PDF-') { const err = new Error('Invalid PDF header'); err.code = 'INVALID_PDF_HEADER'; throw err; }
-      } catch (e) { if (e.code === 'INVALID_PDF_HEADER') throw e; }
+        const chunks = [];
+        for await (const c of gRes.Body) {
+          chunks.push(c);
+        }
+        if (Buffer.concat(chunks).toString('utf8') !== '%PDF-') {
+          const err = new Error('Invalid PDF header');
+          err.code = 'INVALID_PDF_HEADER';
+          throw err;
+        }
+      } catch (e) {
+        if (e.code === 'INVALID_PDF_HEADER') {
+          throw e;
+        }
+      }
     }
     return { valid: ct === declaredMime && cl === declaredSize, contentType: ct, contentLength: cl };
   }
 
-  async validateUploadedObject(key, declaredMime, declaredSize) {
-    if (process.env.NODE_ENV === 'test') {
-      const entry = this._inMemoryStore.get(key);
-      if (!entry) { const err = new Error('Uploaded object not found'); err.code = 'UPLOAD_NOT_FOUND'; throw err; }
-      const valid = entry.mimeType === declaredMime && entry.body.length === declaredSize;
-      return { valid, contentType: entry.mimeType, contentLength: entry.body.length };
-    }
-    const { HeadObjectCommand } = require('@aws-sdk/client-s3');
-    const cmd = new HeadObjectCommand({ Bucket: this.bucket, Key: key });
-    const res = await s3Client.send(cmd);
-    const ct = res.ContentType || '';
-    const cl = res.ContentLength || 0;
-    if (cl > this.maxFileSize) { const err = new Error(`Uploaded file size ${cl} exceeds maximum`); err.code = 'FILE_TOO_LARGE'; throw err; }
-    if (declaredMime === 'application/pdf' && cl > 0) {
-      try {
-        const { GetObjectCommand } = require('@aws-sdk/client-s3');
-        const gCmd = new GetObjectCommand({ Bucket: this.bucket, Key: key, Range: 'bytes=0-4' });
-        const gRes = await s3Client.send(gCmd);
-        const chunks = []; for await (const c of gRes.Body) { chunks.push(c); }
-        if (Buffer.concat(chunks).toString('utf8') !== '%PDF-') { const err = new Error('Invalid PDF header'); err.code = 'INVALID_PDF_HEADER'; throw err; }
-      } catch (e) { if (e.code === 'INVALID_PDF_HEADER') throw e; }
-    }
-    return { valid: ct === declaredMime && cl === declaredSize, contentType: ct, contentLength: cl };
-  }
-
+  /**
+   * Generates a storage key from the provided tenant, invoice, and file name.
+   *
+   * @param {Object} params - The key-generation parameters.
+   * @param {string} params.tenantId - The tenant identifier.
+   * @param {string} params.invoiceId - The invoice identifier.
+   * @param {string} params.fileName - The raw file name.
+   * @returns {string} The generated storage key.
+   */
   generateKey({ tenantId, invoiceId, fileName }) {
     const safeName = this._sanitizeFilename(fileName);
     return this._generateKey(tenantId, invoiceId, safeName);
   }
 
+  /**
+   * Writes an uploaded file into the in-memory fallback store for tests.
+   *
+   * @param {Object} params - The payload to cache.
+   * @param {string} params.key - The storage key.
+   * @param {Buffer} params.body - The file bytes.
+   * @param {string} params.mimeType - The MIME type.
+   * @returns {Promise<void>} Resolves when the object is cached.
+   */
   async uploadFileInMemory({ key, body, mimeType }) {
     if (process.env.NODE_ENV === 'test') {
       this._inMemoryStore.set(key, { body, mimeType });
@@ -310,6 +427,13 @@ class StorageService {
     await s3Client.send(command);
   }
 
+  /**
+   * Retrieves a stored file body by key.
+   *
+   * @param {Object} params - The lookup parameters.
+   * @param {string} params.key - The storage key.
+   * @returns {Promise<Buffer>} The file bytes.
+   */
   async getFile({ key }) {
     if (process.env.NODE_ENV === 'test') {
       const entry = this._inMemoryStore.get(key);
@@ -539,6 +663,9 @@ async function runStartupStorageProbe(probeFn = probeS3Connectivity) {
   return result;
 }
 
+const storageService = new StorageService();
+
+module.exports = storageService;
 module.exports.StorageService = StorageService;
 module.exports.ALLOWED_MIME_TYPES = ALLOWED_MIME_TYPES;
 module.exports.DEFAULT_MAX_FILE_SIZE = DEFAULT_MAX_FILE_SIZE;

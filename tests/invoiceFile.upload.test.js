@@ -270,6 +270,11 @@ describe('config-driven upload size limit', () => {
     expect(fresh.UPLOAD_SIZE_LIMIT).toBe('2kb');
   });
 
+  it('rejects an invalid INVOICE_FILE_MAX_SIZE value when the route loads', () => {
+    process.env.INVOICE_FILE_MAX_SIZE = 'no-limit';
+    expect(() => require('../src/routes/invoiceFile')).toThrow(/INVOICE_FILE_MAX_SIZE/i);
+  });
+
   it('rejects upload when file exceeds env-configured limit', async () => {
     process.env.INVOICE_FILE_MAX_SIZE = '1kb';
     jest.resetModules();

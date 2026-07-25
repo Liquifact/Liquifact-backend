@@ -44,7 +44,8 @@ const MAX_CACHE_SIZE = 10000;
 const tokenCache = createCacheStore();
 
 /**
- * In-flight promise tracker for single-flight deduplication.
+ * Tracks in-flight metadata fetches so concurrent requests for the same token
+ * share a single promise instead of issuing duplicate RPC calls.
  *
  * @type {Map<string, Promise<Object>>}
  */
@@ -383,6 +384,83 @@ async function getFreshTokenMetadata(asset) {
 }
 
 /**
+ * Resolves token metadata for many assets with input deduplication and
+ * single-flight protection.
+ *
+ * The resolver deduplicates identical assets by cache key, returns cache hits
+ * immediately, and uses a bounded worker pool to limit RPC fan-out.
+ * Concurrent misses for the same token reuse the existing in-flight promise
+ * tracking in getTokenMetadata.
+ *
+ * @description Resolves metadata for a batched set of assets while preserving
+ * the existing TTL/invalidation semantics and guarding against stampedes.
+ * @param {Array<Object>} assets - Array of asset descriptors.
+ * @param {Object} [options] - Optional configuration.
+ * @param {number} [options.ttlMs] - Cache TTL in milliseconds.
+ * @param {boolean} [options.skipCache] - Skip cache and force fresh fetch.
+ * @param {number} [options.concurrency] - Maximum concurrent metadata fetches.
+ * @returns {Promise<Array<Object>>} Array of token metadata in the same order as input.
+ */
+async function resolveMany(assets, options = {}) {
+  const {
+    ttlMs = DEFAULT_CACHE_TTL_MS,
+    skipCache = false,
+    concurrency = 5,
+  } = options;
+
+  if (!Array.isArray(assets)) {
+    throw new TypeError('assets must be an array');
+  }
+
+  if (assets.length === 0) {
+    return [];
+  }
+
+  const uniqueAssets = [];
+  const seenCacheKeys = new Set();
+
+  for (const asset of assets) {
+    const validation = validateAsset(asset);
+    if (!validation.valid) {
+      const error = new Error(validation.reason);
+      error.code = 'INVALID_ASSET';
+      error.status = 400;
+      throw error;
+    }
+
+    const cacheKey = generateCacheKey(asset);
+    if (!seenCacheKeys.has(cacheKey)) {
+      seenCacheKeys.add(cacheKey);
+      uniqueAssets.push(asset);
+    }
+  }
+
+  const resolvedByCacheKey = new Map();
+  const workerCount = Math.max(1, Math.min(concurrency, uniqueAssets.length));
+  let nextIndex = 0;
+
+  /**
+   * Processes a subset of the pending asset work queue.
+   *
+   * @returns {Promise<void>}
+   */
+  async function worker() {
+    while (nextIndex < uniqueAssets.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      const asset = uniqueAssets[currentIndex];
+      const cacheKey = generateCacheKey(asset);
+      const metadata = await getTokenMetadata(asset, { ttlMs, skipCache });
+      resolvedByCacheKey.set(cacheKey, metadata);
+    }
+  }
+
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+  return assets.map(asset => resolvedByCacheKey.get(generateCacheKey(asset)));
+}
+
+/**
  * Batch fetches token metadata for multiple assets.
  *
  * Fetches metadata concurrently for better performance. Uses cache where
@@ -398,102 +476,16 @@ async function batchGetTokenMetadata(assets, options = {}) {
   return Promise.all(promises);
 }
 
-/**
- * Resolves token metadata for an array of assets with deduplication and bounded RPC concurrency.
- *
- * Implements:
- * - Input deduplication (duplicate assets share the same lookup).
- * - Cache-first access (cache hits are returned immediately without consuming concurrency slots).
- * - Bounded concurrency (RPC fan-out for cache misses is capped to prevent stampedes).
- * - Single-flight caching (concurrent misses for the same token share one RPC call).
- *
- * IMPORTANT: Cached decimals MUST NOT be used for on-chain principal computations.
- *
- * @param {Array<Object>} assets - Array of asset descriptors to resolve.
- * @param {Object} [options={}] - Batch options.
- * @param {number} [options.concurrency=5] - Maximum concurrent RPC calls.
- * @param {number} [options.ttlMs] - Custom cache TTL.
- * @returns {Promise<Array<Object|null>>} Array of metadata matching the input order.
- */
-async function resolveMany(assets, options = {}) {
-  const { concurrency = 5, ttlMs = DEFAULT_CACHE_TTL_MS } = options;
-  if (!assets || !Array.isArray(assets) || assets.length === 0) {
-    return [];
-  }
-
-  const uniqueKeys = new Set();
-  const missingAssets = [];
-  const resultsByKey = new Map();
-
-  // Phase 1: Deduplicate and check cache/in-flight synchronously
-  for (const asset of assets) {
-    const validation = validateAsset(asset);
-    if (!validation.valid) {
-      continue;
-    }
-
-    const key = generateCacheKey(asset);
-    if (!uniqueKeys.has(key)) {
-      uniqueKeys.add(key);
-
-      const cached = tokenCache.get(key);
-      if (cached) {
-        resultsByKey.set(key, cached);
-      } else {
-        missingAssets.push({ asset, key });
-      }
-    }
-  }
-
-  // Phase 2: Resolve missing assets with bounded concurrency
-  const remaining = [...missingAssets];
-  
-  /**
-   * Worker function to process missing assets concurrently.
-   *
-   * @returns {Promise<void>}
-   */
-  async function worker() {
-    while (remaining.length > 0) {
-      const { asset, key } = remaining.shift();
-      try {
-        const metadata = await getTokenMetadata(asset, { ttlMs, skipCache: false });
-        resultsByKey.set(key, metadata);
-      } catch (err) {
-        logger.error({ err: err.message, key }, 'Failed to resolve token metadata in batch');
-        resultsByKey.set(key, null);
-      }
-    }
-  }
-
-  const workers = [];
-  const workerCount = Math.min(concurrency, missingAssets.length);
-  for (let i = 0; i < workerCount; i++) {
-    workers.push(worker());
-  }
-
-  await Promise.all(workers);
-
-  // Phase 3: Map results back to original array order
-  return assets.map(asset => {
-    const validation = validateAsset(asset);
-    if (!validation.valid) {
-      return null;
-    }
-    return resultsByKey.get(generateCacheKey(asset)) || null;
-  });
-}
-
 module.exports = {
+  DEFAULT_CACHE_TTL_MS,
+  MAX_CACHE_SIZE,
+  generateCacheKey,
+  validateAsset,
   getTokenMetadata,
-  getFreshTokenMetadata,
-  batchGetTokenMetadata,
-  resolveMany,
   invalidateTokenMetadata,
   clearTokenCache,
   getCacheStats,
-  validateAsset,
-  generateCacheKey,
-  DEFAULT_CACHE_TTL_MS,
-  MAX_CACHE_SIZE,
+  getFreshTokenMetadata,
+  batchGetTokenMetadata,
+  resolveMany,
 };

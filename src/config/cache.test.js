@@ -14,6 +14,13 @@ describe('cacheConfig', () => {
     delete process.env.ESCROW_CACHE_TTL_SECONDS;
     const { cacheConfig } = require('./cache');
     expect(cacheConfig.escrowTtl).toBe(30000);
+    expect(cacheConfig.escrowMaxEntries).toBe(500);
+  });
+
+  it('parses ESCROW_CACHE_MAX_ENTRIES', () => {
+    process.env.ESCROW_CACHE_MAX_ENTRIES = '25';
+    const { cacheConfig } = require('./cache');
+    expect(cacheConfig.escrowMaxEntries).toBe(25);
   });
 
   it('parses ESCROW_CACHE_TTL_SECONDS from env and converts to ms', () => {

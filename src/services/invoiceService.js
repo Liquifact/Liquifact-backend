@@ -6,17 +6,17 @@
  * data leakage.  Soft-deletes are implemented via the `deleted_at` column.
  *
  * Public API (DB-backed):
- *   listInvoices(tenantId, opts)          â€” list with soft-delete filter
- *   getInvoices(queryParams | tenantId)   â€” legacy dual-arity shim kept for
+ *   listInvoices(tenantId, opts)          — list with soft-delete filter
+ *   getInvoices(queryParams | tenantId)   — legacy dual-arity shim kept for
  *                                           backward-compat with existing routes
- *   getInvoiceById(id, tenantId)          â€” single record, tenant-scoped
- *   createInvoice(data, tenantId)         â€” insert with generated invoice_id
- *   updateInvoice(id, updates, tenantId)  â€” tenant-scoped UPDATE
- *   deleteInvoice(id, tenantId)           â€” soft-delete
- *   resolveInvoiceForTenant(id, tenantId) â€” tenant-scoped lookup for state routes
- *   transitionInvoice(id, target, tenantId, opts) â€” execute + persist transition
+ *   getInvoiceById(id, tenantId)          — single record, tenant-scoped
+ *   createInvoice(data, tenantId)         — insert with generated invoice_id
+ *   updateInvoice(id, updates, tenantId)  — tenant-scoped UPDATE
+ *   deleteInvoice(id, tenantId)           — soft-delete
+ *   resolveInvoiceForTenant(id, tenantId) — tenant-scoped lookup for state routes
+ *   transitionInvoice(id, target, tenantId, opts) — execute + persist transition
  *
- * KYC helpers (in-memory mockInvoices â€” retained for test compatibility):
+ * KYC helpers (in-memory mockInvoices — retained for test compatibility):
  *   getInvoicesByKycStatus(userId, kycStatus)
  *   updateInvoiceKycStatus(invoiceId, newKycStatus, kycRecordId)
  *
@@ -85,7 +85,7 @@ const mockInvoices = [
 
 /**
  * Returns the current timestamp as a value that works in both SQLite and PG.
- * Uses `db.fn.now()` when available (Knex â‰¥ 0.95), otherwise falls back to
+ * Uses `db.fn.now()` when available (Knex = 0.95), otherwise falls back to
  * an ISO string so tests that mock the db instance don't blow up.
  *
  * @returns {string|Function} timestamp-compatible value
@@ -136,8 +136,8 @@ async function listInvoices(tenantId, opts = {}) {
  * Dual-arity shim kept for backward compatibility with existing callers and
  * tests that use either call form:
  *
- *   getInvoices(queryParams)          â€” object arg (legacy /api/invoices route)
- *   getInvoices(tenantId, status)     â€” positional args (older service callers)
+ *   getInvoices(queryParams)          — object arg (legacy /api/invoices route)
+ *   getInvoices(tenantId, status)     — positional args (older service callers)
  *
  * @param {object|string} arg1 - Either a query-params object or a tenant ID string.
  * @param {string} [arg2]      - Optional status filter (only when arg1 is a tenant ID).
@@ -145,7 +145,7 @@ async function listInvoices(tenantId, opts = {}) {
  */
 async function getInvoices(arg1 = {}, arg2) {
   if (arg1 && typeof arg1 === 'object') {
-    // Query-params style â€” used by old /api/invoices GET handler
+    // Query-params style — used by old /api/invoices GET handler
     try {
       let query = db('invoices').select('*');
       query = applyQueryOptions(query, arg1, INVOICE_QUERY_CONFIG);
@@ -156,7 +156,7 @@ async function getInvoices(arg1 = {}, arg2) {
     }
   }
 
-  // Positional args style â€” (tenantId, status)
+  // Positional args style — (tenantId, status)
   const tenantId = arg1;
   if (!tenantId) {
     throw new TypeError('tenantId is required');
@@ -165,7 +165,7 @@ async function getInvoices(arg1 = {}, arg2) {
   return listInvoices(tenantId, { status: arg2 });
 }
 
-// â”€â”€ Column map for cursor pagination (aligns with INVOICE_QUERY_CONFIG) â”€â”€â”€â”€
+// -- Column map for cursor pagination (aligns with INVOICE_QUERY_CONFIG) ----
 
 const INVOICE_PAGINATION_COLUMN_MAP = {
   amount: 'amount',
@@ -193,8 +193,15 @@ function _applyInvoiceFilters(query, filters) {
  * Paginated invoice listing with cursor-based (preferred) and offset-based
  * (legacy) pagination modes.
  *
+ * Cursor mode uses keyset pagination over `(sortField, id)`, returning a stable
+ * `nextCursor` that works correctly under concurrent inserts.  The cursor is
+ * opaque and HMAC-signed — tampering yields a {@link CursorError}.
+ *
+ * Offset mode accepts `page` (1-based) and `limit` for backward compat.
+ * Both modes return the same `{ data, meta }` shape.
+ *
  * @param {Object}  options
- * @param {Object}  [options.filters={}]     - Validated filters.
+ * @param {Object}  [options.filters={}]     - Validated filters (status, smeId, buyerId, dateFrom, dateTo).
  * @param {Object}  [options.sorting={}]     - Sorting config ({ sortBy, order }).
  * @param {Object}  [options.pagination={}]  - Pagination config ({ cursor, page, limit }).
  * @returns {Promise<{ data: Array, meta: Object }>}
@@ -207,8 +214,10 @@ async function getInvoicesWithPagination({ filters = {}, sorting = {}, paginatio
     : 'created_at';
   const order = (sorting.order === 'asc') ? 'asc' : 'desc';
 
+  // -- Base query (exclude soft-deleted records) -----------------------------
   const baseQuery = () => db('invoices').whereNull('deleted_at');
 
+  // -- Total count (filter-aware, offset-independent) ------------------------
   let countQ = baseQuery();
   _applyInvoiceFilters(countQ, filters);
   const countRow = await countQ.count('* as total').first();
@@ -216,6 +225,7 @@ async function getInvoicesWithPagination({ filters = {}, sorting = {}, paginatio
 
   const useCursor = Boolean(pagination.cursor);
 
+  // -- Cursor-based keyset pagination ----------------------------------------
   if (useCursor) {
     const decoded = decodeCursor(pagination.cursor, sortField);
     const { sortValue, id: lastId } = decoded;
@@ -223,6 +233,9 @@ async function getInvoicesWithPagination({ filters = {}, sorting = {}, paginatio
     let dataQ = baseQuery().select('*');
     _applyInvoiceFilters(dataQ, filters);
 
+    // Keyset predicate:
+    //   ASC:  (sortField > lastValue) OR (sortField = lastValue AND id > lastId)
+    //   DESC: (sortField < lastValue) OR (sortField = lastValue AND id < lastId)
     const gtOp = order === 'asc' ? '>' : '<';
     dataQ.where(function () {
       this.where(sortField, gtOp, sortValue)
@@ -250,6 +263,7 @@ async function getInvoicesWithPagination({ filters = {}, sorting = {}, paginatio
     return { data, meta: { total, limit, hasMore, nextCursor } };
   }
 
+  // -- Offset-based pagination (legacy, backward-compatible) -----------------
   const page = Math.max(1, parseInt(pagination.page, 10) || 1);
   const offset = (page - 1) * limit;
 
@@ -309,7 +323,18 @@ async function getInvoiceById(id, tenantId) {
 /**
  * Creates a new invoice row in the database for the given tenant.
  *
+ * Generates a unique `invoice_id` using the current timestamp + random suffix.
+ * All callers are expected to validate the payload **before** calling this
+ * function; no re-validation is performed here.
+ *
  * @param {object} invoiceData              - Validated invoice fields.
+ * @param {number} invoiceData.amount       - Positive invoice amount.
+ * @param {string} invoiceData.customer     - Customer / buyer name.
+ * @param {string} [invoiceData.currency]   - ISO 4217 currency code.
+ * @param {string} [invoiceData.dueDate]    - Due date (YYYY-MM-DD).
+ * @param {string} [invoiceData.description] - Optional description.
+ * @param {string} [invoiceData.invoiceNumber] - Optional invoice number.
+ * @param {object} [invoiceData.metadata]   - Additional metadata.
  * @param {string} tenantId                 - Tenant identifier.
  * @returns {Promise<object>} The newly created invoice row.
  * @throws {TypeError} When tenantId is missing.
@@ -346,18 +371,23 @@ async function createInvoice(invoiceData, tenantId) {
     ...(metadata !== undefined && { metadata: metadata ? JSON.stringify(metadata) : null }),
   };
 
+  // SQLite returns an array of primary-key integers from insert(); PostgreSQL
+  // returns full rows when `.returning('*')` is chained. We normalise both.
   const result = await db('invoices').insert(row).returning('*');
 
   if (Array.isArray(result) && result.length > 0 && typeof result[0] === 'object') {
+    // PostgreSQL path — full row returned
     return result[0];
   }
 
+  // SQLite path — result is an array of inserted PKs; refetch by invoice_id
   const inserted = await db('invoices').where({ invoice_id: invoiceId }).first();
   return inserted;
 }
 
 /**
  * Applies partial updates to an invoice, scoped to the owning tenant.
+ * Automatically refreshes `updated_at`.
  *
  * @param {string} id          - The invoice_id to update.
  * @param {object} updates     - Column-value pairs to update.
@@ -369,11 +399,13 @@ async function updateInvoice(id, updates = {}, tenantId) {
   if (!id) {
     throw new TypeError('invoice id required');
   }
+  // Ensure invoice exists and belongs to tenant
   const existing = await db('invoices').where({ invoice_id: id, tenant_id: tenantId }).first();
   if (!existing) {
     return null;
   }
 
+  // Reject updates when invoice is in a locked status
   if (existing && LOCKED_STATUSES.has(existing.status)) {
     throw new AppError({
       type: 'https://liquifact.com/probs/validation-error',
@@ -392,6 +424,7 @@ async function updateInvoice(id, updates = {}, tenantId) {
     return result[0];
   }
 
+  // SQLite path
   return db('invoices').where({ invoice_id: id, tenant_id: tenantId }).first();
 }
 
@@ -408,11 +441,13 @@ async function deleteInvoice(id, tenantId) {
     throw new TypeError('invoice id required');
   }
 
+  // Ensure invoice exists and belongs to tenant
   const existing = await db('invoices').where({ invoice_id: id, tenant_id: tenantId }).first();
   if (!existing) {
     return null;
   }
 
+  // Reject deletes when invoice is in a locked status
   if (existing && LOCKED_STATUSES.has(existing.status)) {
     throw new AppError({
       type: 'https://liquifact.com/probs/validation-error',
@@ -434,6 +469,7 @@ async function deleteInvoice(id, tenantId) {
     return result[0];
   }
 
+  // SQLite path — refetch after update
   return db('invoices').where({ invoice_id: id, tenant_id: tenantId }).first();
 }
 
@@ -459,6 +495,8 @@ function parseInvoiceMetadata(raw) {
 
 /**
  * Resolves an invoice for the authenticated tenant.
+ * Returns null when the invoice does not exist, is soft-deleted, or belongs to
+ * another tenant — callers should respond with 404 without leaking existence.
  *
  * @param {string} invoiceId - Public invoice_id (e.g. "inv-001").
  * @param {string} tenantId  - Tenant identifier from extractTenant middleware.
@@ -474,13 +512,22 @@ async function resolveInvoiceForTenant(invoiceId, tenantId) {
 
 /**
  * Executes a validated state transition via the invoice state machine and
- * persists the resulting status to the database.
+ * persists the resulting status to the database. Status is always derived from
+ * the state machine result — client-supplied status fields are never written.
+ *
+ * Optionally merges `escrowId` into the invoice metadata when linking escrow.
  *
  * @param {string} invoiceId   - Public invoice_id.
  * @param {string} targetState - Desired lifecycle state from the state machine.
  * @param {string} tenantId    - Tenant identifier.
  * @param {object} [options={}] - Transition context.
- * @returns {Promise<object>} State-machine transition result.
+ * @param {string} options.actor - Actor performing the transition.
+ * @param {string} [options.reason] - Human-readable reason (required for terminal targets).
+ * @param {string} [options.ipAddress] - Request source IP.
+ * @param {string} [options.userAgent] - Request user agent.
+ * @param {object} [options.metadata] - Additional audit metadata.
+ * @param {string|null|undefined} [options.escrowId] - Escrow contract ID to persist in metadata.
+ * @returns {Promise<object>} State-machine transition result (previousState, newState, auditLog, …).
  * @throws {Error} With `.code` / `.allowedTransitions` when validation fails.
  * @throws {Error} With `.code = 'INVOICE_NOT_FOUND'` and `.statusCode = 404` when not found.
  */
@@ -532,6 +579,20 @@ async function transitionInvoice(invoiceId, targetState, tenantId, options = {})
 // SME Dashboard Metrics
 // ---------------------------------------------------------------------------
 
+/**
+ * Status-to-category mapping for SME dashboard metrics.
+ *
+ * Each invoice status maps to exactly one dashboard category:
+ * - **open** — invoices awaiting verification or verified but not yet funded.
+ * - **funded** — invoices that have been funded but not yet settled.
+ * - **settled** — invoices that are fully settled or paid.
+ * - **defaulted** — invoices that have entered default.
+ *
+ * Statuses **not** listed here (e.g. `withdrawn`) are intentionally excluded
+ * from every category so they do not inflate any bucket.
+ *
+ * @constant {Record<string, string>}
+ */
 const STATUS_CATEGORY_MAP = {
   pending_verification: 'open',
   verified: 'open',
@@ -541,7 +602,16 @@ const STATUS_CATEGORY_MAP = {
   defaulted: 'defaulted',
 };
 
+/**
+ * Pre-computed grouping of statuses by dashboard category, derived once
+ * from {@link STATUS_CATEGORY_MAP} at module load.
+ *
+ * E.g.: `{ open: ['pending_verification', 'verified'], funded: ['funded'], … }`
+ *
+ * @constant {Record<string, string[]>}
+ */
 const CATEGORY_STATUSES = (() => {
+  /** @type {Record<string, string[]>} */
   const groups = {};
   for (const [status, category] of Object.entries(STATUS_CATEGORY_MAP)) {
     if (!groups[category]) {
@@ -552,14 +622,39 @@ const CATEGORY_STATUSES = (() => {
   return groups;
 })();
 
+/**
+ * Ordered list of category names derived from {@link CATEGORY_STATUSES}.
+ * Guarantees a deterministic SELECT clause order across invocations.
+ *
+ * @constant {string[]}
+ */
 const CATEGORY_NAMES = Object.keys(CATEGORY_STATUSES);
 
 /**
- * Returns aggregated invoice counts grouped by SME dashboard category.
+ * Returns aggregated invoice counts grouped by SME dashboard category,
+ * scoped to a single tenant and SME owner.
  *
- * @param {string} tenantId - Tenant identifier.
- * @param {string} userId   - SME owner identifier.
+ * The query produces a single database row with one integer column per
+ * category defined in {@link STATUS_CATEGORY_MAP} (`open`, `funded`,
+ * `settled`, `defaulted`).  The `SUM(CASE …)` clauses are built
+ * **programmatically** from {@link STATUS_CATEGORY_MAP} so the constant
+ * is the single source of truth — adding or removing a status mapping
+ * automatically updates the aggregation without touching the SQL.
+ *
+ * Statuses not listed in the map (e.g. `withdrawn`) are excluded from
+ * every category.  Soft-deleted invoices (`deleted_at IS NOT NULL`) are
+ * always excluded.
+ *
+ * @param {string} tenantId - Tenant identifier (required, from `extractTenant` middleware).
+ * @param {string} userId   - SME owner identifier (required, matches `sme_id` column).
  * @returns {Promise<{open: number, funded: number, settled: number, defaulted: number}>}
+ *   Always returns an object with all four keys; missing categories default to `0`.
+ * @throws {TypeError} When tenantId or userId is missing or not a non-empty string.
+ *
+ * @security
+ *   - Scoped to `tenant_id` and `sme_id` on every query — no cross-tenant or
+ *     cross-owner data leakage.
+ *   - Uses positional (parameterised) bindings via Knex `.where()`.
  */
 async function getSmeInvoiceCounts(tenantId, userId) {
   if (!tenantId || typeof tenantId !== 'string') {
@@ -569,8 +664,13 @@ async function getSmeInvoiceCounts(tenantId, userId) {
     throw new TypeError('userId is required');
   }
 
+  // Build one SUM(CASE WHEN status IN (...) THEN 1 ELSE 0 END) AS <category>
+  // per category using the pre-computed grouping so there is zero duplication
+  // between STATUS_CATEGORY_MAP and the SQL.
   const selectClauses = CATEGORY_NAMES.map((category) => {
     const statuses = CATEGORY_STATUSES[category];
+    // Status values come from the hardcoded STATUS_CATEGORY_MAP constant,
+    // so string interpolation is safe here — no user input reaches this path.
     const inClause = statuses.map((s) => `'${s}'`).join(', ');
     return db.raw(
       `SUM(CASE WHEN status IN (${inClause}) THEN 1 ELSE 0 END) AS ??`,
@@ -584,6 +684,9 @@ async function getSmeInvoiceCounts(tenantId, userId) {
     .select(...selectClauses)
     .first();
 
+  // When no rows match, the aggregate still returns one row with NULL
+  // values in SQLite; coerce every column to a safe integer.
+  /** @type {{open: number, funded: number, settled: number, defaulted: number}} */
   const result = {};
   for (const category of CATEGORY_NAMES) {
     result[category] = Number(row?.[category]) || 0;
@@ -592,14 +695,24 @@ async function getSmeInvoiceCounts(tenantId, userId) {
 }
 
 /**
- * Retrieves a cursor-paginated list of invoices for the SME dashboard.
+ * Retrieves a cursor-paginated list of invoices for the SME dashboard,
+ * scoped to a single tenant and SME owner.
+ *
+ * Uses keyset pagination with `created_at DESC, id DESC` so the ordering
+ * is stable under concurrent inserts.  The cursor is opaque and HMAC-signed;
+ * malformed or tampered cursors throw {@link CursorError}.
+ *
+ * When no cursor is supplied the first page is returned.
+ * The caller controls page size via `limit` (1–100, default 20).
  *
  * @param {string} tenantId - Tenant identifier (required).
  * @param {string} userId   - SME owner identifier (required).
  * @param {object} [options={}]
  * @param {string} [options.cursor] - Opaque cursor from a prior page.
- * @param {number} [options.limit=20] - Max rows per page (clamped to 1â€“100).
- * @returns {Promise<{invoices: object[], meta: object}>}
+ * @param {number} [options.limit=20] - Max rows per page (clamped to 1–100).
+ * @returns {Promise<{invoices: object[], meta: {total: number, limit: number, hasMore: boolean, nextCursor: string|null}}>}
+ * @throws {TypeError}  When tenantId or userId is missing.
+ * @throws {CursorError} When the cursor is malformed, tampered, or expired.
  */
 async function getSmeInvoiceList(tenantId, userId, { cursor, limit = 20 } = {}) {
   if (!tenantId || typeof tenantId !== 'string') {
@@ -670,7 +783,7 @@ async function getSmeInvoiceList(tenantId, userId, { cursor, limit = 20 } = {}) 
 }
 
 // ---------------------------------------------------------------------------
-// KYC helpers (in-memory â€” retained for backward compat with existing tests)
+// KYC helpers (in-memory — retained for backward compat with existing tests)
 // ---------------------------------------------------------------------------
 
 /**

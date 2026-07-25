@@ -7,11 +7,14 @@
  *
  * @module services/kycService
  */
- 
+
 const db = require('../db/knex');
 const logger = require('../logger');
 const { MemoryCacheStore } = require('./cacheStore');
- 
+const { CircuitBreaker } = require('../utils/circuitBreaker');
+const { withRetry } = require('../utils/retry');
+const { createSignatureHeader, verifySignature } = require('./webhooks');
+
 const KYC_STATUSES = {
   PENDING: 'pending',
   VERIFIED: 'verified',
@@ -19,7 +22,7 @@ const KYC_STATUSES = {
   EXEMPTED: 'exempted',
   UNKNOWN: 'unknown', // Fallback for unmapped provider statuses
 };
- 
+
 const PROVIDER_STATUS_MAP = {
   pending: KYC_STATUSES.PENDING,
   in_review: KYC_STATUSES.PENDING,
@@ -38,7 +41,165 @@ const PROVIDER_STATUS_MAP = {
   exempt: KYC_STATUSES.EXEMPTED,
   waived: KYC_STATUSES.EXEMPTED,
 };
- 
+
+// ──────────────────────────────────────────────────────────────────────────
+// Issue #592 — External provider transport hardening
+// ──────────────────────────────────────────────────────────────────────────
+
+/**
+ * Set of HTTP status codes that warrant a retry against the external KYC
+ * provider. Network errors (see {@link KYC_RETRYABLE_NETWORK_CODES}) and
+ * AbortError/TimeoutError are also retried by {@link classifyKycError}.
+ *
+ * @constant {Readonly<Set<number>>}
+ */
+const KYC_RETRYABLE_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+/**
+ * Node.js network error codes that indicate a transient, retryable fault.
+ * Conservative set: connection refused, reset, timed out, DNS hiccups, aborter.
+ *
+ * @constant {Readonly<Set<string>>}
+ */
+const KYC_RETRYABLE_NETWORK_CODES = new Set([
+  'ETIMEDOUT',
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'EAI_AGAIN',
+  'ENOTFOUND',
+  'ABORT_ERR',
+]);
+
+/**
+ * Error thrown by the external KYC provider client. Carries a `retryable`
+ * flag so callers (and the retry helper) can decide whether to attempt
+ * again — a 503 from the provider is retryable, a 400 is permanent.
+ *
+ * Never logs itself — the message may include the upstream status code but
+ * never the raw response body or any environment-derived secrets.
+ *
+ * @extends {Error}
+ */
+class KycProviderError extends Error {
+  /**
+   * Builds a typed KycProviderError carrying status and a stable `retryable`
+   * verdict that {@link withRetry} consumes to decide re-attempts. The shared
+   * {@link CircuitBreaker} reads the same flag (via its onFailure path) so a
+   * sustained outage trips the breaker regardless of which transient code
+   * caused the failure.
+   *
+   * @param {string} message Human-readable error message.
+   * @param {Object} [options]
+   * @param {number|null} [options.status] HTTP status from the upstream response (null on network failure).
+   * @param {boolean} [options.retryable=false] True if the error is transient and worth retrying.
+   * @param {string|null} [options.code=null] Stable classification code (e.g. 'status:503', 'network:ETIMEDOUT').
+   * @param {Error|null} [options.cause=null] Underlying error, preserved for debugging.
+   */
+  constructor(message, options = {}) {
+    super(message);
+    this.name = 'KycProviderError';
+    this.status = options.status ?? null;
+    this.retryable = options.retryable ?? false;
+    this.code = options.code ?? null;
+    if (options.cause) {
+      this.cause = options.cause;
+    }
+    Error.captureStackTrace?.(this, KycProviderError);
+  }
+}
+
+/**
+ * Coerces a raw integer-shaped env var into a clamped positive integer.
+ * Used by {@link getKycProviderConfig} to keep user-supplied durations and
+ * retry counts within safe bounds so a typo cannot disable retries or
+ * make the breaker hang indefinitely.
+ *
+ * @param {string|number|undefined} rawValue Raw env value.
+ * @param {number} fallback Default when the value is missing or non-numeric.
+ * @param {number} min Minimum allowed (clamped lower bound).
+ * @param {number} max Maximum allowed (clamped upper bound).
+ * @returns {number} Clamped integer.
+ */
+function parseClampedInt(rawValue, fallback, min, max) {
+  const parsed = Number.parseInt(String(rawValue === undefined || rawValue === null ? '' : rawValue), 10);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.min(Math.max(parsed, min), max);
+}
+
+/**
+ * Classifies an error thrown by the KYC provider transport.
+ *
+ * Signal priority (first match wins):
+ *   1. Already-typed KycProviderError → honour its `retryable` field.
+ *   2. Transport-level network codes (ECONNRESET, ETIMEDOUT, …) or AbortError.
+ *   3. HTTP status code (top-level `err.status` or `err.response.status`).
+ *
+ * @param {unknown} err - Thrown error value.
+ * @returns {{retryable: boolean, reason: string}} Verdict and stable signal
+ *   identifier (e.g. 'status:503', 'network:ETIMEDOUT', 'kyc-provider-error').
+ */
+function classifyKycError(err) {
+  if (!err || typeof err !== 'object') {
+    return { retryable: false, reason: 'invalid-error-shape' };
+  }
+
+  if (err instanceof KycProviderError) {
+    return { retryable: !!err.retryable, reason: err.code || 'kyc-provider-error' };
+  }
+
+  // Transport-level: Node.js network codes are case-insensitive (the Node
+  // SDK and various clients sometimes lowercase them).
+  const code = typeof err.code === 'string' ? err.code.toUpperCase() : '';
+  if (KYC_RETRYABLE_NETWORK_CODES.has(code)) {
+    return { retryable: true, reason: `network:${code}` };
+  }
+
+  if (err.name === 'AbortError' || err.name === 'TimeoutError') {
+    return { retryable: true, reason: 'timeout' };
+  }
+
+  // Structured HTTP status (top-level or wrapped in `.response`).
+  const rawStatus = err.status ?? (err.response && err.response.status);
+  if (Number.isInteger(rawStatus) && KYC_RETRYABLE_STATUS_CODES.has(rawStatus)) {
+    return { retryable: true, reason: `status:${rawStatus}` };
+  }
+
+  return { retryable: false, reason: 'non-retryable' };
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Shared circuit breaker
+// ──────────────────────────────────────────────────────────────────────────
+
+/**
+ * Shared circuit breaker for all external KYC provider calls. State-transition
+ * metrics (label `name=kyc`) are emitted automatically by the breaker so
+ * operators can alert on sustained outage.
+ *
+ * Thresholds are read from env vars (clamped) at module load:
+ * - `KYC_PROVIDER_CB_FAILURE_THRESHOLD` (1..100, default 5)
+ * - `KYC_PROVIDER_CB_RECOVERY_TIMEOUT_MS` (100..60000, default 10000)
+ *
+ * @type {CircuitBreaker}
+ */
+const sharedKycBreaker = new CircuitBreaker({
+  name: 'kyc',
+  failureThreshold: parseClampedInt(process.env.KYC_PROVIDER_CB_FAILURE_THRESHOLD, 5, 1, 100),
+  recoveryTimeout: parseClampedInt(process.env.KYC_PROVIDER_CB_RECOVERY_TIMEOUT_MS, 10000, 100, 60000),
+});
+
+/**
+ * Resets the shared KYC circuit breaker. Intended for tests and operational
+ * recovery after a known provider fix has been deployed.
+ *
+ * @returns {void}
+ */
+function resetKycCircuitBreaker() {
+  sharedKycBreaker.reset();
+}
+
 // In-memory store for KYC records (used in test/dev environments)
 const mockKycRecords = new Map();
 
@@ -66,22 +227,53 @@ const STATUS_CACHE_KEY_PREFIX = 'kyc:ext:';
  * @constant {number}
  */
 const DEFAULT_STATUS_CACHE_TTL_SECONDS = 30;
- 
+
 /**
  * Configuration for external KYC provider.
- * Loaded from environment variables.
+ * Loaded from environment variables. Numeric values are clamped so a typo
+ * cannot disable the timeout or make retries unbounded.
  *
- * @returns {{enabled: boolean, apiKey: (string|null), baseUrl: (string|null), apiSecret: (string|null)}}
+ * All thresholds are deliberately bounded to keep the dependency safe by
+ * default — see the in-line clamp ranges below.
+ *
+ * @returns {{
+ *   enabled: boolean,
+ *   apiKey: (string|null),
+ *   baseUrl: (string|null),
+ *   apiSecret: (string|null),
+ *   timeoutMs: number,
+ *   maxRetries: number,
+ *   baseDelay: number,
+ *   maxDelay: number,
+ *   signRequests: boolean,
+ *   verifyResponseSignature: boolean
+ * }}
  */
 const getKycProviderConfig = () => {
+  const apiKey = process.env.KYC_PROVIDER_API_KEY || null;
+  const baseUrl = process.env.KYC_PROVIDER_URL || null;
   return {
-    enabled: !!(process.env.KYC_PROVIDER_API_KEY && process.env.KYC_PROVIDER_URL),
-    apiKey: process.env.KYC_PROVIDER_API_KEY || null,
-    baseUrl: process.env.KYC_PROVIDER_URL || null,
-    apiSecret: process.env.KYC_PROVIDER_SECRET || null, // optional secondary key used for webhook HMAC verification
+    enabled: !!(apiKey && baseUrl),
+    apiKey,
+    baseUrl,
+    apiSecret: process.env.KYC_PROVIDER_SECRET || null,
+    // 100ms lower bound — anything tighter would defeat the timeout.
+    // 30s upper bound — bounded so a slow provider request cannot linger for minutes.
+    timeoutMs: parseClampedInt(process.env.KYC_PROVIDER_TIMEOUT_MS, 5000, 100, 30000),
+    // 0 disables retries outright.
+    maxRetries: parseClampedInt(process.env.KYC_PROVIDER_MAX_RETRIES, 3, 0, 10),
+    // Backoff knobs used by withRetry; clamped per the retry helper's own safety caps.
+    baseDelay: parseClampedInt(process.env.KYC_PROVIDER_BASE_DELAY_MS, 200, 0, 10000),
+    maxDelay: parseClampedInt(process.env.KYC_PROVIDER_MAX_DELAY_MS, 5000, 0, 60000),
+    // Outbound request signing (HMAC over the JSON body) — opt-in.
+    signRequests: String(process.env.KYC_PROVIDER_SIGN_REQUESTS || '').toLowerCase() === 'true',
+    // Strict response integrity verification — opt-in. When false, the client
+    // still defensively verifies an `X-KYC-Signature` header if the provider
+    // happens to send one, but does not require it.
+    verifyResponseSignature: String(process.env.KYC_PROVIDER_VERIFY_RESPONSE_SIGNATURE || '').toLowerCase() === 'true',
   };
 };
- 
+
 /**
  * Resolves the configured TTL (in milliseconds) for the external KYC status
  * cache from `KYC_STATUS_CACHE_TTL_SECONDS`.
@@ -195,20 +387,20 @@ function normalizeProviderStatus(status) {
     logger.warn({ status }, 'Received null or undefined provider status, defaulting to unknown');
     return KYC_STATUSES.UNKNOWN;
   }
- 
+
   if (typeof status !== 'string') {
     logger.warn({ status, type: typeof status }, 'Received non-string provider status, defaulting to unknown');
     return KYC_STATUSES.UNKNOWN;
   }
- 
+
   const normalized = status.trim().toLowerCase();
- 
+
   // Handle empty string after trim
   if (normalized === '') {
     logger.warn({ originalStatus: status }, 'Received empty provider status, defaulting to unknown');
     return KYC_STATUSES.UNKNOWN;
   }
- 
+
   // Check if status is in the mapping
   if (!Object.prototype.hasOwnProperty.call(PROVIDER_STATUS_MAP, normalized)) {
     // Log unmapped status for monitoring and future mapping updates
@@ -218,10 +410,10 @@ function normalizeProviderStatus(status) {
     );
     return KYC_STATUSES.UNKNOWN;
   }
- 
+
   return PROVIDER_STATUS_MAP[normalized];
 }
- 
+
 /**
  * Reads a persisted KYC record from the database.
  *
@@ -232,12 +424,12 @@ async function readKycRecord(smeId) {
   if (!smeId || typeof smeId !== 'string') {
     throw new Error('Invalid SME ID');
   }
- 
+
   const row = await db('kyc_records').where({ sme_id: smeId }).first();
   if (!row || !row.status) {
     return null;
   }
- 
+
   return {
     smeId: row.sme_id,
     status: row.status,
@@ -246,7 +438,7 @@ async function readKycRecord(smeId) {
     updatedAt: row.updated_at ? row.updated_at.toISOString?.() || row.updated_at : null,
   };
 }
- 
+
 /**
  * Persists a KYC status update to the database.
  *
@@ -261,7 +453,7 @@ async function persistKycRecord({ smeId, status, providerRecordId = null, verifi
   if (!smeId || typeof smeId !== 'string') {
     throw new Error('Invalid SME ID');
   }
- 
+
   const normalizedStatus = normalizeProviderStatus(status);
   const updatedAt = new Date();
   const record = {
@@ -277,7 +469,7 @@ async function persistKycRecord({ smeId, status, providerRecordId = null, verifi
   // and consult the DB (or provider) for the fresh status. This prevents
   // a stale cached "verified" from outliving a subsequent revocation write.
   invalidateKycStatusCache(smeId);
- 
+
   const existing = await db('kyc_records').where({ sme_id: smeId }).first();
   if (existing) {
     await db('kyc_records')
@@ -286,7 +478,7 @@ async function persistKycRecord({ smeId, status, providerRecordId = null, verifi
   } else {
     await db('kyc_records').insert(record);
   }
- 
+
   return {
     smeId,
     status: normalizedStatus,
@@ -295,10 +487,38 @@ async function persistKycRecord({ smeId, status, providerRecordId = null, verifi
     updatedAt: updatedAt.toISOString(),
   };
 }
- 
+
 /**
  * Verifies KYC status from external provider.
- * Only called if provider is configured and enabled.
+ *
+ * Only called if provider is configured and enabled. The call is hardened
+ * against transient failures (issue #592):
+ *
+ *   1. **Bounded timeout** — requests use `AbortController` keyed off
+ *      `KYC_PROVIDER_TIMEOUT_MS` (default 5 000 ms, clamped `[100, 30000]`).
+ *   2. **Retries** — transient failures (network codes `ETIMEDOUT`/`ECONNRESET`/
+ *      `ECONNREFUSED`/etc., HTTP `408/425/429/5xx`) are retried with
+ *      exponential backoff via {@link withRetry}. Permanent errors (4xx other
+ *      than 408/425/429) are not retried.
+ *   3. **Circuit breaker** — calls are wrapped in a shared {@link CircuitBreaker}
+ *      so sustained outages fail fast instead of queueing requests against the
+ *      degraded provider.
+ *   4. **Fail-closed** — every failure path raises {@link KycProviderError} (or
+ *      re-raises the breaker trip). Never auto-verifies an SME on provider
+ *      unavailability. The caller {@link getKycStatus} falls back to the
+ *      persisted record when an SME is already known.
+ *   5. **Outbound HMAC request signing** — opt-in via
+ *      `KYC_PROVIDER_SIGN_REQUESTS=true`. Uses the same `t=<ts>,v1=<sig>`
+ *      format from {@link createSignatureHeader} so the provider can verify
+ *      using constants identical to the inbound webhook signature scheme.
+ *   6. **Response integrity verification** — if the provider returns an
+ *      `X-KYC-Signature` (or `X-KYC-Response-Signature`) header, the client
+ *      verifies it against `KYC_PROVIDER_SECRET`. Mismatch always fails
+ *      closed. With `KYC_PROVIDER_VERIFY_RESPONSE_SIGNATURE=true` the client
+ *      additionally requires the header to be present.
+ *
+ * Provider secrets (API key, signing secret) are **never** included in
+ * returned data, thrown error messages, or log records.
  *
  * @param {string} smeId - The SME identifier.
  * @param {Object} _smeData - SME metadata from the authenticated principal.
@@ -306,63 +526,199 @@ async function persistKycRecord({ smeId, status, providerRecordId = null, verifi
  */
 async function verifyWithExternalProvider(smeId, _smeData) {
   const config = getKycProviderConfig();
- 
+
   if (!config.enabled) {
     throw new Error('KYC provider not configured');
   }
- 
-  const url = `${config.baseUrl.replace(/\/+$/, '')}/verify`;
- 
-  const payload = {
-    smeId,
-    timestamp: new Date().toISOString(),
-  };
- 
-  const headers = {
-    Authorization: `Bearer ${config.apiKey}`,
-    'Content-Type': 'application/json',
-    Accept: 'application/json',
-  };
- 
-  if (config.apiSecret) {
-    headers['X-KYC-Secret'] = config.apiSecret;
-  }
- 
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(payload),
-    });
- 
-    if (!response.ok) {
-      const body = await response.text();
-      throw new Error(`${response.status}${body ? `: ${body}` : ''}`);
+
+  // Strip any trailing slash on the base URL before composing the endpoint.
+  const baseUrl = config.baseUrl.replace(/\/+$/, '');
+  const url = `${baseUrl}/verify`;
+  // Capture only the host so logs never expose the full URL (which can have
+  // secrets embedded as query params by some provider setups).
+  const safeHost = (() => {
+    try {
+      return new URL(baseUrl).host;
+    } catch (_e) {
+      return 'invalid-url';
     }
- 
-    const data = await response.json();
-    const recordId = data.recordId || data.providerRecordId || data.provider_record_id || `kyc_${smeId}_${Date.now()}`;
-    const verifiedAt = data.verifiedAt || data.verified_at || null;
-    const status = normalizeProviderStatus(data.status || data.kycStatus || data.result || '');
- 
-    const persisted = await persistKycRecord({
-      smeId,
-      status,
-      providerRecordId: recordId,
-      verifiedAt,
-    });
- 
-    return {
-      status: persisted.status,
-      recordId: persisted.recordId,
-      verifiedAt: persisted.verifiedAt,
-    };
-  } catch (error) {
-    logger.error({ smeId, error: error.message }, 'External KYC provider call failed');
-    throw error;
+  })();
+
+  // ── Per-attempt operation: timeout + fetch + sign + verify response ─
+  const operation = async () => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), config.timeoutMs);
+    if (timeoutId.unref) {
+      timeoutId.unref();
+    }
+
+    try {
+      const payload = {
+        smeId,
+        timestamp: new Date().toISOString(),
+      };
+      const body = JSON.stringify(payload);
+
+      const headers = {
+        Authorization: `Bearer ${config.apiKey}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      };
+
+      // Outbound HMAC request signing — opt-in. We sign the exact JSON body
+      // that is put on the wire so the provider can recompute the signature
+      // and authenticate the request. Reuses {@link createSignatureHeader} so
+      // the producer format matches the inbound webhook scheme.
+      if (config.signRequests && config.apiSecret) {
+        headers['X-KYC-Signature'] = createSignatureHeader(config.apiSecret, body);
+      }
+
+      let response;
+      try {
+        response = await fetch(url, {
+          method: 'POST',
+          headers,
+          body,
+          signal: controller.signal,
+        });
+      } catch (networkErr) {
+        // Coerce raw fetch / network error into a typed KycProviderError so
+        // the retry helper sees a stable `retryable` flag.
+        const classified = classifyKycError(networkErr);
+        throw new KycProviderError(
+          `KYC provider request failed: ${networkErr.message || networkErr.code || 'unknown'}`,
+          {
+            status: null,
+            retryable: classified.retryable,
+            code: classified.reason,
+            cause: networkErr,
+          },
+        );
+      }
+
+      if (!response.ok) {
+        const status = response.status;
+        const classified = classifyKycError({ status });
+        // Log only the HTTP status and safe host — never include the body
+        // which may contain PII (SSN, DOB, address) returned by the provider.
+        logger.warn(
+          { smeId, providerHost: safeHost, status, retryable: classified.retryable },
+          'External KYC provider returned non-ok response',
+        );
+        throw new KycProviderError(
+          `KYC provider responded with HTTP ${status}`,
+          { status, retryable: classified.retryable, code: classified.reason },
+        );
+      }
+
+      const responseText = await response.text();
+
+      // ── Response integrity verification ────────────────────────────
+      // If the provider returns a signature header we always verify it
+      // (fail-closed on mismatch). The `verifyResponseSignature` flag
+      // additionally requires the header to be present.
+      if (config.apiSecret) {
+        const responseSig =
+          response.headers.get('X-KYC-Response-Signature') ||
+          response.headers.get('X-KYC-Signature');
+
+        if (responseSig) {
+          const verification = verifySignature(config.apiSecret, responseText, responseSig);
+          if (!verification.valid) {
+            logger.warn(
+              { smeId, providerHost: safeHost, error: verification.error },
+              'KYC provider response signature mismatch (fail-closed)',
+            );
+            throw new KycProviderError(
+              'KYC provider response signature mismatch',
+              { status: 502, retryable: false, code: 'invalid_response_signature' },
+            );
+          }
+        } else if (config.verifyResponseSignature) {
+          logger.warn(
+            { smeId, providerHost: safeHost },
+            'KYC provider response missing required signature (strict mode, fail-closed)',
+          );
+          throw new KycProviderError(
+            'KYC provider response missing required signature',
+            { status: 502, retryable: false, code: 'missing_response_signature' },
+          );
+        }
+      }
+
+      let data;
+      try {
+        data = JSON.parse(responseText);
+      } catch (parseErr) {
+        throw new KycProviderError(
+          `KYC provider returned non-JSON response: ${parseErr.message}`,
+          { status: 502, retryable: false, code: 'invalid_response_body' },
+        );
+      }
+
+      return data;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  };
+
+  const shouldRetry = (err) => {
+    if (err && err.code === 'CIRCUIT_OPEN') {
+      // Tripped breaker — re-raise without further retry; the caller will
+      // handle fallback. withRetry would otherwise consume attempts in vain.
+      return false;
+    }
+    if (err instanceof KycProviderError) {
+      return err.retryable;
+    }
+    return classifyKycError(err).retryable;
+  };
+
+  let data;
+  try {
+    data = await sharedKycBreaker.execute(() =>
+      withRetry(operation, {
+        maxRetries: config.maxRetries,
+        baseDelay: config.baseDelay,
+        maxDelay: config.maxDelay,
+        shouldRetry,
+      }),
+    );
+  } catch (err) {
+    // Log only the safe host and a coarse retryable verdict — never include
+    // the API key, signing secret, or upstream response body.
+    const verdict = classifyKycError(err);
+    logger.error(
+      {
+        smeId,
+        providerHost: safeHost,
+        retryable: verdict.retryable,
+        reason: verdict.reason,
+        error: err.message,
+      },
+      'External KYC provider call failed',
+    );
+    throw err;
   }
+
+  const recordId = data.recordId || data.providerRecordId || data.provider_record_id || `kyc_${smeId}_${Date.now()}`;
+  const verifiedAt = data.verifiedAt || data.verified_at || null;
+  const status = normalizeProviderStatus(data.status || data.kycStatus || data.result || '');
+
+  const persisted = await persistKycRecord({
+    smeId,
+    status,
+    providerRecordId: recordId,
+    verifiedAt,
+  });
+
+  return {
+    status: persisted.status,
+    recordId: persisted.recordId,
+    verifiedAt: persisted.verifiedAt,
+  };
 }
- 
+
 /**
  * Gets KYC status for an SME.
  * Checks external provider if available, falls back to persisted DB record or mock store.
@@ -380,9 +736,9 @@ async function getKycStatus(smeId) {
   if (!smeId || typeof smeId !== 'string') {
     throw new Error('Invalid SME ID');
   }
- 
+
   const config = getKycProviderConfig();
- 
+
   if (config.enabled) {
     try {
       return await readProviderStatusCached(smeId, () => verifyWithExternalProvider(smeId, {}));
@@ -395,12 +751,12 @@ async function getKycStatus(smeId) {
       return { status: KYC_STATUSES.PENDING };
     }
   }
- 
+
   const record = await readKycRecord(smeId);
   if (record) {
     return record;
   }
- 
+
   const mockRecord = mockKycRecords.get(smeId);
   if (mockRecord) {
     return {
@@ -409,10 +765,10 @@ async function getKycStatus(smeId) {
       verifiedAt: mockRecord.verifiedAt,
     };
   }
- 
+
   return { status: KYC_STATUSES.PENDING };
 }
- 
+
 /**
  * Marks an SME as KYC verified.
  * Only available in test/development (mock implementation).
@@ -426,7 +782,7 @@ async function verifySmeSafe(smeId, options = {}) {
   if (!smeId || typeof smeId !== 'string') {
     throw new Error('Invalid SME ID');
   }
- 
+
   const recordId = options.recordId || `kyc_${smeId}_${Date.now()}`;
   const verifiedAt = new Date().toISOString();
   const record = {
@@ -436,9 +792,9 @@ async function verifySmeSafe(smeId, options = {}) {
     verifiedAt,
     createdAt: verifiedAt,
   };
- 
+
   mockKycRecords.set(smeId, record);
- 
+
   // Persist to database
   await persistKycRecord({
     smeId,
@@ -446,16 +802,16 @@ async function verifySmeSafe(smeId, options = {}) {
     providerRecordId: recordId,
     verifiedAt,
   });
- 
+
   logger.info({ smeId, recordId }, 'SME marked as KYC verified');
- 
+
   return {
     status: record.status,
     recordId: record.recordId,
     verifiedAt: record.verifiedAt,
   };
 }
- 
+
 /**
  * Rejects KYC for an SME (mock implementation).
  *
@@ -467,7 +823,7 @@ async function rejectSmeKyc(smeId, reason = 'Manual rejection') {
   if (!smeId || typeof smeId !== 'string') {
     throw new Error('Invalid SME ID');
   }
- 
+
   const recordId = `kyc_${smeId}_${Date.now()}`;
   const record = {
     smeId,
@@ -477,24 +833,24 @@ async function rejectSmeKyc(smeId, reason = 'Manual rejection') {
     rejectedAt: new Date().toISOString(),
     createdAt: new Date().toISOString(),
   };
- 
+
   mockKycRecords.set(smeId, record);
- 
+
   // Persist to database
   await persistKycRecord({
     smeId,
     status: KYC_STATUSES.REJECTED,
     providerRecordId: recordId,
   });
- 
+
   logger.warn({ smeId, recordId, reason }, 'SME KYC rejected');
- 
+
   return {
     status: record.status,
     recordId: record.recordId,
   };
 }
- 
+
 /**
  * Exempts an SME from KYC requirements.
  * Typically used for low-risk vendors or when exemption is policy-approved.
@@ -507,7 +863,7 @@ async function exemptSmeFromKyc(smeId, reason = 'Manual exemption') {
   if (!smeId || typeof smeId !== 'string') {
     throw new Error('Invalid SME ID');
   }
- 
+
   const recordId = `kyc_${smeId}_${Date.now()}`;
   const record = {
     smeId,
@@ -517,24 +873,24 @@ async function exemptSmeFromKyc(smeId, reason = 'Manual exemption') {
     exemptedAt: new Date().toISOString(),
     createdAt: new Date().toISOString(),
   };
- 
+
   mockKycRecords.set(smeId, record);
- 
+
   // Persist to database
   await persistKycRecord({
     smeId,
     status: KYC_STATUSES.EXEMPTED,
     providerRecordId: recordId,
   });
- 
+
   logger.info({ smeId, recordId, reason }, 'SME exempted from KYC');
- 
+
   return {
     status: record.status,
     recordId: record.recordId,
   };
 }
- 
+
 /**
  * Checks if an SME can proceed with funding operations.
  * Returns true ONLY for 'verified' or 'exempted' statuses.
@@ -553,7 +909,7 @@ async function exemptSmeFromKyc(smeId, reason = 'Manual exemption') {
 function canFundWithKycStatus(kycStatus) {
   return kycStatus === KYC_STATUSES.VERIFIED || kycStatus === KYC_STATUSES.EXEMPTED;
 }
- 
+
 /**
  * Clears the in-memory mock KYC record store and the external KYC status cache.
  * Intended for tests/dev usage.
@@ -564,9 +920,10 @@ function resetMockRecords() {
   mockKycRecords.clear();
   kycStatusCache.clear();
 }
- 
+
 module.exports = {
   KYC_STATUSES,
+  PROVIDER_STATUS_MAP,
   getKycStatus,
   verifyWithExternalProvider,
   persistKycRecord,
@@ -580,4 +937,12 @@ module.exports = {
   normalizeProviderStatus, // Export for direct testing
   getStatusCacheTtlMs, // Export for testing (cache TTL behaviour)
   invalidateKycStatusCache, // Export for testing (cache invalidation)
+  // Issue #592 hardening exports:
+  KycProviderError,
+  classifyKycError,
+  sharedKycBreaker,
+  resetKycCircuitBreaker,
+  parseClampedInt,
+  KYC_RETRYABLE_STATUS_CODES,
+  KYC_RETRYABLE_NETWORK_CODES,
 };

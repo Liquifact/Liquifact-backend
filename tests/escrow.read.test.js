@@ -213,6 +213,66 @@ describe('GET /api/escrow/:invoiceId', () => {
     expect(validateInvoiceId('bad id with spaces').valid).toBe(false);
   });
 
+  // ── Not-found / validation-failure paths (via HTTP endpoint) ───────────────
+
+  it('returns 200 with neutral stub for valid-format but unmapped invoiceId', async () => {
+    // For IDs the mock does return an address for but have no projection data,
+    // the endpoint returns 200 with the neutral stub (not found on-chain).
+    const res = await request(app).get('/api/escrow/nonexistent_inv_999');
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('not_found');
+    expect(res.body.data.fundedAmount).toBe(0);
+  });
+
+  it('returns 200 with neutral stub for empty/whitespace invoiceId via HTTP (stub)', async () => {
+    // Express decodes %20 to space; route trims to empty string.
+    // The mock resolves '' to an address; getEscrowStateWithProjection returns neutral stub.
+    const res = await request(app).get('/api/escrow/%20');
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('not_found');
+    expect(res.body.data.fundedAmount).toBe(0);
+  });
+
+  // ── Idempotent-repeat paths ───────────────────────────────────────────────
+
+  it('returns identical response shape on repeated success requests (idempotency)', async () => {
+    await db('escrow_event_projection').insert({
+      invoice_id: 'inv-idem-1',
+      latest_event_id: 'evt_idem_1',
+      latest_event_type: 'funded',
+      latest_ledger_sequence: 100,
+      latest_event_body: JSON.stringify({ status: 'funded', fundedAmount: 999 }),
+      latest_observed_at: new Date(),
+    });
+
+    const first = await request(app).get('/api/escrow/inv-idem-1');
+    expect(first.status).toBe(200);
+
+    const second = await request(app).get('/api/escrow/inv-idem-1');
+    expect(second.status).toBe(200);
+
+    // Core escrow fields must be identical on repeat reads
+    expect(second.body.data.status).toBe(first.body.data.status);
+    expect(second.body.data.fundedAmount).toBe(first.body.data.fundedAmount);
+    expect(second.body.data.latest_ledger_sequence).toBe(first.body.data.latest_ledger_sequence);
+    expect(second.body.data.latest_event_type).toBe(first.body.data.latest_event_type);
+    expect(second.body.data.source).toBe(first.body.data.source);
+    expect(second.body.data.fromProjection).toBe(first.body.data.fromProjection);
+  });
+
+  it('returns identical error shape on repeated 404 requests (idempotency)', async () => {
+    // Use the one invoiceId the mock returns null for to trigger 404.
+    const first = await request(app).get('/api/escrow/unknown-inv');
+    expect(first.status).toBe(404);
+
+    const second = await request(app).get('/api/escrow/unknown-inv');
+    expect(second.status).toBe(404);
+
+    // Error code and shape must be identical on repeat
+    expect(second.body.error.code).toBe(first.body.error.code);
+    expect(second.body.error.message).toBe(first.body.error.message);
+  });
+
   it('invalidates cache on ledger gap', async () => {
     if (!cache) return; // Skip if no redis configured
 

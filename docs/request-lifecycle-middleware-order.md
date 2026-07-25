@@ -40,6 +40,24 @@ Health probes (`/health`, `/healthz`, `/ready`, `/readyz`), API info (`/api`),
 invoice list/create, escrow read, and debug error routes are registered on the
 app instance before feature routers mount.
 
+## Composed auth and tenant stacks
+
+Protected routers that need both authentication and tenant context mount the
+composed middleware stacks from [`src/middleware/stacks.js`](../src/middleware/stacks.js).
+These stacks preserve a strict ordering contract:
+
+- `authenticatedTenantStack` executes `authenticateToken` first and `extractTenant`
+  second. Tenant extraction must never run when JWT authentication fails.
+- `adminStack` executes `adminAuth` first and `extractTenant` second. `adminAuth`
+  selects the API-key branch only when the `x-api-key` header is present.
+  Empty strings and array-valued headers are treated as non-branching values so
+  the request falls back to JWT authentication.
+
+The repository includes an integration-style regression suite in
+[`tests/stacks.ordering.test.js`](../tests/stacks.ordering.test.js) that mounts
+both stacks on a throwaway Express app and exercises the middleware chain with
+Supertest to guard this ordering contract.
+
 ## Feature router mounts (single mount per router instance)
 
 Each feature router is imported once and mounted once via

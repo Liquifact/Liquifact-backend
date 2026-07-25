@@ -9,7 +9,7 @@
     "dev:ts": "node --watch -r ts-node/register/transpile-only src/ts-entry.ts",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "lint:new": "eslint src/routes/invoiceStateRoutes.js src/services/invoiceStateMachine.js tests/invoice.state.test.js",
+    "lint:new": "eslint src/routes/invoiceStateRoutes.js src/services/invoiceStateMachine.js tests/invoice.state.test.js src/schemas/invoiceState.js tests/invoice.stateValidation.test.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "typecheck:jsdoc": "tsc -p tsconfig.checkjs.json --noEmit",
     "build": "tsc -p tsconfig.build.json",
@@ -34,7 +34,12 @@
   "jest": {
     "testEnvironment": "node",
     "transformIgnorePatterns": [],
-    "testPathIgnorePatterns": [],
+    "testPathIgnorePatterns": [
+      "<rootDir>/dist/"
+    ],
+    "modulePathIgnorePatterns": [
+      "<rootDir>/dist/"
+    ],
     "moduleNameMapper": {
       "^node:test$": "<rootDir>/tests/mocks/node_test_shim.js",
       "^node:assert/strict$": "<rootDir>/tests/mocks/node_assert_shim.js"
@@ -54,6 +59,18 @@
         "functions": 95,
         "lines": 95,
         "statements": 95
+      },
+      "src/schemas/invoiceState.js": {
+        "branches": 80,
+        "functions": 80,
+        "lines": 85,
+        "statements": 85
+      },
+      "src/routes/invoiceStateRoutes.js": {
+        "branches": 80,
+        "functions": 80,
+        "lines": 85,
+        "statements": 85
       }
     }
   },

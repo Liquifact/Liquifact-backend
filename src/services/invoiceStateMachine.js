@@ -276,7 +276,7 @@ function validateTransition({ invoiceId, currentState, targetState, actor, reaso
  * @param {string} [options.ipAddress] - IP address of the requester.
  * @param {string} [options.userAgent] - User agent of the requester.
  * @param {object} [options.metadata] - Additional audit metadata.
- * @returns {Promise<{success: boolean, previousState: string, newState: string, auditLog: object, transitionedAt: string, transitionedBy: string}>}
+ * @returns {Promise<{success: boolean, previousState: string, newState: string, auditLog: object, transitionedAt: string, transitionedBy: string}>} Transition result.
  * @throws {Error} With `.code` (and `.allowedTransitions` when applicable) when validation fails.
  */
 async function executeTransition({
@@ -363,7 +363,8 @@ async function getTransitionHistory(invoiceId, getAuditLogsFn) {
 }
 
 /**
- * Validates additional business rules for linking an invoice to escrow.
+ * Validates additional business rules for linking an invoice to escrow,
+ * beyond the core state-machine transition rules.
  *
  * @param {object} invoice - Invoice object.
  * @returns {{canLink: boolean, reason?: string}} Validation result.

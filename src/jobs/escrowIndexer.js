@@ -3,6 +3,7 @@
 const db = require('../db/knex');
 const logger = require('../logger');
 const { resolveInvoiceByAddress } = require('../config/escrowMap');
+const { escrowReadCache } = require('../services/escrowReadCache');
 const {
   escrowIndexerEventsProcessedTotal,
   escrowIndexerEventsSkippedTotal,
@@ -11,6 +12,22 @@ const {
 } = require('../metrics');
 
 const { StrKey } = require('@stellar/stellar-sdk');
+const { indexerEventSchema } = require('../schemas/indexerEvent');
+
+class ValidationError extends Error {
+  /**
+   * Creates an indexer event validation error.
+   * @param {string} message Human-readable failure.
+   * @param {string} code Stable error code.
+   * @param {object|null} details Validation details.
+   */
+  constructor(message, code, details = null) {
+    super(message);
+    this.name = 'ValidationError';
+    this.code = code;
+    this.details = details;
+  }
+}
 
 const INVOICE_ID_REGEX = /^[a-zA-Z0-9_-]{1,128}$/;
 const DEFAULT_POLL_INTERVAL_MS = 15_000;
@@ -31,7 +48,7 @@ function isValidStellarContractId(contractId) {
     return false;
   }
   try {
-    return StrKey.isValidContractId(contractId);
+    return StrKey.isValidContract(contractId);
   } catch (_err) {
     return false;
   }
@@ -132,59 +149,44 @@ function deriveInvoiceId(record, reverseLookup = resolveInvoiceByAddress) {
  * Validates and normalizes a raw escrow event into the canonical shape used by
  * the indexer's persistence and projection logic.
  *
+ * Rejects unknown fields, wrong types, and out-of-range values with a
+ * structured {@link ValidationError} that carries a machine-readable error
+ * code and field-level details.
+ *
  * @param {object} rawEvent - Raw event payload to validate and normalize.
- * @returns {object} The normalized event with validated required fields.
- * @throws {Error} If the payload is not an object or a required field is
- *   missing or malformed.
+ * @returns {object} The normalized event with validated required fields and
+ *   defaults applied for optional fields.
+ * @throws {ValidationError} If the payload is not an object, contains unknown
+ *   fields, has wrong types, or field values are out of bounds.
  */
 function normalizeEvent(rawEvent) {
   if (!rawEvent || typeof rawEvent !== 'object') {
-    throw new Error('Event payload must be an object.');
+    throw new ValidationError('Event payload must be an object.', 'INVALID_PAYLOAD');
   }
 
-  const invoiceId = String(rawEvent.invoiceId || '').trim();
-  const eventId = String(rawEvent.eventId || '').trim();
-  const eventType = String(rawEvent.eventType || '').trim();
-  const pagingToken = String(rawEvent.pagingToken || '').trim();
-  const ledgerSequence = Number(rawEvent.ledgerSequence);
+  const result = indexerEventSchema.safeParse(rawEvent);
 
-  if (!INVOICE_ID_REGEX.test(invoiceId)) {
-    throw new Error('Invalid invoiceId format.');
-  }
-  if (!eventId) {
-    throw new Error('eventId is required.');
-  }
-  if (!eventType) {
-    throw new Error('eventType is required.');
-  }
-  if (!Number.isInteger(ledgerSequence) || ledgerSequence <= 0) {
-    throw new Error('ledgerSequence must be a positive integer.');
+  if (!result.success) {
+    const { parseValidationErrors } = require('../schemas/indexerEvent');
+    const fieldErrors = parseValidationErrors(result.error);
+    throw new ValidationError(
+      'Event payload contains invalid or out-of-range fields.',
+      'VALIDATION_ERROR',
+      fieldErrors,
+    );
   }
 
-  const contractId = rawEvent.contractId ? String(rawEvent.contractId).trim() : null;
-  if (contractId !== null && contractId !== '') {
-    if (!isValidStellarContractId(contractId)) {
-      throw new Error('Invalid contractId format or checksum.');
-    }
-  }
-
-  const txHash = rawEvent.txHash ? String(rawEvent.txHash).trim() : null;
-  if (txHash !== null && txHash !== '') {
-    if (!isValidTxHash(txHash)) {
-      throw new Error('Invalid txHash format.');
-    }
-  }
-
+  const data = result.data;
   return {
-    eventId,
-    invoiceId,
-    eventType,
-    ledgerSequence,
-    pagingToken,
-    contractId,
-    txHash,
-    eventBody: rawEvent.eventBody || {},
-    observedAt: rawEvent.observedAt || new Date().toISOString(),
+    eventId: data.eventId,
+    invoiceId: data.invoiceId,
+    eventType: data.eventType,
+    ledgerSequence: data.ledgerSequence,
+    pagingToken: data.pagingToken || '',
+    contractId: data.contractId !== undefined ? data.contractId : null,
+    txHash: data.txHash !== undefined ? data.txHash : null,
+    eventBody: data.eventBody !== undefined ? data.eventBody : {},
+    observedAt: data.observedAt || new Date().toISOString(),
   };
 }
 
@@ -305,6 +307,8 @@ async function persistEscrowEvent({ store, transactionRunner }, rawEvent) {
     }
   });
 
+  // Projection writes supersede any process-local response cached for this invoice.
+  escrowReadCache.invalidate(event.invoiceId);
   return event;
 }
 
@@ -528,4 +532,5 @@ module.exports = {
   shouldReplaceProjection,
   isValidStellarContractId,
   isValidTxHash,
+  ValidationError,
 };

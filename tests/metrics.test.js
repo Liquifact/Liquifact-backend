@@ -18,6 +18,7 @@ jest.mock('redis', () => {
 const request = require('supertest');
 const { createApp } = require('../src/app');
 const metrics = require('../src/metrics');
+const logger = require('../src/logger');
 const JobQueue = require('../src/workers/jobQueue');
 const BackgroundWorker = require('../src/workers/worker');
 
@@ -128,7 +129,7 @@ describe('GET /metrics', () => {
   });
 
   describe('metrics instrumentation', () => {
-    it('updates queue depth and retry queue size from job queue stats', () => {
+    it('updates queue depth and retry queue size from job queue stats', async () => {
       const queue = new JobQueue();
       const jobId = queue.enqueue('test', { data: 'pending' });
       metrics.registerJobQueue(queue);
@@ -137,7 +138,7 @@ describe('GET /metrics', () => {
       queue.retry(jobId, new Error('failed'));
       metrics.refreshMetrics();
 
-      const output = metrics.registry.metrics();
+      const output = await metrics.registry.metrics();
       expect(output).toMatch(/liquifact_job_queue_depth \d+/);
       expect(output).toMatch(/liquifact_job_retry_queue_size 1/);
     });
@@ -155,9 +156,134 @@ describe('GET /metrics', () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
       metrics.refreshMetrics();
 
-      const output = metrics.registry.metrics();
+      const output = await metrics.registry.metrics();
       expect(output).toMatch(/liquifact_worker_inflight_count [12]/);
       await worker.stop();
+    });
+  });
+
+  describe('metrics instrumentation', () => {
+    it('records success metrics and structured logs for successful scrapes', async () => {
+      const requestLogger = {
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+      };
+      const createRequestLoggerSpy = jest.spyOn(logger, 'createRequestLogger').mockReturnValue(requestLogger);
+
+      const res = await request(app)
+        .get('/metrics')
+        .set('Authorization', 'Bearer test-metrics-secret');
+
+      expect(res.status).toBe(200);
+      const output = await metrics.registry.metrics();
+      expect(output).toMatch(/metrics_requests_total\{status_class="2xx"\}/);
+      expect(output).toMatch(/metrics_request_duration_seconds_(?:bucket|sum|count)/);
+      expect(output).not.toMatch(/metrics_request_errors_total\{cause="none"\}/);
+      expect(requestLogger.info).toHaveBeenCalled();
+      expect(requestLogger.warn).not.toHaveBeenCalled();
+      expect(requestLogger.error).not.toHaveBeenCalled();
+
+      createRequestLoggerSpy.mockRestore();
+    });
+
+    it('records client-error metrics and structured warnings for unauthorized scrapes', async () => {
+      const requestLogger = {
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+      };
+      const createRequestLoggerSpy = jest.spyOn(logger, 'createRequestLogger').mockReturnValue(requestLogger);
+
+      const req = {
+        headers: {},
+        socket: { remoteAddress: '192.0.2.10' },
+        ip: '192.0.2.10',
+      };
+      const res = {
+        statusCode: 200,
+        headers: {},
+        body: undefined,
+        status(code) {
+          this.statusCode = code;
+          return this;
+        },
+        json(payload) {
+          this.body = payload;
+          return this;
+        },
+      };
+      const next = jest.fn();
+
+      metrics.metricsAuth(req, res, next);
+
+      expect(res.statusCode).toBe(401);
+      expect(res.body).toEqual({ error: 'Unauthorized' });
+      expect(requestLogger.warn).toHaveBeenCalled();
+      expect(requestLogger.info).not.toHaveBeenCalled();
+      expect(requestLogger.error).not.toHaveBeenCalled();
+      expect(next).not.toHaveBeenCalled();
+      expect(requestLogger.info).not.toHaveBeenCalled();
+      expect(requestLogger.error).not.toHaveBeenCalled();
+      expect(next).not.toHaveBeenCalled();
+
+      createRequestLoggerSpy.mockRestore();
+    });
+
+    it('records server-error metrics and structured error logs for handler failures', async () => {
+      const requestLogger = {
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+      };
+      const createRequestLoggerSpy = jest.spyOn(logger, 'createRequestLogger').mockReturnValue(requestLogger);
+
+      metrics.recordMetricsEndpointOutcome({
+        statusCode: 500,
+        durationSeconds: 0.01,
+        error: new Error('boom'),
+        req: { headers: {} },
+      });
+
+      const output = await metrics.registry.metrics();
+      expect(output).toMatch(/metrics_requests_total\{status_class="5xx"\}/);
+      expect(output).toMatch(/metrics_request_errors_total\{cause="internal_error"\}/);
+      expect(requestLogger.error).toHaveBeenCalled();
+
+      createRequestLoggerSpy.mockRestore();
+    });
+  });
+
+  describe('not-found paths', () => {
+    it('returns 404 for an unmatched sub-path under /metrics', async () => {
+      const res = await request(app).get('/metrics/does-not-exist');
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Not found');
+    });
+  });
+
+  describe('idempotent-repeat paths', () => {
+    it('returns the same set of metric names on repeated scrapes', async () => {
+      const first = await request(app).get('/metrics');
+      const second = await request(app).get('/metrics');
+
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+
+      const metricNames = (text) =>
+        Array.from(text.matchAll(/^# HELP (\S+)/gm)).map((m) => m[1]).sort();
+
+      expect(metricNames(second.text)).toEqual(metricNames(first.text));
+    });
+
+    it('deterministically returns 401 on repeated unauthorized scrapes when a token is configured', async () => {
+      process.env.METRICS_BEARER_TOKEN = 'repeat-test-token';
+
+      const first = await request(app).get('/metrics');
+      const second = await request(app).get('/metrics');
+
+      expect(first.status).toBe(401);
+      expect(second.status).toBe(401);
     });
   });
 });
@@ -327,6 +453,51 @@ describe('export guard — every module export is defined and valid', () => {
   });
 });
 
+describe('normalizeReminderReason', () => {
+  it('maps timeout-like errors to smtp_timeout', () => {
+    expect(metrics.normalizeReminderReason(new Error('Connection ETIMEDOUT'))).toBe('smtp_timeout');
+    expect(metrics.normalizeReminderReason({ message: 'request timed out' })).toBe('smtp_timeout');
+  });
+
+  it('maps template errors to template_error', () => {
+    expect(metrics.normalizeReminderReason(new Error('invalid template syntax'))).toBe('template_error');
+  });
+
+  it('maps rejection/SMTP/recipient errors to smtp_reject', () => {
+    expect(metrics.normalizeReminderReason(new Error('recipient rejected'))).toBe('smtp_reject');
+    expect(metrics.normalizeReminderReason({ code: 'SMTP_550' })).toBe('smtp_reject');
+  });
+
+  it('maps unrecognized errors to unknown', () => {
+    expect(metrics.normalizeReminderReason(new Error('something else entirely'))).toBe('unknown');
+    expect(metrics.normalizeReminderReason(null)).toBe('unknown');
+    expect(metrics.normalizeReminderReason(undefined)).toBe('unknown');
+  });
+
+  it('handles plain string errors without a message/code property', () => {
+    expect(metrics.normalizeReminderReason('timeout while sending')).toBe('smtp_timeout');
+  });
+});
+
+describe('startMetricsRefresh / stopMetricsRefresh', () => {
+  afterEach(() => {
+    metrics.stopMetricsRefresh();
+  });
+
+  it('starting the refresh timer is idempotent (second call is a no-op)', () => {
+    metrics.startMetricsRefresh();
+    metrics.startMetricsRefresh();
+    // No observable side effect other than not throwing / not creating a second timer;
+    // stopping once is sufficient to clean up either way.
+    metrics.stopMetricsRefresh();
+  });
+
+  it('stopping when no timer is running is a safe no-op', () => {
+    metrics.stopMetricsRefresh();
+    expect(() => metrics.stopMetricsRefresh()).not.toThrow();
+  });
+});
+
 describe('Soroban metrics helpers', () => {
   beforeEach(() => {
     metrics.registry.resetMetrics();
@@ -434,8 +605,8 @@ describe('sorobanCircuitBreakerStateTransitionsTotal — circuit breaker integra
     expect(breaker.state).toBe(initial);
   });
 
-  it('returns Prometheus text before any transition (edge: scrape before first transition)', () => {
-    const promString = metrics.registry.metrics();
+  it('returns Prometheus text before any transition (edge: scrape before first transition)', async () => {
+    const promString = await metrics.registry.metrics();
     expect(typeof promString).toBe('string');
   });
 });

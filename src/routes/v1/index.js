@@ -19,6 +19,7 @@ const express = require('express');
 const router = express.Router();
 const investRoutes = require('../invest');
 const smeRouter = require('../sme');
+const apiKeysRoutes = require('../apiKeys'); // ← Added
 const { extractTenant } = require('../../middleware/tenant');
 const { authenticateToken } = require('../../middleware/auth');
 const invoiceService = require('../../services/invoiceService');
@@ -28,14 +29,16 @@ const { computeEscrowDerivedFields } = require('../../services/escrowDerived');
 const AppError = require('../../errors/AppError');
 const { invoiceCreateSchema, invoiceUpdateSchema, parseValidationErrors } = require('../../schemas/invoice');
 const { validatePatchFields, detectLockedFieldChange } = require('../../middleware/patchInvoice');
+const { validateHealthQuery, rejectBodyOnGet } = require('../../schemas/health');
 
 // ── Sub-router mounts ────────────────────────────────────────────────────────
 router.use('/invest', investRoutes);
 router.use('/sme', smeRouter);
+router.use('/api-keys', apiKeysRoutes); // ← Added
 
 // ── Utility routes ───────────────────────────────────────────────────────────
 
-router.get('/health', (req, res) => {
+router.get('/health', rejectBodyOnGet, validateHealthQuery, (req, res) => {
   return res.json({
     status: 'ok',
     service: 'liquifact-api',
@@ -54,6 +57,7 @@ router.get('/', (req, res) => {
       invoices: 'GET/POST /v1/invoices',
       escrow: 'GET/POST /v1/escrow',
       sme: 'POST /v1/sme/invoice',
+      'api-keys': 'GET /v1/api-keys',
     },
   });
 });
@@ -126,7 +130,6 @@ router.post('/invoices', extractTenant, async (req, res, next) => {
           code: 'VALIDATION_ERROR',
           retryable: false,
           retryHint: 'Correct the highlighted fields and retry.',
-          // Attach extra field-level detail for clients
           fieldErrors,
         }),
       );
@@ -242,7 +245,7 @@ router.patch('/invoices/:id', extractTenant, validatePatchFields, async (req, re
           type: 'https://liquifact.com/probs/validation-error',
           title: 'Validation Error',
           status: 422,
-          detail: `Field '${field}' cannot be modified when invoice status is '${existing.status}'.`,
+          detail: `Field '\( {field}' cannot be modified when invoice status is ' \){existing.status}'.`,
           instance: req.originalUrl,
           code: 'LOCKED_FIELD',
           retryable: false,

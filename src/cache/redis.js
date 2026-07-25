@@ -270,6 +270,27 @@ class RedisEscrowSummaryCache {
       return false;
     }
   }
+
+  /**
+   * Deletes an invoice summary after a successful escrow write.
+   * Failures are non-fatal because callers can still invalidate their local cache.
+   * @param {string} invoiceId The invoice ID.
+   * @returns {Promise<boolean>} Whether Redis accepted the deletion.
+   */
+  async deleteSummary(invoiceId) {
+    if (!this.client || !isValidInvoiceId(invoiceId)) {
+      return false;
+    }
+    try {
+      const result = await this.circuitBreaker.execute(() =>
+        withTimeout(this.client.del(this.key(invoiceId)), this.timeoutMs)
+      );
+      return result !== null;
+    } catch {
+      redisCacheFailOpenTotal.inc();
+      return false;
+    }
+  }
 }
 
 /**

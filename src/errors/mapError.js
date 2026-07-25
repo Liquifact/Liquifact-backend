@@ -16,6 +16,21 @@ function httpStatusToCode(status) {
   if (status === 403) {
     return "FORBIDDEN";
   }
+  if (status === 409) {
+    return "CONFLICT";
+  }
+  if (status === 422) {
+    return "UNPROCESSABLE_ENTITY";
+  }
+  if (status === 429) {
+    return "TOO_MANY_REQUESTS";
+  }
+  if (status === 500) {
+    return "INTERNAL_SERVER_ERROR";
+  }
+  if (status === 503) {
+    return "SERVICE_UNAVAILABLE";
+  }
   if (status === 404) {
     return "NOT_FOUND";
   }
@@ -82,18 +97,24 @@ function mapError(error) {
       retryHint: "Retry the request in a few moments.",
     };
   }
-
   const status = (error && error.status) || 500;
+  const retryableStatuses = [429, 503];
+  const retryable = retryableStatuses.includes(status);
+  let retryHint = "Do not retry until the issue is resolved or support is contacted.";
+  if (status === 429) {
+    retryHint = "Wait for the rate limit window to reset before retrying.";
+  } else if (status === 503) {
+    retryHint = "Retry the request in a few moments.";
+  }
   return {
     status,
-    code: status === 403 ? "FORBIDDEN" : "INTERNAL_SERVER_ERROR",
+    code: httpStatusToCode(status),
     message:
       status === 500
         ? "An internal server error occurred."
         : (error && error.message) || "An internal server error occurred.",
-    retryable: false,
-    retryHint:
-      "Do not retry until the issue is resolved or support is contacted.",
+    retryable,
+    retryHint,
   };
 }
 

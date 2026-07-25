@@ -32,87 +32,35 @@ const router = express.Router();
 const db = require('../db/knex');
 const { replayWebhook, resolveDeadLetter } = require('../services/webhooks');
 const { webhookReplayTotal } = require('../metrics');
-const { adminStack } = require('../middleware/stacks');
-const { encodeCursor, decodeCursor, CursorError } = require('../utils/cursorPagination');
-const responseHelper = require('../utils/responseHelper');
+const { authenticateToken } = require('../middleware/auth');
+// Legacy src/middleware/apiKey.js has been retired in favour of the env-backed
+// registry authenticator. The implementation lives in apiKeyAuth.js and never
+// opens a SQLite connection per request — see issue #590.
+const { authenticateApiKey } = require('../middleware/apiKeyAuth');
 const logger = require('../logger');
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /**
- * Maximum page size for the dead-letter listing endpoint.
- * @constant {number}
- */
-const MAX_LIMIT = 100;
-
-/**
- * Default page size when `limit` is not supplied.
- * @constant {number}
- */
-const DEFAULT_LIMIT = 20;
-
-/**
- * The cursor sort field used for dead-letter keyset pagination.
- * Dead-letters are always ordered by `created_at` descending, with `id` as
- * the tiebreaker.  Because `cursorPagination.js` only allows fields in its
- * ALLOWED_SORT_FIELDS allowlist we encode the cursor with `created_at`.
+ * Pre-built admin API key middleware (no required scope — any valid, non-revoked
+ * key is accepted). Built once so the factory overhead is paid at module load
+ * rather than on every request.
  *
- * @constant {string}
+ * @type {import('express').RequestHandler}
  */
-const DEAD_LETTER_SORT_FIELD = 'created_at';
+const _adminApiKeyMiddleware = authenticateApiKey();
 
 /**
- * Columns that are safe to return to the caller.
- * `webhook_url` is returned so operators know where delivery was attempted.
- * `payload` is returned (it is the event body, not a secret).
- * `webhook_secret` is NOT a column in the table — secrets live in
- * `tenants.settings` and are never persisted to `webhook_dead_letters`.
- * The `X-Signature` header stored in `last_error` might contain partial
- * signature data, but `last_error` is a plain error message string and safe
- * to surface. We explicitly exclude no columns here beyond what the table
- * holds — this comment documents the security decision.
+ * Accepts either a valid admin JWT or a valid X-API-Key.
+ * Honours the existing X-API-KEY contract: when the header is present the
+ * request is authenticated against the env-backed key registry; otherwise it
+ * falls through to JWT auth.
  *
- * @constant {string[]}
+ * @type {import('express').RequestHandler}
  */
-const SAFE_COLUMNS = [
-  'id',
-  'tenant_id',
-  'invoice_id',
-  'event',
-  'webhook_url',
-  'attempts',
-  'last_error',
-  'resolved',
-  'resolved_at',
-  'created_at',
-  // payload is intentionally included — it is the event body, not a secret
-  'payload',
-];
-
-// ── Apply admin auth + tenant extraction to every route ──────────────────────
-router.use(...adminStack);
-
-// ── Helper ───────────────────────────────────────────────────────────────────
-
-/**
- * Redacts secret material from a dead-letter row before sending it to the
- * caller.  Currently the `webhook_dead_letters` table does not store HMAC
- * secrets (they live in `tenants.settings`), but as a defence-in-depth
- * measure we strip any key whose name matches the sensitive-field pattern
- * used throughout the codebase.
- *
- * @param {Object} row - Raw DB row.
- * @returns {Object} Sanitised row safe for external consumption.
- */
-function redactRow(row) {
-  const SENSITIVE_KEYS = /password|secret|token|apiKey|authorization|privateKey|seed|mnemonic/i;
-  const out = {};
-  for (const [k, v] of Object.entries(row)) {
-    if (SENSITIVE_KEYS.test(k)) {
-      // omit
-    } else {
-      out[k] = v;
-    }
+function adminAuth(req, res, next) {
+  if (req.headers['x-api-key']) {
+    return _adminApiKeyMiddleware(req, res, next);
   }
   return out;
 }
@@ -390,10 +338,9 @@ router.post('/replay/:id', async (req, res) => {
   const { id } = req.params;
   try {
     await replayWebhook(id);
-    logger.info(
-      { deadLetterId: id, adminClient: req.apiClient?.clientId || req.user?.sub },
-      'Admin triggered replay',
-    );
+    // `req.apiClient` is set by src/middleware/apiKeyAuth.js on success; the
+    // JWT path sets `req.user`. The legacy `req.apiKey` no longer exists.
+    logger.info({ deadLetterId: id, adminClient: req.apiClient?.clientId || req.user?.sub }, 'Admin triggered replay');
     return res.status(202).json({ replayed: [id] });
   } catch (err) {
     if (err.code === 'NOT_FOUND') {
@@ -461,12 +408,8 @@ router.post('/replay', async (req, res) => {
   }
 
   logger.info(
-    {
-      replayed: replayed.length,
-      failed: failed.length,
-      adminClient: req.apiClient?.clientId || req.user?.sub,
-    },
-    'Admin batch replay completed',
+    { replayed: replayed.length, failed: failed.length, adminClient: req.apiClient?.clientId || req.user?.sub },
+    'Admin batch replay completed'
   );
 
   return res.status(202).json({ replayed, failed });
@@ -488,10 +431,7 @@ router.post('/resolve/:id', async (req, res) => {
     return res.status(409).json({ error: `Dead-letter row already resolved: ${id}` });
   }
   await resolveDeadLetter(id);
-  logger.info(
-    { deadLetterId: id, adminClient: req.apiClient?.clientId || req.user?.sub },
-    'Admin resolved dead-letter without replay',
-  );
+  logger.info({ deadLetterId: id, adminClient: req.apiClient?.clientId || req.user?.sub }, 'Admin resolved dead-letter without replay');
   return res.status(200).json({ resolved: id });
 });
 

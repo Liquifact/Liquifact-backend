@@ -535,6 +535,55 @@ async function performReadinessChecks() {
   return { healthy, checks };
 }
 
+/**
+ * @typedef {Object} HealthCheckRecord
+ * @property {string} id        Deterministic identifier for this check name (e.g. "soroban").
+ * @property {string} name      Human-readable check name.
+ * @property {string} status    Current check status string.
+ * @property {string} timestamp ISO 8601 timestamp at which the snapshot was taken.
+ * @property {Object} detail    Raw result from the individual check function.
+ */
+
+/**
+ * Collects all named dependency health checks into a flat, deterministically-
+ * ordered array of {@link HealthCheckRecord} objects.
+ *
+ * Each record has a stable `id` (the check name) and a `timestamp` derived
+ * from the caller-supplied `snapshotTime` argument (defaults to `Date.now()`).
+ * This makes the list stable and sortable for cursor-based pagination.
+ *
+ * The check order is fixed to: soroban → database → kyc → indexerStaleness →
+ * storage → reconciliation, which matches `performHealthChecks` /
+ * `performReadinessChecks`.
+ *
+ * @param {Object}  [options]
+ * @param {number}  [options.snapshotTime=Date.now()]  Override for unit-test
+ *   determinism; milliseconds since epoch.
+ * @returns {Promise<HealthCheckRecord[]>}
+ */
+async function listHealthChecks({ snapshotTime } = {}) {
+  const ts = snapshotTime !== undefined ? snapshotTime : Date.now();
+  const timestamp = new Date(ts).toISOString();
+
+  const [soroban, database, kyc, indexerStaleness, storage, reconciliation] = await Promise.all([
+    checkSorobanHealth(),
+    checkDatabaseHealth(),
+    checkKycHealth(),
+    checkIndexerStaleness(),
+    checkStorageHealth(),
+    checkReconciliationHealth(),
+  ]);
+
+  return [
+    { id: 'soroban', name: 'Soroban RPC', status: soroban.status, timestamp, detail: soroban },
+    { id: 'database', name: 'Database', status: database.status, timestamp, detail: database },
+    { id: 'kyc', name: 'KYC Provider', status: kyc.status, timestamp, detail: kyc },
+    { id: 'indexerStaleness', name: 'Escrow Indexer Staleness', status: indexerStaleness.status, timestamp, detail: indexerStaleness },
+    { id: 'storage', name: 'Storage (S3)', status: storage.status, timestamp, detail: storage },
+    { id: 'reconciliation', name: 'Escrow Reconciliation', status: reconciliation.status, timestamp, detail: reconciliation },
+  ];
+}
+
 module.exports = {
   checkSorobanHealth,
   checkDatabaseHealth,
@@ -546,4 +595,5 @@ module.exports = {
   performReadinessChecks,
   inspectPoolHealth,
   resolveSorobanHealthTimeoutMs,
+  listHealthChecks,
 };
