@@ -27,6 +27,16 @@ const { getAuditLogs } = require('../services/auditLog');
 const { requireKycForFunding, auditKycAccess } = require('../middleware/kycGating');
 const { extractTenant } = require('../middleware/tenant');
 const responseHelper = require('../utils/responseHelper');
+const {
+  mapTransitionRequest,
+  mapApproveRequest,
+  mapLinkEscrowRequest,
+  mapRejectRequest,
+  toInvoiceStateResponse,
+  toTransitionResponse,
+  toLinkEscrowResponse,
+  toInvoiceHistoryResponse,
+} = require('../dtos/invoiceStateDtos');
 
 router.use(extractTenant);
 
@@ -90,14 +100,14 @@ router.get('/:id/state', async (req, res, next) => {
 
     const currentState = invoice.status;
     const allowedTransitions = getAllowedTransitions(currentState);
+    const stateDto = toInvoiceStateResponse({
+      invoiceId: id,
+      currentState,
+      allowedTransitions,
+    });
 
     return res.json({
-      ...responseHelper.success({
-        invoiceId: id,
-        currentState,
-        allowedTransitions,
-        isTerminal: allowedTransitions.length === 0,
-      }),
+      ...responseHelper.success(stateDto),
       message: 'Invoice state retrieved successfully',
     });
   } catch (error) {
@@ -113,7 +123,7 @@ router.get('/:id/state', async (req, res, next) => {
  */
 router.post('/:id/transition', async (req, res, next) => {
   const { id } = req.params;
-  const { targetState, reason } = req.body || {};
+  const { targetState, reason } = mapTransitionRequest(req.body);
 
   try {
     if (!targetState) {
@@ -137,16 +147,9 @@ router.post('/:id/transition', async (req, res, next) => {
       },
     });
 
+    const responseDto = toTransitionResponse({ invoiceId: id, result, reason });
     return res.status(200).json({
-      ...responseHelper.success({
-        invoiceId: id,
-        previousState: result.previousState,
-        currentState: result.newState,
-        transitionedAt: result.transitionedAt,
-        transitionedBy: result.transitionedBy,
-        reason,
-        auditLogId: result.auditLog.id,
-      }),
+      ...responseHelper.success(responseDto),
       message: `Invoice transitioned from ${result.previousState} to ${result.newState}`,
     });
   } catch (error) {
@@ -163,7 +166,7 @@ router.post('/:id/transition', async (req, res, next) => {
  */
 router.post('/:id/approve', async (req, res, next) => {
   const { id } = req.params;
-  const { reason } = req.body || {};
+  const { reason } = mapApproveRequest(req.body);
 
   try {
     const actor = getActorFromRequest(req);
@@ -182,15 +185,9 @@ router.post('/:id/approve', async (req, res, next) => {
       },
     });
 
+    const responseDto = toTransitionResponse({ invoiceId: id, result });
     return res.status(200).json({
-      ...responseHelper.success({
-        invoiceId: id,
-        previousState: result.previousState,
-        currentState: result.newState,
-        transitionedAt: result.transitionedAt,
-        transitionedBy: result.transitionedBy,
-        auditLogId: result.auditLog.id,
-      }),
+      ...responseHelper.success(responseDto),
       message: 'Invoice approved successfully',
     });
   } catch (error) {
@@ -208,7 +205,7 @@ router.post('/:id/approve', async (req, res, next) => {
  */
 router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, async (req, res, next) => {
   const { id } = req.params;
-  const { escrowId, reason } = req.body || {};
+  const { escrowId, reason } = mapLinkEscrowRequest(req.body);
 
   try {
     const invoice = await invoiceService.resolveInvoiceForTenant(id, req.tenantId);
@@ -242,16 +239,9 @@ router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, async (req
       },
     });
 
+    const responseDto = toLinkEscrowResponse({ invoiceId: id, result, escrowId });
     return res.status(200).json({
-      ...responseHelper.success({
-        invoiceId: id,
-        previousState: result.previousState,
-        currentState: result.newState,
-        escrowId: escrowId || null,
-        transitionedAt: result.transitionedAt,
-        transitionedBy: result.transitionedBy,
-        auditLogId: result.auditLog.id,
-      }),
+      ...responseHelper.success(responseDto),
       message: 'Invoice linked to escrow successfully',
     });
   } catch (error) {
@@ -268,7 +258,7 @@ router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, async (req
  */
 router.post('/:id/reject', async (req, res, next) => {
   const { id } = req.params;
-  const { reason } = req.body || {};
+  const { reason } = mapRejectRequest(req.body);
 
   try {
     if (!reason || typeof reason !== 'string' || reason.trim().length === 0) {
@@ -293,16 +283,9 @@ router.post('/:id/reject', async (req, res, next) => {
       },
     });
 
+    const responseDto = toTransitionResponse({ invoiceId: id, result, reason });
     return res.status(200).json({
-      ...responseHelper.success({
-        invoiceId: id,
-        previousState: result.previousState,
-        currentState: result.newState,
-        reason,
-        transitionedAt: result.transitionedAt,
-        transitionedBy: result.transitionedBy,
-        auditLogId: result.auditLog.id,
-      }),
+      ...responseHelper.success(responseDto),
       message: 'Invoice rejected successfully',
     });
   } catch (error) {
@@ -327,15 +310,15 @@ router.get('/:id/history', async (req, res, next) => {
       return sendInvoiceNotFound(res);
     }
 
-    const history = await getTransitionHistory(id, getAuditLogs);
+    const transitions = await getTransitionHistory(id, getAuditLogs);
+    const historyDto = toInvoiceHistoryResponse({
+      invoiceId: id,
+      currentState: invoice.status,
+      transitions,
+    });
 
     return res.json({
-      ...responseHelper.success({
-        invoiceId: id,
-        currentState: invoice.status,
-        transitions: history,
-        totalTransitions: history.length,
-      }),
+      ...responseHelper.success(historyDto),
       message: 'Invoice transition history retrieved successfully',
     });
   } catch (error) {
