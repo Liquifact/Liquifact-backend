@@ -17,6 +17,12 @@
  *
  * Access: Admin-only (JWT bearer or API key). Tenant-scoped.
  *
+ * Rate limiting (issue #754): a per-client limiter is mounted *before* the
+ * `adminStack` so that failed auth attempts still consume quota. This blocks
+ * auth-flooding with bogus API keys / JWTs and bounds the blast radius of a
+ * buggy redeploy loop hammering this surface. Limits are env-driven and
+ * default to 20 requests per 60 s window per client.
+ *
  * @module routes/adminConfig
  */
 
@@ -27,12 +33,37 @@ const {
   validateBody,
   CONFIG_SECTIONS,
 } = require('../schemas/config');
+const { adminConfigLimiter } = require('../middleware/rateLimit');
+const idempotencyMiddleware = require('../middleware/idempotency');
+const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
 const logger = require('../logger');
 
 const router = express.Router();
 
+// ── Apply per-client rate limit *before* admin auth + tenant extraction ─────
+// Mounting the limiter ahead of adminStack ensures failed authentication
+// attempts still count toward each client's quota — defending against
+// auth-flooding as well as legitimate bursts of config writes.
+router.use(adminConfigLimiter);
+
 // ── Apply admin auth + tenant extraction to every route ──────────────────────
 router.use(...adminStack);
+
+/**
+ * Conditionally applies idempotency logic if the client provides the header.
+ * Allows gradual rollout without breaking existing API clients.
+ *
+ * @param {object} req - Express request
+ * @param {object} res - Express response
+ * @param {function} next - Express next callback
+ * @returns {void}
+ */
+const optionalIdempotency = (req, res, next) => {
+  if (req.header('Idempotency-Key')) {
+    return idempotencyMiddleware(req, res, next);
+  }
+  next();
+};
 
 // ── POST /api/admin/config ────────────────────────────────────────────────────
 
@@ -53,11 +84,30 @@ router.use(...adminStack);
  *       A machine-readable `fieldErrors` map is returned on any validation
  *       failure so that clients can highlight the offending fields.
  *
+ *       **Idempotency**: Requires an `Idempotency-Key` header. Retried
+ *       requests with the same key and body return the original cached
+ *       response; reusing a key with a different body returns 409.
+ *
  *       **Access**: Admin-only (JWT bearer or API key). Tenant-scoped.
+ *       **Rate limit (issue #754)**: per client (API key / IP); default 20
+ *       requests per 60 s window. Returns `429` with a `Retry-After` header
+ *       when the budget is exhausted.
+ *
+ *       **Idempotency (issue #755)**: send an `Idempotency-Key` header (8-128
+ *       URL-safe characters) to safely retry requests. Retries with the same
+ *       key and payload will return the cached response.
  *
  *     tags: [AdminConfig]
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: header
+ *         name: Idempotency-Key
+ *         required: true
+ *         schema:
+ *           type: string
+ *           pattern: '^[A-Za-z0-9._:-]{8,128}$'
+ *         description: Unique idempotency key for this config update. Safe to retry with the same key.
  *     requestBody:
  *       required: true
  *       content:
@@ -68,7 +118,7 @@ router.use(...adminStack);
  *             properties:
  *               section:
  *                 type: string
- *                 enum: [webhook, reconciliation, kyc, retention, fraudThresholds]
+ *                 enum: [webhook, reconciliation, kyc, retention, fraudThresholds, cors]
  *                 description: The configuration section to update.
  *               config:
  *                 type: object
@@ -88,7 +138,7 @@ router.use(...adminStack);
  *                 message:
  *                   type: string
  *       400:
- *         description: Validation error — body contains invalid or missing fields.
+ *         description: Validation error — body contains invalid or missing fields, or missing/malformed Idempotency-Key.
  *         content:
  *           application/problem+json:
  *             schema:
@@ -106,10 +156,56 @@ router.use(...adminStack);
  *         $ref: '#/components/responses/Problem401'
  *       403:
  *         $ref: '#/components/responses/Problem403'
+ *       409:
+ *         description: Idempotency key reused with a different request body.
+ *         content:
+ *           application/problem+json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 type:    { type: string }
+ *                 title:   { type: string }
+ *                 status:  { type: integer }
+ *                 detail:  { type: string }
+ *                 requestId: { type: string }
+ *       429:
+ *         description: Rate limit exceeded (issue #754) — see Retry-After header.
+ *         headers:
+ *           Retry-After:
+ *             schema:
+ *               type: integer
+ *             description: Seconds until the rate-limit window resets.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 type:    { type: string }
+ *                 title:   { type: string }
+ *                 status:  { type: integer }
+ *                 code:    { type: string }
+ *                 retryable: { type: boolean }
+ *                 retry_hint: { type: string }
+ *                 scope:   { type: string }
+ *                 error:   { type: string }
+ *                 message: { type: string }
  */
-router.post('/', validateBody(runtimeConfigSchema), (req, res) => {
+router.post('/', idempotencyMiddleware, validateBody(runtimeConfigSchema), (req, res) => {
   // validateBody attaches the parsed, coerced payload to req.validated
   const { section, config: validatedConfig } = req.validated;
+
+  // Apply runtime configuration changes for supported sections.
+  if (section === 'cors') {
+    if (validatedConfig.origins) {
+      // Update the env var so reloadCorsOrigins can re-read it.
+      process.env.CORS_ALLOWED_ORIGINS = validatedConfig.origins.join(',');
+      reloadCorsOrigins();
+    }
+    if (validatedConfig.maxAge !== undefined) {
+      process.env.CORS_MAX_AGE = String(validatedConfig.maxAge);
+      reloadCorsMaxAge();
+    }
+  }
 
   logger.info(
     {
