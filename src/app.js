@@ -388,6 +388,7 @@ function createApp() {
   mountFeatureRouter(app, '/api/admin/reconciliation', reconciliationRoutes);
   mountFeatureRouter(app, '/api/admin/indexer', adminIndexerRoutes);
   mountFeatureRouter(app, '/v1', v1Routes);
+  mountFeatureRouter(app, '/api', apiKeysRoutes);
 
   assertNoDuplicateRouterMounts();
 

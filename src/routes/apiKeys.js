@@ -11,6 +11,7 @@
 
 const express = require('express');
 const { loadApiKeyRegistry, validateEntry } = require('../config/apiKeys');
+const idempotencyMiddleware = require('../middleware/idempotency');
 
 const router = express.Router();
 const runtimeEntries = new Map();
@@ -116,11 +117,11 @@ function getApiKeyHandler(req, res) {
 }
 
 router.get('/api-keys', listApiKeysHandler);
-router.post('/api-keys', createApiKeyHandler);
+router.post('/api-keys', idempotencyMiddleware, createApiKeyHandler);
 router.get('/api-keys/:key', getApiKeyHandler);
 
 router.get('/keys', listApiKeysHandler);
-router.post('/keys', createApiKeyHandler);
+router.post('/keys', idempotencyMiddleware, createApiKeyHandler);
 router.get('/keys/:key', getApiKeyHandler);
 
 router.resetRuntimeEntries = () => {
