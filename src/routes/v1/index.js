@@ -28,6 +28,7 @@ const { computeEscrowDerivedFields } = require('../../services/escrowDerived');
 const AppError = require('../../errors/AppError');
 const { invoiceCreateSchema, invoiceUpdateSchema, parseValidationErrors } = require('../../schemas/invoice');
 const { validatePatchFields, detectLockedFieldChange } = require('../../middleware/patchInvoice');
+const { validateHealthQuery, rejectBodyOnGet } = require('../../schemas/health');
 
 // ── Sub-router mounts ────────────────────────────────────────────────────────
 router.use('/invest', investRoutes);
@@ -35,7 +36,7 @@ router.use('/sme', smeRouter);
 
 // ── Utility routes ───────────────────────────────────────────────────────────
 
-router.get('/health', (req, res) => {
+router.get('/health', rejectBodyOnGet, validateHealthQuery, (req, res) => {
   return res.json({
     status: 'ok',
     service: 'liquifact-api',

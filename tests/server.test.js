@@ -154,7 +154,7 @@ describe('Server Core Integration Tests', () => {
         .options('/health')
         .set('Origin', allowedOrigin)
         .set('Access-Control-Request-Method', 'GET');
-      
+
       expect(res.statusCode).toBe(204);
       expect(res.headers['access-control-allow-origin']).toBe(allowedOrigin);
     });
@@ -163,18 +163,105 @@ describe('Server Core Integration Tests', () => {
       const res = await request(app)
         .get('/health')
         .set('Origin', allowedOrigin);
-      
+
       expect(res.statusCode).toBe(200);
       expect(res.headers['access-control-allow-origin']).toBe(allowedOrigin);
+    });
+
+    it('should allow requests from a trailing-slash variant of an allowed origin', async () => {
+      const res = await request(app)
+        .get('/health')
+        .set('Origin', 'http://localhost:3000/');
+
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['access-control-allow-origin']).toBe('http://localhost:3000/');
+    });
+
+    it('should allow requests from an upper-case host variant of an allowed origin', async () => {
+      const res = await request(app)
+        .get('/health')
+        .set('Origin', 'HTTP://LOCALHOST:3000');
+
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['access-control-allow-origin']).toBe('HTTP://LOCALHOST:3000');
+    });
+
+    it('should allow requests from a combined upper-case and trailing-slash variant of an allowed origin', async () => {
+      const res = await request(app)
+        .get('/health')
+        .set('Origin', 'HTTP://LOCALHOST:3000/');
+
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['access-control-allow-origin']).toBe('HTTP://LOCALHOST:3000/');
+    });
+
+    it('should reject requests with null origin (literal "null") with 403', async () => {
+      const res = await request(app)
+        .get('/health')
+        .set('Origin', 'null');
+
+      expect(res.statusCode).toBe(403);
+      expect(res.body.error.message).toBe('CORS policy: origin is not allowed.');
+    });
+
+    it('should reject preflight (OPTIONS) requests with null origin (literal "null") with 403', async () => {
+      const res = await request(app)
+        .options('/health')
+        .set('Origin', 'null')
+        .set('Access-Control-Request-Method', 'GET');
+
+      expect(res.statusCode).toBe(403);
+      expect(res.body.error.message).toBe('CORS policy: origin is not allowed.');
     });
 
     it('should reject requests from disallowed origins with 403', async () => {
       const res = await request(app)
         .get('/health')
         .set('Origin', disallowedOrigin);
-      
+
       expect(res.statusCode).toBe(403);
       expect(res.body.error.message).toBe('CORS policy: origin is not allowed.');
+    });
+
+    it('should reject requests from upper-case variant of disallowed origins with 403', async () => {
+      const res = await request(app)
+        .get('/health')
+        .set('Origin', 'HTTP://MALICIOUS-SITE.COM');
+
+      expect(res.statusCode).toBe(403);
+      expect(res.body.error.message).toBe('CORS policy: origin is not allowed.');
+    });
+
+    it('should reject requests from trailing-slash variant of disallowed origins with 403', async () => {
+      const res = await request(app)
+        .get('/health')
+        .set('Origin', 'http://malicious-site.com/');
+
+      expect(res.statusCode).toBe(403);
+      expect(res.body.error.message).toBe('CORS policy: origin is not allowed.');
+    });
+
+    it('should reject subdomain bypass attempts with 403', async () => {
+      const res = await request(app)
+        .get('/health')
+        .set('Origin', 'http://localhost:3000.attacker.com');
+
+      expect(res.statusCode).toBe(403);
+      expect(res.body.error.message).toBe('CORS policy: origin is not allowed.');
+
+      const res2 = await request(app)
+        .get('/health')
+        .set('Origin', 'http://attacker.localhost:3000');
+
+      expect(res2.statusCode).toBe(403);
+      expect(res2.body.error.message).toBe('CORS policy: origin is not allowed.');
+    });
+
+    it('should allow requests without an Origin header (non-browser / server-to-server)', async () => {
+      const res = await request(app).get('/health');
+
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['access-control-allow-origin']).toBeUndefined();
     });
   });
 });

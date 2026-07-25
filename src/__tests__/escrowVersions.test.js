@@ -32,7 +32,23 @@ const jwt = require('jsonwebtoken');
 const app = require('../index');
 
 const SECRET = process.env.JWT_SECRET || 'test-secret';
-const adminToken = jwt.sign({ id: 1, role: 'admin' }, SECRET, { expiresIn: '1h' });
+
+/**
+ * Creates an admin JWT token with tenant context for route-level tests.
+ * The extractTenant middleware requires a tenantId claim or x-tenant-id header.
+ *
+ * @param {object} [overrides] - Additional JWT claims.
+ * @returns {string} Signed JWT.
+ */
+function makeAdminToken(overrides = {}) {
+  return jwt.sign(
+    { id: 1, role: 'admin', tenantId: 'test-tenant', ...overrides },
+    SECRET,
+    { expiresIn: '1h' }
+  );
+}
+
+const adminToken = makeAdminToken();
 const VALID_ID = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 
 // ─── escrowVersions: REGISTRY ─────────────────────────────────────────────────
@@ -214,9 +230,10 @@ describe('POST /api/admin/escrow/refresh', () => {
       .post('/api/admin/escrow/refresh')
       .set('Authorization', `Bearer ${adminToken}`);
     expect(res.status).toBe(202);
-    expect(res.body.message).toBe('Contract list refresh triggered.');
-    expect(res.body.onChainVersion).toBe(3);
-    expect(res.body.status).toBe('current');
+    // Response goes through standardized envelope: payload is in res.body.data
+    expect(res.body.data.message).toBe('Contract list refresh triggered.');
+    expect(res.body.data.onChainVersion).toBe(3);
+    expect(res.body.data.status).toBe('current');
   });
 
   it('returns 400 when ESCROW_CONTRACT_ID is invalid', async () => {
@@ -239,7 +256,8 @@ describe('POST /api/admin/escrow/refresh', () => {
     callSorobanContract.mockResolvedValueOnce(3);
     const res = await request(app)
       .post('/api/admin/escrow/refresh')
-      .set('X-API-KEY', 'any-key'); // apiKeyAuth is mocked to pass
+      .set('x-tenant-id', 'test-tenant')
+      .set('X-API-KEY', 'any-key');
     expect(res.status).toBe(202);
   });
 });
@@ -267,7 +285,8 @@ describe('GET /api/admin/escrow/version', () => {
       .get('/api/admin/escrow/version')
       .set('Authorization', `Bearer ${adminToken}`);
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({
+    // Response goes through standardized envelope: payload is in res.body.data
+    expect(res.body.data).toMatchObject({
       onChainVersion: 3,
       knownVersion: '1.2.0',
       status: 'current',

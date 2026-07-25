@@ -25,6 +25,7 @@ const { auditMiddleware } = require('./middleware/audit');
 const requestId = require('./middleware/requestId');
 const { correlationIdMiddleware } = require('./middleware/correlationId');
 const invoiceService = require('./services/invoiceService');
+const { CursorError } = require('./utils/cursorPagination');
 const { resolveEscrowAddress } = require('./config/escrowMap');
 const { getEscrowStateWithProjection } = require('./services/escrowRead');
 const { createCorsOptions, isCorsOriginRejectedError } = require('./config/cors');
@@ -38,6 +39,7 @@ const {
   urlencodedBodyLimit,
 } = require('./middleware/bodySizeLimits');
 const { performHealthChecks, performReadinessChecks } = require('./services/health');
+const { validateHealthQuery, rejectBodyOnGet } = require('./schemas/health');
 const responseHelper = require('./utils/responseHelper');
 const logger = require('./logger');
 const { metricsAuth, metricsHandler } = require('./metrics');
@@ -51,9 +53,12 @@ const retentionRoutes = require('./routes/retention');
 const invoiceStateRoutes = require('./routes/invoiceStateRoutes');
 const adminEscrowRoutes = require('./routes/adminEscrow');
 const adminWebhooksRoutes = require('./routes/adminWebhooks');
+const adminConfigRoutes = require('./routes/adminConfig');
 const kycRoutes = require('./routes/kyc');
 const reconciliationRoutes = require('./routes/reconciliation');
+const adminIndexerRoutes = require('./routes/adminIndexer');
 const v1Routes = require('./routes/v1');
+const apiKeysRoutes = require('./routes/apiKeys');
 const {
   mountFeatureRouter,
   assertNoDuplicateRouterMounts,
@@ -71,7 +76,7 @@ const {
  */
 function handleCorsError(err, req, res, next) {
   if (isCorsOriginRejectedError(err)) {
-    res.status(403).json({ error: err.message });
+    res.status(403).json({ error: err.message, code: err.code });
     return;
   }
   next(err);
@@ -94,8 +99,9 @@ function handleInternalError(err, req, res, _next) {
     return;
   }
 
-  // AppError: use the status it carries
-  if (err && err.status && err.status >= 400 && err.status < 500) {
+  // AppError: use the status it carries (400–599).
+  // This covers both 4xx client errors and 5xx upstream errors (e.g. 502).
+  if (err && err.status && err.status >= 400 && err.status <= 599) {
     res.status(err.status).json({
       error: {
         code: err.code || String(err.status),
@@ -153,7 +159,7 @@ function createApp() {
   // ── Health / Liveness / Readiness ──────────────────────────────────────
 
   // Liveness probe — no external dependencies
-  app.get('/health', (req, res) => {
+  app.get('/health', rejectBodyOnGet, validateHealthQuery, (req, res) => {
     res.json({
       status: 'ok',
       service: 'liquifact-api',
@@ -163,7 +169,7 @@ function createApp() {
   });
 
   // Liveness alias (Kubernetes convention)
-  app.get('/healthz', (req, res) => {
+  app.get('/healthz', rejectBodyOnGet, validateHealthQuery, (req, res) => {
     res.json({
       status: 'ok',
       service: 'liquifact-api',
@@ -173,7 +179,7 @@ function createApp() {
   });
 
   // Full health check (all dependencies)
-  app.get('/ready', async (req, res) => {
+  app.get('/ready', rejectBodyOnGet, validateHealthQuery, async (req, res) => {
     try {
       const { healthy, checks } = await performHealthChecks();
       const status = healthy ? 200 : 503;
@@ -195,7 +201,7 @@ function createApp() {
   });
 
   // Readiness probe (critical deps only: DB, Soroban RPC)
-  app.get('/readyz', async (req, res) => {
+  app.get('/readyz', rejectBodyOnGet, validateHealthQuery, async (req, res) => {
     try {
       const { healthy, checks } = await performReadinessChecks();
       const status = healthy ? 200 : 503;
@@ -234,7 +240,7 @@ function createApp() {
     });
   });
 
-  // Invoices — GET (list)
+  // Invoices — GET (list) with cursor pagination
   app.get('/api/invoices', async (req, res) => {
     const { isValid, fieldErrors, validatedParams } = validateInvoiceQueryParams(req.query);
     if (!isValid) {
@@ -246,9 +252,28 @@ function createApp() {
         fieldErrors,
       });
     }
-    const invoices = await invoiceService.getInvoices(validatedParams);
+
+    let result;
+    try {
+      result = await invoiceService.getInvoicesWithPagination(validatedParams);
+    } catch (err) {
+      if (err instanceof CursorError) {
+        return res.status(400).json({
+          type: 'https://liquifact.io/problems/validation-error',
+          title: 'Validation Error',
+          status: 400,
+          detail: 'Query parameters contain invalid values.',
+          fieldErrors: {
+            cursor: err.message,
+          },
+        });
+      }
+      throw err;
+    }
+
     res.json({
-      data: invoices,
+      data: result.data,
+      meta: result.meta,
       message: 'Invoices retrieved successfully.',
     });
   });
@@ -359,7 +384,9 @@ function createApp() {
   mountFeatureRouter(app, '/api/admin/audit', auditTrailRoutes);
   mountFeatureRouter(app, '/api/admin/escrow', adminEscrowRoutes);
   mountFeatureRouter(app, '/api/admin/webhooks', adminWebhooksRoutes);
+  mountFeatureRouter(app, '/api/admin/config', adminConfigRoutes);
   mountFeatureRouter(app, '/api/admin/reconciliation', reconciliationRoutes);
+  mountFeatureRouter(app, '/api/admin/indexer', adminIndexerRoutes);
   mountFeatureRouter(app, '/v1', v1Routes);
 
   assertNoDuplicateRouterMounts();

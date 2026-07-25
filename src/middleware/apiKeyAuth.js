@@ -13,6 +13,7 @@
 
 const crypto = require('crypto');
 const { loadApiKeyRegistry } = require('../config/apiKeys');
+const logger = require('../logger');
 
 /** Name of the HTTP request header that carries the API key. */
 const API_KEY_HEADER = 'x-api-key';
@@ -84,6 +85,11 @@ function authenticateApiKey(options = {}) {
     const rawKey = req.headers[API_KEY_HEADER];
 
     if (!rawKey || typeof rawKey !== 'string' || rawKey.trim() === '') {
+      // Audit: missing X-API-Key. Never include the value in the log.
+      logger.warn(
+        { event: 'api_key.auth', outcome: 'missing_header', ip: req.ip, path: req.path },
+        'API key authentication rejected'
+      );
       return res.status(401).json({
         error: 'API key is required. Provide it via the X-API-Key header.',
       });
@@ -94,14 +100,42 @@ function authenticateApiKey(options = {}) {
     const entry = findEntry(registry, rawKey.trim());
 
     if (!entry) {
+      // Audit: unknown key. Never log the candidate key.
+      logger.warn(
+        { event: 'api_key.auth', outcome: 'invalid_key', ip: req.ip, path: req.path },
+        'API key authentication rejected'
+      );
       return res.status(401).json({ error: 'Invalid API key.' });
     }
 
     if (entry.revoked) {
+      // Audit: revoked key. We can record the clientId but never the key string.
+      logger.warn(
+        {
+          event: 'api_key.auth',
+          outcome: 'revoked',
+          clientId: entry.clientId,
+          ip: req.ip,
+          path: req.path,
+        },
+        'API key authentication rejected'
+      );
       return res.status(401).json({ error: 'API key has been revoked.' });
     }
 
     if (requiredScope && !entry.scopes.includes(requiredScope)) {
+      // Audit: scope mismatch. Record the clientId + required scope, never the key.
+      logger.warn(
+        {
+          event: 'api_key.auth',
+          outcome: 'insufficient_scope',
+          clientId: entry.clientId,
+          requiredScope,
+          ip: req.ip,
+          path: req.path,
+        },
+        'API key authentication rejected'
+      );
       return res.status(403).json({
         error: `Insufficient permissions. Required scope: "${requiredScope}".`,
       });
@@ -112,6 +146,19 @@ function authenticateApiKey(options = {}) {
       clientId: entry.clientId,
       scopes: [...entry.scopes],
     };
+
+    // Audit: successful auth. Record clientId + scopes only — never the key.
+    logger.info(
+      {
+        event: 'api_key.auth',
+        outcome: 'success',
+        clientId: entry.clientId,
+        scopes: entry.scopes,
+        ip: req.ip,
+        path: req.path,
+      },
+      'API key authentication succeeded'
+    );
 
     return next();
   };

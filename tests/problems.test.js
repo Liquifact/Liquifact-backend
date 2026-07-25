@@ -435,6 +435,153 @@ describe("Problem JSON Middleware", () => {
     });
   });
 
+  describe("401 Unauthorized Responses", () => {
+    beforeEach(() => {
+      app = express();
+      app.use((req, res, next) => {
+        req.id = "auth-test-id";
+        next();
+      });
+
+      app.get("/unauthorized", (req, res, next) => {
+        next(
+          new AppError({
+            type: `${LIQUifact_PROBLEM_BASE}/unauthorized`,
+            title: "Unauthorized",
+            status: 401,
+            detail: "Authentication is required.",
+            code: "UNAUTHORIZED",
+            retryable: false,
+          }),
+        );
+      });
+
+      app.use(problemJsonHandler);
+    });
+
+    test("returns 401 with correct problem+json shape", async () => {
+      const response = await request(app).get("/unauthorized").expect(401);
+
+      expect(response.headers["content-type"]).toBe(
+        "application/problem+json; charset=utf-8",
+      );
+
+      expect(response.body).toMatchObject({
+        type: `${LIQUifact_PROBLEM_BASE}/unauthorized`,
+        title: "Unauthorized",
+        status: 401,
+        detail: "Authentication is required.",
+        code: "UNAUTHORIZED",
+        retryable: false,
+      });
+    });
+
+    test("401 response has no stack trace", async () => {
+      const response = await request(app).get("/unauthorized").expect(401);
+      expect(response.body).not.toHaveProperty("stack");
+    });
+  });
+
+  describe("409 Conflict Responses", () => {
+    beforeEach(() => {
+      app = express();
+      app.use((req, res, next) => {
+        req.id = "conflict-test-id";
+        next();
+      });
+
+      app.get("/conflict", (req, res, next) => {
+        next(
+          new AppError({
+            type: `${LIQUifact_PROBLEM_BASE}/conflict`,
+            title: "Conflict",
+            status: 409,
+            detail: "Resource state conflict.",
+            instance: "/conflict",
+            code: "CONFLICT",
+            retryable: false,
+            retryHint: "Resolve conflict and retry.",
+          }),
+        );
+      });
+
+      app.use(problemJsonHandler);
+    });
+
+    test("returns 409 with correct problem+json shape", async () => {
+      const response = await request(app).get("/conflict").expect(409);
+
+      expect(response.headers["content-type"]).toBe(
+        "application/problem+json; charset=utf-8",
+      );
+
+      expect(response.body).toMatchObject({
+        type: `${LIQUifact_PROBLEM_BASE}/conflict`,
+        title: "Conflict",
+        status: 409,
+        detail: "Resource state conflict.",
+        instance: "/conflict",
+        code: "CONFLICT",
+        retryable: false,
+        retry_hint: "Resolve conflict and retry.",
+      });
+    });
+
+    test("409 response has no stack trace", async () => {
+      const response = await request(app).get("/conflict").expect(409);
+      expect(response.body).not.toHaveProperty("stack");
+    });
+  });
+
+  describe("Exact Response Shape Parity", () => {
+    beforeEach(() => {
+      app = express();
+      app.use((req, res, next) => {
+        req.id = "shape-test-id";
+        next();
+      });
+
+      app.get("/app-error", (req, res, next) => {
+        next(
+          new AppError({
+            type: `${LIQUifact_PROBLEM_BASE}/bad-request`,
+            title: "Bad Request",
+            status: 400,
+            detail: "Invalid input.",
+            instance: "/app-error",
+            code: "VALIDATION_FAILED",
+            retryable: false,
+          }),
+        );
+      });
+
+      app.get("/generic-error", (req, res, next) => {
+        next(new Error("Something broke"));
+      });
+
+      app.use(problemJsonHandler);
+    });
+
+    test("AppError response has no unexpected fields", async () => {
+      const response = await request(app).get("/app-error").expect(400);
+      const keys = Object.keys(response.body).sort();
+      expect(keys).toEqual(["code", "detail", "instance", "retryable", "status", "title", "type"]);
+    });
+
+    test("generic error response has no unexpected fields", async () => {
+      const response = await request(app).get("/generic-error").expect(500);
+      const keys = Object.keys(response.body).sort();
+      expect(keys).toEqual(["detail", "instance", "status", "title", "type"]);
+    });
+
+    test("no stack trace in any response", async () => {
+      const res1 = await request(app).get("/app-error").expect(400);
+      const res2 = await request(app).get("/generic-error").expect(500);
+      expect(res1.body).not.toHaveProperty("stack");
+      expect(res2.body).not.toHaveProperty("stack");
+    });
+  });
+
   describe("Error Mapping Integration", () => {
     beforeEach(() => {
       app = express();

@@ -160,6 +160,21 @@ describe('escrowMap – resolveEscrowAddress', () => {
     process.env.NODE_ENV = originalNodeEnv;
   });
 
+  it('falls back to the "development" environment when defaultEnvironment is omitted entirely', () => {
+    delete process.env.NODE_ENV;
+    process.env.ESCROW_ADDR_BY_INVOICE = JSON.stringify({
+      mappings: [
+        { invoiceId: 'inv_001', escrowAddress: ADDR_A, environment: 'development', isActive: true },
+      ],
+      allowlistEnabled: false,
+      // defaultEnvironment intentionally omitted
+    });
+    _resetCache();
+
+    expect(resolveEscrowAddress('inv_001')).toBe(ADDR_A);
+    process.env.NODE_ENV = originalNodeEnv;
+  });
+
   // ── allowlistEnabled behavior ─────────────────────────────────────────────
 
   it('resolves normally when allowlistEnabled is true and address is in the mappings', () => {
@@ -346,6 +361,32 @@ describe('escrowMap – module-level cache', () => {
     const second = resolveEscrowAddress('inv_001');
     expect(first).toBe(ADDR_A);
     expect(second).toBe(ADDR_A); // still cached
+  });
+
+  it('rebuilds on every call when cacheEnabled is false, without waiting for TTL or calling _resetCache()', () => {
+    setConfig({
+      mappings: [
+        { invoiceId: 'inv_001', escrowAddress: ADDR_A, environment: 'test', isActive: true },
+      ],
+      defaultEnvironment: 'test',
+      allowlistEnabled: false,
+      cacheEnabled: false,
+    });
+
+    expect(resolveEscrowAddress('inv_001')).toBe(ADDR_A);
+
+    // Swap env directly — no _resetCache() call. With cacheEnabled: false,
+    // _getConfig() must re-parse on every call regardless of cacheTtlSeconds.
+    process.env.ESCROW_ADDR_BY_INVOICE = JSON.stringify({
+      mappings: [
+        { invoiceId: 'inv_001', escrowAddress: ADDR_B, environment: 'test', isActive: true },
+      ],
+      defaultEnvironment: 'test',
+      allowlistEnabled: false,
+      cacheEnabled: false,
+    });
+
+    expect(resolveEscrowAddress('inv_001')).toBe(ADDR_B);
   });
 
   it('picks up the new config after _resetCache()', () => {

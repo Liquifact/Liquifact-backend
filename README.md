@@ -356,6 +356,70 @@ Error: Mismatch: STELLAR_NETWORK=TESTNET requires SOROBAN_RPC_URL="https://sorob
 
 ---
 
+## CORS Policy
+
+Cross-Origin Resource Sharing is configured in `src/config/cors.js`.
+
+### Configuration
+
+Set the allowed origins via environment variable (comma-separated):
+
+```bash
+CORS_ORIGINS=https://app.example.com,https://admin.example.com
+```
+
+`CORS_ALLOWED_ORIGINS` is accepted as an alias for backward compatibility. When both are set, `CORS_ALLOWED_ORIGINS` takes precedence.
+
+In `NODE_ENV=development` with no variable set, a hard-coded set of `localhost` origins is permitted automatically.
+
+In all other environments with no variable set, every browser origin is denied.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CORS_ORIGINS` | unset | Comma-separated list of trusted origins |
+| `CORS_ALLOWED_ORIGINS` | unset | Alias for `CORS_ORIGINS` (preferred when both are present) |
+| `CORS_MAX_AGE` | `600` | Preflight `Access-Control-Max-Age` in seconds |
+
+### Origin normalization
+
+Incoming origins are normalized before allowlist comparison to eliminate case and trailing-slash bypasses:
+
+1. The origin is parsed with the WHATWG `URL` parser (`new URL(origin)`).
+2. `url.origin` is used as the canonical form — the URL parser lowercases the scheme and host, and never includes a trailing slash.
+3. Both the incoming request origin **and** each allowlist entry are normalized before comparison.
+
+Practical consequences:
+
+- `HTTPS://APP.EXAMPLE.COM` → compared as `https://app.example.com` ✅ allowed if listed
+- `https://app.example.com/` → compared as `https://app.example.com` ✅ allowed if listed
+- `HTTPS://APP.EXAMPLE.COM/` → compared as `https://app.example.com` ✅ allowed if listed
+- `https://attacker.example.com` → not in allowlist ❌ rejected
+
+### `null`-origin handling
+
+The literal string `"null"` is sent by browsers for requests from sandboxed `<iframe>` elements, `data:` URIs, and local `file://` navigations. It is **never** an acceptable origin value for credentialed responses:
+
+- `normalizeOrigin("null")` returns `null` immediately — it is never parsed as a URL.
+- `isAllowedOrigin("null", allowlist)` always returns `false`, even if the string `"null"` appears in the allowlist.
+- Requests arriving with `Origin: null` receive a `403 Forbidden` response.
+
+### Credentialed origin policy
+
+Arbitrary origins are never reflected into `Access-Control-Allow-Origin` when `Access-Control-Allow-Credentials: true` is set. Only origins that are explicitly present in the allowlist receive the `Access-Control-Allow-Origin` response header. All other origins — including `"null"`, unparseable values, and any origin absent from the allowlist — receive an error response.
+
+### No-Origin requests
+
+Requests with **no** `Origin` header (curl, Postman, service-to-service, server-side fetch) are always passed through. The CORS middleware only acts when the browser sends an `Origin` header.
+
+### Security notes
+
+- No origin is reflected without being explicitly allowlisted.
+- The literal `"null"` origin is unconditionally denied regardless of allowlist contents.
+- Case variants (`HTTPS://APP.EXAMPLE.COM`) and trailing-slash variants (`https://app.example.com/`) are normalized before comparison — they match the allowlist entry if present, but cannot bypass it.
+- The allowlist can be reloaded at runtime via `reloadCorsOrigins()` without restarting the server.
+
+---
+
 ## API Key Authentication
 
 Service-to-service callers authenticate with the `X-API-Key` request header. Keys are loaded from the `API_KEYS` environment variable — **no database connection is opened per request**.
@@ -613,6 +677,43 @@ curl -H "Authorization: Bearer <token>" \
 curl -H "Authorization: Bearer <token>" \
      "http://localhost:3001/api/marketplace?yieldBpsMin=500&sortBy=yield_bps&order=desc&page=2&limit=10"
 ```
+
+- **Investment Opportunities**: `GET /api/invest/opportunities` — List open investment opportunities available for funding. Returns tenant-scoped invoices enriched with live on-chain escrow state via batched Soroban reads.
+
+  **Response DTO fields**
+
+  | Field | Type | Description |
+  |---|---|---|
+  | `invoiceId` | string | Unique identifier of the underlying invoice |
+  | `fundedBpsOfTarget` | number | Funding progress in basis points (10000 = 100%) |
+  | `maturityAt` | string (ISO 8601) | Investment maturity timestamp |
+  | `yieldBpsDisplay` | number | Expected return in basis points (e.g. 500 = 5%) |
+  | `onChain` | object | Live blockchain state pointers |
+  | `onChain.escrowAddress` | string | Stellar/Soroban escrow contract address |
+  | `onChain.ledgerIndex` | string \| null | Last synchronized ledger index |
+
+  **Pagination**
+
+  | Param | Type | Default | Range | Description |
+  |---|---|---|---|---|
+  | `page` | integer | 1 | ≥ 1 | 1-based page number |
+  | `limit` | integer | 20 | 1–100 | Items per page |
+
+  **Security**
+
+  - Tenant-scoped: requires `x-tenant-id` header or JWT `tenantId` claim.
+  - Non-investable invoice statuses (draft, cancelled, etc.) are never exposed.
+  - Per-invoice on-chain read failures silently skip enrichment for that invoice; the full list is never 500'd.
+  - Cross-tenant invoice IDs are filtered before any escrow read is made.
+
+  **Example**
+  ```bash
+  curl -H "Authorization: Bearer <token>" \
+       "http://localhost:3001/api/invest/opportunities?page=1&limit=10"
+  # Response: { data: [...], meta: { total, page, limit, totalPages } }
+  ```
+
+  **Funding endpoint**: `POST /api/invest/fund-invoice` — Submit a funding commitment to an escrow contract. Requires KYC verification, validates the investor address, and enforces idempotency to prevent double-funding. See [`docs/escrow-integration-overview.md`](./docs/escrow-integration-overview.md) for the full funding flow.
 
 ---
 

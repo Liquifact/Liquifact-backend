@@ -16,7 +16,7 @@ const router = express.Router();
 function parseJsonPayload(rawBody) {
   try {
     return JSON.parse(rawBody);
-  } catch (error) {
+  } catch (_e) {
     throw new Error('Invalid JSON payload');
   }
 }
@@ -142,6 +142,19 @@ router.post('/webhook', async (req, res) => {
 
   if (!status || typeof status !== 'string') {
     return res.status(400).json({ error: 'Missing or invalid status' });
+  }
+
+  // Reject unsigned payloads that include a status we don't recognise. The
+  // signed webhook is the provider's authoritative signal — if it sends a
+  // status string outside {@link kycService.PROVIDER_STATUS_MAP} we must not
+  // silently normalise it to 'unknown'. Fail-closed (issue #592).
+  const normalised = kycService.normalizeProviderStatus(status);
+  if (normalised === kycService.KYC_STATUSES.UNKNOWN) {
+    logger.warn(
+      { smeId, status },
+      'KYC webhook received status outside PROVIDER_STATUS_MAP; rejecting (fail-closed)',
+    );
+    return res.status(400).json({ error: `Unknown provider status: ${status}` });
   }
 
   try {

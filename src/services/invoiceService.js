@@ -27,6 +27,7 @@
 
 const db = require('../db/knex');
 const { applyQueryOptions } = require('../utils/queryBuilder');
+const { encodeCursor, decodeCursor, CursorError } = require('../utils/cursorPagination');
 const logger = require('../logger');
 const AppError = require('../errors/AppError');
 const { LOCKED_STATUSES } = require('../middleware/patchInvoice');
@@ -198,6 +199,139 @@ async function getInvoices(arg1 = {}, arg2) {
   }
 
   return listInvoices(tenantId, { status: arg2 });
+}
+
+// ── Column map for cursor pagination (aligns with INVOICE_QUERY_CONFIG) ────
+
+const INVOICE_PAGINATION_COLUMN_MAP = {
+  amount: 'amount',
+  date: 'date',
+  created_at: 'created_at',
+};
+
+/**
+ * Applies invoice-list filters to a Knex query (shared by data + count queries).
+ *
+ * @param {import('knex').QueryBuilder} query
+ * @param {Object} filters - Validated filter params.
+ * @returns {import('knex').QueryBuilder}
+ */
+function _applyInvoiceFilters(query, filters) {
+  if (filters.status) { query.where('status', filters.status); }
+  if (filters.smeId)  { query.where('sme_id', filters.smeId); }
+  if (filters.buyerId) { query.where('buyer_id', filters.buyerId); }
+  if (filters.dateFrom) { query.where('date', '>=', filters.dateFrom); }
+  if (filters.dateTo)   { query.where('date', '<=', filters.dateTo); }
+  return query;
+}
+
+/**
+ * Paginated invoice listing with cursor-based (preferred) and offset-based
+ * (legacy) pagination modes.
+ *
+ * Cursor mode uses keyset pagination over `(sortField, id)`, returning a stable
+ * `nextCursor` that works correctly under concurrent inserts.  The cursor is
+ * opaque and HMAC-signed — tampering yields a {@link CursorError}.
+ *
+ * Offset mode accepts `page` (1-based) and `limit` for backward compat.
+ * Both modes return the same `{ data, meta }` shape.
+ *
+ * @param {Object}  options
+ * @param {Object}  [options.filters={}]     - Validated filters (status, smeId, buyerId, dateFrom, dateTo).
+ * @param {Object}  [options.sorting={}]     - Sorting config ({ sortBy, order }).
+ * @param {Object}  [options.pagination={}]  - Pagination config ({ cursor, page, limit }).
+ * @returns {Promise<{ data: Array, meta: Object }>}
+ * @throws {CursorError} When the cursor is malformed, tampered, or has a sort-field mismatch.
+ */
+async function getInvoicesWithPagination({ filters = {}, sorting = {}, pagination = {} } = {}) {
+  const limit = Math.max(1, Math.min(100, parseInt(pagination.limit, 10) || 10));
+  const sortField = (sorting.sortBy && INVOICE_PAGINATION_COLUMN_MAP[sorting.sortBy])
+    ? sorting.sortBy
+    : 'created_at';
+  const order = (sorting.order === 'asc') ? 'asc' : 'desc';
+
+  // ── Base query (exclude soft-deleted records) ─────────────────────────────
+  const baseQuery = () => db('invoices').whereNull('deleted_at');
+
+  // ── Total count (filter-aware, offset-independent) ────────────────────────
+  let countQ = baseQuery();
+  _applyInvoiceFilters(countQ, filters);
+  const countRow = await countQ.count('* as total').first();
+  const total = parseInt(countRow.total ?? countRow['count(*)'] ?? 0, 10);
+
+  const useCursor = Boolean(pagination.cursor);
+
+  // ── Cursor-based keyset pagination ────────────────────────────────────────
+  if (useCursor) {
+    const decoded = decodeCursor(pagination.cursor, sortField);
+    const { sortValue, id: lastId } = decoded;
+
+    let dataQ = baseQuery().select('*');
+    _applyInvoiceFilters(dataQ, filters);
+
+    // Keyset predicate:
+    //   ASC:  (sortField > lastValue) OR (sortField = lastValue AND id > lastId)
+    //   DESC: (sortField < lastValue) OR (sortField = lastValue AND id < lastId)
+    const gtOp = order === 'asc' ? '>' : '<';
+    dataQ.where(function () {
+      this.where(sortField, gtOp, sortValue)
+        .orWhere(function () {
+          this.where(sortField, '=', sortValue).where('id', gtOp, lastId);
+        });
+    });
+
+    dataQ.orderBy(sortField, order).orderBy('id', order);
+
+    const rows = await dataQ.limit(limit + 1);
+    const hasMore = rows.length > limit;
+    const data = hasMore ? rows.slice(0, limit) : rows;
+
+    let nextCursor = null;
+    if (hasMore && data.length > 0) {
+      const lastRow = data[data.length - 1];
+      nextCursor = encodeCursor({
+        sortField,
+        sortValue: lastRow[sortField],
+        id: lastRow.id,
+      });
+    }
+
+    return { data, meta: { total, limit, hasMore, nextCursor } };
+  }
+
+  // ── Offset-based pagination (legacy, backward-compatible) ─────────────────
+  const page = Math.max(1, parseInt(pagination.page, 10) || 1);
+  const offset = (page - 1) * limit;
+
+  let dataQ = baseQuery().select('*');
+  _applyInvoiceFilters(dataQ, filters);
+  dataQ.orderBy(sortField, order).orderBy('id', order);
+
+  const pagedRows = await dataQ.limit(limit + 1).offset(offset);
+  const pagedHasMore = pagedRows.length > limit;
+  const pagedData = pagedHasMore ? pagedRows.slice(0, limit) : pagedRows;
+
+  let pagedNextCursor = null;
+  if (pagedHasMore && pagedData.length > 0) {
+    const lastRow = pagedData[pagedData.length - 1];
+    pagedNextCursor = encodeCursor({
+      sortField,
+      sortValue: lastRow[sortField],
+      id: lastRow.id,
+    });
+  }
+
+  return {
+    data: pagedData,
+    meta: {
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+      hasMore: pagedHasMore,
+      nextCursor: pagedNextCursor,
+    },
+  };
 }
 
 /**
@@ -596,6 +730,94 @@ async function getSmeInvoiceCounts(tenantId, userId) {
   return result;
 }
 
+/**
+ * Retrieves a cursor-paginated list of invoices for the SME dashboard,
+ * scoped to a single tenant and SME owner.
+ *
+ * Uses keyset pagination with `created_at DESC, id DESC` so the ordering
+ * is stable under concurrent inserts.  The cursor is opaque and HMAC-signed;
+ * malformed or tampered cursors throw {@link CursorError}.
+ *
+ * When no cursor is supplied the first page is returned.
+ * The caller controls page size via `limit` (1–100, default 20).
+ *
+ * @param {string} tenantId - Tenant identifier (required).
+ * @param {string} userId   - SME owner identifier (required).
+ * @param {object} [options={}]
+ * @param {string} [options.cursor] - Opaque cursor from a prior page.
+ * @param {number} [options.limit=20] - Max rows per page (clamped to 1–100).
+ * @returns {Promise<{invoices: object[], meta: {total: number, limit: number, hasMore: boolean, nextCursor: string|null}}>}
+ * @throws {TypeError}  When tenantId or userId is missing.
+ * @throws {CursorError} When the cursor is malformed, tampered, or expired.
+ */
+async function getSmeInvoiceList(tenantId, userId, { cursor, limit = 20 } = {}) {
+  if (!tenantId || typeof tenantId !== 'string') {
+    throw new TypeError('tenantId is required');
+  }
+  if (!userId || typeof userId !== 'string') {
+    throw new TypeError('userId is required');
+  }
+
+  const MAX_LIMIT = 100;
+  const safeLimit = Math.max(1, Math.min(MAX_LIMIT, parseInt(limit, 10) || 20));
+
+  const baseQuery = () =>
+    db('invoices')
+      .where({ tenant_id: tenantId, sme_id: userId })
+      .whereNull('deleted_at');
+
+  const countRow = await baseQuery().count('* as total').first();
+  const total = parseInt(countRow?.total ?? countRow?.['count(*)'] ?? 0, 10);
+
+  let cursorData = null;
+  if (cursor) {
+    try {
+      cursorData = decodeCursor(cursor, 'created_at');
+    } catch (err) {
+      if (err instanceof CursorError) {
+        throw err;
+      }
+      throw new CursorError('Invalid cursor');
+    }
+  }
+
+  let dataQuery = baseQuery()
+    .select('*')
+    .orderBy('created_at', 'desc')
+    .orderBy('id', 'desc')
+    .limit(safeLimit + 1);
+
+  if (cursorData) {
+    dataQuery = dataQuery.where(function () {
+      this.where('created_at', '<', cursorData.sortValue)
+        .orWhere(function () {
+          this.where('created_at', cursorData.sortValue)
+            .andWhere('id', '<', parseInt(String(cursorData.id), 10) || 0);
+        });
+    });
+  }
+
+  const rows = await dataQuery;
+
+  const hasMore = rows.length > safeLimit;
+  const pageRows = hasMore ? rows.slice(0, safeLimit) : rows;
+
+  let nextCursor = null;
+  if (hasMore && pageRows.length > 0) {
+    const lastRow = pageRows[pageRows.length - 1];
+    nextCursor = encodeCursor({
+      sortField: 'created_at',
+      sortValue: lastRow.created_at,
+      id: String(lastRow.id),
+    });
+  }
+
+  return {
+    invoices: pageRows,
+    meta: { total, limit: safeLimit, hasMore, nextCursor },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // KYC helpers (in-memory — retained for backward compat with existing tests)
 // ---------------------------------------------------------------------------
@@ -659,6 +881,7 @@ module.exports = {
   // Primary DB-backed API
   listInvoices,
   getInvoices,
+  getInvoicesWithPagination,
   getInvoiceById,
   createInvoice,
   updateInvoice,
@@ -668,6 +891,7 @@ module.exports = {
   parseInvoiceMetadata,
   // SME dashboard metrics
   getSmeInvoiceCounts,
+  getSmeInvoiceList,
   STATUS_CATEGORY_MAP,
   // KYC helpers (in-memory)
   getInvoicesByKycStatus,
@@ -676,4 +900,7 @@ module.exports = {
   mockInvoices,
   // Config constant (legacy test compat)
   INVOICE_QUERY_CONFIG,
+  // Cursor pagination utility (re-exported for tests)
+  CursorError,
+  INVOICE_PAGINATION_COLUMN_MAP,
 };

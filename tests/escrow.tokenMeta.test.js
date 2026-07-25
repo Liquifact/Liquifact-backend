@@ -331,6 +331,13 @@ describe('tokenMeta - Token Metadata Service', () => {
       expect(results[1]).toBe(results[2]);
     });
 
+    it('rejects invalid assets in the batch resolver', async () => {
+      await expect(resolveMany([{ code: 'INVALID' }])).rejects.toMatchObject({
+        code: 'INVALID_ASSET',
+        status: 400,
+      });
+    });
+
     it('handles RPC failure for one token without failing the whole batch', async () => {
       const { callSorobanContract } = require('../src/services/soroban');
       // Mock failure for Soroban token but success for Horizon token

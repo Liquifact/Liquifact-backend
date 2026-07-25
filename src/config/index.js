@@ -32,10 +32,22 @@ const ConfigSchema = z
     ESCROW_INDEXER_STALE_THRESHOLD_SECONDS: z.coerce.number().min(1).default(300),
     // Graceful shutdown configuration
     SHUTDOWN_TIMEOUT_MS: z.coerce.number().min(0).default(10000),
-    // KYC provider — all optional, but URL+key must be provided together in non-test envs
+    // KYC provider — all optional, but URL+key must be provided together in non-test envs.
+    // Issue #592 adds bounded numeric knobs so a typo cannot disable timeouts or make
+    // retries unbounded.
     KYC_PROVIDER_URL: z.string().url().optional(),
     KYC_PROVIDER_API_KEY: z.string().min(1).optional(),
     KYC_PROVIDER_SECRET: z.string().min(1).optional(),
+    // Issue #592 — KYC provider transport hardening. Numeric knobs are clamped
+    // so a typo cannot disable the timeout, exhaust retries, or hang the breaker.
+    KYC_PROVIDER_TIMEOUT_MS: z.coerce.number().min(100).max(30000).default(5000),
+    KYC_PROVIDER_MAX_RETRIES: z.coerce.number().min(0).max(10).default(3),
+    KYC_PROVIDER_BASE_DELAY_MS: z.coerce.number().min(0).max(10000).default(200),
+    KYC_PROVIDER_MAX_DELAY_MS: z.coerce.number().min(0).max(60000).default(5000),
+    KYC_PROVIDER_SIGN_REQUESTS: z.enum(['true', 'false']).default('false'),
+    KYC_PROVIDER_VERIFY_RESPONSE_SIGNATURE: z.enum(['true', 'false']).default('false'),
+    KYC_PROVIDER_CB_FAILURE_THRESHOLD: z.coerce.number().min(1).max(100).default(5),
+    KYC_PROVIDER_CB_RECOVERY_TIMEOUT_MS: z.coerce.number().min(100).max(60000).default(10000),
     // Public base URL for the API, used in the OpenAPI spec servers array.
     // Required in production and must use HTTPS. Falls back to localhost in development/test.
     PUBLIC_API_BASE_URL: z.string().url().optional(),
