@@ -539,4 +539,5 @@ module.exports = {
   reloadCorsOrigins,
   resolveAllowlist,
   validateCorsOrigin,
+  validateOriginEntry,
 };

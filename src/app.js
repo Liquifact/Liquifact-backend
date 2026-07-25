@@ -44,7 +44,11 @@ const { validateHealthQuery, rejectBodyOnGet } = require('./schemas/health');
 const responseHelper = require('./utils/responseHelper');
 const logger = require('./logger');
 const { metricsAuth, metricsHandler } = require('./metrics');
+const { metricsLimiter } = require('./middleware/rateLimit');
 const { instrumentHealth } = require('./middleware/healthMetrics');
+
+
+
 const smeRoutes = require('./routes/sme');
 const invoiceFileRoutes = require('./routes/invoiceFile');
 const auditTrailRoutes = require('./routes/auditTrail');
@@ -404,6 +408,10 @@ function createApp() {
   // still consume quota — defending against brute-force token guessing
   // on the metrics surface (issue #744).
   app.get('/metrics', metricsLimiter, metricsAuth, metricsHandler);
+
+
+
+
 
   // ── 7. 404 catch-all ─────────────────────────────────────────────────────
   app.use((req, res) => {
