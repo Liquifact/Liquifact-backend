@@ -4,6 +4,7 @@ const express = require('express');
 const { verifySignature } = require('../services/webhooks');
 const kycService = require('../services/kycService');
 const logger = require('../logger');
+const { kycWebhookSchema, parseValidationErrors } = require('../schemas/kycWebhook');
 
 const router = express.Router();
 
@@ -131,18 +132,31 @@ router.post('/webhook', async (req, res) => {
     return res.status(400).json({ error: error.message });
   }
 
-  const smeId = payload.smeId || payload.sme_id;
-  const status = payload.status || payload.kycStatus || payload.kyc_status;
-  const providerRecordId = payload.recordId || payload.providerRecordId || payload.provider_record_id || null;
-  const verifiedAt = payload.verifiedAt || payload.verified_at || null;
-
-  if (!smeId || typeof smeId !== 'string') {
-    return res.status(400).json({ error: 'Missing or invalid smeId' });
+  // ── Strict payload validation (issue #638) ──────────────────────────────
+  // Validate the parsed webhook body against the bounded Zod schema.
+  // Rejects unknown fields, wrong types, oversized strings, and
+  // out-of-range values with a structured application/problem+json 400.
+  const validationResult = kycWebhookSchema.safeParse(payload);
+  if (!validationResult.success) {
+    const fieldErrors = parseValidationErrors(validationResult.error);
+    return res.status(400).json({
+      type: 'https://liquifact.io/problems/validation-error',
+      title: 'Validation Error',
+      status: 400,
+      detail: 'KYC webhook payload contains invalid or missing fields.',
+      instance: req.originalUrl,
+      fieldErrors,
+    });
   }
 
-  if (!status || typeof status !== 'string') {
-    return res.status(400).json({ error: 'Missing or invalid status' });
-  }
+  const validated = validationResult.data;
+  const smeId = validated.smeId;
+  const status = validated.status;
+  const providerRecordId = validated.recordId || null;
+  const verifiedAt = validated.verifiedAt || null;
+
+  // Zod schema already guarantees smeId and status are non-empty strings,
+  // so the manual guards above are no longer needed (issue #638).
 
   // Reject unsigned payloads that include a status we don't recognise. The
   // signed webhook is the provider's authoritative signal — if it sends a
