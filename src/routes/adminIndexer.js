@@ -21,6 +21,7 @@ const { CursorError } = require('../utils/cursorPagination');
 const { adminStack } = require('../middleware/stacks');
 const responseHelper = require('../utils/responseHelper');
 const logger = require('../logger');
+const { instrumentIndexer } = require('../middleware/indexerMetrics');
 
 /**
  * Maximum page size clamped by the service layer.
@@ -250,7 +251,7 @@ function _parseQuery(query) {
  *       403:
  *         $ref: '#/components/responses/Problem403'
  */
-router.get('/events', async (req, res, next) => {
+router.get('/events', instrumentIndexer(async (req, res, next) => {
   try {
     // ── 1. Parse and validate query parameters ──────────────────────────────
     const { isValid, fieldErrors, params } = _parseQuery(req.query);
