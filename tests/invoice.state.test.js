@@ -36,6 +36,14 @@ const {
   canLinkToEscrow,
 } = require('../src/services/invoiceStateMachine');
 const { clearAuditLogs, getAuditLogs } = require('../src/services/auditLog');
+
+// Mock escrowSubmit so the idempotency middleware (now referenced from
+// invoiceStateRoutes via optionalIdempotency) does not chain into metrics.js
+// which has pre-existing undefined exports.
+jest.mock('../src/services/escrowSubmit', () => ({
+  IDEMPOTENCY_KEY_PATTERN: /^[A-Za-z0-9._:-]{8,128}$/,
+}));
+
 const invoiceStateRoutes = require('../src/routes/invoiceStateRoutes');
 const invoiceService = require('../src/services/invoiceService');
 

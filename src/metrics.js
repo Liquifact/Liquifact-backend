@@ -1176,6 +1176,60 @@ const sorobanRpcRetryCausesTotal = new client.Counter({
  */
 
 /**
+ * Counter: Total metrics endpoint requests by status class.
+ * @type {import('prom-client').Counter}
+ */
+const metricsRequestsTotal = new client.Counter({
+  name: 'metrics_requests_total',
+  help: 'Total number of metrics endpoint requests by status class',
+  labelNames: ['status_class'],
+  registers: [registry],
+});
+
+/**
+ * Counter: Metrics endpoint request errors by cause.
+ * @type {import('prom-client').Counter}
+ */
+const metricsRequestErrorsTotal = new client.Counter({
+  name: 'metrics_request_errors_total',
+  help: 'Total number of metrics endpoint request errors by cause',
+  labelNames: ['cause'],
+  registers: [registry],
+});
+
+/**
+ * Records the outcome of a metrics endpoint request.
+ *
+ * Observes duration, increments the request and error counters, and logs
+ * structured error details when the response is not successful.
+ *
+ * @param {object} params
+ * @param {number} params.statusCode - HTTP response status code.
+ * @param {number} params.durationSeconds - Wall-clock duration in seconds.
+ * @param {Error} [params.error] - Error object, if any.
+ * @param {import('express').Request} params.req - Express request (for logging).
+ * @returns {void}
+ */
+function recordMetricsEndpointOutcome({ statusCode, durationSeconds, error, req }) {
+  const statusClass = normalizeMetricsEndpointStatusClass(statusCode);
+  const cause = normalizeMetricsEndpointCause(error, statusCode);
+
+  metricsRequestDurationSeconds.observe({ status_class: statusClass }, durationSeconds);
+  metricsRequestsTotal.inc({ status_class: statusClass });
+
+  if (cause !== 'none') {
+    metricsRequestErrorsTotal.inc({ cause });
+  }
+
+  if (cause !== 'none' && req) {
+    const requestLogger = logger.createRequestLogger
+      ? logger.createRequestLogger(req)
+      : logger;
+    requestLogger.error({ statusCode, durationSeconds, err: error }, 'Metrics endpoint error');
+  }
+}
+
+/**
  * Maps an HTTP status code to a bounded `status_class` label value.
  *
  * @param {unknown} status - HTTP status code.
