@@ -38,15 +38,13 @@ describe('investorCommitment persistence — persistCommitment', () => {
     expect(result.created_at).toBeDefined();
   });
 
-  it('handles a non-matching idempotency key as new insert', async () => {
+  it('returns existing row when idempotency key is provided (mock always matches)', async () => {
     const result = await persistCommitment({
       ...baseParams,
       invoiceId: 'inv_persist_002',
       idempotencyKey: 'no-match-key',
     });
     expect(result).toBeDefined();
-    // The mock's .first() returns a default row so the idempotency path
-    // returns it as-is (simulating a DB-level duplicate detection).
     expect(result).toHaveProperty('id');
   });
 
@@ -91,14 +89,6 @@ describe('investorCommitment persistence — persistCommitment', () => {
 });
 
 describe('investorCommitment persistence — updateCommitment', () => {
-  const baseParams = {
-    invoiceId: 'inv_update',
-    investorAddress: VALID_ADDR,
-    escrowAddress: VALID_ESCROW,
-    amountStroops: '50000000',
-    status: 'requires_signature',
-  };
-
   it('throws CommitmentValidationError when amount_stroops is in fields (immutability)', async () => {
     const { CommitmentValidationError } = require('../src/services/investorCommitment');
     await expect(
