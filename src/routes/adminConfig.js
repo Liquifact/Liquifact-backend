@@ -35,9 +35,8 @@ const {
 } = require('../schemas/config');
 const { adminConfigLimiter } = require('../middleware/rateLimit');
 const idempotencyMiddleware = require('../middleware/idempotency');
-const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
 const logger = require('../logger');
-const idempotencyMiddleware = require('../middleware/idempotency');
+const { applyConfigSection } = require('../services/configService');
 
 const router = express.Router();
 
@@ -196,17 +195,7 @@ router.post('/', idempotencyMiddleware, validateBody(runtimeConfigSchema), (req,
   const { section, config: validatedConfig } = req.validated;
 
   // Apply runtime configuration changes for supported sections.
-  if (section === 'cors') {
-    if (validatedConfig.origins) {
-      // Update the env var so reloadCorsOrigins can re-read it.
-      process.env.CORS_ALLOWED_ORIGINS = validatedConfig.origins.join(',');
-      reloadCorsOrigins();
-    }
-    if (validatedConfig.maxAge !== undefined) {
-      process.env.CORS_MAX_AGE = String(validatedConfig.maxAge);
-      reloadCorsMaxAge();
-    }
-  }
+  applyConfigSection(section, validatedConfig);
 
   logger.info(
     {
