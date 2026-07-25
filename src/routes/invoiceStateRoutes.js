@@ -25,10 +25,10 @@ const {
 const invoiceService = require('../services/invoiceService');
 const { getAuditLogs } = require('../services/auditLog');
 const { requireKycForFunding, auditKycAccess } = require('../middleware/kycGating');
-const { extractTenant } = require('../middleware/tenant');
+const { authenticatedTenantStack } = require('../middleware/stacks');
 const responseHelper = require('../utils/responseHelper');
 
-router.use(extractTenant);
+router.use(...authenticatedTenantStack);
 
 // Per-client (API key / IP) rate limit on the invoice-state endpoints (#739).
 const { invoiceStateLimiter } = require('../middleware/rateLimit');

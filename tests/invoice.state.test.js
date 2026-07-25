@@ -22,6 +22,12 @@ jest.mock('../src/middleware/kycGating', () => ({
   auditKycAccess: jest.fn((_req, _res, next) => next()),
 }));
 
+// Stub auth so unit tests can exercise invoice-state handler behavior without
+// requiring a valid Authorization header on every request.
+jest.mock('../src/middleware/auth', () => ({
+  authenticateToken: jest.fn((req, res, next) => next()),
+}));
+
 const {
   INVOICE_STATES,
   VALID_TRANSITIONS,
