@@ -4,7 +4,8 @@ Cross-Origin Resource Sharing (CORS) for the LiquiFact backend is implemented in
 [`src/config/cors.js`](../src/config/cors.js) and wired into Express in
 [`src/app.js`](../src/app.js). This document is the single reference for every
 integrator who needs to understand CORS policy, request/response shapes, and error
-codes.
+codes. For day-to-day operations and incident response, see
+[`runbook-cors.md`](./runbook-cors.md).
 
 ---
 
