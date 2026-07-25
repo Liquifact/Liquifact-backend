@@ -17,6 +17,7 @@ const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const app = require('../src/index');
 const db = require('../src/db/knex');
+const invoiceService = require('../src/services/invoiceService');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'test-secret-at-least-32-characters-long-string-for-jest';
 
@@ -309,8 +310,7 @@ describe('SME Metrics API', () => {
         .set('Authorization', `Bearer ${token}`);
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toBe('Bad Request');
-      expect(res.body.message).toContain('Malformed cursor');
+      expect(res.body.error.message).toContain('Malformed cursor');
     });
 
     test('pagination respects tenant isolation', async () => {
@@ -378,6 +378,166 @@ describe('SME Metrics API', () => {
       expect(res.status).toBe(200);
       expect(res.body.data).toEqual({ open: 1, funded: 1, settled: 1, defaulted: 0 });
       expect(res.body.meta.invoices).toHaveLength(2);
+    });
+
+    test('rejects a cursor with a tampered signature with 400', async () => {
+      await db('invoices').insert([
+        { invoice_id: 'ts1', sme_id: userId, tenant_id: tenantId, status: 'verified', amount: 100, customer: 'TS1' },
+        { invoice_id: 'ts2', sme_id: userId, tenant_id: tenantId, status: 'funded', amount: 200, customer: 'TS2' },
+      ]);
+
+      const page1 = await request(app)
+        .get('/api/sme/metrics?limit=1')
+        .set('Authorization', `Bearer ${token}`);
+
+      const validCursor = page1.body.meta.nextCursor;
+      const dotIdx = validCursor.lastIndexOf('.');
+      const sig = validCursor.slice(dotIdx + 1);
+      const flippedChar = sig[0] === '0' ? '1' : '0';
+      const tamperedCursor = `${validCursor.slice(0, dotIdx + 1)}${flippedChar}${sig.slice(1)}`;
+
+      const res = await request(app)
+        .get(`/api/sme/metrics?limit=1&cursor=${tamperedCursor}`)
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error.message).toContain('Invalid cursor signature');
+    });
+  });
+
+  // ── Not-found / unmatched-route paths ───────────────────────────────────
+
+  describe('not-found paths', () => {
+    test('returns 404 for an unmatched sub-path under /api/sme/metrics', async () => {
+      const res = await request(app)
+        .get('/api/sme/metrics/does-not-exist')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(404);
+      expect(res.body.error.message).toBe('Not found');
+    });
+
+    test('returns aggregated zeros (not a 404) for a valid tenant/user pair with no invoices', async () => {
+      const newUserToken = jwt.sign({ id: 'nobody_home', tenantId }, JWT_SECRET);
+
+      const res = await request(app)
+        .get('/api/sme/metrics')
+        .set('Authorization', `Bearer ${newUserToken}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data).toEqual({ open: 0, funded: 0, settled: 0, defaulted: 0 });
+    });
+  });
+
+  // ── Unexpected (non-CursorError) failures propagate to the error handler ──
+
+  describe('unexpected error propagation', () => {
+    test('a non-CursorError from the pagination lookup is forwarded to next(err) as a 500', async () => {
+      const spy = jest
+        .spyOn(invoiceService, 'getSmeInvoiceList')
+        .mockRejectedValueOnce(new Error('unexpected db failure'));
+
+      const res = await request(app)
+        .get('/api/sme/metrics?limit=5')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(500);
+      spy.mockRestore();
+    });
+  });
+
+  // ── Validation-failure: invalid (non-throwing) limit values ────────────
+
+  describe('validation-failure — invalid limit values are clamped, not rejected', () => {
+    beforeEach(async () => {
+      await db('invoices').insert([
+        { invoice_id: 'lv1', sme_id: userId, tenant_id: tenantId, status: 'verified', amount: 100, customer: 'LV1' },
+      ]);
+    });
+
+    test('non-numeric limit falls back to the default page size', async () => {
+      const res = await request(app)
+        .get('/api/sme/metrics?limit=not-a-number')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.meta.limit).toBe(20);
+    });
+
+    test('zero limit is falsy and falls back to the default page size (not clamped to 1)', async () => {
+      // `parseInt('0', 10) || 20` treats 0 as falsy, so this takes the same
+      // default-fallback path as a non-numeric limit rather than clamping to 1.
+      const res = await request(app)
+        .get('/api/sme/metrics?limit=0')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.meta.limit).toBe(20);
+    });
+
+    test('negative limit is clamped up to the minimum of 1', async () => {
+      const res = await request(app)
+        .get('/api/sme/metrics?limit=-5')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.meta.limit).toBe(1);
+    });
+  });
+
+  // ── Idempotent-repeat paths ──────────────────────────────────────────────
+
+  describe('idempotent-repeat paths', () => {
+    test('repeating the aggregated-counts request returns identical data', async () => {
+      await db('invoices').insert([
+        { invoice_id: 'ir1', sme_id: userId, tenant_id: tenantId, status: 'verified', amount: 100, customer: 'IR1' },
+        { invoice_id: 'ir2', sme_id: userId, tenant_id: tenantId, status: 'funded', amount: 200, customer: 'IR2' },
+      ]);
+
+      const first = await request(app)
+        .get('/api/sme/metrics')
+        .set('Authorization', `Bearer ${token}`);
+      const second = await request(app)
+        .get('/api/sme/metrics')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(second.body.data).toEqual(first.body.data);
+    });
+
+    test('repeating a paginated request with the same cursor returns the same page', async () => {
+      await db('invoices').insert([
+        { invoice_id: 'irp1', sme_id: userId, tenant_id: tenantId, status: 'verified', amount: 100, customer: 'IRP1' },
+        { invoice_id: 'irp2', sme_id: userId, tenant_id: tenantId, status: 'funded', amount: 200, customer: 'IRP2' },
+        { invoice_id: 'irp3', sme_id: userId, tenant_id: tenantId, status: 'settled', amount: 300, customer: 'IRP3' },
+      ]);
+
+      const page1 = await request(app)
+        .get('/api/sme/metrics?limit=2')
+        .set('Authorization', `Bearer ${token}`);
+      const cursor = page1.body.meta.nextCursor;
+
+      const repeatA = await request(app)
+        .get(`/api/sme/metrics?limit=2&cursor=${cursor}`)
+        .set('Authorization', `Bearer ${token}`);
+      const repeatB = await request(app)
+        .get(`/api/sme/metrics?limit=2&cursor=${cursor}`)
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(repeatA.status).toBe(200);
+      expect(repeatB.status).toBe(200);
+      expect(repeatB.body.meta.invoices).toEqual(repeatA.body.meta.invoices);
+      expect(repeatB.body.meta.nextCursor).toEqual(repeatA.body.meta.nextCursor);
+      expect(repeatB.body.meta.hasMore).toEqual(repeatA.body.meta.hasMore);
+    });
+
+    test('repeating an unauthorized request deterministically returns 401 each time', async () => {
+      const first = await request(app).get('/api/sme/metrics');
+      const second = await request(app).get('/api/sme/metrics');
+
+      expect(first.status).toBe(401);
+      expect(second.status).toBe(401);
     });
   });
 });

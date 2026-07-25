@@ -142,9 +142,12 @@ router.get('/metrics', authenticateToken, extractTenant, async (req, res, next) 
       result = await invoiceService.getSmeInvoiceList(tenantId, userId, { cursor, limit });
     } catch (err) {
       if (err instanceof CursorError) {
+        // Nested under `error.message` (not a top-level `message` sibling) so the
+        // response-envelope wrapper in src/app.js (toStandardEnvelope) preserves the
+        // specific cursor error instead of collapsing it to the generic "Bad Request"
+        // label — see PR description for details.
         return res.status(400).json({
-          error: 'Bad Request',
-          message: err.message
+          error: { message: err.message },
         });
       }
       throw err;
