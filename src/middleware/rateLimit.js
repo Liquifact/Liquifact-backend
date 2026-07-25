@@ -171,6 +171,13 @@ const API_KEY_MAX = parseRateLimitEnv('RATE_LIMIT_API_KEY_MAX', 1000);
 const CONFIG_RATE_LIMIT_WINDOW_MS = parseRateLimitEnv('CONFIG_RATE_LIMIT_WINDOW_MS', 60 * 1000);
 const CONFIG_RATE_LIMIT_MAX = parseRateLimitEnv('CONFIG_RATE_LIMIT_MAX', 20);
 
+// Issue #769 — health-endpoint rate limiter. Defaults are generous enough for
+// Kubernetes liveness/readiness probes (every 1–10 s per pod) plus external
+// monitoring scrapers while still bounding the blast radius of an accidental
+// polling loop or a misconfigured probe.
+const HEALTH_RATE_LIMIT_WINDOW_MS = parseRateLimitEnv('HEALTH_RATE_LIMIT_WINDOW_MS', 15 * 1000);
+const HEALTH_RATE_LIMIT_MAX = parseRateLimitEnv('HEALTH_RATE_LIMIT_MAX', 60);
+
 /**
  * Standard global rate limiter for all API endpoints.
  * Limits each IP/API key to configured requests per window.
@@ -250,6 +257,10 @@ function adminConfigKeyGenerator(req) {
   }
   return req.ip || req.socket?.remoteAddress || '127.0.0.1';
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// adminConfigLimiter (issue #754)
+// ────────────────────────────────────────────────────────────────────────────
 
 /**
  * 429 response body for {@link adminConfigLimiter}.
@@ -353,6 +364,95 @@ function createConfigRateLimiter() {
   });
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// healthLimiter (issue #769)
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 429 response body for {@link healthLimiter}.
+ *
+ * Emits the canonical RFC 7807 extensions used elsewhere in this codebase.
+ * Notably the `retry_hint` field is snake-cased for wire compatibility with
+ * the rest of the platform's problem+json responses.
+ *
+ * Note: express-rate-limit already sets a precise `Retry-After` header
+ * (seconds remaining until the window resets). We deliberately do NOT
+ * override it — the framework value is strictly more accurate than any
+ * `windowMs`-derived estimate could ever be.
+ *
+ * @param {import('express').Request} _req - Express request (unused).
+ * @param {import('express').Response} res - Express response.
+ * @param {import('express').NextFunction} _next - Express next (unused).
+ * @param {{ statusCode: number, windowMs: number }} options - RateLimit options.
+ * @returns {void}
+ */
+function healthHandler(_req, res, _next, options) {
+  res.status(options.statusCode).json({
+    type: 'https://liquifact.com/probs/too-many-requests',
+    title: 'Too Many Requests',
+    status: options.statusCode,
+    code: 'RATE_LIMITED',
+    retryable: true,
+    retry_hint: 'Wait for the rate-limit window to reset before retrying.',
+    scope: 'health',
+    error: 'Too many requests.',
+    message: 'Rate limit threshold breached for health endpoints. Please try again later.',
+  });
+}
+
+/**
+ * Per-client rate limiter for health endpoints (issue #769).
+ *
+ * Each client — identified by X-API-Key when present, otherwise by socket IP —
+ * is allotted a configurable per-window budget. Defaults are generous enough
+ * for Kubernetes liveness/readiness probes plus external monitoring scrapers
+ * while still bounding the blast radius of accidental polling loops.
+ *
+ * The limiter is mounted BEFORE any auth middleware so that unauthenticated
+ * clients still consume quota (defending against probe-flooding).
+ *
+ * Env vars:
+ *   - `HEALTH_RATE_LIMIT_WINDOW_MS` (default 15 000)
+ *   - `HEALTH_RATE_LIMIT_MAX`       (default 60)
+ *
+ * @type {import('express').RequestHandler}
+ */
+const healthLimiter = rateLimit({
+  windowMs: HEALTH_RATE_LIMIT_WINDOW_MS,
+  limit: HEALTH_RATE_LIMIT_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: resolveRateLimitStore('health'),
+  keyGenerator: adminConfigKeyGenerator,
+  validate: {
+    xForwardedForHeader: false,
+  },
+  handler: healthHandler,
+});
+
+/**
+ * Factory variant of {@link healthLimiter} for callers (mostly tests)
+ * that need to construct a fresh limiter with different bounds. Production
+ * code should mount `healthLimiter` directly so the Redis/console.warn
+ * handshake runs once at module load, not once per request.
+ *
+ * @returns {import('express').RequestHandler}
+ */
+function createHealthRateLimiter() {
+  return rateLimit({
+    windowMs: HEALTH_RATE_LIMIT_WINDOW_MS,
+    limit: HEALTH_RATE_LIMIT_MAX,
+    standardHeaders: true,
+    legacyHeaders: false,
+    store: resolveRateLimitStore('health'),
+    keyGenerator: adminConfigKeyGenerator,
+    validate: {
+      xForwardedForHeader: false,
+    },
+    handler: healthHandler,
+  });
+}
+
 module.exports = {
   createRateLimiter,
   globalLimiter,
@@ -362,10 +462,15 @@ module.exports = {
   adminConfigLimiter,
   adminConfigKeyGenerator,
   adminConfigHandler,
+  healthLimiter,
+  createHealthRateLimiter,
+  healthHandler,
   parseRateLimitEnv,
   keyGenerator,
   apiKeyKeyGenerator,
   getApiKey,
   CONFIG_RATE_LIMIT_WINDOW_MS,
   CONFIG_RATE_LIMIT_MAX,
+  HEALTH_RATE_LIMIT_WINDOW_MS,
+  HEALTH_RATE_LIMIT_MAX,
 };

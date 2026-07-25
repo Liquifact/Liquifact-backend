@@ -37,6 +37,13 @@ const {
 const idempotencyMiddleware = require('../middleware/idempotency');
 const { healthReportSchema, parseValidationErrors } = require('../schemas/healthReport');
 const logger = require('../logger');
+const { healthLimiter } = require('../middleware/rateLimit');
+
+// ── Per-client rate limiting (issue #769) ───────────────────────────────────
+// Applied BEFORE route handlers so all health endpoints share the same budget.
+// Each client (API key / IP) gets HEALTH_RATE_LIMIT_MAX requests per
+// HEALTH_RATE_LIMIT_WINDOW_MS window.
+router.use(healthLimiter);
 
 /**
  * @swagger
