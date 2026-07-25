@@ -24,6 +24,7 @@ const { createSecurityMiddleware } = require('./middleware/security');
 const { auditMiddleware } = require('./middleware/audit');
 const requestId = require('./middleware/requestId');
 const { correlationIdMiddleware } = require('./middleware/correlationId');
+const { createCorsRateLimiter } = require('./middleware/rateLimit');
 const invoiceService = require('./services/invoiceService');
 const { CursorError } = require('./utils/cursorPagination');
 const { resolveEscrowAddress } = require('./config/escrowMap');
@@ -140,6 +141,8 @@ function createApp() {
   const app = express();
 
   // ── 1. CORS ──────────────────────────────────────────────────────────────
+  // Rate limit cross-origin requests before the CORS middleware evaluates them.
+  app.use(createCorsRateLimiter());
   app.use(cors(createCorsOptions()));
 
   // ── 1.a. KYC webhook raw body parser ──────────────────────────────────────

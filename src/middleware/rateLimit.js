@@ -177,6 +177,76 @@ const CONFIG_RATE_LIMIT_MAX = parseRateLimitEnv('CONFIG_RATE_LIMIT_MAX', 20);
 // accidental tight loops or abusive reloads within one scrape cycle.
 const METRICS_RATE_LIMIT_WINDOW_MS = parseRateLimitEnv('METRICS_RATE_LIMIT_WINDOW_MS', 60 * 1000);
 const METRICS_RATE_LIMIT_MAX = parseRateLimitEnv('METRICS_RATE_LIMIT_MAX', 30);
+const CORS_RATE_LIMIT_WINDOW_MS = parseRateLimitEnv('CORS_RATE_LIMIT_WINDOW_MS', 15 * 60 * 1000);
+const CORS_RATE_LIMIT_MAX = parseRateLimitEnv('CORS_RATE_LIMIT_MAX', 120);
+
+/**
+ * CORS request rate-limit handler.
+ * Returns a structured 429 response and preserves standard rate-limit headers.
+ *
+ * @param {import('express').Request} _req - Express request object.
+ * @param {import('express').Response} res - Express response object.
+ * @param {import('express').NextFunction} _next - Express next callback.
+ * @param {{ statusCode: number, windowMs: number }} options - Rate limiter options.
+ * @returns {void}
+ */
+function corsRateLimitHandler(_req, res, _next, options) {
+  res.status(options.statusCode).json({
+    type: 'https://liquifact.com/probs/too-many-requests',
+    title: 'Too Many Requests',
+    status: options.statusCode,
+    code: 'RATE_LIMITED',
+    retryable: true,
+    retry_hint: 'Wait for the rate-limit window to reset before retrying.',
+    scope: 'cors',
+    error: 'Too many requests.',
+    message: 'Rate limit threshold breached for CORS requests. Please try again later.',
+  });
+}
+
+/**
+ * Per-client rate limiter for CORS requests.
+ * Limits browser-origin requests by API key or IP and returns Retry-After on 429.
+ *
+ * Env vars:
+ *   - `CORS_RATE_LIMIT_WINDOW_MS` (default 15 min)
+ *   - `CORS_RATE_LIMIT_MAX`       (default 120)
+ *
+ * @type {import('express').RequestHandler}
+ */
+const corsLimiter = rateLimit({
+  windowMs: CORS_RATE_LIMIT_WINDOW_MS,
+  limit: CORS_RATE_LIMIT_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: resolveRateLimitStore('cors'),
+  keyGenerator: apiKeyKeyGenerator,
+  validate: {
+    xForwardedForHeader: false,
+  },
+  skip: (req) => !req.get('Origin'),
+  handler: corsRateLimitHandler,
+});
+
+/**
+ * Factory for creating a fresh CORS limiter instance (useful for tests/apps).
+ * Returns a new express-rate-limit middleware configured for CORS.
+ */
+function createCorsRateLimiter() {
+  return rateLimit({
+    windowMs: CORS_RATE_LIMIT_WINDOW_MS,
+    max: CORS_RATE_LIMIT_MAX,
+    standardHeaders: true,
+    legacyHeaders: false,
+    store: resolveRateLimitStore('cors'),
+    keyGenerator: apiKeyKeyGenerator,
+    validate: {
+      xForwardedForHeader: false,
+    },
+    skip: (req) => !req.get('Origin'),
+    handler: corsRateLimitHandler,
+  });
+}
 
 /**
  * Standard global rate limiter for all API endpoints.
@@ -352,6 +422,40 @@ const invoiceStateLimiter = rateLimit({
   },
 });
 
+/**
+ * Metrics limiter 429 handler and factory (kept local to this module).
+ */
+function metricsRateLimitHandler(_req, res, _next, options) {
+  res.status(options.statusCode).json({
+    type: 'https://liquifact.com/probs/too-many-requests',
+    title: 'Too Many Requests',
+    status: options.statusCode,
+    code: 'RATE_LIMITED',
+    retryable: true,
+    retry_hint: 'Wait for the rate-limit window to reset before retrying.',
+    scope: 'metrics',
+    error: 'Too many requests.',
+    message: 'Rate limit threshold breached for /metrics. Please try again later.',
+  });
+}
+
+function createMetricsRateLimiter() {
+  return rateLimit({
+    windowMs: METRICS_RATE_LIMIT_WINDOW_MS,
+    max: METRICS_RATE_LIMIT_MAX,
+    standardHeaders: true,
+    legacyHeaders: false,
+    store: resolveRateLimitStore('metrics'),
+    keyGenerator: adminConfigKeyGenerator,
+    validate: {
+      xForwardedForHeader: false,
+    },
+    handler: metricsRateLimitHandler,
+  });
+}
+
+const metricsLimiter = createMetricsRateLimiter();
+
 module.exports = {
   createRateLimiter,
   globalLimiter,
@@ -367,6 +471,11 @@ module.exports = {
   CONFIG_RATE_LIMIT_MAX,
   METRICS_RATE_LIMIT_WINDOW_MS,
   METRICS_RATE_LIMIT_MAX,
+  CORS_RATE_LIMIT_WINDOW_MS,
+  CORS_RATE_LIMIT_MAX,
+  corsLimiter,
+  corsRateLimitHandler,
+  createCorsRateLimiter,
   metricsLimiter,
   metricsRateLimitHandler,
   createMetricsRateLimiter,
