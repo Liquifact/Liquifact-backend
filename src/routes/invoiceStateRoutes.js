@@ -1,29 +1,8 @@
-/**
- * Invoice State Transition Routes
- * Handles invoice lifecycle state transitions with audit logging.
- *
- * Invoices are resolved and persisted through invoiceService (Knex), scoped
- * to the authenticated tenant from extractTenant middleware. Status is never
- * taken from the client â€” it is always derived from the state machine result
- * of a validated transition.
- *
- * The capital-movement link-escrow route is protected by the KYC gate.
- *
- * @module routes/invoiceStateRoutes
- */
-
 'use strict';
 
 const express = require('express');
 const router = express.Router();
-const {
-  INVOICE_STATES,
-  getAllowedTransitions,
-  getTransitionHistory,
-  canLinkToEscrow,
-} = require('../services/invoiceStateMachine');
-const invoiceService = require('../services/invoiceService');
-const { getAuditLogs } = require('../services/auditLog');
+const invoiceStateService = require('../services/invoiceStateService');
 const { requireKycForFunding, auditKycAccess } = require('../middleware/kycGating');
 const { extractTenant } = require('../middleware/tenant');
 const responseHelper = require('../utils/responseHelper');
@@ -51,13 +30,23 @@ function getActorFromRequest(req) {
 }
 
 /**
- * Sends a standardized 404 when an invoice is unknown or belongs to another tenant.
+ * Builds the context object from the request.
  *
- * @param {import('express').Response} res - Express response object.
- * @returns {import('express').Response} The 404 response.
+ * @param {import('express').Request} req - Express request object.
+ * @param {Object} additionalMetadata - Extra metadata to include.
+ * @returns {Object} Context object.
  */
-function sendInvoiceNotFound(res) {
-  return res.status(404).json(responseHelper.error('Invoice not found', 'INVOICE_NOT_FOUND'));
+function buildContext(req, additionalMetadata = {}) {
+  return {
+    actor: getActorFromRequest(req),
+    ipAddress: req.ip || (req.socket && req.socket.remoteAddress) || 'unknown',
+    userAgent: req.get('user-agent') || 'unknown',
+    metadata: {
+      method: req.method,
+      path: req.path,
+      ...additionalMetadata,
+    },
+  };
 }
 
 /**
@@ -79,28 +68,17 @@ function sendTransitionError(res, error) {
  * Returns the current state and allowed transitions for an invoice.
  */
 router.get('/:id/state', async (req, res, next) => {
-  const { id } = req.params;
-
   try {
-    const invoice = await invoiceService.resolveInvoiceForTenant(id, req.tenantId);
-
-    if (!invoice) {
-      return sendInvoiceNotFound(res);
-    }
-
-    const currentState = invoice.status;
-    const allowedTransitions = getAllowedTransitions(currentState);
+    const result = await invoiceStateService.getState(req.params.id, req.tenantId);
 
     return res.json({
-      ...responseHelper.success({
-        invoiceId: id,
-        currentState,
-        allowedTransitions,
-        isTerminal: allowedTransitions.length === 0,
-      }),
+      ...responseHelper.success(result),
       message: 'Invoice state retrieved successfully',
     });
   } catch (error) {
+    if (error.code) {
+      return sendTransitionError(res, error);
+    }
     return next(error);
   }
 });
@@ -112,42 +90,15 @@ router.get('/:id/state', async (req, res, next) => {
  * Request body: { "targetState": "approved", "reason": "..." }
  */
 router.post('/:id/transition', async (req, res, next) => {
-  const { id } = req.params;
   const { targetState, reason } = req.body || {};
 
   try {
-    if (!targetState) {
-      return res.status(400).json(
-        responseHelper.error('Target state is required', 'MISSING_TARGET_STATE'),
-      );
-    }
-
-    const actor = getActorFromRequest(req);
-    const ipAddress = req.ip || (req.socket && req.socket.remoteAddress) || 'unknown';
-    const userAgent = req.get('user-agent') || 'unknown';
-
-    const result = await invoiceService.transitionInvoice(id, targetState, req.tenantId, {
-      actor,
-      reason,
-      ipAddress,
-      userAgent,
-      metadata: {
-        method: req.method,
-        path: req.path,
-      },
-    });
+    const context = buildContext(req);
+    const result = await invoiceStateService.transition(req.params.id, req.tenantId, targetState, reason, context);
 
     return res.status(200).json({
-      ...responseHelper.success({
-        invoiceId: id,
-        previousState: result.previousState,
-        currentState: result.newState,
-        transitionedAt: result.transitionedAt,
-        transitionedBy: result.transitionedBy,
-        reason,
-        auditLogId: result.auditLog.id,
-      }),
-      message: `Invoice transitioned from ${result.previousState} to ${result.newState}`,
+      ...responseHelper.success(result),
+      message: `Invoice transitioned from ${result.previousState} to ${result.currentState}`,
     });
   } catch (error) {
     if (error.code) {
@@ -162,35 +113,14 @@ router.post('/:id/transition', async (req, res, next) => {
  * Convenience endpoint to approve a pending invoice.
  */
 router.post('/:id/approve', async (req, res, next) => {
-  const { id } = req.params;
   const { reason } = req.body || {};
 
   try {
-    const actor = getActorFromRequest(req);
-    const ipAddress = req.ip || (req.socket && req.socket.remoteAddress) || 'unknown';
-    const userAgent = req.get('user-agent') || 'unknown';
-
-    const result = await invoiceService.transitionInvoice(id, INVOICE_STATES.APPROVED, req.tenantId, {
-      actor,
-      reason: reason || 'Invoice approved',
-      ipAddress,
-      userAgent,
-      metadata: {
-        method: req.method,
-        path: req.path,
-        action: 'approve',
-      },
-    });
+    const context = buildContext(req, { action: 'approve' });
+    const result = await invoiceStateService.approve(req.params.id, req.tenantId, reason, context);
 
     return res.status(200).json({
-      ...responseHelper.success({
-        invoiceId: id,
-        previousState: result.previousState,
-        currentState: result.newState,
-        transitionedAt: result.transitionedAt,
-        transitionedBy: result.transitionedBy,
-        auditLogId: result.auditLog.id,
-      }),
+      ...responseHelper.success(result),
       message: 'Invoice approved successfully',
     });
   } catch (error) {
@@ -207,51 +137,17 @@ router.post('/:id/approve', async (req, res, next) => {
  * gated on the caller's SME holding a verified/exempted KYC status.
  */
 router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, async (req, res, next) => {
-  const { id } = req.params;
   const { escrowId, reason } = req.body || {};
 
   try {
-    const invoice = await invoiceService.resolveInvoiceForTenant(id, req.tenantId);
-
-    if (!invoice) {
-      return sendInvoiceNotFound(res);
-    }
-
-    const linkValidation = canLinkToEscrow(invoice);
-    if (!linkValidation.canLink) {
-      return res.status(400).json(
-        responseHelper.error(linkValidation.reason, 'CANNOT_LINK_TO_ESCROW'),
-      );
-    }
-
-    const actor = getActorFromRequest(req);
-    const ipAddress = req.ip || (req.socket && req.socket.remoteAddress) || 'unknown';
-    const userAgent = req.get('user-agent') || 'unknown';
-
-    const result = await invoiceService.transitionInvoice(id, INVOICE_STATES.LINKED_ESCROW, req.tenantId, {
-      actor,
-      reason: reason || 'Invoice linked to escrow',
-      ipAddress,
-      userAgent,
-      escrowId: escrowId || null,
-      metadata: {
-        method: req.method,
-        path: req.path,
-        action: 'link-escrow',
-        escrowId: escrowId || 'pending',
-      },
+    const context = buildContext(req, {
+      action: 'link-escrow',
+      escrowId: escrowId || 'pending',
     });
+    const result = await invoiceStateService.linkEscrow(req.params.id, req.tenantId, escrowId, reason, context);
 
     return res.status(200).json({
-      ...responseHelper.success({
-        invoiceId: id,
-        previousState: result.previousState,
-        currentState: result.newState,
-        escrowId: escrowId || null,
-        transitionedAt: result.transitionedAt,
-        transitionedBy: result.transitionedBy,
-        auditLogId: result.auditLog.id,
-      }),
+      ...responseHelper.success(result),
       message: 'Invoice linked to escrow successfully',
     });
   } catch (error) {
@@ -267,42 +163,14 @@ router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, async (req
  * Convenience endpoint to reject an invoice. Requires a non-empty reason.
  */
 router.post('/:id/reject', async (req, res, next) => {
-  const { id } = req.params;
   const { reason } = req.body || {};
 
   try {
-    if (!reason || typeof reason !== 'string' || reason.trim().length === 0) {
-      return res.status(400).json(
-        responseHelper.error('Reason is required for rejection', 'MISSING_TRANSITION_REASON'),
-      );
-    }
-
-    const actor = getActorFromRequest(req);
-    const ipAddress = req.ip || (req.socket && req.socket.remoteAddress) || 'unknown';
-    const userAgent = req.get('user-agent') || 'unknown';
-
-    const result = await invoiceService.transitionInvoice(id, INVOICE_STATES.REJECTED, req.tenantId, {
-      actor,
-      reason,
-      ipAddress,
-      userAgent,
-      metadata: {
-        method: req.method,
-        path: req.path,
-        action: 'reject',
-      },
-    });
+    const context = buildContext(req, { action: 'reject' });
+    const result = await invoiceStateService.reject(req.params.id, req.tenantId, reason, context);
 
     return res.status(200).json({
-      ...responseHelper.success({
-        invoiceId: id,
-        previousState: result.previousState,
-        currentState: result.newState,
-        reason,
-        transitionedAt: result.transitionedAt,
-        transitionedBy: result.transitionedBy,
-        auditLogId: result.auditLog.id,
-      }),
+      ...responseHelper.success(result),
       message: 'Invoice rejected successfully',
     });
   } catch (error) {
@@ -318,27 +186,17 @@ router.post('/:id/reject', async (req, res, next) => {
  * Returns the state-transition history for an invoice.
  */
 router.get('/:id/history', async (req, res, next) => {
-  const { id } = req.params;
-
   try {
-    const invoice = await invoiceService.resolveInvoiceForTenant(id, req.tenantId);
-
-    if (!invoice) {
-      return sendInvoiceNotFound(res);
-    }
-
-    const history = await getTransitionHistory(id, getAuditLogs);
+    const result = await invoiceStateService.getHistory(req.params.id, req.tenantId);
 
     return res.json({
-      ...responseHelper.success({
-        invoiceId: id,
-        currentState: invoice.status,
-        transitions: history,
-        totalTransitions: history.length,
-      }),
+      ...responseHelper.success(result),
       message: 'Invoice transition history retrieved successfully',
     });
   } catch (error) {
+    if (error.code) {
+      return sendTransitionError(res, error);
+    }
     return next(error);
   }
 });
