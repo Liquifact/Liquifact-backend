@@ -1214,6 +1214,70 @@ const metricsRequestDurationSeconds = new client.Histogram({
   registers: [registry],
 });
 
+const metricsRequestsTotal = new client.Counter({
+  name: 'metrics_requests_total',
+  help: 'Total number of metrics endpoint requests',
+  labelNames: ['status_class'],
+  registers: [registry],
+});
+
+const metricsRequestErrorsTotal = new client.Counter({
+  name: 'metrics_request_errors_total',
+  help: 'Total number of metrics endpoint request errors',
+  labelNames: ['cause'],
+  registers: [registry],
+});
+
+function recordMetricsEndpointOutcome({ statusCode, durationSeconds, error, req }) {
+  const statusClass = normalizeMetricsEndpointStatusClass(statusCode);
+  const cause = normalizeMetricsEndpointCause(error, statusCode);
+  metricsRequestDurationSeconds.observe({ status_class: statusClass }, durationSeconds);
+  metricsRequestsTotal.inc({ status_class: statusClass });
+  if (cause !== 'none') {
+    metricsRequestErrorsTotal.inc({ cause });
+  }
+}
+
+const persistenceRequestDurationSeconds = new client.Histogram({
+  name: 'persistence_request_duration_seconds',
+  help: 'Duration of persistence-endpoint requests in seconds',
+  labelNames: ['status_class', 'endpoint'],
+  buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5],
+  registers: [registry],
+});
+
+const persistenceRequestsTotal = new client.Counter({
+  name: 'persistence_requests_total',
+  help: 'Total number of persistence-endpoint requests',
+  labelNames: ['status_class', 'endpoint'],
+  registers: [registry],
+});
+
+const persistenceRequestErrorsTotal = new client.Counter({
+  name: 'persistence_request_errors_total',
+  help: 'Total number of persistence-endpoint request errors',
+  labelNames: ['cause', 'endpoint'],
+  registers: [registry],
+});
+
+const PERSISTENCE_STATUS_CLASS_ENUM = Object.freeze(['2xx', '4xx', '5xx']);
+const PERSISTENCE_CAUSE_ENUM = Object.freeze(['validation', 'storage', 'internal', 'none']);
+
+function normalizePersistenceEndpoint(endpoint) {
+  return typeof endpoint === 'string' ? endpoint : 'unknown';
+}
+
+function normalizePersistenceStatusClass(status) {
+  const code = Number(status);
+  if (code >= 500) return '5xx';
+  if (code >= 400) return '4xx';
+  return '2xx';
+}
+
+function normalizePersistenceCause(cause) {
+  return PERSISTENCE_CAUSE_ENUM.includes(cause) ? cause : 'internal';
+}
+
 // ── KYC webhook metrics (issue #731) ────────────────────────────────────────
 
 /**
