@@ -19,6 +19,7 @@ const router = express.Router();
 const { listIndexerEvents, INDEXER_SORT_FIELDS } = require('../services/indexerService');
 const { CursorError } = require('../utils/cursorPagination');
 const { adminStack } = require('../middleware/stacks');
+const { indexerLimiter } = require('../middleware/rateLimit');
 const responseHelper = require('../utils/responseHelper');
 const logger = require('../logger');
 
@@ -27,6 +28,10 @@ const logger = require('../logger');
  * @constant {number}
  */
 const MAX_LIMIT = 100;
+
+// Apply a per-client rate limit before admin auth so bursts are contained
+// even when the caller is unauthenticated or misconfigured.
+router.use(indexerLimiter);
 
 // Apply admin auth (JWT or API key) + tenant extraction to every route in this
 // file.

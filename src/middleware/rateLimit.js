@@ -24,6 +24,9 @@
 
 const rateLimit = require('express-rate-limit');
 
+const WINDOW_MS = parseRateLimitEnv('RATE_LIMIT_WINDOW_MS', 15 * 60 * 1000);
+const MAX_REQUESTS = parseRateLimitEnv('RATE_LIMIT_MAX_REQUESTS', 100);
+
 /**
  * Resolves the Redis-backed store for a scope when the shared Redis client is
  * available and `rate-limit-redis` can be loaded; otherwise returns
@@ -179,6 +182,59 @@ const METRICS_RATE_LIMIT_WINDOW_MS = parseRateLimitEnv('METRICS_RATE_LIMIT_WINDO
 const METRICS_RATE_LIMIT_MAX = parseRateLimitEnv('METRICS_RATE_LIMIT_MAX', 30);
 
 /**
+ * 429 response body for the metrics rate limiter.
+ *
+ * @param {import('express').Request} _req - Express request (unused).
+ * @param {import('express').Response} res - Express response.
+ * @param {import('express').NextFunction} _next - Express next (unused).
+ * @param {{ statusCode: number }} options - RateLimit options.
+ * @returns {void}
+ */
+function metricsRateLimitHandler(_req, res, _next, options) {
+  res.status(options.statusCode).json({
+    error: 'Too many requests.',
+    message: 'Rate limit threshold breached for /metrics. Please try again later.',
+  });
+}
+
+/**
+ * Metrics endpoint limiter. Keeps Prometheus scrapes and similar probes from
+ * overwhelming the service while still allowing normal traffic.
+ *
+ * @type {import('express').RequestHandler}
+ */
+const metricsLimiter = rateLimit({
+  windowMs: METRICS_RATE_LIMIT_WINDOW_MS,
+  limit: METRICS_RATE_LIMIT_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator,
+  validate: {
+    xForwardedForHeader: false,
+  },
+  handler: metricsRateLimitHandler,
+});
+
+/**
+ * Factory variant for constructing a fresh metrics limiter.
+ *
+ * @returns {import('express').RequestHandler}
+ */
+function createMetricsRateLimiter() {
+  return rateLimit({
+    windowMs: METRICS_RATE_LIMIT_WINDOW_MS,
+    limit: METRICS_RATE_LIMIT_MAX,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator,
+    validate: {
+      xForwardedForHeader: false,
+    },
+    handler: metricsRateLimitHandler,
+  });
+}
+
+/**
  * Standard global rate limiter for all API endpoints.
  * Limits each IP/API key to configured requests per window.
  *
@@ -330,6 +386,23 @@ function createConfigRateLimiter() {
 
 const INVOICE_STATE_WINDOW_MS = parseRateLimitEnv('RATE_LIMIT_INVOICE_STATE_WINDOW_MS', 15 * 60 * 1000);
 const INVOICE_STATE_MAX = parseRateLimitEnv('RATE_LIMIT_INVOICE_STATE_MAX', 60);
+const INDEXER_RATE_LIMIT_WINDOW_MS = parseRateLimitEnv('RATE_LIMIT_INDEXER_WINDOW_MS', 15 * 60 * 1000);
+const INDEXER_RATE_LIMIT_MAX = parseRateLimitEnv('RATE_LIMIT_INDEXER_MAX', 60);
+
+/**
+ * Generates a rate-limit key using the API key when present, otherwise the
+ * client IP address.
+ *
+ * @param {import('express').Request} req - Express request object.
+ * @returns {string} The rate-limit key.
+ */
+function indexerKeyGenerator(req) {
+  const apiKey = getApiKey(req);
+  if (apiKey) {
+    return `apikey_${apiKey}`;
+  }
+  return req.ip || req.socket?.remoteAddress || '127.0.0.1';
+}
 
 /**
  * Per-client (API key / IP) rate limiter for the invoice-state endpoints.
@@ -352,6 +425,27 @@ const invoiceStateLimiter = rateLimit({
   },
 });
 
+/**
+ * Per-client (API key / IP) rate limiter for the admin indexer endpoint.
+ * Config-driven via RATE_LIMIT_INDEXER_WINDOW_MS / RATE_LIMIT_INDEXER_MAX.
+ * express-rate-limit sets Retry-After via standardHeaders on 429.
+ *
+ * @returns {Function} Express rate limiting middleware.
+ */
+const indexerLimiter = rateLimit({
+  windowMs: INDEXER_RATE_LIMIT_WINDOW_MS,
+  limit: INDEXER_RATE_LIMIT_MAX,
+  message: {
+    error: `Too many indexer requests. Max ${INDEXER_RATE_LIMIT_MAX} per ${Math.round(INDEXER_RATE_LIMIT_WINDOW_MS / 60000)} minutes.`,
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: indexerKeyGenerator,
+  validate: {
+    xForwardedForHeader: false,
+  },
+});
+
 module.exports = {
   createRateLimiter,
   globalLimiter,
@@ -362,6 +456,7 @@ module.exports = {
   adminConfigKeyGenerator,
   adminConfigHandler,
   invoiceStateLimiter,
+  indexerLimiter,
   getApiKey,
   CONFIG_RATE_LIMIT_WINDOW_MS,
   CONFIG_RATE_LIMIT_MAX,
