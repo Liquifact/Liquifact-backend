@@ -97,6 +97,8 @@ Any violation causes a fast startup failure with a clear, redacted error message
 | `RATE_LIMIT_SENSITIVE_MAX` | integer | `40` | No | No | [`src/middleware/rateLimit.js`](../src/middleware/rateLimit.js) |
 | `RATE_LIMIT_API_KEY_WINDOW_MS` | integer milliseconds | `900000` | No | No | [`src/middleware/rateLimit.js`](../src/middleware/rateLimit.js) |
 | `RATE_LIMIT_API_KEY_MAX` | integer | `1000` | No | No | [`src/middleware/rateLimit.js`](../src/middleware/rateLimit.js) |
+| `CONFIG_RATE_LIMIT_WINDOW_MS` | integer milliseconds | `60000` | No | No | [`src/middleware/rateLimit.js`](../src/middleware/rateLimit.js) — issue #754 per-client limit on `/api/admin/config` (mounted before `adminStack` so failed auth still counts) |
+| `CONFIG_RATE_LIMIT_MAX` | integer (≥ 1) | `20` | No | No | [`src/middleware/rateLimit.js`](../src/middleware/rateLimit.js) — issue #754 per-client cap, paired with `CONFIG_RATE_LIMIT_WINDOW_MS` |
 | `WEB_CONCURRENCY` | integer | `1` (single-instance default) | No | No | [`src/middleware/rateLimit.js`](../src/middleware/rateLimit.js) — issues #429 cluster-detection signal |
 | `INVOICE_FRAUD_CEILING` | number > 0 | `10000000` | No | No | [`src/config/verificationThresholds.js`](../src/config/verificationThresholds.js) |
 | `INVOICE_MANUAL_REVIEW_THRESHOLD` | number > 0, `<= INVOICE_FRAUD_CEILING` | `1000000` | No | No | [`src/config/verificationThresholds.js`](../src/config/verificationThresholds.js) |

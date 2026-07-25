@@ -17,6 +17,12 @@
  *
  * Access: Admin-only (JWT bearer or API key). Tenant-scoped.
  *
+ * Rate limiting (issue #754): a per-client limiter is mounted *before* the
+ * `adminStack` so that failed auth attempts still consume quota. This blocks
+ * auth-flooding with bogus API keys / JWTs and bounds the blast radius of a
+ * buggy redeploy loop hammering this surface. Limits are env-driven and
+ * default to 20 requests per 60 s window per client.
+ *
  * @module routes/adminConfig
  */
 
@@ -27,9 +33,16 @@ const {
   validateBody,
   CONFIG_SECTIONS,
 } = require('../schemas/config');
+const { adminConfigLimiter } = require('../middleware/rateLimit');
 const logger = require('../logger');
 
 const router = express.Router();
+
+// ── Apply per-client rate limit *before* admin auth + tenant extraction ─────
+// Mounting the limiter ahead of adminStack ensures failed authentication
+// attempts still count toward each client's quota — defending against
+// auth-flooding as well as legitimate bursts of config writes.
+router.use(adminConfigLimiter);
 
 // ── Apply admin auth + tenant extraction to every route ──────────────────────
 router.use(...adminStack);
@@ -54,6 +67,9 @@ router.use(...adminStack);
  *       failure so that clients can highlight the offending fields.
  *
  *       **Access**: Admin-only (JWT bearer or API key). Tenant-scoped.
+ *       **Rate limit (issue #754)**: per client (API key / IP); default 20
+ *       requests per 60 s window. Returns `429` with a `Retry-After` header
+ *       when the budget is exhausted.
  *
  *     tags: [AdminConfig]
  *     security:
@@ -106,6 +122,27 @@ router.use(...adminStack);
  *         $ref: '#/components/responses/Problem401'
  *       403:
  *         $ref: '#/components/responses/Problem403'
+ *       429:
+ *         description: Rate limit exceeded (issue #754) — see Retry-After header.
+ *         headers:
+ *           Retry-After:
+ *             schema:
+ *               type: integer
+ *             description: Seconds until the rate-limit window resets.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 type:    { type: string }
+ *                 title:   { type: string }
+ *                 status:  { type: integer }
+ *                 code:    { type: string }
+ *                 retryable: { type: boolean }
+ *                 retry_hint: { type: string }
+ *                 scope:   { type: string }
+ *                 error:   { type: string }
+ *                 message: { type: string }
  */
 router.post('/', validateBody(runtimeConfigSchema), (req, res) => {
   // validateBody attaches the parsed, coerced payload to req.validated
