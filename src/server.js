@@ -8,6 +8,7 @@
 
 const app = require('./index');
 const { validate, logRedactedSummary } = require('./config');
+const shutdownCoordinator = require('./utils/shutdownCoordinator');
 
 /**
  * Validates the application configuration at startup before the server starts listening.
@@ -31,6 +32,10 @@ runBootConfigValidation();
 
 const PORT = process.env.PORT || 3001;
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`LiquiFact API running at http://localhost:${PORT}`);
 });
+
+shutdownCoordinator.register({ server });
+shutdownCoordinator.setupSignalListeners();
+

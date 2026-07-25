@@ -30,7 +30,9 @@ const _adminApiKeyMiddleware = authenticateApiKey();
  * @returns {void}
  */
 function adminAuth(req, res, next) {
-  if (req.headers['x-api-key']) {
+  const apiKeyHeaderPresent = Object.prototype.hasOwnProperty.call(req.headers, 'x-api-key');
+
+  if (apiKeyHeaderPresent) {
     return _adminApiKeyMiddleware(req, res, next);
   }
   return authenticateToken(req, res, next);

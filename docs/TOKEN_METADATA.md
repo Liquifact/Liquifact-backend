@@ -22,6 +22,8 @@ For any financial calculations (e.g., computing principal, interest, fees), alwa
 
 The token metadata service implements **single-flight** cache stampede protection. If multiple concurrent requests arrive for the exact same token before it has been cached (e.g., during a large batch render of marketplace items), they will all share a single in-flight RPC promise. This avoids flooding Horizon or Soroban RPC with duplicate calls.
 
+The batched resolver, `resolveMany`, extends that protection by deduplicating identical inputs by cache key and using a bounded worker pool (default concurrency: 5) so large batches do not fan out unbounded RPC traffic.
+
 ## TTL Strategy
 
 ### Default TTL

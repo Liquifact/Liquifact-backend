@@ -25,8 +25,8 @@ describe('SME Invoice Upload - Security Hardening', () => {
   });
 
   describe('Direct Upload (POST /api/sme/invoice)', () => {
-    it('should upload PDF invoice successfully', async () => {
-      const mockKey = 'tenants/user-123/invoices/test-inv/uuid-test.pdf';
+    it('should upload PDF invoice successfully with tenant ID', async () => {
+      const mockKey = 'tenants/test-tenant/invoices/test-inv/uuid-test.pdf';
       const mockSignedUrl = 'https://signed-url.example.com/test';
 
       storageService.uploadFile.mockResolvedValue(mockKey);
@@ -34,6 +34,7 @@ describe('SME Invoice Upload - Security Hardening', () => {
 
       const response = await request(app)
         .post('/api/sme/invoice')
+        .set('X-Tenant-Id', 'test-tenant')
         .attach('invoice', Buffer.from('fake pdf content'), 'test.pdf')
         .field('invoiceId', 'test-inv');
 
@@ -48,14 +49,25 @@ describe('SME Invoice Upload - Security Hardening', () => {
         expect.any(Buffer),
         'test.pdf',
         VALID_PDF_MIME,
-        'unknown',
+        'test-tenant',
         'test-inv',
       );
+    });
+
+    it('should return 400 if no tenant is provided', async () => {
+      const response = await request(app)
+        .post('/api/sme/invoice')
+        .attach('invoice', Buffer.from('fake pdf content'), 'test.pdf')
+        .field('invoiceId', 'test-inv');
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toBe('Missing tenant context.');
     });
 
     it('should return 400 if no file provided', async () => {
       const response = await request(app)
         .post('/api/sme/invoice')
+        .set('X-Tenant-Id', 'test-tenant')
         .set('Content-Type', 'multipart/form-data');
 
       expect(response.status).toBe(400);
@@ -69,6 +81,7 @@ describe('SME Invoice Upload - Security Hardening', () => {
 
       const response = await request(app)
         .post('/api/sme/invoice')
+        .set('X-Tenant-Id', 'test-tenant')
         .attach('invoice', Buffer.from('bad content'), 'test.txt');
 
       expect(response.status).toBe(400);
@@ -82,6 +95,7 @@ describe('SME Invoice Upload - Security Hardening', () => {
 
       const response = await request(app)
         .post('/api/sme/invoice')
+        .set('X-Tenant-Id', 'test-tenant')
         .attach('invoice', Buffer.from('content'), 'test.pdf');
 
       expect(response.status).toBe(400);
@@ -90,15 +104,17 @@ describe('SME Invoice Upload - Security Hardening', () => {
   });
 
   describe('Presigned Upload URL (POST /api/sme/invoice/presigned-url)', () => {
-    it('should generate presigned upload URL for valid request', async () => {
+    it('should generate presigned upload URL for valid request with tenant and idempotency key', async () => {
       const mockResult = {
         url: 'https://s3-presigned.example.com/upload',
-        key: 'tenants/user-123/invoices/inv-abc/uuid-file.pdf',
+        key: 'tenants/test-tenant/invoices/inv-abc/uuid-file.pdf',
       };
       storageService.getPresignedUploadUrl.mockResolvedValue(mockResult);
 
       const response = await request(app)
         .post('/api/sme/invoice/presigned-url')
+        .set('X-Tenant-Id', 'test-tenant')
+        .set('Idempotency-Key', 'ik_test-key-123')
         .send({
           fileName: 'invoice.pdf',
           mimeType: VALID_PDF_MIME,
@@ -113,7 +129,7 @@ describe('SME Invoice Upload - Security Hardening', () => {
       });
       expect(response.body.invoiceId).toBeDefined();
       expect(storageService.getPresignedUploadUrl).toHaveBeenCalledWith({
-        tenantId: 'unknown',
+        tenantId: 'test-tenant',
         invoiceId: expect.any(String),
         fileName: 'invoice.pdf',
         mimeType: VALID_PDF_MIME,
@@ -121,15 +137,111 @@ describe('SME Invoice Upload - Security Hardening', () => {
       });
     });
 
+    it('should return the same invoiceId on idempotent retry with same key and body', async () => {
+      const mockResult = {
+        url: 'https://s3-presigned.example.com/upload',
+        key: 'tenants/test-tenant/invoices/custom-inv-42/uuid-file.pdf',
+      };
+      storageService.getPresignedUploadUrl.mockResolvedValue(mockResult);
+
+      const key = 'ik_test-key-456';
+      const body = {
+        fileName: 'invoice.pdf',
+        mimeType: VALID_PDF_MIME,
+        fileSize: 50000,
+        invoiceId: 'custom-inv-42',
+      };
+
+      // First call
+      const first = await request(app)
+        .post('/api/sme/invoice/presigned-url')
+        .set('X-Tenant-Id', 'test-tenant')
+        .set('Idempotency-Key', key)
+        .send(body);
+
+      expect(first.status).toBe(200);
+      const firstInvoiceId = first.body.invoiceId;
+
+      // Second call with same key and body
+      const second = await request(app)
+        .post('/api/sme/invoice/presigned-url')
+        .set('X-Tenant-Id', 'test-tenant')
+        .set('Idempotency-Key', key)
+        .send(body);
+
+      expect(second.status).toBe(200);
+      expect(second.body.invoiceId).toBe(firstInvoiceId);
+    });
+
+    it('should return 409 when same idempotency key is used with different body', async () => {
+      const key = 'ik_test-key-789';
+
+      // First call with body A
+      await request(app)
+        .post('/api/sme/invoice/presigned-url')
+        .set('X-Tenant-Id', 'test-tenant')
+        .set('Idempotency-Key', key)
+        .send({
+          fileName: 'invoice.pdf',
+          mimeType: VALID_PDF_MIME,
+          fileSize: 50000,
+        })
+        .expect(200);
+
+      // Second call with same key but body B
+      const response = await request(app)
+        .post('/api/sme/invoice/presigned-url')
+        .set('X-Tenant-Id', 'test-tenant')
+        .set('Idempotency-Key', key)
+        .send({
+          fileName: 'different.pdf',
+          mimeType: VALID_PDF_MIME,
+          fileSize: 100000,
+        });
+
+      expect(response.status).toBe(409);
+      expect(response.body.type).toMatch(/conflict/);
+    });
+
+    it('should return 400 if Idempotency-Key header is missing', async () => {
+      const response = await request(app)
+        .post('/api/sme/invoice/presigned-url')
+        .set('X-Tenant-Id', 'test-tenant')
+        .send({
+          fileName: 'invoice.pdf',
+          mimeType: VALID_PDF_MIME,
+          fileSize: 50000,
+        });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toBe('Idempotency-Key header is required for this endpoint.');
+    });
+
+    it('should return 400 if no tenant is provided', async () => {
+      const response = await request(app)
+        .post('/api/sme/invoice/presigned-url')
+        .set('Idempotency-Key', 'ik_test-key-012')
+        .send({
+          fileName: 'invoice.pdf',
+          mimeType: VALID_PDF_MIME,
+          fileSize: 50000,
+        });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toBe('Missing tenant context.');
+    });
+
     it('should include invoiceId from request body', async () => {
       const mockResult = {
         url: 'https://s3-presigned.example.com/upload',
-        key: 'tenants/user-123/invoices/custom-inv-42/uuid-file.pdf',
+        key: 'tenants/test-tenant/invoices/custom-inv-42/uuid-file.pdf',
       };
       storageService.getPresignedUploadUrl.mockResolvedValue(mockResult);
 
       const response = await request(app)
         .post('/api/sme/invoice/presigned-url')
+        .set('X-Tenant-Id', 'test-tenant')
+        .set('Idempotency-Key', 'ik_test-key-345')
         .send({
           fileName: 'invoice.pdf',
           mimeType: VALID_PDF_MIME,
@@ -140,7 +252,7 @@ describe('SME Invoice Upload - Security Hardening', () => {
       expect(response.status).toBe(200);
       expect(response.body.invoiceId).toBe('custom-inv-42');
       expect(storageService.getPresignedUploadUrl).toHaveBeenCalledWith({
-        tenantId: 'unknown',
+        tenantId: 'test-tenant',
         invoiceId: 'custom-inv-42',
         fileName: 'invoice.pdf',
         mimeType: VALID_PDF_MIME,
@@ -151,6 +263,8 @@ describe('SME Invoice Upload - Security Hardening', () => {
     it('should return 400 if required fields are missing', async () => {
       const response = await request(app)
         .post('/api/sme/invoice/presigned-url')
+        .set('X-Tenant-Id', 'test-tenant')
+        .set('Idempotency-Key', 'ik_test-key-678')
         .send({ fileName: 'test.pdf' });
 
       expect(response.status).toBe(400);
@@ -164,6 +278,8 @@ describe('SME Invoice Upload - Security Hardening', () => {
 
       const response = await request(app)
         .post('/api/sme/invoice/presigned-url')
+        .set('X-Tenant-Id', 'test-tenant')
+        .set('Idempotency-Key', 'ik_test-key-901')
         .send({
           fileName: 'test.html',
           mimeType: 'text/html',
@@ -181,6 +297,8 @@ describe('SME Invoice Upload - Security Hardening', () => {
 
       const response = await request(app)
         .post('/api/sme/invoice/presigned-url')
+        .set('X-Tenant-Id', 'test-tenant')
+        .set('Idempotency-Key', 'ik_test-key-234')
         .send({
           fileName: 'large.pdf',
           mimeType: VALID_PDF_MIME,
@@ -200,6 +318,8 @@ describe('SME Invoice Upload - Security Hardening', () => {
 
       const response = await request(app)
         .post('/api/sme/invoice/presigned-url')
+        .set('X-Tenant-Id', 'test-tenant')
+        .set('Idempotency-Key', 'ik_test-key-567')
         .send({
           fileName: 'invoice.pdf',
           mimeType: VALID_PDF_MIME,

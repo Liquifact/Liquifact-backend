@@ -1,3 +1,7 @@
+// jest.mock('../src/metrics', ()=> ({}));
+// jest.mock('../src/cache/redis', ()=> ({
+//   createdRedisEscrowSummaryCache: ()=> ({})
+// }));
 'use strict';
 
 const jwt = require('jsonwebtoken');
@@ -9,6 +13,8 @@ const {
   SUBMISSION_STATUSES,
   resolveSigningConfig,
   submitEscrowFunding,
+  buildMemo,
+  EscrowSubmitError
 } = require('../src/services/escrowSubmit');
 const { simulateOrThrowSync } = require('../src/services/sorobanSim');
 
@@ -295,5 +301,30 @@ describe('POST /api/escrow funding stub', () => {
       retry_hint: 'Fix the escrow funding payload and try again.',
     });
     expect(response.body.error.message).toContain('invoiceId contains unsupported characters.');
+  });
+});
+
+describe('buildMemo', () => {
+ // const { buildMemo, EscrowSubmitError } = require('../src/services/escrowSubmit');
+
+  it('should return memo when invoice ID fits within 28 bytes', () => {
+    const result = buildMemo('INV-001');
+    expect(result).toEqual({ type: 'text', value: 'lq:INV-001' });
+  });
+
+  it('should pass when memo is exactly 28 bytes', () => {
+    const exactId = 'A'.repeat(25); // 'lq:' (3) + 25 = 28 bytes
+    const result = buildMemo(exactId);
+    expect(result.value).toBe(`lq:${exactId}`);
+  });
+
+  it('should throw when memo is one byte over the limit', () => {
+    const longId = 'A'.repeat(26); // 'lq:' (3) + 26 = 29 bytes
+    expect(() => buildMemo(longId)).toThrow(EscrowSubmitError);
+  });
+
+  it('should throw when invoice ID is far over the limit', () => {
+    const veryLongId = 'A'.repeat(100);
+    expect(() => buildMemo(veryLongId)).toThrow('truncation detected');
   });
 });

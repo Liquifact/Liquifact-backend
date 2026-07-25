@@ -14,6 +14,7 @@
 const {
   CommitmentValidationError,
   validateAmountStroops,
+  normalizeAmountStroopsInput,
   validateAddress,
   persistCommitment,
   updateCommitment,
@@ -139,6 +140,33 @@ describe('validateAmountStroops', () => {
     it('rejects very large overflow value', () => {
       expect(() => validateAmountStroops('9'.repeat(30))).toThrow(CommitmentValidationError);
     });
+  });
+});
+
+// ─── normalizeAmountStroopsInput ──────────────────────────────────────────────
+
+describe('normalizeAmountStroopsInput', () => {
+  it('returns canonical string for safe integer numbers', () => {
+    expect(normalizeAmountStroopsInput(10000000)).toBe('10000000');
+  });
+
+  it('returns large decimal strings without precision loss', () => {
+    const large = '9007199254740993';
+    expect(normalizeAmountStroopsInput(large)).toBe(large);
+  });
+
+  it('rejects scientific notation strings', () => {
+    expect(() => normalizeAmountStroopsInput('1e7')).toThrow(CommitmentValidationError);
+  });
+
+  it('rejects decimal strings', () => {
+    expect(() => normalizeAmountStroopsInput('100.0')).toThrow(CommitmentValidationError);
+  });
+
+  it('rejects unsafe integer numbers', () => {
+    expect(() => normalizeAmountStroopsInput(Number.MAX_SAFE_INTEGER + 1)).toThrow(
+      CommitmentValidationError,
+    );
   });
 });
 

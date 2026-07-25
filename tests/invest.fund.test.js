@@ -43,9 +43,13 @@ jest.mock('../src/config/escrowMap', () => ({
   },
 }));
 
-jest.mock('../src/services/investorCommitment', () => ({
-  persistCommitment: jest.fn(),
-}));
+jest.mock('../src/services/investorCommitment', () => {
+  const actual = jest.requireActual('../src/services/investorCommitment');
+  return {
+    ...actual,
+    persistCommitment: jest.fn(),
+  };
+});
 
 jest.mock('../src/middleware/idempotency', () => (req, res, next) => next());
 
@@ -110,7 +114,7 @@ describe('POST /api/invest/fund-invoice — body validation (400)', () => {
       .set('Authorization', `Bearer ${token()}`)
       .set('x-tenant-id', TENANT_ID)
       .set('Content-Type', 'application/json')
-      .send('"just a string"');
+      .send([]);
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe('VALIDATION_ERROR');
   });
@@ -120,7 +124,7 @@ describe('POST /api/invest/fund-invoice — body validation (400)', () => {
       .post('/api/invest/fund-invoice')
       .set('Authorization', `Bearer ${token()}`)
       .set('x-tenant-id', TENANT_ID)
-      .send({ investorAddress: VALID_ADDRESS, amountStroops: 1000 });
+      .send({ investorAddress: VALID_ADDRESS, amountStroops: '1000' });
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe('VALIDATION_ERROR');
     expect(res.body.error.details.some(d => /invoiceId/.test(d))).toBe(true);
@@ -137,7 +141,7 @@ describe('POST /api/invest/fund-invoice — body validation (400)', () => {
       .post('/api/invest/fund-invoice')
       .set('Authorization', `Bearer ${token()}`)
       .set('x-tenant-id', TENANT_ID)
-      .send({ invoiceId: badId, investorAddress: VALID_ADDRESS, amountStroops: 1000 });
+      .send({ invoiceId: badId, investorAddress: VALID_ADDRESS, amountStroops: '1000' });
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe('VALIDATION_ERROR');
   });
@@ -147,7 +151,7 @@ describe('POST /api/invest/fund-invoice — body validation (400)', () => {
       .post('/api/invest/fund-invoice')
       .set('Authorization', `Bearer ${token()}`)
       .set('x-tenant-id', TENANT_ID)
-      .send({ invoiceId: VALID_INVOICE, amountStroops: 1000 });
+      .send({ invoiceId: VALID_INVOICE, amountStroops: '1000' });
     expect(res.status).toBe(400);
     expect(res.body.error.details.some(d => /investorAddress/.test(d))).toBe(true);
   });
@@ -163,7 +167,7 @@ describe('POST /api/invest/fund-invoice — body validation (400)', () => {
       .post('/api/invest/fund-invoice')
       .set('Authorization', `Bearer ${token()}`)
       .set('x-tenant-id', TENANT_ID)
-      .send({ invoiceId: VALID_INVOICE, investorAddress: badAddr, amountStroops: 1000 });
+      .send({ invoiceId: VALID_INVOICE, investorAddress: badAddr, amountStroops: '1000' });
     expect(res.status).toBe(400);
     expect(res.body.error.details.some(d => /investorAddress/.test(d))).toBe(true);
   });
@@ -173,7 +177,7 @@ describe('POST /api/invest/fund-invoice — body validation (400)', () => {
       .post('/api/invest/fund-invoice')
       .set('Authorization', `Bearer ${token()}`)
       .set('x-tenant-id', TENANT_ID)
-      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: 1000 });
+      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: '1000' });
     // Should not fail on investorAddress validation (may succeed or fail for other reasons)
     if (res.status === 400) {
       expect(res.body.error.details.every(d => !/investorAddress/.test(d))).toBe(true);
@@ -195,7 +199,7 @@ describe('POST /api/invest/fund-invoice — body validation (400)', () => {
       .post('/api/invest/fund-invoice')
       .set('Authorization', `Bearer ${token()}`)
       .set('x-tenant-id', TENANT_ID)
-      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: 0 });
+      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: '0' });
     expect(res.status).toBe(400);
     expect(res.body.error.details.some(d => /amountStroops/.test(d))).toBe(true);
   });
@@ -205,7 +209,7 @@ describe('POST /api/invest/fund-invoice — body validation (400)', () => {
       .post('/api/invest/fund-invoice')
       .set('Authorization', `Bearer ${token()}`)
       .set('x-tenant-id', TENANT_ID)
-      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: -500 });
+      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: '-500' });
     expect(res.status).toBe(400);
     expect(res.body.error.details.some(d => /amountStroops/.test(d))).toBe(true);
   });
@@ -215,7 +219,7 @@ describe('POST /api/invest/fund-invoice — body validation (400)', () => {
       .post('/api/invest/fund-invoice')
       .set('Authorization', `Bearer ${token()}`)
       .set('x-tenant-id', TENANT_ID)
-      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: 100.5 });
+      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: '100.5' });
     expect(res.status).toBe(400);
     expect(res.body.error.details.some(d => /amountStroops/.test(d))).toBe(true);
   });
@@ -226,6 +230,50 @@ describe('POST /api/invest/fund-invoice — body validation (400)', () => {
       .set('Authorization', `Bearer ${token()}`)
       .set('x-tenant-id', TENANT_ID)
       .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: 'abc' });
+    expect(res.status).toBe(400);
+    expect(res.body.error.details.some(d => /amountStroops/.test(d))).toBe(true);
+  });
+
+  it('rejects scientific-notation string amountStroops', async () => {
+    const res = await agent()
+      .post('/api/invest/fund-invoice')
+      .set('Authorization', `Bearer ${token()}`)
+      .set('x-tenant-id', TENANT_ID)
+      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: '1e7' });
+    expect(res.status).toBe(400);
+    expect(res.body.error.details.some(d => /amountStroops/.test(d))).toBe(true);
+  });
+
+  it('rejects decimal string amountStroops', async () => {
+    const res = await agent()
+      .post('/api/invest/fund-invoice')
+      .set('Authorization', `Bearer ${token()}`)
+      .set('x-tenant-id', TENANT_ID)
+      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: '100.0' });
+    expect(res.status).toBe(400);
+    expect(res.body.error.details.some(d => /amountStroops/.test(d))).toBe(true);
+  });
+
+  it('rejects leading-zero string amountStroops', async () => {
+    const res = await agent()
+      .post('/api/invest/fund-invoice')
+      .set('Authorization', `Bearer ${token()}`)
+      .set('x-tenant-id', TENANT_ID)
+      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: '007' });
+    expect(res.status).toBe(400);
+    expect(res.body.error.details.some(d => /amountStroops/.test(d))).toBe(true);
+  });
+
+  it('rejects unsafe integer number amountStroops', async () => {
+    const res = await agent()
+      .post('/api/invest/fund-invoice')
+      .set('Authorization', `Bearer ${token()}`)
+      .set('x-tenant-id', TENANT_ID)
+      .send({
+        invoiceId: VALID_INVOICE,
+        investorAddress: VALID_ADDRESS,
+        amountStroops: Number.MAX_SAFE_INTEGER + 1,
+      });
     expect(res.status).toBe(400);
     expect(res.body.error.details.some(d => /amountStroops/.test(d))).toBe(true);
   });
@@ -250,7 +298,7 @@ describe('POST /api/invest/fund-invoice — KYC gate', () => {
       .post('/api/invest/fund-invoice')
       .set('Authorization', `Bearer ${token}`)
       .set('x-tenant-id', TENANT_ID)
-      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: 1000 });
+      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: '1000' });
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe('KYC_GATE_FAILED');
   });
@@ -263,7 +311,7 @@ describe('POST /api/invest/fund-invoice — KYC gate', () => {
       .post('/api/invest/fund-invoice')
       .set('Authorization', `Bearer ${token}`)
       .set('x-tenant-id', TENANT_ID)
-      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: 1000 });
+      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: '1000' });
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe('KYC_GATE_FAILED');
   });
@@ -275,7 +323,7 @@ describe('POST /api/invest/fund-invoice — KYC gate', () => {
       .post('/api/invest/fund-invoice')
       .set('Authorization', `Bearer ${token}`)
       .set('x-tenant-id', TENANT_ID)
-      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: 1000 });
+      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: '1000' });
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe('MISSING_SME_ID');
   });
@@ -290,7 +338,7 @@ describe('POST /api/invest/fund-invoice — KYC gate', () => {
       .send({
         invoiceId: VALID_INVOICE,
         investorAddress: VALID_ADDRESS,
-        amountStroops: 1000,
+        amountStroops: '1000',
         smeId: VERIFIED_SME, // attacker-supplied
       });
     // Middleware reads JWT smeId, so PENDING_SME is used → blocked
@@ -309,7 +357,7 @@ describe('POST /api/invest/fund-invoice — happy path', () => {
       .post('/api/invest/fund-invoice')
       .set('Authorization', `Bearer ${token()}`)
       .set('x-tenant-id', TENANT_ID)
-      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: 5000 });
+      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: '5000' });
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('stubbed');
     expect(res.body.invoiceId).toBe(VALID_INVOICE);
@@ -327,7 +375,7 @@ describe('POST /api/invest/fund-invoice — happy path', () => {
       .post('/api/invest/fund-invoice')
       .set('Authorization', `Bearer ${token}`)
       .set('x-tenant-id', TENANT_ID)
-      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: 1 });
+      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: '1' });
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('stubbed');
   });
@@ -345,7 +393,7 @@ describe('POST /api/invest/fund-invoice — happy path', () => {
       .post('/api/invest/fund-invoice')
       .set('Authorization', `Bearer ${token()}`)
       .set('x-tenant-id', TENANT_ID)
-      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: 1000 });
+      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: '1000' });
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('requires_signature');
     expect(res.body.unsignedXdr).toBe('AAAA==');
@@ -364,7 +412,7 @@ describe('POST /api/invest/fund-invoice — happy path', () => {
       .post('/api/invest/fund-invoice')
       .set('Authorization', `Bearer ${token()}`)
       .set('x-tenant-id', TENANT_ID)
-      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: 999 });
+      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: '999' });
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('submitted');
     expect(res.body.txHash).toBe('abc123');
@@ -378,7 +426,7 @@ describe('POST /api/invest/fund-invoice — happy path', () => {
       .post('/api/invest/fund-invoice')
       .set('Authorization', `Bearer ${token()}`)
       .set('x-tenant-id', TENANT_ID)
-      .send({ invoiceId: 'inv-missing', investorAddress: VALID_ADDRESS, amountStroops: 100 });
+      .send({ invoiceId: 'inv-missing', investorAddress: VALID_ADDRESS, amountStroops: '100' });
     expect(res.status).toBe(422);
     expect(res.body.error.code).toBe('ESCROW_NOT_FOUND');
   });
@@ -391,7 +439,7 @@ describe('POST /api/invest/fund-invoice — happy path', () => {
       .post('/api/invest/fund-invoice')
       .set('Authorization', `Bearer ${token()}`)
       .set('x-tenant-id', TENANT_ID)
-      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: 100 });
+      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: '100' });
     expect(res.status).toBe(502);
     expect(res.body.error.code).toBe('ESCROW_SUBMIT_FAILED');
     // RPC detail must not leak to the client
@@ -403,7 +451,7 @@ describe('POST /api/invest/fund-invoice — happy path', () => {
       .post('/api/invest/fund-invoice')
       .set('Authorization', `Bearer ${token()}`)
       .set('x-tenant-id', TENANT_ID)
-      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: 7777 });
+      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: '7777' });
     expect(submitFundEscrow).toHaveBeenCalledWith(
       expect.objectContaining({
         escrowAddress:   VALID_ESCROW,
@@ -419,7 +467,7 @@ describe('POST /api/invest/fund-invoice — happy path', () => {
       .post('/api/invest/fund-invoice')
       .set('Authorization', `Bearer ${token()}`)
       .set('x-tenant-id', TENANT_ID)
-      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: 333 });
+      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: '333' });
     expect(persistCommitment).toHaveBeenCalledWith(
       expect.objectContaining({
         invoiceId:       VALID_INVOICE,
@@ -429,5 +477,43 @@ describe('POST /api/invest/fund-invoice — happy path', () => {
         status:          'stubbed',
       })
     );
+  });
+
+  it('returns 500 when persistCommitment throws an unexpected error', async () => {
+    persistCommitment.mockRejectedValueOnce(new Error('DB connection lost'));
+
+    const res = await agent()
+      .post('/api/invest/fund-invoice')
+      .set('Authorization', `Bearer ${token()}`)
+      .set('x-tenant-id', TENANT_ID)
+      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: '500' });
+    expect(res.status).toBe(500);
+    expect(res.body.error.code).toBe('INTERNAL_SERVER_ERROR');
+    // The actual error message must not leak to the client
+    expect(JSON.stringify(res.body)).not.toContain('DB connection lost');
+  });
+
+  it('returns the same commitmentId for duplicate requests (idempotent at service layer)', async () => {
+    const body = { invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: '5000' };
+    const firstRes = await agent()
+      .post('/api/invest/fund-invoice')
+      .set('Authorization', `Bearer ${token()}`)
+      .set('x-tenant-id', TENANT_ID)
+      .send(body);
+    expect(firstRes.status).toBe(200);
+    expect(firstRes.body.commitmentId).toBe('cmt-1');
+
+    const secondRes = await agent()
+      .post('/api/invest/fund-invoice')
+      .set('Authorization', `Bearer ${token()}`)
+      .set('x-tenant-id', TENANT_ID)
+      .send(body);
+    expect(secondRes.status).toBe(200);
+    expect(secondRes.body.commitmentId).toBe('cmt-1');
+
+    const firstKey = persistCommitment.mock.calls[0][0].idempotencyKey;
+    const secondKey = persistCommitment.mock.calls[1][0].idempotencyKey;
+    expect(firstKey).toBeDefined();
+    expect(secondKey).toBe(firstKey);
   });
 });

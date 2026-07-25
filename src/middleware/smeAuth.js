@@ -1,19 +1,25 @@
 'use strict';
 
 const AppError = require('../errors/AppError');
-
-const STELLAR_ADDRESS_RE = /^G[A-Z2-7]{55}$/;
+const { isValidStellarAccountAddress } = require('../utils/validators');
 
 /**
- * Middleware: verifies the authenticated user has a bound Stellar wallet address.
- * Accepts wallet from req.user.walletAddress or x-stellar-address header (stub).
- * @param req
- * @param res
- * @param next
+ * Resolves the bound Stellar wallet from the authenticated principal.
+ *
+ * The middleware intentionally ignores wallet values supplied via headers,
+ * query parameters, or request bodies so a client cannot spoof a bound wallet.
+ *
+ * @param {import("express").Request} req The Express request object.
+ * @returns {string|undefined} The wallet address bound to the authenticated user.
  */
+function resolveBoundWallet(req) {
+  return req.user && typeof req.user === 'object' ? req.user.walletAddress : undefined;
+}
+
 /**
  * Middleware: verifies the authenticated user has a bound Stellar wallet address.
- * Accepts wallet from req.user.walletAddress or x-stellar-address header (stub).
+ * The wallet is resolved exclusively from the authenticated principal.
+ *
  * @param {import("express").Request} req The Express request object.
  * @param {import("express").Response} res The Express response object.
  * @param {import("express").NextFunction} next The Express next middleware function.
@@ -29,7 +35,7 @@ function authorizeSmeWallet(req, res, next) {
     }));
   }
 
-  const wallet = req.user.walletAddress;
+  const wallet = resolveBoundWallet(req);
 
   if (!wallet) {
     return next(new AppError({
@@ -40,7 +46,7 @@ function authorizeSmeWallet(req, res, next) {
     }));
   }
 
-  if (!STELLAR_ADDRESS_RE.test(wallet)) {
+  if (!isValidStellarAccountAddress(wallet)) {
     return next(new AppError({
       type: 'https://liquifact.com/probs/validation-error',
       title: 'Invalid Wallet Address',

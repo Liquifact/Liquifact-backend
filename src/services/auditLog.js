@@ -8,6 +8,7 @@
 
 const { appendAuditEvent, redactValue } = require('./auditLogStore');
 const db = require('../db/knex');
+const MAX_PAGE_SIZE = 100; // Maximum number of audit logs to return in a single query
 
 /**
  * Generates a unique audit log ID using timestamp and random suffix.
@@ -186,6 +187,16 @@ async function getAuditLogs({
   limit = 100,
   offset = 0,
 } = {}) {
+  /**
+   * Clamp the requested limit to a safe maximum to prevent loading the entire audit log into memory. The default limit is 100, and the maximum allowed is 100.
+   * -Non-numeric or negative limits will default to 100.
+   * Any value above MAX_PAGE_SIZE will be capped to MAX_PAGE_SIZE.
+   * Callers needing more rows should use the streaming export route.
+   */
+  const parsedLimit = Number(limit);
+  const requestedLimit = (!isNaN(parsedLimit) && parsedLimit > 0) ? parsedLimit:100;
+  const cappedLimit = Math.min(requestedLimit, MAX_PAGE_SIZE);
+  const safeOffset = Number.isInteger(offset) && offset >= 0 ? offset : 0;
   let query = db('audit_log_events').select('*').orderBy('created_at', 'desc');
 
   if (resourceId) { query = query.where('target_id', resourceId); }
@@ -193,9 +204,8 @@ async function getAuditLogs({
   if (actor) { query = query.where('actor_id', actor); }
   if (action) { query = query.where('action', action); }
 
-  if (limit !== Infinity) {
-    query = query.limit(limit).offset(offset);
-  }
+  query = query.limit(cappedLimit).offset(safeOffset ?? 0);
+
 
   const rows = await query;
   let filtered = rows.map(mapDbRowToAuditLog);
@@ -245,15 +255,20 @@ async function clearAuditLogs() {
     throw new Error('Cannot clear audit logs in production');
   }
   // Remove trigger so we can clear during testing
-  await db.raw('DROP TRIGGER IF EXISTS trg_audit_log_no_delete ON audit_log_events');
-  await db('audit_log_events').del();
-  // Re-add trigger
-  await db.raw(`
-    CREATE TRIGGER trg_audit_log_no_delete
-    BEFORE DELETE ON audit_log_events
-    FOR EACH ROW
-    EXECUTE FUNCTION prevent_audit_log_update_or_delete();
-  `);
+  try {
+    await db.raw('DROP TRIGGER IF EXISTS trg_audit_log_no_delete ON audit_log_events');
+    await db('audit_log_events').del();
+    // Re-add trigger
+    await db.raw(`
+      CREATE TRIGGER trg_audit_log_no_delete
+      BEFORE DELETE ON audit_log_events
+      FOR EACH ROW
+      EXECUTE FUNCTION prevent_audit_log_update_or_delete();
+    `);
+  } catch (error) {
+    await db('audit_log_events').del();
+  }
+  
 }
 
 /**

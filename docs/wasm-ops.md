@@ -129,8 +129,13 @@ Expected response:
 | `NETWORK_PASSPHRASE` | Stellar network passphrase |
 | `ESCROW_CONTRACT_ID` | Deployed LiquifactEscrow contract address |
 | `JWT_SECRET` | Secret for verifying admin JWT tokens |
-| `API_KEYS_DB_PATH` | Path to the SQLite API key store |
+| `API_KEYS` | Encoded JSON list of API key entries for the env-backed registry (see [README — API Key Authentication](../README.md#api-key-authentication)) |
 | `ESCROW_REFRESH_ON_BOOT` | Set to `true` to auto-refresh on service start |
+
+> **Note**: The legacy `API_KEYS_DB_PATH` SQLite store was retired alongside
+> `src/middleware/apiKey.js` (issue #590). API key authentication is served
+> entirely from the environment-backed registry in `src/middleware/apiKeyAuth.js`; no
+> SQLite connection is opened per request.
 
 ---
 
@@ -165,7 +170,100 @@ Expected response:
 
 ---
 
-## 5. Security Notes
+## 5. Version Mismatch Alert (issue #457)
+
+When `runContractListRefresh` (`src/jobs/contractListRefresh.js`) detects that the
+on-chain `SCHEMA_VERSION` diverges from the expected/known registry version, it
+raises an **operator-facing alert** rather than noticing the divergence silently.
+A mismatch signals a contract upgrade or an unexpected/rolled-back deployment that
+the backend may not yet support.
+
+### What fires
+
+A mismatch is any comparison `status` other than `current`:
+
+| `status` | Meaning | Alert |
+|----------|---------|-------|
+| `current` | On-chain matches the highest registry entry | none (clears prior alert state) |
+| `ahead` | On-chain is newer than every registry entry | **alert** |
+| `unknown` | On-chain version is not in the registry | **alert** |
+
+On a mismatch the job:
+
+1. Increments the Prometheus counter
+   **`contract_wasm_version_mismatch_alerts_total`** (label `status` = `ahead` |
+   `unknown`).
+2. Emits an **`error`-severity** structured log (the severity the existing
+   alerting pipeline consumes) tagged `alert: "contract_wasm_version_mismatch"`:
+
+   ```json
+   {
+     "level": "ERROR",
+     "alert": "contract_wasm_version_mismatch",
+     "contractId": "C....",
+     "expectedVersion": "1.2.0",
+     "observedVersion": 4,
+     "status": "ahead",
+     "msg": "ALERT: on-chain wasm SCHEMA_VERSION mismatch detected"
+   }
+   ```
+
+### De-duplication (no alert spam)
+
+The alert is **idempotent by version pair**: while the same
+`(contractId, expectedVersion, observedVersion)` mismatch persists across
+scheduled runs, only the **first** occurrence emits a metric increment and log.
+The de-dupe state for a contract is cleared automatically once its version
+returns to `current`, so a later regression re-alerts. It re-alerts immediately
+if the observed version changes to a new pair. State can be reset manually via
+`resetVersionMismatchAlertState()` (exported for tests/ops). The alert helper
+returns `true` only when it emits a new metric/log alert and `false` when an
+identical signature is suppressed.
+
+> Note: because de-dupe state is in-process, a service restart resets it and the
+> next run will alert once for any still-present mismatch — this is intentional
+> (it re-surfaces an unresolved condition after a deploy/restart).
+
+### Read failures are not mismatches
+
+If `getOnChainSchemaVersion` fails (RPC error / invalid contract id) the job
+rejects and **no** mismatch alert is raised — that path is handled separately
+(see §4 RPC read failure). RPC failures surface through the existing
+`getOnChainSchemaVersion` error log and the refresh route's `502`.
+
+### Security: the alert payload is safe to surface
+
+The payload contains only non-secret, publicly observable values: the contract
+address (a public on-chain identifier), the expected registry version label, the
+observed `SCHEMA_VERSION` integer, and the status. No RPC URLs, API keys, JWTs,
+or other secrets are included. (Verified by a test asserting the payload never
+contains RPC-URL credentials and exposes only the whitelisted keys.)
+
+### Runbook — responding to the alert
+
+1. **Acknowledge**: the alert means the deployed `LiquifactEscrow` contract no
+   longer matches what this backend tracks. Capital-movement flows may rely on
+   schema assumptions — treat as time-sensitive.
+2. **Confirm on-chain**: read `SCHEMA_VERSION` directly
+   (`GET /api/admin/escrow/version`) and cross-check the wasm hash in the Stellar
+   explorer for the `contractId` in the alert.
+3. **Classify**:
+   - `ahead` → a planned upgrade is live before the backend caught up. Add the
+     new `semver → SCHEMA_VERSION` entry to `REGISTRY` in
+     `src/config/escrowVersions.js`, ship it, then trigger a refresh
+     (`POST /api/admin/escrow/refresh`).
+   - `unknown` (lower than current) → possible rollback or wrong
+     `ESCROW_CONTRACT_ID`. Verify the contract id and follow the **Rollback
+     steps** in §4 before re-triggering a refresh.
+4. **Verify recovery**: re-run the refresh; once `status` returns to `current`
+   the alert de-dupe state clears and `contract_wasm_version_mismatch_alerts_total`
+   stops increasing.
+5. **Suggested monitor**: alert when
+   `increase(contract_wasm_version_mismatch_alerts_total[15m]) > 0`.
+
+---
+
+## 6. Security Notes
 
 - The `/api/admin/escrow/*` routes require **either** a valid admin JWT
   (`Authorization: Bearer <token>`) **or** a valid `X-API-KEY` header.

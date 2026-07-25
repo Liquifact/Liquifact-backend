@@ -21,7 +21,15 @@ The binding is established using **Sign-In with Stellar (SIWS)**:
 
 The `authorizeSmeWallet` middleware ensures that:
 - The user is authenticated via JWT.
-- The user has a bound wallet address (either in their profile or provided via stub headers).
+- The user has a bound Stellar address in a valid StrKey format.
+- The wallet is resolved exclusively from the authenticated principal (`req.user.walletAddress`); values supplied via headers, bodies, or other request data are ignored and cannot override the bound address.
+
+Accepted address formats for SME authorization are:
+- `G...` Stellar account public keys
+- `C...` Soroban contract addresses
+
+The validator rejects malformed, lowercase, wrong-length, and whitespace-padded
+values.
 
 The `verifyInvoiceOwner` middleware ensures that:
 - The requested invoice belongs to the authenticated user (via `ownerId`) or their bound wallet (via `smeWallet`).
@@ -36,8 +44,7 @@ Retrieves a specific invoice for an SME, ensuring they own it via their wallet b
 
 ```bash
 curl -X GET http://localhost:3001/api/sme/invoice/inv_123 \
-  -H "Authorization: Bearer <JWT_TOKEN>" \
-  -H "x-stellar-address: GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  -H "Authorization: Bearer <JWT_TOKEN>"
 ```
 
 **Successful Response (200 OK):**
@@ -69,6 +76,7 @@ curl -X GET http://localhost:3001/api/sme/invoice/inv_123 \
 
 ## Security Notes
 
-- **Input Validation**: All wallet addresses are validated against Stellar's `G...` public key format.
+- **Input Validation**: All wallet addresses are validated as full Stellar StrKeys, accepting only valid `G...` account keys and `C...` contract addresses.
+- **Principal Binding**: SME authorization trusts only the authenticated principal's bound wallet address; header or body spoofing is ignored.
 - **Replay Protection**: Live SIWS implementation must use one-time nonces to prevent signature replay attacks.
 - **Privacy**: Only public keys are stored; private keys never leave the user's wallet.

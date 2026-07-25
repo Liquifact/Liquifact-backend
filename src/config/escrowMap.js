@@ -31,7 +31,7 @@
 
 'use strict';
 
-const STELLAR_ADDRESS_RE = /^[CG][A-Z2-7]{55}$/;
+const { isValidStellarAddress } = require('../utils/validators');
 
 /**
  * Thrown when no active escrow mapping exists for an invoice ID.
@@ -95,7 +95,7 @@ function _parseConfig() {
     if (!m.invoiceId || typeof m.invoiceId !== 'string') {
       throw new EscrowMapConfigError('Each mapping must have a string invoiceId.');
     }
-    if (!m.escrowAddress || !STELLAR_ADDRESS_RE.test(m.escrowAddress)) {
+    if (!m.escrowAddress || !isValidStellarAddress(m.escrowAddress)) {
       throw new EscrowMapConfigError(
         `Mapping for ${m.invoiceId} has an invalid Stellar escrowAddress.`
       );
@@ -234,7 +234,7 @@ function resolveInvoiceByAddress(contractAddress) {
   }
 
   const address = String(contractAddress).trim();
-  if (!STELLAR_ADDRESS_RE.test(address)) {
+  if (!isValidStellarAddress(address)) {
     return null;
   }
 

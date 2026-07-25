@@ -58,18 +58,55 @@ jest.mock('../src/services/escrowBatchRead', () => ({
   batchReadEscrowStates: jest.fn(),
 }));
 
+// Mount only the real authentication, tenant resolution, and invest service so
+// unrelated application routes cannot affect this focused security suite.
+jest.mock('../src/app', () => {
+  const express = require('express');
+  const { authenticatedTenantStack } = require('../src/middleware/stacks');
+  const { listOpportunities } = require('../src/services/investService');
+
+  return {
+    createApp: () => {
+      const app = express();
+      app.get('/api/invest/opportunities', ...authenticatedTenantStack, async (req, res, next) => {
+        try {
+          const result = await listOpportunities({
+            tenantId: req.tenantId,
+            page: req.query.page,
+            limit: req.query.limit,
+          });
+          res.json({ data: result.data, meta: result.meta });
+        } catch (error) {
+          next(error);
+        }
+      });
+      app.use((error, _req, res, _next) => {
+        res.status(error.status || 500).json({ error: error.message });
+      });
+      return app;
+    },
+  };
+});
+
 const { batchReadEscrowStates } = require('../src/services/escrowBatchRead');
+const { getOpportunities, listInvestments, listOpportunities } = require('../src/services/investService');
+const { resolveEscrowAddress } = require('../src/config/escrowMap');
 const logger = require('../src/logger');
 
 let mockData = [];
 let mockTotal = { total: 0 };
+let mockOwnedInvoiceIds = null;
+let mockLastWhereInColumn = null;
 
 jest.mock('../src/db/knex', () => {
   const q = {
     select: jest.fn().mockReturnThis(),
     where: jest.fn().mockReturnThis(),
     andWhere: jest.fn().mockReturnThis(),
-    whereIn: jest.fn().mockReturnThis(),
+    whereIn: jest.fn(function whereIn(column) {
+      mockLastWhereInColumn = column;
+      return this;
+    }),
     whereNull: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
     limit: jest.fn().mockReturnThis(),
@@ -80,7 +117,11 @@ jest.mock('../src/db/knex', () => {
     count: jest.fn().mockReturnThis(),
     first: jest.fn(() => Promise.resolve(mockTotal)),
     then(resolve, _reject) {
-      return Promise.resolve(mockData).then(resolve);
+      const rows = mockLastWhereInColumn === 'id'
+        ? (mockOwnedInvoiceIds || mockData.map(({ id }) => id)).map(id => ({ id }))
+        : mockData;
+      mockLastWhereInColumn = null;
+      return Promise.resolve(rows).then(resolve);
     },
     catch: jest.fn().mockReturnThis(),
   };
@@ -114,6 +155,8 @@ describe('Invest batch on-chain read behavior (/api/invest/opportunities)', () =
 
     mockData = THREE_INVOICES;
     mockTotal = { total: THREE_INVOICES.length };
+    mockOwnedInvoiceIds = null;
+    mockLastWhereInColumn = null;
 
     validToken = jwt.sign(
       { id: 'user_batch', role: 'investor', tenantId: TENANT },
@@ -250,6 +293,160 @@ describe('Invest batch on-chain read behavior (/api/invest/opportunities)', () =
       .set('Authorization', `Bearer ${validToken}`);
 
     expect(sharedQuery.where).toHaveBeenCalledWith('tenant_id', TENANT);
+  });
+
+  it('filters mixed foreign-tenant IDs before reading or returning escrow data', async () => {
+    mockData = [
+      THREE_INVOICES[0],
+      { id: 'inv_foreign', funded_ratio: 90, maturity_date: '2026-10-01', yield_bps: 900 },
+    ];
+    mockTotal = { total: 2 };
+    mockOwnedInvoiceIds = ['inv_batch_a'];
+    batchReadEscrowStates.mockResolvedValue({
+      results: [
+        { invoiceId: 'inv_batch_a', status: 'active', fundedAmount: 10000 },
+        { invoiceId: 'inv_foreign', status: 'active', fundedAmount: 999999 },
+      ],
+      errors: [],
+    });
+
+    const res = await request(app)
+      .get('/api/invest/opportunities')
+      .set('Authorization', `Bearer ${validToken}`);
+
+    expect(res.status).toBe(200);
+    expect(batchReadEscrowStates).toHaveBeenCalledWith(['inv_batch_a']);
+    expect(res.body.data.map(item => item.invoiceId)).toEqual(['inv_batch_a']);
+    expect(JSON.stringify(res.body)).not.toContain('inv_foreign');
+    expect(JSON.stringify(res.body)).not.toContain('999999');
+    expect(logger.warn).toHaveBeenCalledWith(
+      {
+        tenantId: TENANT,
+        invoiceIds: ['inv_foreign'],
+        count: 1,
+      },
+      expect.stringContaining('blocked cross-tenant or unknown invoice IDs'),
+    );
+  });
+
+  it('filters an unknown invoice ID without invoking an escrow read for it', async () => {
+    mockData = [
+      { id: 'inv_unknown', funded_ratio: 0, maturity_date: '2026-10-01', yield_bps: 400 },
+    ];
+    mockTotal = { total: 1 };
+    mockOwnedInvoiceIds = [];
+    batchReadEscrowStates.mockResolvedValue({ results: [], errors: [] });
+
+    const res = await request(app)
+      .get('/api/invest/opportunities')
+      .set('Authorization', `Bearer ${validToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual([]);
+    expect(batchReadEscrowStates).toHaveBeenCalledWith([]);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ invoiceIds: ['inv_unknown'], count: 1 }),
+      expect.stringContaining('blocked cross-tenant or unknown invoice IDs'),
+    );
+  });
+
+  it('requires tenant context for every investment opportunity listing service', async () => {
+    await expect(getOpportunities()).rejects.toThrow('Missing tenant context');
+    await expect(listInvestments()).rejects.toThrow('Missing tenant context');
+    await expect(listOpportunities()).rejects.toThrow('Missing tenant context');
+  });
+
+  it('maps defaults and clamps pagination in the non-enriched opportunity listing', async () => {
+    mockData = [
+      { id: 'inv_defaults' },
+      { id: 'inv_invalid_ratio', funded_ratio: 'not-a-number' },
+    ];
+    mockTotal = { total: '2' };
+
+    const result = await getOpportunities({
+      tenantId: TENANT,
+      page: 'invalid',
+      limit: 1000,
+    });
+
+    expect(result.data[0]).toEqual({
+      invoiceId: 'inv_defaults',
+      fundedBpsOfTarget: 0,
+      maturityAt: null,
+      yieldBpsDisplay: null,
+      onChain: { escrowAddress: null, ledgerIndex: null },
+    });
+    expect(result.data[1].fundedBpsOfTarget).toBe(0);
+    expect(result.meta).toEqual({ total: 2, page: 1, limit: 100, totalPages: 1 });
+    expect(sharedQuery.limit).toHaveBeenCalledWith(100);
+
+    mockData = [];
+    mockTotal = { total: 0 };
+    const emptyResult = await getOpportunities({ tenantId: TENANT, limit: 'invalid' });
+    expect(emptyResult.meta).toEqual({ total: 0, page: 1, limit: 10, totalPages: 0 });
+  });
+
+  it('preserves per-ID errors and cursor metadata for owned cursor-list invoices', async () => {
+    mockData = [THREE_INVOICES[0], THREE_INVOICES[1]];
+    mockTotal = { total: 2 };
+    batchReadEscrowStates.mockResolvedValue({
+      results: [{ invoiceId: 'inv_batch_a', status: 'active', fundedAmount: 10000 }],
+      errors: [{ invoiceId: 'inv_batch_b', error: 'RPC unavailable', code: 'ECONNREFUSED' }],
+    });
+
+    const result = await listInvestments({
+      tenantId: TENANT,
+      cursor: 'inv_previous',
+      limit: 2,
+    });
+
+    expect(sharedQuery.andWhere).toHaveBeenCalledWith('id', '>', 'inv_previous');
+    expect(batchReadEscrowStates).toHaveBeenCalledWith(['inv_batch_a', 'inv_batch_b']);
+    expect(result.data[0].onChain).toEqual(expect.objectContaining({
+      status: 'active',
+      syncError: null,
+    }));
+    expect(result.data[1].onChain.syncError).toBe('RPC unavailable');
+    expect(result.meta).toEqual({
+      limit: 2,
+      next_cursor: 'inv_batch_b',
+      count: 2,
+      has_more: true,
+    });
+  });
+
+  it('returns empty cursor metadata without querying ownership for an empty set', async () => {
+    mockData = [];
+    mockTotal = { total: 0 };
+    batchReadEscrowStates.mockResolvedValue({ results: [], errors: [] });
+
+    const result = await listInvestments({ tenantId: TENANT, limit: 'invalid' });
+
+    expect(result.data).toEqual([]);
+    expect(batchReadEscrowStates).toHaveBeenCalledWith([]);
+    expect(result.meta).toEqual({
+      limit: 10,
+      next_cursor: null,
+      count: 0,
+      has_more: false,
+    });
+  });
+
+  it('leaves escrow addresses empty when tenant-owned mappings are unavailable', async () => {
+    mockData = [THREE_INVOICES[0], THREE_INVOICES[1]];
+    mockTotal = { total: 2 };
+    resolveEscrowAddress
+      .mockImplementationOnce(() => { throw new Error('mapping unavailable'); })
+      .mockReturnValueOnce('');
+    batchReadEscrowStates.mockResolvedValue({ results: [], errors: [] });
+
+    const result = await listOpportunities({
+      tenantId: TENANT,
+      page: 'invalid',
+      limit: 'invalid',
+    });
+
+    expect(result.data.map(item => item.onChain.escrowAddress)).toEqual(['', '']);
   });
 
   it('rejects unauthenticated requests with 401', async () => {

@@ -84,7 +84,7 @@ class CircuitBreaker {
       }
       const metrics = getMetrics();
       if (metrics && metrics.sorobanCircuitBreakerStateTransitionsTotal) {
-        metrics.sorobanCircuitBreakerStateTransitionsTotal.labels(this.name, newState).inc();
+        metrics.sorobanCircuitBreakerStateTransitionsTotal.labels(this.name, oldState, newState).inc();
       }
     }
   }

@@ -14,6 +14,14 @@ const {
   registry,
 } = require('../src/metrics');
 
+async function getMetricValue(metric) {
+  const res = await metric.get();
+  return res.values && res.values[0] ? res.values[0].value : 0;
+}
+
+const VALID_CONTRACT_ID = 'CDLZFC3SYJ27SBCC6BAKCY73WFXHBTE357R67CW567QX65ECUGN45RXI';
+const VALID_TX_HASH = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+
 /**
  * NOTE: This test suite focuses on:
  * - invoice id derivation rules (explicit fields, record.value, record.topics)
@@ -150,8 +158,8 @@ describe('escrow indexer event parsing and cursor advancement', () => {
             eventType: 'contract_event',
             ledgerSequence: 10,
             pagingToken: 'cursor-2',
-            contractId: 'contract-A',
-            txHash: 'tx-1',
+            contractId: VALID_CONTRACT_ID,
+            txHash: VALID_TX_HASH,
             eventBody: { invoice_id: 'INV-1' },
             observedAt: '2020-01-01T00:00:00.000Z',
           },
@@ -311,15 +319,15 @@ describe('escrow indexer event parsing and cursor advancement', () => {
         log: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
       });
 
-      const beforeGauge = escrowIndexerLastCursorAdvanceTimestampSeconds.get().values[0].value;
+      const beforeGauge = await getMetricValue(escrowIndexerLastCursorAdvanceTimestampSeconds);
 
       const summary = await indexer.runCycle();
       expect(summary).not.toBeNull();
       expect(summary.processed).toBe(2);
-      expect(escrowIndexerEventsProcessedTotal.get().values[0].value).toBe(2);
-      expect(escrowIndexerEventsSkippedTotal.get().values[0].value).toBe(0);
+      expect(await getMetricValue(escrowIndexerEventsProcessedTotal)).toBe(2);
+      expect(await getMetricValue(escrowIndexerEventsSkippedTotal)).toBe(0);
 
-      const afterGauge = escrowIndexerLastCursorAdvanceTimestampSeconds.get().values[0].value;
+      const afterGauge = await getMetricValue(escrowIndexerLastCursorAdvanceTimestampSeconds);
       expect(afterGauge).not.toBe(beforeGauge);
       expect(afterGauge).toBeGreaterThan(0);
     });
@@ -368,8 +376,8 @@ describe('escrow indexer event parsing and cursor advancement', () => {
       const summary = await indexer.runCycle();
       expect(summary.processed).toBe(1);
       expect(summary.skipped).toBe(1);
-      expect(escrowIndexerEventsProcessedTotal.get().values[0].value).toBe(1);
-      expect(escrowIndexerEventsSkippedTotal.get().values[0].value).toBe(1);
+      expect(await getMetricValue(escrowIndexerEventsProcessedTotal)).toBe(1);
+      expect(await getMetricValue(escrowIndexerEventsSkippedTotal)).toBe(1);
     });
 
     test('cycle failure increments cycle failures and never calls process.exit', async () => {
@@ -393,16 +401,17 @@ describe('escrow indexer event parsing and cursor advancement', () => {
 
       const summary = await indexer.runCycle();
       expect(summary).toBeNull();
-      expect(escrowIndexerCycleFailuresTotal.get().values[0].value).toBe(1);
+      expect(await getMetricValue(escrowIndexerCycleFailuresTotal)).toBe(1);
       expect(exitSpy).not.toHaveBeenCalled();
 
       exitSpy.mockRestore();
     });
 
     test('metrics emission failure increments cycle failures', async () => {
-      // This simulates a metric emission problem by forcing summary.processed
-      // to become invalid. Since runCycle obtains summary from runEscrowIndexerCycle,
-      // we simulate by throwing inside options.log.error emission path.
+      const incSpy = jest.spyOn(escrowIndexerEventsProcessedTotal, 'inc').mockImplementation(() => {
+        throw new Error('metrics emit failed');
+      });
+
       const indexer = createEscrowIndexer({
         store: {
           loadCursor: jest.fn().mockResolvedValue('cursor-1'),
@@ -412,27 +421,35 @@ describe('escrow indexer event parsing and cursor advancement', () => {
           upsertProjection: jest.fn().mockResolvedValue(undefined),
         },
         fetchEscrowEvents: jest.fn().mockResolvedValue({
-          events: [],
-          nextCursor: 'cursor-1',
+          events: [
+            {
+              invoiceId: 'INV-1',
+              eventId: 'evt-1',
+              eventType: 'contract_event',
+              ledgerSequence: 10,
+              pagingToken: 'cursor-2',
+              contractId: VALID_CONTRACT_ID,
+              txHash: VALID_TX_HASH,
+              eventBody: {},
+              observedAt: '2020-01-01T00:00:00.000Z',
+            },
+          ],
+          nextCursor: 'cursor-2',
         }),
         transactionRunner: async (fn) => fn({}),
         pollIntervalMs: 1_000_000,
         log: {
           info: jest.fn(),
           warn: jest.fn(),
-          error: jest.fn().mockImplementation(() => {
-            // If called for invalid metric data, it is a no-op. We want to throw
-            // when trying to emit metrics to hit the metricsError catch.
-            throw new Error('metrics emit failed');
-          }),
+          error: jest.fn(),
         },
       });
 
       const summary = await indexer.runCycle();
-      // runCycle returns summary (it only returns null on cycle failure), but metrics
-      // emission errors should increment cycleFailuresTotal.
       expect(summary).not.toBeNull();
-      expect(escrowIndexerCycleFailuresTotal.get().values[0].value).toBe(1);
+      expect(await getMetricValue(escrowIndexerCycleFailuresTotal)).toBe(1);
+
+      incSpy.mockRestore();
     });
   });
 
@@ -468,11 +485,320 @@ describe('escrow indexer event parsing and cursor advancement', () => {
         log: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
       });
 
-      const before = escrowIndexerLastCursorAdvanceTimestampSeconds.get().values[0].value;
+      const before = await getMetricValue(escrowIndexerLastCursorAdvanceTimestampSeconds);
       await indexer.runCycle();
-      const after = escrowIndexerLastCursorAdvanceTimestampSeconds.get().values[0].value;
+      const after = await getMetricValue(escrowIndexerLastCursorAdvanceTimestampSeconds);
 
       expect(after).toBe(before);
+    });
+  });
+
+  describe('escrow event identifier validation', () => {
+
+    test('valid contractId + valid txHash persists successfully', async () => {
+      const store = {
+        loadCursor: jest.fn().mockResolvedValue('cursor-1'),
+        saveCursor: jest.fn().mockResolvedValue(undefined),
+        upsertEvent: jest.fn().mockResolvedValue(undefined),
+        findProjection: jest.fn().mockResolvedValue(null),
+        upsertProjection: jest.fn().mockResolvedValue(undefined),
+      };
+      const txRunner = async (fn) => fn({});
+      const fetchEscrowEvents = jest.fn().mockResolvedValue({
+        events: [
+          {
+            invoiceId: 'INV-1',
+            eventId: 'evt-1',
+            eventType: 'contract_event',
+            ledgerSequence: 10,
+            pagingToken: 'cursor-2',
+            contractId: VALID_CONTRACT_ID,
+            txHash: VALID_TX_HASH,
+            eventBody: {},
+            observedAt: '2020-01-01T00:00:00.000Z',
+          },
+        ],
+        nextCursor: 'cursor-2',
+      });
+
+      const res = await runEscrowIndexerCycle({
+        store,
+        fetchEscrowEvents,
+        transactionRunner: txRunner,
+        batchSize: 100,
+        log: { warn: jest.fn(), info: jest.fn(), error: jest.fn() },
+      });
+
+      expect(res.processed).toBe(1);
+      expect(res.skipped).toBe(0);
+      expect(store.upsertEvent).toHaveBeenCalledTimes(1);
+    });
+
+    test('invalid contractId prefix (e.g. starts with G) is rejected', async () => {
+      const store = {
+        loadCursor: jest.fn().mockResolvedValue('cursor-1'),
+        saveCursor: jest.fn().mockResolvedValue(undefined),
+        upsertEvent: jest.fn().mockResolvedValue(undefined),
+        findProjection: jest.fn().mockResolvedValue(null),
+        upsertProjection: jest.fn().mockResolvedValue(undefined),
+      };
+      const txRunner = async (fn) => fn({});
+      const fetchEscrowEvents = jest.fn().mockResolvedValue({
+        events: [
+          {
+            invoiceId: 'INV-1',
+            eventId: 'evt-1',
+            eventType: 'contract_event',
+            ledgerSequence: 10,
+            pagingToken: 'cursor-2',
+            contractId: 'GDLZFC3SYJ27SBCC6BAKCY73WFXHBTE357R67CW567QX65ECUGN45RXI', // starts with G
+            txHash: VALID_TX_HASH,
+            eventBody: {},
+            observedAt: '2020-01-01T00:00:00.000Z',
+          },
+        ],
+        nextCursor: 'cursor-2',
+      });
+
+      const res = await runEscrowIndexerCycle({
+        store,
+        fetchEscrowEvents,
+        transactionRunner: txRunner,
+        batchSize: 100,
+        log: { warn: jest.fn(), info: jest.fn(), error: jest.fn() },
+      });
+
+      expect(res.processed).toBe(0);
+      expect(res.skipped).toBe(1);
+      expect(store.upsertEvent).not.toHaveBeenCalled();
+    });
+
+    test('invalid contractId format is rejected', async () => {
+      const store = {
+        loadCursor: jest.fn().mockResolvedValue('cursor-1'),
+        saveCursor: jest.fn().mockResolvedValue(undefined),
+        upsertEvent: jest.fn().mockResolvedValue(undefined),
+        findProjection: jest.fn().mockResolvedValue(null),
+        upsertProjection: jest.fn().mockResolvedValue(undefined),
+      };
+      const txRunner = async (fn) => fn({});
+      const fetchEscrowEvents = jest.fn().mockResolvedValue({
+        events: [
+          {
+            invoiceId: 'INV-1',
+            eventId: 'evt-1',
+            eventType: 'contract_event',
+            ledgerSequence: 10,
+            pagingToken: 'cursor-2',
+            contractId: 'CDLZF', // too short
+            txHash: VALID_TX_HASH,
+            eventBody: {},
+            observedAt: '2020-01-01T00:00:00.000Z',
+          },
+        ],
+        nextCursor: 'cursor-2',
+      });
+
+      const res = await runEscrowIndexerCycle({
+        store,
+        fetchEscrowEvents,
+        transactionRunner: txRunner,
+        batchSize: 100,
+        log: { warn: jest.fn(), info: jest.fn(), error: jest.fn() },
+      });
+
+      expect(res.processed).toBe(0);
+      expect(res.skipped).toBe(1);
+    });
+
+    test('invalid txHash length is rejected', async () => {
+      const store = {
+        loadCursor: jest.fn().mockResolvedValue('cursor-1'),
+        saveCursor: jest.fn().mockResolvedValue(undefined),
+        upsertEvent: jest.fn().mockResolvedValue(undefined),
+        findProjection: jest.fn().mockResolvedValue(null),
+        upsertProjection: jest.fn().mockResolvedValue(undefined),
+      };
+      const txRunner = async (fn) => fn({});
+      const fetchEscrowEvents = jest.fn().mockResolvedValue({
+        events: [
+          {
+            invoiceId: 'INV-1',
+            eventId: 'evt-1',
+            eventType: 'contract_event',
+            ledgerSequence: 10,
+            pagingToken: 'cursor-2',
+            contractId: VALID_CONTRACT_ID,
+            txHash: VALID_TX_HASH.slice(0, 63), // 63 chars
+            eventBody: {},
+            observedAt: '2020-01-01T00:00:00.000Z',
+          },
+          {
+            invoiceId: 'INV-2',
+            eventId: 'evt-2',
+            eventType: 'contract_event',
+            ledgerSequence: 10,
+            pagingToken: 'cursor-3',
+            contractId: VALID_CONTRACT_ID,
+            txHash: VALID_TX_HASH + 'a', // 65 chars
+            eventBody: {},
+            observedAt: '2020-01-01T00:00:00.000Z',
+          },
+        ],
+        nextCursor: 'cursor-3',
+      });
+
+      const res = await runEscrowIndexerCycle({
+        store,
+        fetchEscrowEvents,
+        transactionRunner: txRunner,
+        batchSize: 100,
+        log: { warn: jest.fn(), info: jest.fn(), error: jest.fn() },
+      });
+
+      expect(res.processed).toBe(0);
+      expect(res.skipped).toBe(2);
+    });
+
+    test('invalid txHash non-hex characters are rejected', async () => {
+      const store = {
+        loadCursor: jest.fn().mockResolvedValue('cursor-1'),
+        saveCursor: jest.fn().mockResolvedValue(undefined),
+        upsertEvent: jest.fn().mockResolvedValue(undefined),
+        findProjection: jest.fn().mockResolvedValue(null),
+        upsertProjection: jest.fn().mockResolvedValue(undefined),
+      };
+      const txRunner = async (fn) => fn({});
+      const fetchEscrowEvents = jest.fn().mockResolvedValue({
+        events: [
+          {
+            invoiceId: 'INV-1',
+            eventId: 'evt-1',
+            eventType: 'contract_event',
+            ledgerSequence: 10,
+            pagingToken: 'cursor-2',
+            contractId: VALID_CONTRACT_ID,
+            txHash: VALID_TX_HASH.slice(0, 63) + 'g', // 'g' is non-hex
+            eventBody: {},
+            observedAt: '2020-01-01T00:00:00.000Z',
+          },
+        ],
+        nextCursor: 'cursor-2',
+      });
+
+      const res = await runEscrowIndexerCycle({
+        store,
+        fetchEscrowEvents,
+        transactionRunner: txRunner,
+        batchSize: 100,
+        log: { warn: jest.fn(), info: jest.fn(), error: jest.fn() },
+      });
+
+      expect(res.processed).toBe(0);
+      expect(res.skipped).toBe(1);
+    });
+
+    test('malformed events are skipped/quarantined and remaining batch continues', async () => {
+      const store = {
+        loadCursor: jest.fn().mockResolvedValue('cursor-1'),
+        saveCursor: jest.fn().mockResolvedValue(undefined),
+        upsertEvent: jest.fn().mockResolvedValue(undefined),
+        findProjection: jest.fn().mockResolvedValue(null),
+        upsertProjection: jest.fn().mockResolvedValue(undefined),
+      };
+      const txRunner = async (fn) => fn({});
+      const fetchEscrowEvents = jest.fn().mockResolvedValue({
+        events: [
+          {
+            invoiceId: 'INV-1',
+            eventId: 'evt-1',
+            eventType: 'contract_event',
+            ledgerSequence: 10,
+            pagingToken: 'cursor-2',
+            contractId: 'GDLZFC3SYJ27SBCC6BAKCY73WFXHBTE357R67CW567QX65ECUGN45RXI', // starts with G => bad
+            txHash: VALID_TX_HASH,
+            eventBody: {},
+            observedAt: '2020-01-01T00:00:00.000Z',
+          },
+          {
+            invoiceId: 'INV-2',
+            eventId: 'evt-2',
+            eventType: 'contract_event',
+            ledgerSequence: 10,
+            pagingToken: 'cursor-3',
+            contractId: VALID_CONTRACT_ID,
+            txHash: VALID_TX_HASH,
+            eventBody: {},
+            observedAt: '2020-01-01T00:00:00.000Z',
+          },
+        ],
+        nextCursor: 'cursor-3',
+      });
+
+      const warnSpy = jest.fn();
+      const res = await runEscrowIndexerCycle({
+        store,
+        fetchEscrowEvents,
+        transactionRunner: txRunner,
+        batchSize: 100,
+        log: { warn: warnSpy, info: jest.fn(), error: jest.fn() },
+      });
+
+      expect(res.processed).toBe(1);
+      expect(res.skipped).toBe(1);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0][1]).toContain('Skipping invalid escrow event');
+      expect(store.upsertEvent).toHaveBeenCalledTimes(1);
+    });
+
+    test('duplicate events remain idempotent', async () => {
+      const store = {
+        loadCursor: jest.fn().mockResolvedValue('cursor-1'),
+        saveCursor: jest.fn().mockResolvedValue(undefined),
+        upsertEvent: jest.fn().mockResolvedValue(undefined),
+        findProjection: jest.fn().mockResolvedValue(null),
+        upsertProjection: jest.fn().mockResolvedValue(undefined),
+      };
+      const txRunner = async (fn) => fn({});
+      const fetchEscrowEvents = jest.fn().mockResolvedValue({
+        events: [
+          {
+            invoiceId: 'INV-1',
+            eventId: 'evt-1',
+            eventType: 'contract_event',
+            ledgerSequence: 10,
+            pagingToken: 'cursor-2',
+            contractId: VALID_CONTRACT_ID,
+            txHash: VALID_TX_HASH,
+            eventBody: {},
+            observedAt: '2020-01-01T00:00:00.000Z',
+          },
+          {
+            invoiceId: 'INV-1',
+            eventId: 'evt-1',
+            eventType: 'contract_event',
+            ledgerSequence: 10,
+            pagingToken: 'cursor-2',
+            contractId: VALID_CONTRACT_ID,
+            txHash: VALID_TX_HASH,
+            eventBody: {},
+            observedAt: '2020-01-01T00:00:00.000Z',
+          },
+        ],
+        nextCursor: 'cursor-2',
+      });
+
+      const res = await runEscrowIndexerCycle({
+        store,
+        fetchEscrowEvents,
+        transactionRunner: txRunner,
+        batchSize: 100,
+        log: { warn: jest.fn(), info: jest.fn(), error: jest.fn() },
+      });
+
+      expect(res.processed).toBe(2);
+      expect(res.skipped).toBe(0);
+      expect(store.upsertEvent).toHaveBeenCalledTimes(2);
     });
   });
 

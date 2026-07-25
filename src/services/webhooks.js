@@ -41,6 +41,11 @@ const { registry } = require('../metrics');
 const SIGNATURE_VERSION = 'v1';
 const TOLERANCE_MS = 5 * 60 * 1000;
 
+// Signature header guards — a well-formed header is "t=<10 digits>,v1=<64 hex chars>"
+// (~80 chars). These limits are generous but still block header-flooding abuse.
+const MAX_SIGNATURE_HEADER_LENGTH = 256;
+const MAX_SIGNATURE_HEADER_PARTS = 10;
+
 /**
  * Recursively sorts keys of an object to ensure deterministic JSON serialization.
  *
@@ -269,7 +274,21 @@ async function emitWebhook(event, invoiceId, additionalData = {}) {
  * @returns {Object} Result object with valid boolean and optional error message.
  */
 function verifySignature(secret, rawBody, signatureHeader, toleranceMs = TOLERANCE_MS) {
+  // ── Max-length guard ────────────────────────────────────────────────────────
+  // Reject oversized headers before any splitting or allocation work.
+  if (typeof signatureHeader !== 'string' || signatureHeader.length > MAX_SIGNATURE_HEADER_LENGTH) {
+    return { valid: false, error: 'Invalid signature header format' };
+  }
+
   const parts = signatureHeader.split(',');
+
+  // ── Part-count guard ────────────────────────────────────────────────────────
+  // A well-formed header has exactly 2 parts: "t=<ts>" and "v1=<sig>".
+  // Cap well above that to allow future versioning while blocking floods.
+  if (parts.length > MAX_SIGNATURE_HEADER_PARTS) {
+    return { valid: false, error: 'Invalid signature header format' };
+  }
+
   let timestamp = null;
   let signature = null;
 
@@ -301,78 +320,96 @@ function verifySignature(secret, rawBody, signatureHeader, toleranceMs = TOLERAN
 }
 
 /**
- * Enqueues a `webhook_delivery` job for a successful invoice state transition.
+ * Writes a failed webhook delivery to the dead-letter table.
  *
- * The function looks up the tenant's webhook configuration from the database;
- * if no URL or secret is configured it returns silently. The job payload
- * includes the transition metadata so that the signed outbound request can be
- * composed by the worker without an additional DB round-trip.
- *
- * Secrets and full target URLs are **never** logged at info level.
- *
- * @param {Object} options - Enqueue options.
- * @param {string} options.invoiceId    - Invoice that transitioned.
- * @param {string} options.event        - Event type label (e.g. `'invoice.approved'`).
- * @param {Object} options.transition   - Transition metadata.
- * @param {string} options.transition.from          - Previous state.
- * @param {string} options.transition.to            - New state.
- * @param {string} options.transition.actor         - Who triggered the transition.
- * @param {string|null} [options.transition.reason] - Optional reason.
- * @param {string} options.transition.transitionedAt - ISO timestamp.
- * @returns {Promise<string|null>} The enqueued job ID, or null if skipped.
+ * @param {Object} params
+ * @param {string} params.tenantId
+ * @param {string} params.invoiceId
+ * @param {string} params.event
+ * @param {Object} params.payload
+ * @param {string} params.webhookUrl
+ * @param {number} params.attempts
+ * @param {string} params.lastError
+ * @returns {Promise<string>} The new dead-letter row id.
  */
-async function enqueueWebhookDelivery({ invoiceId, event, transition }) {
-  if (!_sharedWorker) {
-    // Worker not yet initialised (e.g. during unit tests that only test
-    // signature helpers). Log at debug level and bail out.
-    logger.info({ invoiceId, event }, 'webhook: shared worker not set, skipping enqueue');
-    return null;
-  }
-
-  try {
-    const invoice = await db('invoices').select('tenant_id').where('id', invoiceId).first();
-    if (!invoice) {
-      logger.warn({ invoiceId }, 'webhook: invoice not found, skipping enqueue');
-      return null;
-    }
-
-    const { tenant_id: tenantId } = invoice;
-
-    const tenant = await db('tenants').select('settings').where('id', tenantId).first();
-    if (!tenant || !tenant.settings) {
-      logger.warn({ tenantId, invoiceId }, 'webhook: tenant settings not found, skipping enqueue');
-      return null;
-    }
-
-    const { webhook_url: webhookUrl, webhook_secret: webhookSecret } = tenant.settings;
-    if (!webhookUrl || !webhookSecret) {
-      // Not configured — this is expected; log at info, not warn.
-      logger.info({ tenantId, invoiceId }, 'webhook: URL or secret not configured, skipping enqueue');
-      return null;
-    }
-
-    const jobId = _sharedWorker.enqueue('webhook_delivery', {
-      invoiceId,
-      tenantId,
-      webhookUrl,
-      webhookSecret,
+async function writeDeadLetter({ tenantId, invoiceId, event, payload, webhookUrl, attempts, lastError }) {
+  const [row] = await db('webhook_dead_letters')
+    .insert({
+      tenant_id: tenantId,
+      invoice_id: invoiceId,
       event,
-      transition,
-    });
+      payload: JSON.stringify(payload),
+      webhook_url: webhookUrl,
+      attempts,
+      last_error: lastError,
+    })
+    .returning('id');
+  return row?.id ?? row;
+}
 
-    logger.info(
-      { invoiceId, tenantId, event, jobId },
-      'webhook: delivery job enqueued'
-    );
-
-    return jobId;
-  } catch (err) {
-    logger.error(
-      { invoiceId, event, error: err && err.message ? err.message : String(err) },
-      'webhook: failed to enqueue delivery job'
-    );
-    return null;
+/**
+ * Replays a dead-letter row by re-signing and re-sending the stored payload.
+ * On success the row is marked resolved. Throws on delivery failure.
+ *
+ * @param {string} deadLetterId - The `webhook_dead_letters.id` to replay.
+ * @returns {Promise<void>}
+ */
+async function replayWebhook(deadLetterId) {
+  const row = await db('webhook_dead_letters').where('id', deadLetterId).first();
+  if (!row) {
+    throw Object.assign(new Error(`Dead-letter row not found: ${deadLetterId}`), { code: 'NOT_FOUND' });
   }
+  if (row.resolved) {
+    throw Object.assign(new Error(`Dead-letter row already resolved: ${deadLetterId}`), { code: 'ALREADY_RESOLVED' });
+  }
+
+  const tenant = await db('tenants').select('settings').where('id', row.tenant_id).first();
+  const secret = tenant?.settings?.webhook_secret;
+  if (!secret) {
+    throw new Error(`No webhook secret configured for tenant ${row.tenant_id}`);
+  }
+
+  const body = typeof row.payload === 'string' ? row.payload : JSON.stringify(row.payload);
+  const signatureHeader = createSignatureHeader(secret, body);
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+  let response;
+  try {
+    response = await fetch(row.webhook_url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Signature': signatureHeader,
+      },
+      body,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  if (!response.ok) {
+    throw new Error(`Webhook replay responded with ${response.status}`);
+  }
+
+  await resolveDeadLetter(deadLetterId);
+  logger.info({ deadLetterId, webhook_url: row.webhook_url }, 'Webhook replayed successfully');
+}
+
+/**
+ * Marks a dead-letter row as resolved without re-sending.
+ *
+ * @param {string} deadLetterId
+ * @returns {Promise<void>}
+ */
+async function resolveDeadLetter(deadLetterId) {
+  await db('webhook_dead_letters').where('id', deadLetterId).update({
+    resolved: true,
+    resolved_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  });
 }
 
 module.exports = {
@@ -380,9 +417,9 @@ module.exports = {
   verifySignature,
   createSignature,
   createSignatureHeader,
-  sortKeys,
-  setSharedWorker,
-  enqueueWebhookDelivery,
+  writeDeadLetter,
+  replayWebhook,
+  resolveDeadLetter,
   SIGNATURE_VERSION,
   TOLERANCE_MS,
 };

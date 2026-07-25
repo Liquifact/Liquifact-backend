@@ -15,6 +15,86 @@ All protected endpoints require a Bearer token:
 export TOKEN="your-jwt-token-here"
 ```
 
+## OpenAPI operationId and Tag Requirements (Issue #622)
+
+All documented API operations in `src/routes/**` must include:
+
+1. A unique `operationId` — used by client SDK generators to name service methods.
+2. At least one tag from the top-level tags list — used to group methods into SDK service classes.
+
+### Defined Tags
+
+| Tag | Description |
+| --- | --- |
+| `Invoices` | Invoice management — create, read, update, delete, and file operations |
+| `Marketplace` | Marketplace browse — search, filter, and paginate investable invoices |
+| `Invest` | Investment operations — funding opportunities and invoice funding |
+| `Investor` | Investor lock management — funder commitment and lock records |
+| `Admin` | Administrative operations — reconciliation, escrow management, webhook replay, audit exports |
+| `KYC` | Know-Your-Customer integration — webhook ingestion from the KYC provider |
+| `Escrow` | Escrow contract operations — state reads, version checks, and refresh |
+| `SME` | SME dashboard — metrics, invoice uploads, and presigned URL generation |
+| `Reconciliation` | Escrow reconciliation — run history for admin review |
+
+### Currently documented operationIds
+
+| operationId | Method | Path | Tag |
+| --- | --- | --- | --- |
+| `listMarketplaceInvoices` | GET | `/api/marketplace` | Marketplace |
+| `listInvestOpportunities` | GET | `/api/invest/opportunities` | Invest |
+| `fundInvoice` | POST | `/api/invest/fund-invoice` | Invest |
+| `listInvestorLocks` | GET | `/api/investor/locks` | Investor |
+| `getInvestorLockByInvoice` | GET | `/api/investor/locks/{invoiceId}` | Investor |
+| `ingestKycWebhook` | POST | `/api/kyc/webhook` | KYC |
+| `listReconciliationRuns` | GET | `/api/admin/reconciliation/runs` | Reconciliation |
+| `getSmeMetrics` | GET | `/api/sme/metrics` | SME |
+| `refreshEscrowContractList` | POST | `/api/admin/escrow/refresh` | Escrow |
+| `getEscrowContractVersion` | GET | `/api/admin/escrow/version` | Escrow |
+
+### Adding a new documented route
+
+When adding a `@swagger` JSDoc block to a route file:
+
+```javascript
+/**
+ * @swagger
+ * /api/example/path:
+ *   get:
+ *     operationId: myNewOperation       ← required: unique camelCase name
+ *     summary: Short description
+ *     tags: [Marketplace]               ← required: must be in the top-level tags list
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Success
+ */
+```
+
+Rules:
+- `operationId` must be **unique** across the entire spec — `buildOpenApiSpec()` throws at build time if any operation is missing or shares an ID with another.
+- `tags` must reference one of the declared top-level tags (see table above).
+- Verify your addition with `npm test -- openapi.operationIds.test.js`.
+
+### Build-time enforcement
+
+`src/openapi/openapiSpec.js` → `buildOpenApiSpec()` performs two checks after generating the spec:
+
+1. **Missing operationId** — any operation without an `operationId` throws:
+   ```
+   Error: The following operations are missing an operationId:
+     GET /api/my/path
+   ```
+
+2. **Duplicate operationId** — any two operations sharing an `operationId` throw:
+   ```
+   Error: Duplicate operationId "myOp" found:
+     First:  GET /api/path-a
+     Second: POST /api/path-b
+   ```
+
+These errors surface during server startup and during `npm test`.
+
 ## Mounted Feature Routes
 
 The live Express app factory mounts the feature routers before the 404 handler, so these prefixes are available from the running API:
@@ -28,6 +108,15 @@ The live Express app factory mounts the feature routers before the 404 handler, 
 | Admin escrow | `/api/admin/escrow` | `GET /api/admin/escrow/version` |
 | SME | `/api/sme` | `GET /api/sme/metrics` |
 | Versioned API | `/v1` | `GET /v1/health` |
+
+### Invest opportunity tenant isolation
+
+`GET /api/invest/opportunities` resolves the tenant exclusively from the
+authenticated request context. Before the service performs its batched escrow
+read, it re-validates every invoice ID against that tenant. Foreign, deleted,
+and unknown IDs are omitted from both the response and the on-chain batch, and
+the rejected IDs are logged as a security warning. Per-invoice read failures
+for confirmed tenant-owned IDs remain isolated and do not fail the full list.
 
 Protected routes continue to require the route-level authentication already defined by each router. Retention operations are tenant-scoped, so service callers should also provide tenant context where applicable:
 
@@ -249,6 +338,44 @@ X-Request-ID: req_123456796
     "deletedAt": null
   },
   "message": "Invoice retrieved successfully"
+}
+```
+
+### 3. List Invoices With a Status Filter (200)
+
+`GET /api/invoices` accepts the shared invoice status vocabulary used by the
+state machine and marketplace validators.
+
+Supported `status` values:
+
+`paid`, `pending`, `overdue`, `pending_verification`, `verified`,
+`partially_funded`, `funded`, `settled`, `completed`, `defaulted`, `approved`,
+`linked_escrow`, `rejected`, `cancelled`
+
+**Request:**
+```bash
+curl -X GET "http://localhost:3001/api/invoices?status=verified&sortBy=amount&order=desc" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Response:**
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+X-Request-ID: req_123456797
+
+{
+  "data": [
+    {
+      "id": "inv_1640995200000_124",
+      "amount": 25000,
+      "customer": "Globex Corp",
+      "status": "verified",
+      "createdAt": "2021-12-31T23:59:59.999Z",
+      "deletedAt": null
+    }
+  ],
+  "message": "Invoices retrieved successfully."
 }
 ```
 

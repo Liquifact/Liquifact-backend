@@ -11,6 +11,39 @@ const AppError = require('../errors/AppError');
 const configModule = require('../config');
 
 /**
+ * Resolve JWT verification configuration from the validated app config.
+ * A weak literal fallback is only allowed in test mode so isolated middleware
+ * tests can run before boot validation. Non-test environments must never
+ * authenticate with an unvalidated or missing secret.
+ *
+ * @param {string} instance - Request path for RFC 7807 error metadata.
+ * @returns {{JWT_SECRET: string, JWT_ALGORITHMS?: string, JWT_ISSUER?: string, JWT_AUDIENCE?: string}} JWT config.
+ * @throws {AppError} When config is unavailable outside test mode.
+ */
+function resolveJwtConfig(instance) {
+  try {
+    return configModule.get();
+  } catch (_err) {
+    if (process.env.NODE_ENV === 'test') {
+      return {
+        JWT_SECRET: process.env.JWT_SECRET || 'test-secret',
+        JWT_ALGORITHMS: process.env.JWT_ALGORITHMS || 'HS256',
+        JWT_ISSUER: process.env.JWT_ISSUER,
+        JWT_AUDIENCE: process.env.JWT_AUDIENCE,
+      };
+    }
+
+    throw new AppError({
+      type: 'https://liquifact.com/probs/auth-config-unavailable',
+      title: 'Unauthorized',
+      status: 401,
+      detail: 'Authentication configuration is unavailable',
+      instance,
+    });
+  }
+}
+
+/**
  * Middleware function to enforce authentication for protected routes.
  * Checks the "Authorization" header for a "Bearer <token>" pattern,
  * validates the JWT with algorithm allowlist, issuer, and audience enforcement,
@@ -50,15 +83,9 @@ const authenticateToken = (req, res, next) => {
 
   let cfg;
   try {
-    cfg = configModule.get();
-  } catch (_err) {
-    // Fallback for tests or before config is validated
-    cfg = {
-      JWT_SECRET: process.env.JWT_SECRET || 'test-secret',
-      JWT_ALGORITHMS: process.env.JWT_ALGORITHMS || 'HS256',
-      JWT_ISSUER: process.env.JWT_ISSUER,
-      JWT_AUDIENCE: process.env.JWT_AUDIENCE,
-    };
+    cfg = resolveJwtConfig(req.originalUrl);
+  } catch (err) {
+    return next(err);
   }
 
   const secret = cfg.JWT_SECRET;
@@ -92,4 +119,4 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-module.exports = { authenticateToken };
+module.exports = { authenticateToken, resolveJwtConfig };

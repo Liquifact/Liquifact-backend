@@ -9,7 +9,7 @@
     "dev:ts": "node --watch -r ts-node/register/transpile-only src/ts-entry.ts",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "lint:new": "eslint src/routes/invoiceStateRoutes.js src/services/invoiceStateMachine.js tests/invoice.state.test.js",
+    "lint:new": "eslint src/routes/invoiceStateRoutes.js src/services/invoiceStateMachine.js tests/invoice.state.test.js src/schemas/invoiceState.js tests/invoice.stateValidation.test.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "typecheck:jsdoc": "tsc -p tsconfig.checkjs.json --noEmit",
     "build": "tsc -p tsconfig.build.json",
@@ -33,20 +33,54 @@
   "type": "commonjs",
   "jest": {
     "testEnvironment": "node",
-    "testPathIgnorePatterns": [],
+    "transformIgnorePatterns": [],
+    "testPathIgnorePatterns": [
+      "<rootDir>/dist/"
+    ],
+    "modulePathIgnorePatterns": [
+      "<rootDir>/dist/"
+    ],
     "moduleNameMapper": {
       "^node:test$": "<rootDir>/tests/mocks/node_test_shim.js",
       "^node:assert/strict$": "<rootDir>/tests/mocks/node_assert_shim.js"
     },
     "setupFilesAfterEnv": [
       "<rootDir>/tests/mocks/setup.js"
-    ]
+    ],
+    "coverageThreshold": {
+      "src/middleware/legalHoldGate.js": {
+        "branches": 80,
+        "functions": 95,
+        "lines": 95,
+        "statements": 95
+      },
+      "src/services/escrowRead.js": {
+        "branches": 75,
+        "functions": 95,
+        "lines": 95,
+        "statements": 95
+      },
+      "src/schemas/invoiceState.js": {
+        "branches": 80,
+        "functions": 80,
+        "lines": 85,
+        "statements": 85
+      },
+      "src/routes/invoiceStateRoutes.js": {
+        "branches": 80,
+        "functions": 80,
+        "lines": 85,
+        "statements": 85
+      }
+    }
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.665.0",
     "@aws-sdk/s3-request-presigner": "^3.665.0",
     "@sentry/node": "^8.0.0",
     "@stellar/stellar-sdk": "^16.0.1",
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
     "axios": "^1.16.1",
     "chessify-protocol": "^0.1.0",
     "cors": "^2.8.6",
@@ -64,13 +98,14 @@
     "prom-client": "^14.2.0",
     "rate-limit-redis": "^4.3.1",
     "sqlite3": "^5.1.6",
+    "swagger-jsdoc": "^6.2.8",
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@babel/types": "^8.0.0",
+    "@babel/types": "^7.29.7",
     "@types/node": "^20.0.0",
     "autocannon": "^8.0.0",
-    "c8": "^11.0.0",
+    "c8": "^10.1.0",
     "eslint": "^9.21.0",
     "eslint-plugin-jsdoc": "50.6.3",
     "eslint-plugin-security": "^3.0.1",

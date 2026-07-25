@@ -1,10 +1,29 @@
 'use strict';
 
+jest.mock('redis', () => {
+  const mockClient = {
+    on: jest.fn(),
+    connect: jest.fn().mockResolvedValue(undefined),
+    get: jest.fn().mockResolvedValue(null),
+    setEx: jest.fn().mockResolvedValue('OK'),
+    del: jest.fn().mockResolvedValue(1),
+    quit: jest.fn().mockResolvedValue('OK'),
+    isOpen: false,
+  };
+  return {
+    createClient: jest.fn(() => mockClient),
+  };
+}, { virtual: true });
+
 const request = require('supertest');
 const { createApp } = require('../src/app');
 const metrics = require('../src/metrics');
+const logger = require('../src/logger');
 const JobQueue = require('../src/workers/jobQueue');
 const BackgroundWorker = require('../src/workers/worker');
+
+// Destructure internal helpers used by the metrics-auth / safeEqual tests.
+const { metricsAuth, safeEqual, extractClientIp, LOOPBACK } = metrics;
 
 describe('GET /metrics', () => {
   let app;
@@ -110,7 +129,7 @@ describe('GET /metrics', () => {
   });
 
   describe('metrics instrumentation', () => {
-    it('updates queue depth and retry queue size from job queue stats', () => {
+    it('updates queue depth and retry queue size from job queue stats', async () => {
       const queue = new JobQueue();
       const jobId = queue.enqueue('test', { data: 'pending' });
       metrics.registerJobQueue(queue);
@@ -119,7 +138,7 @@ describe('GET /metrics', () => {
       queue.retry(jobId, new Error('failed'));
       metrics.refreshMetrics();
 
-      const output = metrics.registry.metrics();
+      const output = await metrics.registry.metrics();
       expect(output).toMatch(/liquifact_job_queue_depth \d+/);
       expect(output).toMatch(/liquifact_job_retry_queue_size 1/);
     });
@@ -137,9 +156,134 @@ describe('GET /metrics', () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
       metrics.refreshMetrics();
 
-      const output = metrics.registry.metrics();
+      const output = await metrics.registry.metrics();
       expect(output).toMatch(/liquifact_worker_inflight_count [12]/);
       await worker.stop();
+    });
+  });
+
+  describe('metrics instrumentation', () => {
+    it('records success metrics and structured logs for successful scrapes', async () => {
+      const requestLogger = {
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+      };
+      const createRequestLoggerSpy = jest.spyOn(logger, 'createRequestLogger').mockReturnValue(requestLogger);
+
+      const res = await request(app)
+        .get('/metrics')
+        .set('Authorization', 'Bearer test-metrics-secret');
+
+      expect(res.status).toBe(200);
+      const output = await metrics.registry.metrics();
+      expect(output).toMatch(/metrics_requests_total\{status_class="2xx"\}/);
+      expect(output).toMatch(/metrics_request_duration_seconds_(?:bucket|sum|count)/);
+      expect(output).not.toMatch(/metrics_request_errors_total\{cause="none"\}/);
+      expect(requestLogger.info).toHaveBeenCalled();
+      expect(requestLogger.warn).not.toHaveBeenCalled();
+      expect(requestLogger.error).not.toHaveBeenCalled();
+
+      createRequestLoggerSpy.mockRestore();
+    });
+
+    it('records client-error metrics and structured warnings for unauthorized scrapes', async () => {
+      const requestLogger = {
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+      };
+      const createRequestLoggerSpy = jest.spyOn(logger, 'createRequestLogger').mockReturnValue(requestLogger);
+
+      const req = {
+        headers: {},
+        socket: { remoteAddress: '192.0.2.10' },
+        ip: '192.0.2.10',
+      };
+      const res = {
+        statusCode: 200,
+        headers: {},
+        body: undefined,
+        status(code) {
+          this.statusCode = code;
+          return this;
+        },
+        json(payload) {
+          this.body = payload;
+          return this;
+        },
+      };
+      const next = jest.fn();
+
+      metrics.metricsAuth(req, res, next);
+
+      expect(res.statusCode).toBe(401);
+      expect(res.body).toEqual({ error: 'Unauthorized' });
+      expect(requestLogger.warn).toHaveBeenCalled();
+      expect(requestLogger.info).not.toHaveBeenCalled();
+      expect(requestLogger.error).not.toHaveBeenCalled();
+      expect(next).not.toHaveBeenCalled();
+      expect(requestLogger.info).not.toHaveBeenCalled();
+      expect(requestLogger.error).not.toHaveBeenCalled();
+      expect(next).not.toHaveBeenCalled();
+
+      createRequestLoggerSpy.mockRestore();
+    });
+
+    it('records server-error metrics and structured error logs for handler failures', async () => {
+      const requestLogger = {
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+      };
+      const createRequestLoggerSpy = jest.spyOn(logger, 'createRequestLogger').mockReturnValue(requestLogger);
+
+      metrics.recordMetricsEndpointOutcome({
+        statusCode: 500,
+        durationSeconds: 0.01,
+        error: new Error('boom'),
+        req: { headers: {} },
+      });
+
+      const output = await metrics.registry.metrics();
+      expect(output).toMatch(/metrics_requests_total\{status_class="5xx"\}/);
+      expect(output).toMatch(/metrics_request_errors_total\{cause="internal_error"\}/);
+      expect(requestLogger.error).toHaveBeenCalled();
+
+      createRequestLoggerSpy.mockRestore();
+    });
+  });
+
+  describe('not-found paths', () => {
+    it('returns 404 for an unmatched sub-path under /metrics', async () => {
+      const res = await request(app).get('/metrics/does-not-exist');
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Not found');
+    });
+  });
+
+  describe('idempotent-repeat paths', () => {
+    it('returns the same set of metric names on repeated scrapes', async () => {
+      const first = await request(app).get('/metrics');
+      const second = await request(app).get('/metrics');
+
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+
+      const metricNames = (text) =>
+        Array.from(text.matchAll(/^# HELP (\S+)/gm)).map((m) => m[1]).sort();
+
+      expect(metricNames(second.text)).toEqual(metricNames(first.text));
+    });
+
+    it('deterministically returns 401 on repeated unauthorized scrapes when a token is configured', async () => {
+      process.env.METRICS_BEARER_TOKEN = 'repeat-test-token';
+
+      const first = await request(app).get('/metrics');
+      const second = await request(app).get('/metrics');
+
+      expect(first.status).toBe(401);
+      expect(second.status).toBe(401);
     });
   });
 });
@@ -218,6 +362,252 @@ describe('LOOPBACK set', () => {
     expect(LOOPBACK.has('10.0.0.1')).toBe(false);
     expect(LOOPBACK.has('192.168.1.1')).toBe(false);
     expect(LOOPBACK.has('172.16.0.1')).toBe(false);
+  });
+});
+
+describe('export guard — every module export is defined and valid', () => {
+  const metricExports = [
+    'footprintCacheHitsTotal',
+    'footprintCacheMissesTotal',
+    'footprintCacheEvictionsTotal',
+    'escrowIndexerEventsProcessedTotal',
+    'escrowIndexerEventsSkippedTotal',
+    'escrowIndexerCycleFailuresTotal',
+    'escrowReconciliationMismatches',
+    'maturityReminderDeliveryAttemptsTotal',
+    'maturityReminderDeliverySuccessTotal',
+    'maturityReminderDeadLetterTotal',
+    'sorobanCircuitBreakerStateTransitionsTotal',
+    'cacheStoreErrorsTotal',
+    'redisCacheFailOpenTotal',
+    'readinessGauge',
+    'sorobanRpcRetryCausesTotal',
+    'sorobanRpcCallDurationSeconds',
+  ];
+
+  const counterExports = [
+    'footprintCacheHitsTotal',
+    'footprintCacheMissesTotal',
+    'footprintCacheEvictionsTotal',
+    'escrowIndexerEventsProcessedTotal',
+    'escrowIndexerEventsSkippedTotal',
+    'escrowIndexerCycleFailuresTotal',
+    'escrowReconciliationMismatches',
+    'maturityReminderDeliveryAttemptsTotal',
+    'maturityReminderDeliverySuccessTotal',
+    'maturityReminderDeadLetterTotal',
+    'sorobanCircuitBreakerStateTransitionsTotal',
+    'cacheStoreErrorsTotal',
+    'redisCacheFailOpenTotal',
+    'sorobanRpcRetryCausesTotal',
+  ];
+
+  const gaugeExports = [
+    'readinessGauge',
+    'escrowIndexerLastCursorAdvanceTimestampSeconds',
+  ];
+
+  const histogramExports = [
+    'sorobanRpcCallDurationSeconds',
+  ];
+
+  it('every exported metric is defined (not undefined)', () => {
+    for (const key of metricExports) {
+      expect(metrics[key]).toBeDefined();
+    }
+  });
+
+  it('every exported metric is not null', () => {
+    for (const key of metricExports) {
+      expect(metrics[key]).not.toBeNull();
+    }
+  });
+
+  it('every counter export has an inc method', () => {
+    for (const key of counterExports) {
+      expect(typeof metrics[key].inc).toBe('function');
+    }
+  });
+
+  it('every gauge export has a set method', () => {
+    for (const key of gaugeExports) {
+      expect(typeof metrics[key].set).toBe('function');
+    }
+  });
+
+  it('every histogram export has observe and startTimer methods', () => {
+    for (const key of histogramExports) {
+      expect(typeof metrics[key].observe).toBe('function');
+      expect(typeof metrics[key].startTimer).toBe('function');
+    }
+  });
+
+  it('sorobanCircuitBreakerStateTransitionsTotal has expected labelNames', () => {
+    const counter = metrics.sorobanCircuitBreakerStateTransitionsTotal;
+    expect(counter.labelNames).toBeDefined();
+    const names = Array.isArray(counter.labelNames) ? counter.labelNames : [];
+    expect(names).toContain('breaker_name');
+    expect(names).toContain('from_state');
+    expect(names).toContain('to_state');
+    expect(names.length).toBe(3);
+  });
+});
+
+describe('normalizeReminderReason', () => {
+  it('maps timeout-like errors to smtp_timeout', () => {
+    expect(metrics.normalizeReminderReason(new Error('Connection ETIMEDOUT'))).toBe('smtp_timeout');
+    expect(metrics.normalizeReminderReason({ message: 'request timed out' })).toBe('smtp_timeout');
+  });
+
+  it('maps template errors to template_error', () => {
+    expect(metrics.normalizeReminderReason(new Error('invalid template syntax'))).toBe('template_error');
+  });
+
+  it('maps rejection/SMTP/recipient errors to smtp_reject', () => {
+    expect(metrics.normalizeReminderReason(new Error('recipient rejected'))).toBe('smtp_reject');
+    expect(metrics.normalizeReminderReason({ code: 'SMTP_550' })).toBe('smtp_reject');
+  });
+
+  it('maps unrecognized errors to unknown', () => {
+    expect(metrics.normalizeReminderReason(new Error('something else entirely'))).toBe('unknown');
+    expect(metrics.normalizeReminderReason(null)).toBe('unknown');
+    expect(metrics.normalizeReminderReason(undefined)).toBe('unknown');
+  });
+
+  it('handles plain string errors without a message/code property', () => {
+    expect(metrics.normalizeReminderReason('timeout while sending')).toBe('smtp_timeout');
+  });
+});
+
+describe('startMetricsRefresh / stopMetricsRefresh', () => {
+  afterEach(() => {
+    metrics.stopMetricsRefresh();
+  });
+
+  it('starting the refresh timer is idempotent (second call is a no-op)', () => {
+    metrics.startMetricsRefresh();
+    metrics.startMetricsRefresh();
+    // No observable side effect other than not throwing / not creating a second timer;
+    // stopping once is sufficient to clean up either way.
+    metrics.stopMetricsRefresh();
+  });
+
+  it('stopping when no timer is running is a safe no-op', () => {
+    metrics.stopMetricsRefresh();
+    expect(() => metrics.stopMetricsRefresh()).not.toThrow();
+  });
+});
+
+describe('Soroban metrics helpers', () => {
+  beforeEach(() => {
+    metrics.registry.resetMetrics();
+  });
+
+  it('exposes bounded label names for Soroban latency histogram', () => {
+    const histogram = metrics.sorobanRpcCallDurationSeconds;
+    expect(histogram.labelNames).toEqual(['method', 'outcome']);
+  });
+
+  it('exposes bounded label names for Soroban retry cause counter', () => {
+    const counter = metrics.sorobanRpcRetryCausesTotal;
+    expect(counter.labelNames).toEqual(['cause']);
+  });
+
+  it('normalizes Soroban RPC methods to bounded values', () => {
+    expect(metrics.normalizeSorobanRpcMethod('simulateTransaction')).toBe('simulate_transaction');
+    expect(metrics.normalizeSorobanRpcMethod('get_legal_hold')).toBe('legal_hold_status');
+    expect(metrics.normalizeSorobanRpcMethod('secret-wallet-123')).toBe('unknown');
+  });
+
+  it('normalizes Soroban retry causes to bounded values', () => {
+    expect(metrics.normalizeSorobanRetryCause('timeout')).toBe('timeout');
+    expect(metrics.normalizeSorobanRetryCause('429')).toBe('429');
+    expect(metrics.normalizeSorobanRetryCause('5xx')).toBe('5xx');
+    expect(metrics.normalizeSorobanRetryCause('ECONNRESET')).toBe('unknown');
+  });
+
+  it('normalizes Soroban outcomes to bounded values', () => {
+    expect(metrics.normalizeSorobanRpcOutcome('success')).toBe('success');
+    expect(metrics.normalizeSorobanRpcOutcome('circuit_open')).toBe('circuit_open');
+    expect(metrics.normalizeSorobanRpcOutcome('payload-secret')).toBe('error');
+  });
+});
+
+describe('sorobanCircuitBreakerStateTransitionsTotal — circuit breaker integration', () => {
+  const { CircuitBreaker, CircuitBreakerState } = require('../src/utils/circuitBreaker');
+
+  beforeEach(() => {
+    metrics.registry.resetMetrics();
+  });
+
+  it('is incremented on CLOSED -> OPEN transition', async () => {
+    const breaker = new CircuitBreaker({ name: 'test', failureThreshold: 1, recoveryTimeout: 999999 });
+    expect(breaker.state).toBe(CircuitBreakerState.CLOSED);
+
+    await expect(breaker.execute(async () => { throw new Error('fail'); })).rejects.toThrow('fail');
+
+    expect(breaker.state).toBe(CircuitBreakerState.OPEN);
+
+    const metric = metrics.registry.getSingleMetric('soroban_circuit_breaker_state_transitions_total');
+    expect(metric).toBeDefined();
+  });
+
+  it('is incremented on OPEN -> HALF_OPEN and back to OPEN on failure', async () => {
+    const breaker = new CircuitBreaker({ name: 'test-half-open', failureThreshold: 1, recoveryTimeout: 1 });
+    expect(breaker.state).toBe(CircuitBreakerState.CLOSED);
+
+    await expect(breaker.execute(async () => { throw new Error('fail'); })).rejects.toThrow('fail');
+    expect(breaker.state).toBe(CircuitBreakerState.OPEN);
+
+    breaker.nextAttemptTime = 0;
+    await expect(breaker.execute(async () => { throw new Error('still fail'); })).rejects.toThrow('still fail');
+
+    expect(breaker.state).toBe(CircuitBreakerState.OPEN);
+  });
+
+  it('is incremented on HALF_OPEN -> CLOSED on success', async () => {
+    const breaker = new CircuitBreaker({ name: 'test-recover', failureThreshold: 1, recoveryTimeout: 1 });
+
+    await expect(breaker.execute(async () => { throw new Error('fail'); })).rejects.toThrow('fail');
+    expect(breaker.state).toBe(CircuitBreakerState.OPEN);
+
+    breaker.nextAttemptTime = 0;
+    breaker._transitionState(CircuitBreakerState.HALF_OPEN);
+    expect(breaker.state).toBe(CircuitBreakerState.HALF_OPEN);
+
+    await breaker.execute(async () => 'ok');
+
+    expect(breaker.state).toBe(CircuitBreakerState.CLOSED);
+  });
+
+  it('is incremented on reset() transition back to CLOSED', async () => {
+    const breaker = new CircuitBreaker({ name: 'test-reset', failureThreshold: 1, recoveryTimeout: 99999 });
+    await expect(breaker.execute(async () => { throw new Error('fail'); })).rejects.toThrow('fail');
+
+    expect(breaker.state).toBe(CircuitBreakerState.OPEN);
+
+    breaker.reset();
+
+    expect(breaker.state).toBe(CircuitBreakerState.CLOSED);
+  });
+
+  it('label values are bounded to the CircuitBreakerState enum', () => {
+    const validStates = ['CLOSED', 'OPEN', 'HALF_OPEN'];
+    expect(Object.values(CircuitBreakerState)).toEqual(validStates);
+  });
+
+  it('does not increment when state does not change', () => {
+    const breaker = new CircuitBreaker({ name: 'test-noop' });
+    const initial = breaker.state;
+
+    breaker._transitionState(CircuitBreakerState.CLOSED);
+
+    expect(breaker.state).toBe(initial);
+  });
+
+  it('returns Prometheus text before any transition (edge: scrape before first transition)', async () => {
+    const promString = await metrics.registry.metrics();
+    expect(typeof promString).toBe('string');
   });
 });
 
@@ -463,6 +853,34 @@ describe('metricsAuth unit', () => {
       metricsAuth(req, res, next);
       expect(next).toHaveBeenCalled();
       delete process.env.METRICS_BEARER_TOKEN;
+    });
+  });
+});
+
+describe('metrics shim path for Soroban observability', () => {
+  afterEach(() => {
+    jest.resetModules();
+    jest.unmock('prom-client');
+  });
+
+  it('keeps Soroban histogram and retry counter as safe no-ops when prom-client is unavailable', () => {
+    jest.resetModules();
+
+    jest.isolateModules(() => {
+      jest.doMock('prom-client', () => {
+        throw new Error('prom-client unavailable');
+      });
+
+      const shimMetrics = require('../src/metrics');
+
+      expect(() => {
+        shimMetrics.sorobanRpcRetryCausesTotal.labels({ cause: '429' }).inc();
+        const endTimer = shimMetrics.sorobanRpcCallDurationSeconds.startTimer({ method: 'contract_call' });
+        endTimer({ outcome: 'success' });
+      }).not.toThrow();
+
+      expect(shimMetrics.normalizeSorobanRpcMethod('secret-payload')).toBe('unknown');
+      expect(shimMetrics.normalizeSorobanRetryCause('rate-limited')).toBe('unknown');
     });
   });
 });

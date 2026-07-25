@@ -20,6 +20,36 @@ router.use(...adminStack);
 /**
  * POST /api/admin/escrow/refresh
  * Manually triggers the contract list refresh job.
+ *
+ * @swagger
+ * /api/admin/escrow/refresh:
+ *   post:
+ *     operationId: refreshEscrowContractList
+ *     summary: Trigger a manual contract list refresh
+ *     description: |
+ *       Manually triggers the Soroban contract list refresh job.
+ *       Requires admin authentication (JWT or API key).
+ *     tags: [Escrow]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       202:
+ *         description: Contract list refresh triggered
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *       400:
+ *         $ref: '#/components/responses/Problem400'
+ *       401:
+ *         $ref: '#/components/responses/Problem401'
+ *       403:
+ *         $ref: '#/components/responses/Problem403'
+ *       502:
+ *         description: Soroban RPC read failed
  */
 router.post('/refresh', async (req, res, next) => {
   try {
@@ -53,6 +83,42 @@ router.post('/refresh', async (req, res, next) => {
 /**
  * GET /api/admin/escrow/version
  * Returns the current on-chain SCHEMA_VERSION and registry comparison.
+ *
+ * @swagger
+ * /api/admin/escrow/version:
+ *   get:
+ *     operationId: getEscrowContractVersion
+ *     summary: Get on-chain escrow contract schema version
+ *     description: |
+ *       Returns the current on-chain `SCHEMA_VERSION` for the LiquifactEscrow
+ *       contract and compares it against the known registry version.
+ *       Requires admin authentication (JWT or API key).
+ *     tags: [Escrow]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Version comparison returned
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 onChainVersion:
+ *                   type: string
+ *                 knownVersion:
+ *                   type: string
+ *                 status:
+ *                   type: string
+ *                   enum: [match, mismatch, unknown]
+ *       400:
+ *         $ref: '#/components/responses/Problem400'
+ *       401:
+ *         $ref: '#/components/responses/Problem401'
+ *       403:
+ *         $ref: '#/components/responses/Problem403'
+ *       502:
+ *         description: Soroban RPC read failed
  */
 router.get('/version', async (req, res, next) => {
   try {

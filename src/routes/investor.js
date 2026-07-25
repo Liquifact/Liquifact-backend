@@ -12,6 +12,10 @@ const { extractTenant } = require('../middleware/tenant');
 const { cacheResponse, makeInvestorLocksKey, makeInvestorLockKey } = require('../middleware/cache');
 const { getSharedStore } = require('../services/cacheStore');
 const investorCommitmentService = require('../services/investorCommitment');
+const {
+  getBoundFunderAddress,
+  isInvestorLockAdmin,
+} = require('../utils/investorLockScope');
 const logger = require('../logger');
 
 const CACHE_TTL_MS = 15000;
@@ -30,11 +34,12 @@ const cacheLock = cacheResponse({
  * @swagger
  * /api/investor/locks:
  *   get:
+ *     operationId: listInvestorLocks
  *     summary: Get investor commitment locks (paginated)
  *     description: |
  *       Retrieve a paginated list of investor lock records
  *       (claimNotBefore, investorEffectiveYieldBps) per funder.
- *       Returns `stale=true` in `meta` for DB-mirrored data.
+ *       Returns `meta.stale=true` only when any row lacks a fresh DB refresh timestamp.
  *
  *       **Pagination**
  *       | Param | Default | Notes |
@@ -42,8 +47,9 @@ const cacheLock = cacheResponse({
  *       | `limit` | 20 | Items per page (1–100) |
  *       | `page`  | 1  | 1-based page number |
  *
- *       Funder scoping is always enforced server-side; a caller can only see
- *       locks for the `funderAddress` they supply, never another funder's locks.
+ *       Funder scoping is always enforced server-side. Non-admin callers can
+ *       only see locks for the funder address bound to their authenticated
+ *       principal. Admin or owner callers may inspect all funders in the tenant.
  *     tags: [Investor]
  *     security:
  *       - bearerAuth: []
@@ -52,7 +58,7 @@ const cacheLock = cacheResponse({
  *         name: funderAddress
  *         schema:
  *           type: string
- *         description: Funder Stellar address (G... or C...). When supplied only that funder's locks are returned.
+ *         description: Optional funder Stellar address (G... or C...). Non-admin callers may only request their own bound funder address.
  *       - in: query
  *         name: invoiceId
  *         schema:
@@ -113,13 +119,22 @@ const cacheLock = cacheResponse({
  *                       type: boolean
  *       400:
  *         description: Invalid address format or invalid pagination params
+ *       403:
+ *         description: Caller is not authorized for the requested funder scope
  */
 router.get('/locks', authenticateToken, extractTenant, cacheLocks, async (req, res, next) => {
   try {
     const { funderAddress, invoiceId } = req.query;
+    const hasFunderAddressParam = Object.prototype.hasOwnProperty.call(req.query, 'funderAddress');
+    const requestedFunderAddress = hasFunderAddressParam && typeof funderAddress === 'string'
+      ? funderAddress.trim()
+      : undefined;
 
-    if (funderAddress) {
-      const validation = investorCommitmentService.validateAddress(funderAddress);
+    if (hasFunderAddressParam) {
+      if (typeof funderAddress !== 'string') {
+        return res.status(400).json({ error: 'funderAddress must be a single string value' });
+      }
+      const validation = investorCommitmentService.validateAddress(requestedFunderAddress);
       if (!validation.valid) {
         return res.status(400).json({ error: validation.reason });
       }
@@ -145,23 +160,45 @@ router.get('/locks', authenticateToken, extractTenant, cacheLocks, async (req, r
     const limit = rawLimit !== undefined ? parseInt(rawLimit, 10) : 20;
     const page = rawPage !== undefined ? parseInt(rawPage, 10) : 1;
 
-    const hasFunderAddress = funderAddress && typeof funderAddress === 'string';
+    const isAdmin = isInvestorLockAdmin(req.user);
+    const boundFunderAddress = getBoundFunderAddress(req.user);
+    let effectiveFunderAddress = requestedFunderAddress;
 
-    const result = hasFunderAddress
-      ? investorCommitmentService.getInvestorLocksByAddress(funderAddress.trim(), { invoiceId, limit, page })
-      : investorCommitmentService.getAllInvestorLocks({ invoiceId, limit, page });
+    if (!isAdmin) {
+      if (!boundFunderAddress) {
+        return res.status(403).json({ error: 'Authenticated investor is not bound to a funderAddress' });
+      }
+
+      const boundValidation = investorCommitmentService.validateAddress(boundFunderAddress);
+      if (!boundValidation.valid) {
+        return res.status(403).json({ error: 'Authenticated investor has an invalid bound funderAddress' });
+      }
+
+      if (requestedFunderAddress && requestedFunderAddress !== boundFunderAddress) {
+        return res.status(403).json({ error: 'funderAddress is not authorized for this caller' });
+      }
+
+      effectiveFunderAddress = boundFunderAddress;
+    }
+
+    const tenantId = req.tenantId;
+    const result = effectiveFunderAddress
+      ? await investorCommitmentService.getInvestorLocksByAddress(effectiveFunderAddress, { tenantId, invoiceId, limit, page })
+      : await investorCommitmentService.getAllInvestorLocks({ tenantId, invoiceId, limit, page });
 
     const anyStale = result.data.length > 0 && result.data.some((lock) => lock.stale === true);
 
     logger.info(
       {
         requestId: req.id,
-        funderAddress,
+        funderAddress: effectiveFunderAddress,
+        requestedFunderAddress,
         invoiceId,
         count: result.data.length,
         total: result.meta.total,
         page: result.meta.page,
         stale: anyStale,
+        adminScope: isAdmin,
       },
       'Investor locks retrieved'
     );
@@ -183,6 +220,7 @@ router.get('/locks', authenticateToken, extractTenant, cacheLocks, async (req, r
  * @swagger
  * /api/investor/locks/{invoiceId}:
  *   get:
+ *     operationId: getInvestorLockByInvoice
  *     summary: Get investor lock for specific invoice
  *     description: Get lock details for a specific invoice and funder
  *     tags: [Investor]
@@ -206,6 +244,8 @@ router.get('/locks', authenticateToken, extractTenant, cacheLocks, async (req, r
  *         description: Lock record found
  *       400:
  *         description: Missing or invalid funderAddress
+ *       403:
+ *         description: Caller is not authorized for the requested funder
  *       404:
  *         description: Lock not found
  */
@@ -223,13 +263,34 @@ router.get('/locks/:invoiceId', authenticateToken, extractTenant, cacheLock, asy
       return res.status(400).json({ error: validation.reason });
     }
 
-    const lock = investorCommitmentService.getInvestorLock(invoiceId, funderAddress.trim());
+    const requestedFunderAddress = funderAddress.trim();
+    const isAdmin = isInvestorLockAdmin(req.user);
+    const boundFunderAddress = getBoundFunderAddress(req.user);
+
+    if (!isAdmin) {
+      if (!boundFunderAddress) {
+        return res.status(403).json({ error: 'Authenticated investor is not bound to a funderAddress' });
+      }
+
+      const boundValidation = investorCommitmentService.validateAddress(boundFunderAddress);
+      if (!boundValidation.valid) {
+        return res.status(403).json({ error: 'Authenticated investor has an invalid bound funderAddress' });
+      }
+
+      if (requestedFunderAddress !== boundFunderAddress) {
+        return res.status(403).json({ error: 'funderAddress is not authorized for this caller' });
+      }
+    }
+
+    const lock = await investorCommitmentService.getInvestorLock(invoiceId, requestedFunderAddress, {
+      tenantId: req.tenantId,
+    });
 
     if (!lock) {
       return res.status(404).json({ error: 'Lock not found' });
     }
 
-    logger.info({ requestId: req.id, invoiceId, funderAddress }, 'Investor lock retrieved');
+    logger.info({ requestId: req.id, invoiceId, funderAddress: requestedFunderAddress, adminScope: isAdmin }, 'Investor lock retrieved');
 
     return res.json({ data: lock, message: 'Investor lock retrieved.' });
   } catch (error) {

@@ -572,3 +572,89 @@ describe('validateMarketplaceQueryParams – cursor support', () => {
     }
   });
 });
+
+// ── Unit tests: status vocabulary alignment ──────────────────────────────────
+
+describe('Status vocabulary alignment – state machine vs marketplace', () => {
+  /**
+   * These tests enforce the contract that the marketplace visibility set is
+   * always a proper subset of the authoritative ALL_INVOICE_STATUSES from
+   * invoiceStateMachine.  If either constant drifts the suite fails
+   * immediately, making the misalignment impossible to ship silently.
+   */
+  const {
+    ALL_INVOICE_STATUSES,
+    INVESTABLE_STATUSES,
+  } = require('../src/services/invoiceStateMachine');
+  const { PUBLIC_INVESTABLE_INVOICE_STATUSES } = require('../src/services/marketplaceService');
+
+  it('ALL_INVOICE_STATUSES contains at least the legacy funding-progress vocabulary', () => {
+    // These are the statuses that existed in the validator before this change.
+    // Removing any of them from the state machine would be a breaking regression.
+    const requiredStatuses = [
+      'pending_verification',
+      'verified',
+      'partially_funded',
+      'funded',
+      'completed',
+      'defaulted',
+    ];
+    for (const s of requiredStatuses) {
+      expect(ALL_INVOICE_STATUSES).toContain(s);
+    }
+  });
+
+  it('ALL_INVOICE_STATUSES contains all lifecycle states from INVOICE_STATES', () => {
+    const { INVOICE_STATES } = require('../src/services/invoiceStateMachine');
+    for (const s of Object.values(INVOICE_STATES)) {
+      expect(ALL_INVOICE_STATUSES).toContain(s);
+    }
+  });
+
+  it('INVESTABLE_STATUSES is a non-empty frozen array', () => {
+    expect(Array.isArray(INVESTABLE_STATUSES)).toBe(true);
+    expect(INVESTABLE_STATUSES.length).toBeGreaterThan(0);
+    // Object.isFrozen checks the freeze applied in invoiceStateMachine
+    expect(Object.isFrozen(INVESTABLE_STATUSES)).toBe(true);
+  });
+
+  it('every status in INVESTABLE_STATUSES is a recognized state (subset of ALL_INVOICE_STATUSES)', () => {
+    for (const s of INVESTABLE_STATUSES) {
+      expect(ALL_INVOICE_STATUSES).toContain(s);
+    }
+  });
+
+  it('PUBLIC_INVESTABLE_INVOICE_STATUSES is the same reference as INVESTABLE_STATUSES (single source)', () => {
+    // The marketplace constant must be derived from — not a copy of — the
+    // state machine constant.  A value equality check is the minimum bar;
+    // identity equality (===) confirms no accidental re-freeze with new array.
+    expect(PUBLIC_INVESTABLE_INVOICE_STATUSES).toBe(INVESTABLE_STATUSES);
+  });
+
+  it('no terminal lifecycle state is investable', () => {
+    const { TERMINAL_STATES } = require('../src/services/invoiceStateMachine');
+    for (const s of TERMINAL_STATES) {
+      expect(INVESTABLE_STATUSES).not.toContain(s);
+    }
+  });
+
+  it('no non-public state (pending, approved, rejected, cancelled) is in INVESTABLE_STATUSES', () => {
+    const nonPublicStates = ['pending', 'approved', 'linked_escrow', 'rejected', 'cancelled', 'pending_verification', 'defaulted'];
+    for (const s of nonPublicStates) {
+      expect(INVESTABLE_STATUSES).not.toContain(s);
+    }
+  });
+
+  it('verified is in INVESTABLE_STATUSES', () => {
+    expect(INVESTABLE_STATUSES).toContain('verified');
+  });
+
+  it('partially_funded is in INVESTABLE_STATUSES', () => {
+    expect(INVESTABLE_STATUSES).toContain('partially_funded');
+  });
+
+  it('funded is NOT in INVESTABLE_STATUSES (fully funded invoices are no longer accepting commitments)', () => {
+    // Once fully funded, no additional investor commitments can be accepted.
+    expect(INVESTABLE_STATUSES).not.toContain('funded');
+  });
+});

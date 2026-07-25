@@ -11,6 +11,7 @@
 
 const { callSorobanContract } = require('../services/soroban');
 const logger = require('../logger');
+const { isValidStellarContractAddress } = require('../utils/validators');
 
 /**
  * Known LiquifactEscrow deployments: semver -> SCHEMA_VERSION (u32).
@@ -25,19 +26,13 @@ const REGISTRY = {
 };
 
 /**
- * Stellar contract address pattern (C + 55 base-32 chars).
- * @type {RegExp}
- */
-const CONTRACT_ID_RE = /^C[A-Z2-7]{55}$/;
-
-/**
  * Validates a Stellar contract address.
  *
  * @param {string} contractId
  * @returns {boolean}
  */
 function isValidContractId(contractId) {
-  return typeof contractId === 'string' && CONTRACT_ID_RE.test(contractId);
+  return isValidStellarContractAddress(contractId);
 }
 
 /**

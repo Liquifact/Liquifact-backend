@@ -20,14 +20,14 @@ class AppError extends Error {
    * @returns {AppError}
    */
   constructor(params) {
-    const { title, code, retryable, retryHint, context } = params || {};
+    const { title, context } = params || {};
     super(title);
     this.name = this.constructor.name;
 
-    // Delegate to canonical builder for assembly/defaulting
+    // Delegate to canonical builder for ALL field assembly/defaulting
     const problem = formatProblemDetails({
       ...params,
-      stack: undefined, // Do not format stack within AppError construction
+      stack: undefined,
     });
 
     this.type = problem.type;
@@ -35,10 +35,10 @@ class AppError extends Error {
     this.status = problem.status;
     this.detail = problem.detail;
     this.instance = problem.instance;
-    this.code = code;
-    this.retryable = retryable;
-    this.retryHint = retryHint;
-    this.context = params.context || null;
+    this.code = problem.code;
+    this.retryable = problem.retryable;
+    this.retryHint = problem.retry_hint;
+    this.context = context || null;
 
     // Capture stack trace, excluding constructor call from it
     Error.captureStackTrace(this, this.constructor);

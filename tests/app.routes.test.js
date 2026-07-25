@@ -44,6 +44,10 @@ jest.mock('../src/services/escrowSubmit', () => ({
 
 jest.mock('../src/services/investorCommitment', () => ({
   persistCommitment: jest.fn(),
+  getAllInvestorLocks: jest.fn(() => ({ data: [], meta: { total: 0, page: 1, limit: 20, totalPages: 0 } })),
+  getInvestorLocksByAddress: jest.fn(() => ({ data: [], meta: { total: 0, page: 1, limit: 20, totalPages: 0 } })),
+  getInvestorLock: jest.fn(() => null),
+  validateAddress: jest.fn(() => ({ valid: true })),
 }));
 
 jest.mock('../src/jobs/retentionPurge', () => ({
@@ -84,6 +88,9 @@ jest.mock('../src/db/knex', () => {
 const { performHealthChecks } = require('../src/services/health');
 const marketplaceService = require('../src/services/marketplaceService');
 const escrowVersions = require('../src/config/escrowVersions');
+const { createApp } = require('../src/app');
+const investorRoutes = require('../src/routes/investor');
+const { getFeatureRouterMounts } = require('../src/utils/routeMountRegistry');
 const app = require('../src/app');
 
 const SECRET = process.env.JWT_SECRET || 'test-secret';
@@ -236,6 +243,68 @@ describe('Mounted feature routers', () => {
     const res = await request(app).get('/v1/health');
 
     expect(res.status).not.toBe(404);
+  });
+
+  it('mounts investor routes under /api/investor exactly once', () => {
+    createApp();
+    const investorMounts = getFeatureRouterMounts().filter(
+      (entry) => entry.basePath === '/api/investor'
+    );
+
+    expect(investorMounts).toHaveLength(1);
+    expect(investorMounts[0].router).toBe(investorRoutes);
+  });
+
+  it('mounts investor list endpoint and rejects unauthenticated requests', async () => {
+    const res = await request(app).get('/api/investor/locks');
+
+    expect(res.status).toBe(401);
+  });
+
+  it('mounts investor list endpoint and requires tenant context', async () => {
+    const tokenNoTenant = jwt.sign({ sub: 'user_1', id: 'user_1' }, SECRET);
+    const res = await request(app)
+      .get('/api/investor/locks')
+      .set('Authorization', `Bearer ${tokenNoTenant}`);
+
+    expect(res.status).toBe(400);
+  });
+
+  it('mounts investor detail endpoint and rejects unauthenticated requests', async () => {
+    const res = await request(app).get('/api/investor/locks/inv-001');
+
+    expect(res.status).toBe(401);
+  });
+
+  it('mounts investor detail endpoint and requires tenant context', async () => {
+    const tokenNoTenant = jwt.sign({ sub: 'user_1', id: 'user_1' }, SECRET);
+    const res = await request(app)
+      .get('/api/investor/locks/inv-001?funderAddress=GDRXE2BQUC3AZNPVFSCEZ76NJ3WWL25FYFK6RGZGIEKWE4SOUJ3LNLRK')
+      .set('Authorization', `Bearer ${tokenNoTenant}`);
+
+    expect(res.status).toBe(400);
+  });
+
+  it('allows authenticated investor list requests', async () => {
+    const res = await request(app)
+      .get('/api/investor/locks')
+      .set('Authorization', authHeader());
+
+    expect(res.status).not.toBe(401);
+    expect(res.status).not.toBe(404);
+  });
+
+  it('has no duplicate router-instance mounts at any base path', () => {
+    createApp();
+    const mounts = getFeatureRouterMounts();
+
+    for (let i = 0; i < mounts.length; i += 1) {
+      for (let j = i + 1; j < mounts.length; j += 1) {
+        expect(
+          mounts[i].basePath === mounts[j].basePath && mounts[i].router === mounts[j].router
+        ).toBe(false);
+      }
+    }
   });
 });
 

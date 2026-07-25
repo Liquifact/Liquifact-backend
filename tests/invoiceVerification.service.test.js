@@ -1,9 +1,42 @@
 /**
  * Comprehensive test suite for Invoice Verification Service.
- * Tests fraud checks, business rules, and security validations across all decision paths.
+ *
+ * Covers fraud checks, business rules, security validations, machine-readable
+ * reason codes, configuration-driven thresholds, per-tenant overrides, and
+ * invalid-configuration handling across all decision paths.
  */
 
-const { verifyInvoice } = require('../src/services/invoiceVerification');
+const { verifyInvoice, ReasonCode } = require('../src/services/invoiceVerification');
+const {
+  resolveThresholds,
+  VerificationConfigError,
+  DEFAULT_FRAUD_CEILING,
+  DEFAULT_MANUAL_REVIEW_THRESHOLD,
+  _resetThresholdCache,
+} = require('../src/config/verificationThresholds');
+
+const THRESHOLD_ENV_KEYS = [
+  'INVOICE_FRAUD_CEILING',
+  'INVOICE_MANUAL_REVIEW_THRESHOLD',
+  'INVOICE_TENANT_THRESHOLDS',
+];
+
+/** Remove all threshold env vars so each test starts from documented defaults. */
+function clearThresholdEnv() {
+  for (const key of THRESHOLD_ENV_KEYS) {
+    delete process.env[key];
+  }
+}
+
+beforeEach(() => {
+  clearThresholdEnv();
+  _resetThresholdCache();
+});
+
+afterAll(() => {
+  clearThresholdEnv();
+  _resetThresholdCache();
+});
 
 describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
   // ============================================================================
@@ -59,6 +92,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'MANUAL_REVIEW',
         reason: 'High value invoice requires manual approval',
+        reasonCode: ReasonCode.MANUAL_REVIEW_REQUIRED,
       });
     });
   });
@@ -72,6 +106,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid payload structure',
+        reasonCode: ReasonCode.INVALID_PAYLOAD,
       });
     });
 
@@ -80,6 +115,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid payload structure',
+        reasonCode: ReasonCode.INVALID_PAYLOAD,
       });
     });
 
@@ -88,6 +124,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid payload structure',
+        reasonCode: ReasonCode.INVALID_PAYLOAD,
       });
     });
 
@@ -96,6 +133,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid payload structure',
+        reasonCode: ReasonCode.INVALID_PAYLOAD,
       });
     });
 
@@ -104,6 +142,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid payload structure',
+        reasonCode: ReasonCode.INVALID_PAYLOAD,
       });
     });
 
@@ -113,6 +152,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid amount: must be a positive number',
+        reasonCode: ReasonCode.INVALID_AMOUNT,
       });
     });
   });
@@ -129,6 +169,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid amount: must be a positive number',
+        reasonCode: ReasonCode.INVALID_AMOUNT,
       });
     });
 
@@ -140,6 +181,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid amount: must be a positive number',
+        reasonCode: ReasonCode.INVALID_AMOUNT,
       });
     });
 
@@ -151,6 +193,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid amount: must be a positive number',
+        reasonCode: ReasonCode.INVALID_AMOUNT,
       });
     });
 
@@ -162,6 +205,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid amount: must be a positive number',
+        reasonCode: ReasonCode.INVALID_AMOUNT,
       });
     });
 
@@ -173,6 +217,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid amount: must be a positive number',
+        reasonCode: ReasonCode.INVALID_AMOUNT,
       });
     });
 
@@ -184,6 +229,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid amount: must be a positive number',
+        reasonCode: ReasonCode.INVALID_AMOUNT,
       });
     });
 
@@ -195,6 +241,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid amount: must be a positive number',
+        reasonCode: ReasonCode.INVALID_AMOUNT,
       });
     });
 
@@ -206,6 +253,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid amount: must be a positive number',
+        reasonCode: ReasonCode.INVALID_AMOUNT,
       });
     });
 
@@ -217,6 +265,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid amount: must be a positive number',
+        reasonCode: ReasonCode.INVALID_AMOUNT,
       });
     });
 
@@ -228,18 +277,20 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid amount: must be a positive number',
+        reasonCode: ReasonCode.INVALID_AMOUNT,
       });
     });
 
-    it('should reject Infinity (exceeds max threshold)', async () => {
+    it('should reject Infinity (exceeds fraud ceiling)', async () => {
       const result = await verifyInvoice({
         amount: Infinity,
         customer: 'Acme Corp',
       });
-      // Infinity is > 10000000, so it fails on max threshold check, not type check
+      // Infinity is > fraud ceiling, so it fails the ceiling check, not the type check
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Amount exceeds maximum allowed threshold',
+        reasonCode: ReasonCode.AMOUNT_EXCEEDS_FRAUD_CEILING,
       });
     });
 
@@ -251,6 +302,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid amount: must be a positive number',
+        reasonCode: ReasonCode.INVALID_AMOUNT,
       });
     });
   });
@@ -267,6 +319,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid customer: must be a non-empty string',
+        reasonCode: ReasonCode.INVALID_CUSTOMER,
       });
     });
 
@@ -278,6 +331,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid customer: must be a non-empty string',
+        reasonCode: ReasonCode.INVALID_CUSTOMER,
       });
     });
 
@@ -289,6 +343,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid customer: must be a non-empty string',
+        reasonCode: ReasonCode.INVALID_CUSTOMER,
       });
     });
 
@@ -300,6 +355,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid customer: must be a non-empty string',
+        reasonCode: ReasonCode.INVALID_CUSTOMER,
       });
     });
 
@@ -311,6 +367,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid customer: must be a non-empty string',
+        reasonCode: ReasonCode.INVALID_CUSTOMER,
       });
     });
 
@@ -322,6 +379,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid customer: must be a non-empty string',
+        reasonCode: ReasonCode.INVALID_CUSTOMER,
       });
     });
 
@@ -333,6 +391,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid customer: must be a non-empty string',
+        reasonCode: ReasonCode.INVALID_CUSTOMER,
       });
     });
 
@@ -344,6 +403,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid customer: must be a non-empty string',
+        reasonCode: ReasonCode.INVALID_CUSTOMER,
       });
     });
 
@@ -355,6 +415,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid customer: must be a non-empty string',
+        reasonCode: ReasonCode.INVALID_CUSTOMER,
       });
     });
 
@@ -366,6 +427,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid customer: must be a non-empty string',
+        reasonCode: ReasonCode.INVALID_CUSTOMER,
       });
     });
   });
@@ -374,145 +436,48 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
   // GROUP 5: REJECTED - Injection Pattern Detection (Security)
   // ============================================================================
   describe('REJECTED - injection pattern security validation', () => {
-    it('should reject customer with HTML injection (<)', async () => {
-      const result = await verifyInvoice({
-        amount: 5000,
-        customer: 'Acme<Corp',
-      });
-      expect(result).toEqual({
-        status: 'REJECTED',
-        reason: 'Suspicious characters detected in customer data',
-      });
-    });
+    const cases = [
+      ['HTML injection (<)', 'Acme<Corp'],
+      ['HTML closing tag injection (>)', 'Acme>Corp'],
+      ['script tag', '<script>alert("xss")</script>'],
+      ['curly braces (template injection)', 'Acme{Corp}'],
+      ['opening curly brace only', 'Acme{Corp'],
+      ['closing curly brace only', 'AcmeCorp}'],
+      ['dollar sign (variable injection)', 'Acme$Corp'],
+      ['template literal syntax', '`Acme${Corp}`'],
+      ['multiple injection patterns', '<Acme$Corp>'],
+      ['leading suspicious character', '<Acme'],
+      ['trailing suspicious character', 'Acme>'],
+    ];
 
-    it('should reject customer with HTML closing tag injection (>)', async () => {
-      const result = await verifyInvoice({
-        amount: 5000,
-        customer: 'Acme>Corp',
-      });
+    it.each(cases)('should reject customer with %s', async (_label, customer) => {
+      const result = await verifyInvoice({ amount: 5000, customer });
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Suspicious characters detected in customer data',
-      });
-    });
-
-    it('should reject customer with script tag', async () => {
-      const result = await verifyInvoice({
-        amount: 5000,
-        customer: '<script>alert("xss")</script>',
-      });
-      expect(result).toEqual({
-        status: 'REJECTED',
-        reason: 'Suspicious characters detected in customer data',
-      });
-    });
-
-    it('should reject customer with curly braces (template injection)', async () => {
-      const result = await verifyInvoice({
-        amount: 5000,
-        customer: 'Acme{Corp}',
-      });
-      expect(result).toEqual({
-        status: 'REJECTED',
-        reason: 'Suspicious characters detected in customer data',
-      });
-    });
-
-    it('should reject customer with opening curly brace only', async () => {
-      const result = await verifyInvoice({
-        amount: 5000,
-        customer: 'Acme{Corp',
-      });
-      expect(result).toEqual({
-        status: 'REJECTED',
-        reason: 'Suspicious characters detected in customer data',
-      });
-    });
-
-    it('should reject customer with closing curly brace only', async () => {
-      const result = await verifyInvoice({
-        amount: 5000,
-        customer: 'AcmeCorp}',
-      });
-      expect(result).toEqual({
-        status: 'REJECTED',
-        reason: 'Suspicious characters detected in customer data',
-      });
-    });
-
-    it('should reject customer with dollar sign (variable injection)', async () => {
-      const result = await verifyInvoice({
-        amount: 5000,
-        customer: 'Acme$Corp',
-      });
-      expect(result).toEqual({
-        status: 'REJECTED',
-        reason: 'Suspicious characters detected in customer data',
-      });
-    });
-
-    it('should reject customer with template literal syntax', async () => {
-      const result = await verifyInvoice({
-        amount: 5000,
-        customer: '`Acme${Corp}`',
-      });
-      expect(result).toEqual({
-        status: 'REJECTED',
-        reason: 'Suspicious characters detected in customer data',
-      });
-    });
-
-    it('should reject customer with multiple injection patterns', async () => {
-      const result = await verifyInvoice({
-        amount: 5000,
-        customer: '<Acme$Corp>',
-      });
-      expect(result).toEqual({
-        status: 'REJECTED',
-        reason: 'Suspicious characters detected in customer data',
-      });
-    });
-
-    it('should reject customer starting with suspicious character', async () => {
-      const result = await verifyInvoice({
-        amount: 5000,
-        customer: '<Acme',
-      });
-      expect(result).toEqual({
-        status: 'REJECTED',
-        reason: 'Suspicious characters detected in customer data',
-      });
-    });
-
-    it('should reject customer ending with suspicious character', async () => {
-      const result = await verifyInvoice({
-        amount: 5000,
-        customer: 'Acme>',
-      });
-      expect(result).toEqual({
-        status: 'REJECTED',
-        reason: 'Suspicious characters detected in customer data',
+        reasonCode: ReasonCode.SUSPICIOUS_CUSTOMER,
       });
     });
   });
 
   // ============================================================================
-  // GROUP 6: REJECTED - Amount Exceeds Maximum Threshold
+  // GROUP 6: Fraud ceiling (default configuration)
   // ============================================================================
-  describe('REJECTED - amount exceeds maximum threshold', () => {
-    it('should require manual review at maximum threshold (10000000)', async () => {
+  describe('REJECTED - amount exceeds fraud ceiling (defaults)', () => {
+    it('should require manual review exactly at the fraud ceiling (10000000)', async () => {
       const result = await verifyInvoice({
         amount: 10000000,
         customer: 'Acme Corp',
       });
-      // 10000000 >= 1000000, so manual review before max threshold check
+      // 10000000 is not > ceiling, and >= manual-review threshold
       expect(result).toEqual({
         status: 'MANUAL_REVIEW',
         reason: 'High value invoice requires manual approval',
+        reasonCode: ReasonCode.MANUAL_REVIEW_REQUIRED,
       });
     });
 
-    it('should reject amount just above maximum threshold (10000000.01)', async () => {
+    it('should reject amount just above the fraud ceiling (10000000.01)', async () => {
       const result = await verifyInvoice({
         amount: 10000000.01,
         customer: 'Acme Corp',
@@ -520,6 +485,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Amount exceeds maximum allowed threshold',
+        reasonCode: ReasonCode.AMOUNT_EXCEEDS_FRAUD_CEILING,
       });
     });
 
@@ -531,6 +497,7 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Amount exceeds maximum allowed threshold',
+        reasonCode: ReasonCode.AMOUNT_EXCEEDS_FRAUD_CEILING,
       });
     });
 
@@ -542,67 +509,39 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Amount exceeds maximum allowed threshold',
+        reasonCode: ReasonCode.AMOUNT_EXCEEDS_FRAUD_CEILING,
       });
     });
   });
 
   // ============================================================================
-  // GROUP 7: MANUAL_REVIEW - High Value Invoice (1M - 10M Range)
+  // GROUP 7: MANUAL_REVIEW - High Value Invoice (default configuration)
   // ============================================================================
-  describe('MANUAL_REVIEW - high value invoice threshold', () => {
-    it('should require manual review at minimum threshold (1000000)', async () => {
-      const result = await verifyInvoice({
-        amount: 1000000,
-        customer: 'Large Corp',
-      });
-      expect(result).toEqual({
-        status: 'MANUAL_REVIEW',
-        reason: 'High value invoice requires manual approval',
-      });
+  describe('MANUAL_REVIEW - high value invoice threshold (defaults)', () => {
+    const expected = {
+      status: 'MANUAL_REVIEW',
+      reason: 'High value invoice requires manual approval',
+      reasonCode: ReasonCode.MANUAL_REVIEW_REQUIRED,
+    };
+
+    it('should require manual review at the manual-review threshold (1000000)', async () => {
+      const result = await verifyInvoice({ amount: 1000000, customer: 'Large Corp' });
+      expect(result).toEqual(expected);
     });
 
-    it('should require manual review just above minimum threshold (1000000.01)', async () => {
-      const result = await verifyInvoice({
-        amount: 1000000.01,
-        customer: 'Large Corp',
-      });
-      expect(result).toEqual({
-        status: 'MANUAL_REVIEW',
-        reason: 'High value invoice requires manual approval',
-      });
+    it('should require manual review just above the threshold (1000000.01)', async () => {
+      const result = await verifyInvoice({ amount: 1000000.01, customer: 'Large Corp' });
+      expect(result).toEqual(expected);
     });
 
     it('should require manual review at mid-range (5000000)', async () => {
-      const result = await verifyInvoice({
-        amount: 5000000,
-        customer: 'Enterprise Corp',
-      });
-      expect(result).toEqual({
-        status: 'MANUAL_REVIEW',
-        reason: 'High value invoice requires manual approval',
-      });
+      const result = await verifyInvoice({ amount: 5000000, customer: 'Enterprise Corp' });
+      expect(result).toEqual(expected);
     });
 
-    it('should require manual review just below maximum threshold (9999999.99)', async () => {
-      const result = await verifyInvoice({
-        amount: 9999999.99,
-        customer: 'Mega Corp',
-      });
-      expect(result).toEqual({
-        status: 'MANUAL_REVIEW',
-        reason: 'High value invoice requires manual approval',
-      });
-    });
-
-    it('should require manual review with valid customer in mid-range', async () => {
-      const result = await verifyInvoice({
-        amount: 2500000,
-        customer: 'Global Holdings Inc.',
-      });
-      expect(result).toEqual({
-        status: 'MANUAL_REVIEW',
-        reason: 'High value invoice requires manual approval',
-      });
+    it('should require manual review just below the fraud ceiling (9999999.99)', async () => {
+      const result = await verifyInvoice({ amount: 9999999.99, customer: 'Mega Corp' });
+      expect(result).toEqual(expected);
     });
   });
 
@@ -612,44 +551,27 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
   describe('validation order - early exit on first failure', () => {
     it('should reject invalid payload before checking amount', async () => {
       const result = await verifyInvoice(null);
-      // Expects payload check, not amount check
-      expect(result.reason).toBe('Invalid payload structure');
+      expect(result.reasonCode).toBe(ReasonCode.INVALID_PAYLOAD);
     });
 
     it('should check amount before customer when payload is valid', async () => {
-      const result = await verifyInvoice({
-        amount: 'invalid',
-        customer: null, // also invalid
-      });
-      // Should fail on amount, not customer
-      expect(result.reason).toBe('Invalid amount: must be a positive number');
+      const result = await verifyInvoice({ amount: 'invalid', customer: null });
+      expect(result.reasonCode).toBe(ReasonCode.INVALID_AMOUNT);
     });
 
     it('should check customer validity before injection patterns', async () => {
-      const result = await verifyInvoice({
-        amount: 5000,
-        customer: null, // invalid type before injection check
-      });
-      // Should fail on type, not injection
-      expect(result.reason).toBe('Invalid customer: must be a non-empty string');
+      const result = await verifyInvoice({ amount: 5000, customer: null });
+      expect(result.reasonCode).toBe(ReasonCode.INVALID_CUSTOMER);
     });
 
-    it('should check amount threshold before customer injection', async () => {
-      const result = await verifyInvoice({
-        amount: 15000000, // exceeds max
-        customer: 'Normal<Customer', // has injection
-      });
-      // Should fail on amount, not injection
-      expect(result.reason).toBe('Amount exceeds maximum allowed threshold');
+    it('should check fraud ceiling before customer injection', async () => {
+      const result = await verifyInvoice({ amount: 15000000, customer: 'Normal<Customer' });
+      expect(result.reasonCode).toBe(ReasonCode.AMOUNT_EXCEEDS_FRAUD_CEILING);
     });
 
     it('should reach injection check after all other validations pass', async () => {
-      const result = await verifyInvoice({
-        amount: 5000,
-        customer: 'Acme<Corp',
-      });
-      // Should fail on injection
-      expect(result.reason).toBe('Suspicious characters detected in customer data');
+      const result = await verifyInvoice({ amount: 5000, customer: 'Acme<Corp' });
+      expect(result.reasonCode).toBe(ReasonCode.SUSPICIOUS_CUSTOMER);
     });
   });
 
@@ -667,59 +589,55 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(result).toEqual({ status: 'VERIFIED' });
     });
 
-    it('should handle payload with missing optional-looking fields', async () => {
-      const result = await verifyInvoice({
-        amount: 5000,
-        customer: 'Acme Corp',
-        // no extra fields
+    it('should ignore a tenantId smuggled in the payload (not options)', async () => {
+      process.env.INVOICE_TENANT_THRESHOLDS = JSON.stringify({
+        evil: { manualReviewThreshold: 1 },
       });
+      _resetThresholdCache();
+      // Even though the payload carries tenantId, it must NOT influence thresholds.
+      const result = await verifyInvoice({ amount: 5000, customer: 'Acme', tenantId: 'evil' });
       expect(result).toEqual({ status: 'VERIFIED' });
     });
 
-    it('should treat undefined amount field as missing (falsy check)', async () => {
-      const result = await verifyInvoice({
-        amount: undefined,
-        customer: 'Acme Corp',
-      });
+    it('should handle explicitly null or undefined options parameter', async () => {
+      const resultNull = await verifyInvoice({ amount: 5000, customer: 'Acme Corp' }, null);
+      expect(resultNull).toEqual({ status: 'VERIFIED' });
+
+      const resultUndefined = await verifyInvoice({ amount: 5000, customer: 'Acme Corp' }, undefined);
+      expect(resultUndefined).toEqual({ status: 'VERIFIED' });
+    });
+
+    it('should treat undefined amount field as invalid', async () => {
+      const result = await verifyInvoice({ amount: undefined, customer: 'Acme Corp' });
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid amount: must be a positive number',
+        reasonCode: ReasonCode.INVALID_AMOUNT,
       });
     });
 
-    it('should treat undefined customer field as missing (falsy check)', async () => {
-      const result = await verifyInvoice({
-        amount: 5000,
-        customer: undefined,
-      });
+    it('should treat undefined customer field as invalid', async () => {
+      const result = await verifyInvoice({ amount: 5000, customer: undefined });
       expect(result).toEqual({
         status: 'REJECTED',
         reason: 'Invalid customer: must be a non-empty string',
+        reasonCode: ReasonCode.INVALID_CUSTOMER,
       });
     });
 
     it('should handle very small positive amount (0.001)', async () => {
-      const result = await verifyInvoice({
-        amount: 0.001,
-        customer: 'Micro Corp',
-      });
+      const result = await verifyInvoice({ amount: 0.001, customer: 'Micro Corp' });
       expect(result).toEqual({ status: 'VERIFIED' });
     });
 
     it('should handle very long customer name', async () => {
       const longName = 'A'.repeat(1000);
-      const result = await verifyInvoice({
-        amount: 5000,
-        customer: longName,
-      });
+      const result = await verifyInvoice({ amount: 5000, customer: longName });
       expect(result).toEqual({ status: 'VERIFIED' });
     });
 
     it('should handle customer name with international characters', async () => {
-      const result = await verifyInvoice({
-        amount: 5000,
-        customer: 'Société Générale',
-      });
+      const result = await verifyInvoice({ amount: 5000, customer: 'Société Générale' });
       expect(result).toEqual({ status: 'VERIFIED' });
     });
 
@@ -762,5 +680,270 @@ describe('Invoice Verification Service - Comprehensive Decision Matrix', () => {
       expect(results[1].status).toBe('REJECTED');
       expect(results[2].status).toBe('MANUAL_REVIEW');
     });
+  });
+
+  // ============================================================================
+  // GROUP 11: Configuration-driven global thresholds
+  // ============================================================================
+  describe('configuration-driven global thresholds', () => {
+    it('applies a custom fraud ceiling from INVOICE_FRAUD_CEILING', async () => {
+      process.env.INVOICE_FRAUD_CEILING = '2000000';
+      _resetThresholdCache();
+
+      const rejected = await verifyInvoice({ amount: 2000001, customer: 'Acme' });
+      expect(rejected.reasonCode).toBe(ReasonCode.AMOUNT_EXCEEDS_FRAUD_CEILING);
+
+      // At the new ceiling: not rejected, but >= default manual-review threshold.
+      const review = await verifyInvoice({ amount: 2000000, customer: 'Acme' });
+      expect(review.reasonCode).toBe(ReasonCode.MANUAL_REVIEW_REQUIRED);
+    });
+
+    it('applies a custom manual-review threshold from INVOICE_MANUAL_REVIEW_THRESHOLD', async () => {
+      process.env.INVOICE_MANUAL_REVIEW_THRESHOLD = '5000';
+      _resetThresholdCache();
+
+      const review = await verifyInvoice({ amount: 5000, customer: 'Acme' });
+      expect(review.reasonCode).toBe(ReasonCode.MANUAL_REVIEW_REQUIRED);
+
+      const verified = await verifyInvoice({ amount: 4999.99, customer: 'Acme' });
+      expect(verified).toEqual({ status: 'VERIFIED' });
+    });
+
+    it('tightens both thresholds together', async () => {
+      process.env.INVOICE_FRAUD_CEILING = '100000';
+      process.env.INVOICE_MANUAL_REVIEW_THRESHOLD = '10000';
+      _resetThresholdCache();
+
+      expect((await verifyInvoice({ amount: 9999, customer: 'Acme' })).status).toBe('VERIFIED');
+      expect((await verifyInvoice({ amount: 10000, customer: 'Acme' })).reasonCode).toBe(
+        ReasonCode.MANUAL_REVIEW_REQUIRED
+      );
+      expect((await verifyInvoice({ amount: 100001, customer: 'Acme' })).reasonCode).toBe(
+        ReasonCode.AMOUNT_EXCEEDS_FRAUD_CEILING
+      );
+    });
+  });
+
+  // ============================================================================
+  // GROUP 12: Per-tenant overrides
+  // ============================================================================
+  describe('per-tenant threshold overrides', () => {
+    beforeEach(() => {
+      process.env.INVOICE_TENANT_THRESHOLDS = JSON.stringify({
+        'tenant-strict': { fraudCeiling: 50000, manualReviewThreshold: 10000 },
+        'tenant-loose': { fraudCeiling: 50000000, manualReviewThreshold: 5000000 },
+        'tenant-partial': { manualReviewThreshold: 250000 },
+      });
+      _resetThresholdCache();
+    });
+
+    it('applies a stricter tenant override', async () => {
+      const review = await verifyInvoice(
+        { amount: 10000, customer: 'Acme' },
+        { tenantId: 'tenant-strict' }
+      );
+      expect(review.reasonCode).toBe(ReasonCode.MANUAL_REVIEW_REQUIRED);
+
+      const rejected = await verifyInvoice(
+        { amount: 50001, customer: 'Acme' },
+        { tenantId: 'tenant-strict' }
+      );
+      expect(rejected.reasonCode).toBe(ReasonCode.AMOUNT_EXCEEDS_FRAUD_CEILING);
+    });
+
+    it('applies a looser tenant override', async () => {
+      // Amount that defaults would send to manual review is verified for the loose tenant.
+      const verified = await verifyInvoice(
+        { amount: 4999999, customer: 'Acme' },
+        { tenantId: 'tenant-loose' }
+      );
+      expect(verified).toEqual({ status: 'VERIFIED' });
+    });
+
+    it('fills omitted override fields from global defaults (partial override)', async () => {
+      // Only manualReviewThreshold overridden; fraudCeiling falls back to default 10000000.
+      const review = await verifyInvoice(
+        { amount: 250000, customer: 'Acme' },
+        { tenantId: 'tenant-partial' }
+      );
+      expect(review.reasonCode).toBe(ReasonCode.MANUAL_REVIEW_REQUIRED);
+
+      const rejected = await verifyInvoice(
+        { amount: 10000001, customer: 'Acme' },
+        { tenantId: 'tenant-partial' }
+      );
+      expect(rejected.reasonCode).toBe(ReasonCode.AMOUNT_EXCEEDS_FRAUD_CEILING);
+    });
+
+    it('falls back to defaults for an unknown tenant', async () => {
+      const result = await verifyInvoice(
+        { amount: 999999, customer: 'Acme' },
+        { tenantId: 'no-such-tenant' }
+      );
+      expect(result).toEqual({ status: 'VERIFIED' });
+    });
+
+    it('falls back to defaults when no tenantId is supplied', async () => {
+      const result = await verifyInvoice({ amount: 999999, customer: 'Acme' });
+      expect(result).toEqual({ status: 'VERIFIED' });
+    });
+
+    it('does not resolve prototype-pollution keys as tenants', async () => {
+      const result = await verifyInvoice(
+        { amount: 999999, customer: 'Acme' },
+        { tenantId: '__proto__' }
+      );
+      // Should use defaults (999999 < 1000000 => VERIFIED), not crash or inherit.
+      expect(result).toEqual({ status: 'VERIFIED' });
+    });
+  });
+
+  // ============================================================================
+  // GROUP 13: Invalid configuration handling (fail closed)
+  // ============================================================================
+  describe('invalid configuration handling', () => {
+    it('fails closed to MANUAL_REVIEW on a non-numeric fraud ceiling', async () => {
+      process.env.INVOICE_FRAUD_CEILING = 'not-a-number';
+      _resetThresholdCache();
+
+      const result = await verifyInvoice({ amount: 5000, customer: 'Acme' });
+      expect(result).toEqual({
+        status: 'MANUAL_REVIEW',
+        reason: 'Threshold configuration unavailable; manual review required',
+        reasonCode: ReasonCode.CONFIG_UNAVAILABLE,
+      });
+    });
+
+    it('fails closed when manual-review threshold exceeds the fraud ceiling', async () => {
+      process.env.INVOICE_FRAUD_CEILING = '1000';
+      process.env.INVOICE_MANUAL_REVIEW_THRESHOLD = '5000';
+      _resetThresholdCache();
+
+      const result = await verifyInvoice({ amount: 100, customer: 'Acme' });
+      expect(result.reasonCode).toBe(ReasonCode.CONFIG_UNAVAILABLE);
+    });
+
+    it('fails closed on malformed tenant override JSON', async () => {
+      process.env.INVOICE_TENANT_THRESHOLDS = '{ not valid json';
+      _resetThresholdCache();
+
+      const result = await verifyInvoice(
+        { amount: 5000, customer: 'Acme' },
+        { tenantId: 'tenant-strict' }
+      );
+      expect(result.reasonCode).toBe(ReasonCode.CONFIG_UNAVAILABLE);
+    });
+
+    it('still rejects structurally invalid input before consulting config', async () => {
+      process.env.INVOICE_FRAUD_CEILING = 'not-a-number';
+      _resetThresholdCache();
+
+      // Structural checks run before threshold resolution, so this is a clean reject.
+      const result = await verifyInvoice({ amount: -1, customer: 'Acme' });
+      expect(result.reasonCode).toBe(ReasonCode.INVALID_AMOUNT);
+    });
+
+    it('propagates non-VerificationConfigError exceptions from threshold resolution', async () => {
+      const originalHas = Map.prototype.has;
+      Map.prototype.has = function (key) {
+        if (key === 'cause-generic-error') {
+          throw new TypeError('Generic Map error');
+        }
+        return originalHas.apply(this, arguments);
+      };
+
+      try {
+        await expect(
+          verifyInvoice({ amount: 5000, customer: 'Acme' }, { tenantId: 'cause-generic-error' })
+        ).rejects.toThrow(TypeError);
+      } finally {
+        Map.prototype.has = originalHas;
+      }
+    });
+  });
+});
+
+// ============================================================================
+// Configuration module unit tests
+// ============================================================================
+describe('verificationThresholds config module', () => {
+  it('returns documented defaults when no env vars are set', () => {
+    const thresholds = resolveThresholds();
+    expect(thresholds).toEqual({
+      fraudCeiling: DEFAULT_FRAUD_CEILING,
+      manualReviewThreshold: DEFAULT_MANUAL_REVIEW_THRESHOLD,
+    });
+  });
+
+  it('treats empty-string env values as unset and uses defaults', () => {
+    process.env.INVOICE_FRAUD_CEILING = '';
+    process.env.INVOICE_MANUAL_REVIEW_THRESHOLD = '   ';
+    _resetThresholdCache();
+    expect(resolveThresholds()).toEqual({
+      fraudCeiling: DEFAULT_FRAUD_CEILING,
+      manualReviewThreshold: DEFAULT_MANUAL_REVIEW_THRESHOLD,
+    });
+  });
+
+  it('memoizes parsed config until reset', () => {
+    // Keep manual-review threshold low so the custom ceilings stay consistent.
+    process.env.INVOICE_MANUAL_REVIEW_THRESHOLD = '100';
+    process.env.INVOICE_FRAUD_CEILING = '12345';
+    _resetThresholdCache();
+    expect(resolveThresholds().fraudCeiling).toBe(12345);
+
+    // Mutating env without resetting must not change the memoized value.
+    process.env.INVOICE_FRAUD_CEILING = '999';
+    expect(resolveThresholds().fraudCeiling).toBe(12345);
+
+    _resetThresholdCache();
+    expect(resolveThresholds().fraudCeiling).toBe(999);
+  });
+
+  it('returns a fresh object each call so callers cannot mutate the cache', () => {
+    const a = resolveThresholds();
+    a.fraudCeiling = 1;
+    const b = resolveThresholds();
+    expect(b.fraudCeiling).toBe(DEFAULT_FRAUD_CEILING);
+  });
+
+  it('throws VerificationConfigError on a zero threshold', () => {
+    process.env.INVOICE_MANUAL_REVIEW_THRESHOLD = '0';
+    _resetThresholdCache();
+    expect(() => resolveThresholds()).toThrow(VerificationConfigError);
+  });
+
+  it('throws VerificationConfigError on a negative threshold', () => {
+    process.env.INVOICE_FRAUD_CEILING = '-5';
+    _resetThresholdCache();
+    expect(() => resolveThresholds()).toThrow(VerificationConfigError);
+  });
+
+  it('throws when tenant overrides JSON is an array, not an object', () => {
+    process.env.INVOICE_TENANT_THRESHOLDS = '[]';
+    _resetThresholdCache();
+    expect(() => resolveThresholds()).toThrow(VerificationConfigError);
+  });
+
+  it('throws when a tenant override is not an object', () => {
+    process.env.INVOICE_TENANT_THRESHOLDS = JSON.stringify({ acme: 5 });
+    _resetThresholdCache();
+    expect(() => resolveThresholds('acme')).toThrow(VerificationConfigError);
+  });
+
+  it('throws when a tenant override field is not a positive number', () => {
+    process.env.INVOICE_TENANT_THRESHOLDS = JSON.stringify({
+      acme: { fraudCeiling: 'huge' },
+    });
+    _resetThresholdCache();
+    expect(() => resolveThresholds('acme')).toThrow(VerificationConfigError);
+  });
+
+  it('accepts a numeric tenantId by coercing it to a string key', () => {
+    process.env.INVOICE_TENANT_THRESHOLDS = JSON.stringify({
+      '42': { manualReviewThreshold: 500 },
+    });
+    _resetThresholdCache();
+    expect(resolveThresholds(42).manualReviewThreshold).toBe(500);
   });
 });

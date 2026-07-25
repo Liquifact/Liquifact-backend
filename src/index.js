@@ -14,6 +14,23 @@ require('dotenv').config();
 
 const app = require('./app');
 const { validate, logRedactedSummary } = require('./config');
+const shutdownCoordinator = require('./utils/shutdownCoordinator');
+
+/**
+ * Runs the S3 connectivity probe at startup. Failures are logged but never
+ * block process start — the readiness probe (`/readyz`) surfaces storage
+ * misconfiguration to orchestrators once the HTTP server is listening.
+ *
+ * @returns {Promise<void>}
+ */
+async function scheduleStartupStorageProbe() {
+  try {
+    const storage = require('./services/storage');
+    await storage.runStartupStorageProbe();
+  } catch (_err) {
+    // Best-effort: a probe failure must not abort startup.
+  }
+}
 
 /**
  * Validates the application configuration at startup before the server starts listening.
@@ -41,7 +58,12 @@ function runBootConfigValidation() {
 function startServer() {
   runBootConfigValidation();
   const port = process.env.PORT || 3001;
-  return app.listen(port);
+  // Fire-and-forget probe — do not await, so startup is not blocked.
+  scheduleStartupStorageProbe();
+  const server = app.listen(port);
+  shutdownCoordinator.register({ server });
+  shutdownCoordinator.setupSignalListeners();
+  return server;
 }
 
 /**
@@ -70,7 +92,12 @@ function createApp() {
 }
 
 
+// Start background workers when running as main module (not in tests)
 if (process.env.NODE_ENV !== 'test' && require.main === module) {
+  // Start the idempotency purge worker
+  const { startPurgeWorker } = require('./jobs/idempotencyPurge');
+  startPurgeWorker();
+
   startServer();
 }
 

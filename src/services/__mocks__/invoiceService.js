@@ -8,4 +8,10 @@ module.exports = {
   deleteInvoice: jest.fn().mockResolvedValue(null),
   getInvoicesByKycStatus: jest.fn().mockReturnValue([]),
   updateInvoiceKycStatus: jest.fn().mockReturnValue(null),
+  getSmeInvoiceCounts: jest.fn().mockResolvedValue({
+    open: 0,
+    funded: 0,
+    settled: 0,
+    defaulted: 0,
+  }),
 };

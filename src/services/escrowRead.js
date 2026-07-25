@@ -39,8 +39,75 @@ const logger = require("../logger");
 const { getTokenMetadata } = require("./tokenMeta");
 const db = require("../db/knex");
 const { createRedisEscrowSummaryCache } = require("../cache/redis");
+const { escrowReadCache } = require("./escrowReadCache");
 
 const cache = createRedisEscrowSummaryCache();
+
+/**
+ * Tri-state legal-hold outcome. Issue #424 — a legal hold is a compliance
+ * gate, so an unreadable read MUST NOT collapse to `not_held`.
+ *
+ * @typedef {'held' | 'not_held' | 'unknown'} LegalHoldStatus
+ */
+
+/**
+ * Envelope returned by {@link fetchLegalHoldStatus} and surfaced on the
+ * escrow state object. The `reason` and `errorCode` fields are populated
+ * only for the `unknown` outcome so callers can alert on the specific
+ * failure mode without re-reading service logs.
+ *
+ * @typedef {object} LegalHoldEnvelope
+ * @property {LegalHoldStatus} status - The tri-state result.
+ * @property {string} [reason] - Why the status is `unknown`
+ *   (`rpc_error` | `adapter_error` | `service_unavailable`).
+ * @property {string} [errorCode] - Low-cardinality error code if the call
+ *   failed with one (e.g. `ETIMEDOUT`, `ECONNREFUSED`).
+ */
+
+/**
+ * Canonical constants for the tri-state. Exported so callers (route
+ * handlers, dashboards) can branch on the same string and avoid typos.
+ *
+ * @constant {Readonly<{HEL: 'held', NOT_HELD: 'not_held', UNKNOWN: 'unknown'}>}
+ */
+const LEGAL_HOLD_STATUS = Object.freeze({
+  HELD: "held",
+  NOT_HELD: "not_held",
+  UNKNOWN: "unknown",
+});
+
+/**
+ * Default reasons for the `unknown` case. Surfaced so operators can
+ * distinguish a real RPC failure from an unsupported adapter shape.
+ *
+ * @constant {Readonly<{RPC_ERROR: 'rpc_error', ADAPTER_ERROR: 'adapter_error'}>}
+ */
+const LEGAL_HOLD_UNKNOWN_REASONS = Object.freeze({
+  RPC_ERROR: "rpc_error",
+  ADAPTER_ERROR: "adapter_error",
+});
+
+/**
+ * Canonical boolean → tri-state coercion. Issue #424 — exported as the
+ * single source of truth for the rule (the gate reuses it on the legacy
+ * boolean-adapter path so we never drift).
+ *
+ * Treats truthy / numeric 1 / string 'true' as `held`; anything else
+ * (including `null` / `undefined` / `''`) as `not_held`. Adapters that
+ * throw or hang are NOT handled here; the caller is expected to route
+ * throws through the `unknown` branch.
+ *
+ * @param {unknown} raw - Adapter return value.
+ * @returns {LegalHoldStatus} Normalised status.
+ */
+function coerceLegalHoldStatus(raw) {
+  return raw === true || raw === 1 || raw === "true"
+    ? LEGAL_HOLD_STATUS.HELD
+    : LEGAL_HOLD_STATUS.NOT_HELD;
+}
+
+// Alias for internal use within this module.
+const _coerceLegalHoldStatus = coerceLegalHoldStatus;
 
 /**
  * Regex that a valid invoice ID must satisfy.
@@ -84,21 +151,28 @@ function validateInvoiceId(invoiceId) {
 }
 
 /**
- * Calls the on-chain `get_legal_hold` getter for the given escrow contract.
+ * Calls the on-chain `get_legal_hold` getter and returns the resolved
+ * tri-state. Issue #424 ensures a failed read is reported as `unknown`
+ * rather than collapsing to `not_held` (which would silently unblock any
+ * caller that naively defaults to `false`).
  *
- * In production this would invoke the real Soroban RPC; here we wrap the
- * operation in `callSorobanContract` so retries and error mapping are applied
- * consistently. The `adapter` parameter lets tests inject a stub without
- * monkey-patching the module.
+ * Outcome contract:
+ *   - {@link LEGAL_HOLD_STATUS.HELD}     — on-chain flag is truthy.
+ *   - {@link LEGAL_HOLD_STATUS.NOT_HELD} — on-chain flag is falsy.
+ *   - {@link LEGAL_HOLD_STATUS.UNKNOWN}  — RPC error, timeout, circuit-open,
+ *     or any other unrecoverable condition. Always paired with a `reason`
+ *     and the original `errorCode` so operators can triage.
+ *
+ * Production placeholder: with no `adapter`, the stub returns `NOT_HELD`.
+ * Real deployments should wire `adapter` through to `sorobanClient.invokeContract`.
  *
  * @param {string} invoiceId - Validated invoice identifier.
- * @param {Function} [adapter] - Optional async function `(invoiceId) => boolean`.
- *   Defaults to the production Soroban stub.
- * @returns {Promise<boolean>} Resolves to `true` when the escrow is under legal
- *   hold, `false` otherwise. Defaults to `false` on any non-fatal error so
- *   that a missing or unreachable contract never silently unblocks funding.
+ * @param {Function} [adapter] - Optional async function `(invoiceId) => unknown`
+ *   whose return value is coerced via {@link _coerceLegalHoldStatus}.
+ * @returns {Promise<LegalHoldEnvelope>} Resolved tri-state envelope.
+ *   NEVER throws.
  */
-async function fetchLegalHold(invoiceId, adapter) {
+async function fetchLegalHoldStatus(invoiceId, adapter) {
   const operation = adapter
     ? () => adapter(invoiceId)
     : async () => {
@@ -109,18 +183,51 @@ async function fetchLegalHold(invoiceId, adapter) {
 
   try {
     const result = await callSorobanContract(operation);
-    // Coerce to boolean; treat any truthy on-chain value as held.
-    return result === true || result === 1 || result === "true";
+    return { status: _coerceLegalHoldStatus(result) };
   } catch (err) {
-    // Log without exposing internals; default to false (not held) so a
-    // transient RPC failure does not permanently block all funding.
-    // Callers that need stricter behaviour can override via the adapter.
+    // Issue #424: a transient RPC failure MUST NOT be reported as NOT_HELD.
+    // The middleware (legalHoldGate.js) treats `unknown` as 503 service
+    // unavailable and blocks the funding path.
     logger.warn(
-      { invoiceId, errCode: err?.code },
-      "escrowRead: get_legal_hold call failed — defaulting to false",
+      {
+        invoiceId,
+        errCode: err?.code,
+        reason: LEGAL_HOLD_UNKNOWN_REASONS.RPC_ERROR,
+      },
+      "escrowRead: get_legal_hold call failed — status is unknown, gate must fail closed",
     );
-    return false;
+    return {
+      status: LEGAL_HOLD_STATUS.UNKNOWN,
+      reason: LEGAL_HOLD_UNKNOWN_REASONS.RPC_ERROR,
+      errorCode: typeof err?.code === "string" ? err.code : undefined,
+    };
   }
+}
+
+/**
+ * Calls the on-chain `get_legal_hold` getter for the given escrow contract.
+ *
+ * @deprecated Prefer {@link fetchLegalHoldStatus} for security-sensitive
+ *   callers; the boolean return value silently collapses `unknown` into
+ *   `false` and provides no signal to distinguish the two. This function is
+ *   retained for backward compatibility with `readEscrowState` and any
+ *   legacy caller that simply wants `if (await fetchLegalHold(id))`.
+ *
+ * Behaviour:
+ *   - `true`  → on-chain flag is truthy.
+ *   - `false` → everything else, INCLUDING a failed RPC read. The companion
+ *     `readEscrowState` flips `state.legal_hold` to `true` for an `unknown`
+ *     read so failures are still failed-closed at the data-consumer level.
+ *
+ * @param {string} invoiceId - Validated invoice identifier.
+ * @param {Function} [adapter] - Optional async function `(invoiceId) => boolean`.
+ *   Defaults to the production Soroban stub.
+ * @returns {Promise<boolean>} Resolves to `true` when the escrow is under legal
+ *   hold, `false` for any other outcome.
+ */
+async function fetchLegalHold(invoiceId, adapter) {
+  const { status } = await fetchLegalHoldStatus(invoiceId, adapter);
+  return status === LEGAL_HOLD_STATUS.HELD;
 }
 
 /**
@@ -316,11 +423,22 @@ async function readEscrowState(invoiceId, options = {}) {
 
   const safeId = invoiceId.trim();
 
-  // Fetch base escrow state and legal hold flag concurrently.
-  const [baseState, legalHold] = await Promise.all([
+  // Fetch base escrow state and legal hold status concurrently.
+  const [baseState, legalHoldResult] = await Promise.all([
     _fetchBaseEscrowState(safeId, escrowAdapter, { dbClient }),
-    fetchLegalHold(safeId, legalHoldAdapter),
+    fetchLegalHoldStatus(safeId, legalHoldAdapter),
   ]);
+
+  // Issue #424 — fail-closed at the data layer:
+  //   * `state.legal_hold` (boolean) is `true` for both `held` and `unknown`
+  //     so any caller that branches on `if (!state.legal_hold)` cannot
+  //     accidentally fund an invoice whose hold status is unreadable.
+  //   * `state.legalHoldStatus` carries the full tri-state for callers that
+  //     need to distinguish a verified hold from an outage.
+  const legalHoldStatus = legalHoldResult.status;
+  const legalHoldBool =
+    legalHoldStatus === LEGAL_HOLD_STATUS.HELD ||
+    legalHoldStatus === LEGAL_HOLD_STATUS.UNKNOWN;
 
   // Fetch token metadata if funding asset is provided. This is best-effort:
   // any failure is logged but does not fail the whole read (warn-and-continue).
@@ -343,7 +461,16 @@ async function readEscrowState(invoiceId, options = {}) {
 
   return {
     ...baseState,
-    legal_hold: legalHold,
+    legal_hold: legalHoldBool,
+    legalHoldStatus,
+    // Surface failure context so operators can investigate 'unknown' outcomes
+    // without needing to re-read the service logs.
+    ...(legalHoldResult.reason
+      ? { legalHoldReason: legalHoldResult.reason }
+      : {}),
+    ...(legalHoldResult.errorCode
+      ? { legalHoldErrorCode: legalHoldResult.errorCode }
+      : {}),
     funding_token: tokenMetadata,
     // Forward ledger close time so callers can pass opts.ledgerCloseTime to
     // computeEscrowDerivedFields.  The field is present only when the Soroban
@@ -439,12 +566,16 @@ async function readEscrowStateWithAttestations(invoiceId, options = {}) {
 
   const safeId = invoiceId.trim();
 
-  // Fetch all data concurrently
-  const [baseState, legalHold, attestations] = await Promise.all([
+  // Issue #424 — same tri-state propagation as `readEscrowState`.
+  const [baseState, legalHoldResult, attestations] = await Promise.all([
     _fetchBaseEscrowState(safeId, escrowAdapter, { dbClient }),
-    fetchLegalHold(safeId, legalHoldAdapter),
+    fetchLegalHoldStatus(safeId, legalHoldAdapter),
     fetchAttestationAppendLog(safeId, attestationAdapter),
   ]);
+  const legalHoldStatus = legalHoldResult.status;
+  const legalHoldBool =
+    legalHoldStatus === LEGAL_HOLD_STATUS.HELD ||
+    legalHoldStatus === LEGAL_HOLD_STATUS.UNKNOWN;
 
   // Fetch token metadata if funding asset is provided (best-effort).
   let tokenMetadata = null;
@@ -466,7 +597,14 @@ async function readEscrowStateWithAttestations(invoiceId, options = {}) {
 
   return {
     ...baseState,
-    legal_hold: legalHold,
+    legal_hold: legalHoldBool,
+    legalHoldStatus,
+    ...(legalHoldResult.reason
+      ? { legalHoldReason: legalHoldResult.reason }
+      : {}),
+    ...(legalHoldResult.errorCode
+      ? { legalHoldErrorCode: legalHoldResult.errorCode }
+      : {}),
     attestations,
     funding_token: tokenMetadata,
     ...(baseState.ledgerCloseTime != null
@@ -543,15 +681,22 @@ async function getEscrowStateWithProjection(invoiceId, options = {}) {
   const safeId = invoiceId.trim();
   const { dbClient } = options;
 
-  // 1. Try cache first if enabled. Cache wins on hit.
+  // 1. The bounded local cache avoids DB/Redis work on the hottest reads.
+  const localCached = escrowReadCache.get(safeId);
+  if (localCached !== undefined) {
+    return localCached;
+  }
+
+  // 2. Try the optional shared Redis cache. Cache wins on hit.
   if (cache) {
     const cacheResult = await cache.getSummary(safeId);
     if (cacheResult.hit) {
+      escrowReadCache.set(safeId, cacheResult.value);
       return cacheResult.value;
     }
   }
 
-  // 2. Read from the projection table via the shared helper, so projection
+  // 3. Read from the projection table via the shared helper, so projection
   //    shape stays consistent with readEscrowState / readFundedAmount /
   //    readEscrowStateWithAttestations.
   const projectionState = await _readBaseStateFromProjection(safeId, dbClient);
@@ -563,20 +708,34 @@ async function getEscrowStateWithProjection(invoiceId, options = {}) {
         projectionState.latest_ledger_sequence,
       );
     }
+    escrowReadCache.set(safeId, projectionState);
     return projectionState;
   }
 
-  // 3. Fallback to live RPC read (neutral stub currently; real Soroban call
+  // 4. Fallback to live RPC read (neutral stub currently; real Soroban call
   //    once the contract is deployed).
   const baseState = await _fetchBaseEscrowState(safeId, undefined, { dbClient });
-  const legalHold = await fetchLegalHold(safeId);
+  // Issue #424 — read the tri-state so unknown failures stay distinguishable
+  // from "not held" downstream.
+  const legalHoldResult = await fetchLegalHoldStatus(safeId);
+  const legalHoldStatus = legalHoldResult.status;
+  const legalHoldBool =
+    legalHoldStatus === LEGAL_HOLD_STATUS.HELD ||
+    legalHoldStatus === LEGAL_HOLD_STATUS.UNKNOWN;
 
   // Preserve the legacy `latest_event_type === 'live_read'` marker so callers
   // and existing tests that branch on it keep working with the projection-first
   // refactor.
   const state = {
     ...baseState,
-    legal_hold: legalHold,
+    legal_hold: legalHoldBool,
+    legalHoldStatus,
+    ...(legalHoldResult.reason
+      ? { legalHoldReason: legalHoldResult.reason }
+      : {}),
+    ...(legalHoldResult.errorCode
+      ? { legalHoldErrorCode: legalHoldResult.errorCode }
+      : {}),
     latest_event_type: baseState.latest_event_type || "live_read",
     source: baseState.source || "rpc_stub",
   };
@@ -585,8 +744,26 @@ async function getEscrowStateWithProjection(invoiceId, options = {}) {
     // For live reads, we might not know the exact ledger, so we omit it.
     await cache.setSummary(safeId, state);
   }
+  escrowReadCache.set(safeId, state);
 
   return state;
+}
+
+/**
+ * Invalidates the cached response for an invoice after an escrow write.
+ * @param {string} invoiceId Invoice whose cached read is stale.
+ * @returns {Promise<boolean>} Whether a local or shared entry was removed.
+ */
+async function invalidateEscrowReadCache(invoiceId) {
+  if (typeof invoiceId !== "string") {
+    return false;
+  }
+  const safeId = invoiceId.trim();
+  const localInvalidated = escrowReadCache.invalidate(safeId);
+  const redisInvalidated = cache
+    ? await cache.deleteSummary(safeId)
+    : false;
+  return localInvalidated || redisInvalidated;
 }
 
 module.exports = {
@@ -594,7 +771,14 @@ module.exports = {
   readEscrowStateWithAttestations,
   readFundedAmount,
   fetchLegalHold,
+  fetchLegalHoldStatus,
   fetchAttestationAppendLog,
   validateInvoiceId,
   getEscrowStateWithProjection,
+  invalidateEscrowReadCache,
+  LEGAL_HOLD_STATUS,
+  LEGAL_HOLD_UNKNOWN_REASONS,
+  // Exported so the gate can reuse the canonical rule instead of
+  // duplicating the inline coerce. Issue #424.
+  coerceLegalHoldStatus,
 };

@@ -2,23 +2,25 @@
 
 ## Overview
 
-The Invoice Lifecycle API implements a secure state machine for managing invoice transitions through the LiquiFact platform. The state machine enforces strict transition rules and maintains a complete audit trail of all state changes.
+The Invoice Lifecycle API implements a tenant-scoped state machine for managing invoice transitions through the LiquiFact platform. The state machine enforces strict transition rules and maintains a complete, append-only audit trail of every state change.
 
-**Persistence:** Invoice state is stored in the tenant-scoped `invoices` table via Knex. All transition handlers resolve invoices with `getInvoiceById(invoice_id, tenant_id)` and persist the new `status` after a successful `executeTransition()` call. Status is never accepted from the client request body — only the state machine result is written.
+**Persistence:** Invoice state is stored in the tenant-scoped `invoices` table via Knex. Every transition handler resolves the invoice with `invoiceService.resolveInvoiceForTenant(invoiceId, tenantId)` and, after a successful `executeTransition()` call from the state machine (`src/services/invoiceStateMachine.js`), persists the resulting `status` via `invoiceService.updateInvoice()`. **Status is never accepted from the client request body** — the only client-controlled input is `targetState` (or an implicit target on the convenience endpoints), which must pass state-machine validation before anything is written.
 
-**Tenant isolation:** Every route requires tenant context via the `x-tenant-id` header or a `tenantId` claim in the authenticated JWT (see `extractTenant` middleware). Invoices belonging to another tenant return `404 INVOICE_NOT_FOUND` without leaking existence.
+**Tenant isolation:** Every route in this router mounts the `extractTenant` middleware. Tenant context is resolved from the `x-tenant-id` header or a `tenantId` claim on the authenticated JWT. Requests without a resolvable tenant are rejected with `400`. Invoices belonging to another tenant are indistinguishable from invoices that don't exist — both return `404 INVOICE_NOT_FOUND`.
 
-**Response envelope:** Success and error responses use the standardized envelope from `responseHelper` (`data`, `meta`, `error` fields).
+**Response envelope:** Success and error responses use the standardized envelope from `src/utils/responseHelper.js` (`data`, `meta`, `error` fields), with a human-readable `message` field attached at the top level.
 
 ## State Machine
 
+Implemented in [`src/services/invoiceStateMachine.js`](../src/services/invoiceStateMachine.js).
+
 ### States
 
-- **pending**: Initial state when invoice is created
+- **pending**: Initial state when an invoice is created
 - **approved**: Invoice has been verified and approved
 - **linked_escrow**: Invoice is linked to an escrow contract (terminal state)
 - **rejected**: Invoice was rejected during verification (terminal state)
-- **cancelled**: Invoice was cancelled by user (terminal state)
+- **cancelled**: Invoice was cancelled (terminal state)
 
 ### Valid Transitions
 
@@ -30,32 +32,29 @@ pending → cancelled
 approved → linked_escrow
 approved → cancelled
 
-linked_escrow → (none - terminal)
-rejected → (none - terminal)
-cancelled → (none - terminal)
+linked_escrow → (none — terminal)
+rejected → (none — terminal)
+cancelled → (none — terminal)
 ```
 
 ### Transition Rules
 
-1. **No Silent Jumps**: Cannot skip states (e.g., pending → linked_escrow is forbidden)
-2. **Terminal States**: Once in a terminal state, no further transitions are allowed
-3. **Terminal Transition Reason**: Transitions to `rejected` or `cancelled` require a non-empty, sanitized reason that is recorded in the audit trail.
-4. **Audit Trail**: Every transition is logged with actor, timestamp, and reason
-5. **Authorization**: All transitions require authenticated user
+1. **No silent jumps** — e.g. `pending → linked_escrow` is rejected with `INVALID_TRANSITION`.
+2. **Terminal states** — once an invoice reaches `linked_escrow`, `rejected`, or `cancelled`, no further transitions are allowed (`TERMINAL_STATE`).
+3. **Reason required for terminal targets** — transitions into `rejected` or `cancelled` require a non-empty reason (after control-character stripping and trimming), capped at 1024 characters.
+4. **Audit trail** — every successful transition creates an immutable `STATE_TRANSITION` audit log entry (actor, before/after state, reason, IP, user agent).
+5. **Tenant scoping** — the invoice is always re-resolved for the caller's tenant before any transition is attempted.
 
 ## API Endpoints
 
+All endpoints are mounted under `/api/invoices` (see [`src/routes/invoiceStateRoutes.js`](../src/routes/invoiceStateRoutes.js)) and require an `x-tenant-id` header (or a JWT `tenantId` claim).
+
 ### 1. Get Invoice State
 
-Get the current state and allowed transitions for an invoice.
+**`GET /api/invoices/:id/state`**
 
-**Endpoint**: `GET /api/invoices/:id/state`
+Returns the current state and allowed transitions for an invoice.
 
-**Headers**:
-- `x-tenant-id` (required when JWT lacks `tenantId` claim)
-- `Authorization: Bearer YOUR_JWT_TOKEN` (recommended)
-
-**Response**:
 ```json
 {
   "data": {
@@ -64,46 +63,31 @@ Get the current state and allowed transitions for an invoice.
     "allowedTransitions": ["approved", "rejected", "cancelled"],
     "isTerminal": false
   },
-  "meta": {
-    "timestamp": "2026-04-26T10:30:00.000Z",
-    "version": "0.1.0"
-  },
+  "meta": { "timestamp": "2026-07-24T10:30:00.000Z", "version": "0.1.0" },
   "error": null,
   "message": "Invoice state retrieved successfully"
 }
 ```
 
-**cURL Example**:
-```bash
-curl -X GET http://localhost:3001/api/invoices/inv-001/state \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
-  -H "x-tenant-id: tenant-alpha"
-```
-
----
-
 ### 2. Execute State Transition
 
-Execute a state transition with audit logging.
+**`POST /api/invoices/:id/transition`**
 
-**Endpoint**: `POST /api/invoices/:id/transition`
+Generic transition endpoint driven entirely by the state machine.
 
-**Request Body**:
+Request body:
 ```json
-{
-  "targetState": "approved",
-  "reason": "Invoice verified and approved by finance team"
-}
+{ "targetState": "approved", "reason": "Invoice verified and approved by finance team" }
 ```
 
-**Response**:
+Success response:
 ```json
 {
   "data": {
     "invoiceId": "inv-001",
     "previousState": "pending",
     "currentState": "approved",
-    "transitionedAt": "2026-04-26T10:30:00.000Z",
+    "transitionedAt": "2026-07-24T10:30:00.000Z",
     "transitionedBy": "user-123",
     "reason": "Invoice verified and approved by finance team",
     "auditLogId": "AUDIT-1714132200000-abc123def"
@@ -112,191 +96,46 @@ Execute a state transition with audit logging.
 }
 ```
 
-**cURL Example**:
-```bash
-curl -X POST http://localhost:3001/api/invoices/inv-001/transition \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "targetState": "approved",
-    "reason": "Invoice verified and approved by finance team"
-  }'
-```
-
-**Error Response** (Invalid Transition):
+Invalid-transition error response:
 ```json
 {
   "data": null,
-  "meta": {
-    "timestamp": "2026-04-26T10:30:00.000Z",
-    "version": "0.1.0"
-  },
   "error": {
     "message": "Invalid state transition from pending to linked_escrow. Allowed transitions: approved, rejected, cancelled",
     "code": "INVALID_TRANSITION",
-    "details": {
-      "allowedTransitions": ["approved", "rejected", "cancelled"]
-    }
+    "details": { "allowedTransitions": ["approved", "rejected", "cancelled"] }
   }
 }
 ```
-
-**Error Response** (Missing terminal transition reason):
-```json
-{
-  "data": null,
-  "meta": {
-    "timestamp": "2026-04-26T10:30:00.000Z",
-    "version": "0.1.0"
-  },
-  "error": {
-    "message": "Reason is required for terminal transition to rejected",
-    "code": "MISSING_TRANSITION_REASON",
-    "details": null
-  }
-}
-```
-
----
 
 ### 3. Approve Invoice
 
-Convenience endpoint to approve a pending invoice.
+**`POST /api/invoices/:id/approve`** — convenience wrapper for `pending → approved`.
 
-**Endpoint**: `POST /api/invoices/:id/approve`
-
-**Request Body**:
-```json
-{
-  "reason": "All verification checks passed"
-}
-```
-
-**Response**:
-```json
-{
-  "data": {
-    "invoiceId": "inv-001",
-    "previousState": "pending",
-    "currentState": "approved",
-    "transitionedAt": "2026-04-26T10:30:00.000Z",
-    "transitionedBy": "user-123",
-    "auditLogId": "AUDIT-1714132200000-xyz789"
-  },
-  "message": "Invoice approved successfully"
-}
-```
-
-**cURL Example**:
-```bash
-curl -X POST http://localhost:3001/api/invoices/inv-001/approve \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "reason": "All verification checks passed"
-  }'
-```
-
----
+Request body: `{ "reason": "All verification checks passed" }` (optional; defaults to `"Invoice approved"`).
 
 ### 4. Link Invoice to Escrow
 
-Link an approved invoice to an escrow contract.
+**`POST /api/invoices/:id/link-escrow`** — convenience wrapper for `approved → linked_escrow`.
 
-**Endpoint**: `POST /api/invoices/:id/link-escrow`
+This is a **capital-movement endpoint** and is gated by `requireKycForFunding` followed by `auditKycAccess` (see [`src/middleware/kycGating.js`](../src/middleware/kycGating.js)): the caller's authenticated SME must hold a `verified` or `exempted` KYC status, or the request is rejected with `403 KYC_GATE_FAILED` before the invoice is even looked up. A successful access is logged via `auditKycAccess` for compliance review.
 
-**Request Body**:
-```json
-{
-  "escrowId": "escrow-123",
-  "reason": "Escrow contract created on Stellar"
-}
-```
+Request body: `{ "escrowId": "escrow-123", "reason": "Escrow contract created on Stellar" }` (`escrowId` is optional; when provided it is persisted into the invoice's `metadata.escrowId`).
 
-**Response**:
-```json
-{
-  "data": {
-    "invoiceId": "inv-001",
-    "previousState": "approved",
-    "currentState": "linked_escrow",
-    "escrowId": "escrow-123",
-    "transitionedAt": "2026-04-26T11:00:00.000Z",
-    "transitionedBy": "user-123",
-    "auditLogId": "AUDIT-1714134000000-def456"
-  },
-  "message": "Invoice linked to escrow successfully"
-}
-```
-
-**cURL Example**:
-```bash
-curl -X POST http://localhost:3001/api/invoices/inv-001/link-escrow \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "escrowId": "escrow-123",
-    "reason": "Escrow contract created on Stellar"
-  }'
-```
-
-**Business Rules**:
-- Invoice must be in `approved` state
-- Cannot link pending or rejected invoices
-
----
+Business rule beyond the core state machine: `canLinkToEscrow()` additionally requires the invoice to currently be `approved` — attempting to link a `pending` or already-`linked_escrow` invoice returns `400 CANNOT_LINK_TO_ESCROW`.
 
 ### 5. Reject Invoice
 
-Reject a pending invoice with a reason.
+**`POST /api/invoices/:id/reject`** — convenience wrapper for `* → rejected`.
 
-**Endpoint**: `POST /api/invoices/:id/reject`
-
-**Request Body**:
-```json
-{
-  "reason": "Invalid documentation provided"
-}
-```
-
-**Response**:
-```json
-{
-  "data": {
-    "invoiceId": "inv-001",
-    "previousState": "pending",
-    "currentState": "rejected",
-    "reason": "Invalid documentation provided",
-    "transitionedAt": "2026-04-26T10:45:00.000Z",
-    "transitionedBy": "user-123",
-    "auditLogId": "AUDIT-1714133100000-ghi789"
-  },
-  "message": "Invoice rejected successfully"
-}
-```
-
-**cURL Example**:
-```bash
-curl -X POST http://localhost:3001/api/invoices/inv-001/reject \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "reason": "Invalid documentation provided"
-  }'
-```
-
-**Validation**:
-- `reason` field is required for rejection
-
----
+Request body: `{ "reason": "Invalid documentation provided" }`. `reason` is **required** — a missing or blank reason returns `400 MISSING_TRANSITION_REASON` before the state machine is even consulted.
 
 ### 6. Get Transition History
 
-Retrieve the complete state transition history for an invoice.
+**`GET /api/invoices/:id/history`**
 
-**Endpoint**: `GET /api/invoices/:id/history`
+Returns the full, tenant-scoped audit trail for an invoice, most recent first.
 
-**Response**:
 ```json
 {
   "data": {
@@ -305,77 +144,48 @@ Retrieve the complete state transition history for an invoice.
     "transitions": [
       {
         "id": "AUDIT-1714134000000-def456",
-        "timestamp": "2026-04-26T11:00:00.000Z",
+        "timestamp": "2026-07-24T11:00:00.000Z",
         "actor": "user-123",
         "fromState": "approved",
         "toState": "linked_escrow",
         "reason": "Escrow contract created on Stellar",
         "ipAddress": "192.168.1.100"
-      },
-      {
-        "id": "AUDIT-1714132200000-xyz789",
-        "timestamp": "2026-04-26T10:30:00.000Z",
-        "actor": "user-123",
-        "fromState": "pending",
-        "toState": "approved",
-        "reason": "All verification checks passed",
-        "ipAddress": "192.168.1.100"
       }
     ],
-    "totalTransitions": 2
+    "totalTransitions": 1
   },
   "message": "Invoice transition history retrieved successfully"
 }
 ```
 
-**cURL Example**:
-```bash
-curl -X GET http://localhost:3001/api/invoices/inv-001/history \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN"
-```
-
----
-
 ## Error Codes
 
 | Code | Description | HTTP Status |
 |------|-------------|-------------|
-| `INVOICE_NOT_FOUND` | Invoice does not exist | 404 |
-| `MISSING_TARGET_STATE` | Target state not provided | 400 |
-| `INVALID_TRANSITION` | Transition not allowed by state machine | 400 |
-| `ALREADY_IN_TARGET_STATE` | Invoice is already in the target state | 400 |
-| `TERMINAL_STATE` | Cannot transition from terminal state | 400 |
-| `CANNOT_LINK_TO_ESCROW` | Business rules prevent escrow linking | 400 |
-| `MISSING_TRANSITION_REASON` | Reason required for terminal transition | 400 |
-
----
+| `INVOICE_NOT_FOUND` | Invoice does not exist, is soft-deleted, or belongs to another tenant | 404 |
+| `MISSING_TARGET_STATE` | `targetState` not provided on `/transition` | 400 |
+| `MISSING_TRANSITION_REASON` | Reason required (terminal target, or `/reject`) but absent/blank | 400 |
+| `TRANSITION_REASON_TOO_LONG` | Reason exceeds 1024 characters | 400 |
+| `ALREADY_IN_TARGET_STATE` | Invoice is already in the requested state | 400 |
+| `TERMINAL_STATE` | Invoice's current state does not permit further transitions | 400 |
+| `INVALID_TRANSITION` | Requested transition is not in the allowed-transition table | 400 |
+| `CANNOT_LINK_TO_ESCROW` | Invoice is not in `approved` state | 400 |
+| `KYC_GATE_FAILED` | SME's KYC status does not permit the capital-moving `link-escrow` operation | 403 |
+| `MISSING_SME_ID` | Authenticated principal has no `smeId` claim (required for the KYC gate) | 400 |
 
 ## Audit Trail
 
-Every state transition creates an immutable audit log entry with:
-
-- **Actor**: User ID or IP address of who performed the transition
-- **Timestamp**: ISO 8601 timestamp of when transition occurred
-- **Before/After States**: Previous and new states
-- **Reason**: Human-readable explanation for the transition
-- **IP Address**: Source IP of the request
-- **User Agent**: Client user agent string
-- **Metadata**: Additional context (method, path, escrow ID, etc.)
-
-### Audit Log Schema
+Every successful transition creates an immutable entry via `createAuditLog()` (`src/services/auditLog.js`), persisted to the append-only `audit_log_events` table:
 
 ```json
 {
   "id": "AUDIT-1714132200000-abc123",
-  "timestamp": "2026-04-26T10:30:00.000Z",
+  "timestamp": "2026-07-24T10:30:00.000Z",
   "actor": "user-123",
   "action": "STATE_TRANSITION",
   "resourceType": "invoice",
   "resourceId": "inv-001",
-  "changes": {
-    "before": { "state": "pending" },
-    "after": { "state": "approved" }
-  },
+  "changes": { "before": { "state": "pending" }, "after": { "state": "approved" } },
   "statusCode": 200,
   "ipAddress": "192.168.1.100",
   "userAgent": "Mozilla/5.0...",
@@ -388,155 +198,29 @@ Every state transition creates an immutable audit log entry with:
 }
 ```
 
----
+## Capital Moving States Gating
+
+Beyond the `pending`/`approved`/`linked_escrow`/`rejected`/`cancelled` lifecycle covered by this router, `CAPITAL_MOVING_STATES` (`src/services/invoiceStateMachine.js`) identifies funding-progress statuses that involve the reallocation of funds and therefore require KYC verification wherever they are reached:
+
+* `funded`
+* `settled`
+
+`kycGatingMiddleware` (`src/middleware/kycGating.js`) blocks any request whose target state is in this set unless the caller is KYC-verified. This is used by the investor funding flow (`src/routes/invest.js`); it is distinct from the `requireKycForFunding` gate on `POST /api/invoices/:id/link-escrow` described above.
 
 ## Security Considerations
 
-### Tenant scoping
-- All routes mount `extractTenant` middleware before handlers run.
-- Invoice lookups use `invoice_id` **and** `tenant_id`; cross-tenant IDs return `404`.
-- Client-supplied `status` fields in the request body are ignored — only the state machine output is persisted.
-
-### Authentication
-- All endpoints require valid JWT authentication
-- Actor is extracted from JWT token (`req.user.id` or `req.user.sub`)
-- Fallback to IP address only for development/testing
-
-### Authorization
-- Users can only transition invoices they have permission to modify
-- Role-based access control should be implemented in production
-
-### Input Validation
-- All state transitions are validated against the state machine rules
-- Reason fields are sanitized to prevent XSS
-- State names are validated against allowed values
-
-### Audit Security
-- Audit logs are immutable once created
-- Sensitive fields (passwords, tokens) are automatically redacted
-- Audit logs include IP address and user agent for forensics
-
----
-
-## Complete Workflow Example
-
-### Scenario: Invoice Approval and Escrow Linking
-
-```bash
-# 1. Check initial state
-curl -X GET http://localhost:3001/api/invoices/inv-001/state \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN"
-
-# Response: { "currentState": "pending", "allowedTransitions": ["approved", "rejected", "cancelled"] }
-
-# 2. Approve the invoice
-curl -X POST http://localhost:3001/api/invoices/inv-001/approve \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "reason": "Invoice verified by finance team"
-  }'
-
-# Response: { "currentState": "approved", "previousState": "pending" }
-
-# 3. Link to escrow
-curl -X POST http://localhost:3001/api/invoices/inv-001/link-escrow \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "escrowId": "escrow-abc-123",
-    "reason": "Escrow contract deployed to Stellar"
-  }'
-
-# Response: { "currentState": "linked_escrow", "escrowId": "escrow-abc-123" }
-
-# 4. View complete history
-curl -X GET http://localhost:3001/api/invoices/inv-001/history \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN"
-
-# Response: Shows all 2 transitions with timestamps and actors
-```
-
----
+- **Tenant scoping**: all reads/writes are scoped by `invoice_id` **and** `tenant_id`; cross-tenant IDs return `404` rather than `403`, so tenant existence is never leaked.
+- **Status is never client-overridable**: the request body's only meaningful input is `targetState` (or is implicit on the convenience endpoints); the persisted `status` always comes from the state machine's `executeTransition()` result.
+- **KYC gate on capital movement**: `POST /:id/link-escrow` requires `requireKycForFunding` to pass before the invoice is resolved or any transition is attempted.
+- **Actor resolution**: the acting principal is taken from `req.user.id`/`req.user.sub` (JWT), falling back to the request IP only when no authenticated user is present.
+- **Reason sanitization**: control characters are stripped and the string is trimmed before being persisted to the audit log, mitigating log-injection via the `reason` field.
 
 ## Testing
 
-### Unit Tests
-Run unit tests for state machine logic:
 ```bash
 npm test tests/invoice.state.test.js
-```
-
-### Coverage Requirements
-- Minimum 95% line coverage on new code
-- All state transitions tested
-- All error conditions tested
-- Audit logging verified
-
-### Test Coverage
-```bash
 npm run test:coverage -- tests/invoice.state.test.js
+npm run lint:new
 ```
 
----
-
-## Database Schema
-
-### Invoices Table (Knex / SQLite test profile)
-
-State transitions update the `status` column on the tenant-scoped `invoices` row:
-
-| Column | Notes |
-|--------|-------|
-| `invoice_id` | Public identifier used in API paths |
-| `tenant_id` | Required on every read/write |
-| `status` | Lifecycle state (`pending`, `approved`, `linked_escrow`, `rejected`, `cancelled`, …) |
-| `metadata` | JSON; `escrowId` stored here after link-escrow |
-| `deleted_at` | Soft-deleted invoices are excluded from state routes |
-
-### Audit Logs Table
-
-```sql
-CREATE TABLE audit_logs (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    timestamp TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-    actor VARCHAR(255) NOT NULL,
-    action VARCHAR(50) NOT NULL,
-    resource_type VARCHAR(50) NOT NULL,
-    resource_id VARCHAR(255) NOT NULL,
-    before_state JSONB,
-    after_state JSONB,
-    status_code INTEGER NOT NULL DEFAULT 200,
-    ip_address VARCHAR(45),
-    user_agent TEXT,
-    metadata JSONB DEFAULT '{}',
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX idx_audit_logs_resource ON audit_logs(resource_type, resource_id);
-CREATE INDEX idx_audit_logs_timestamp ON audit_logs(timestamp DESC);
-```
-
----
-
-## Integration with Stellar
-
-When linking an invoice to escrow, the system should:
-
-1. Validate invoice is in `approved` state
-2. Create escrow contract on Stellar network
-3. Transition invoice to `linked_escrow` state
-4. Store escrow contract ID in invoice record
-5. Create audit log with escrow details
-
-The state machine ensures invoices cannot be linked to escrow without proper approval, preventing unauthorized or premature escrow creation.
-
----
-
-## Future Enhancements
-
-- **Partial Approvals**: Multi-step approval workflow
-- **Conditional Transitions**: Business rule engine for complex validations
-- **Rollback Support**: Ability to revert certain transitions with proper authorization
-- **Notification System**: Trigger notifications on state changes
-- **Webhook Integration**: Call external systems on state transitions
+`tests/invoice.state.test.js` exercises the full transition matrix (valid and invalid pairs), terminal-state rejection, reason validation/sanitization, audit-log emission, and the route layer (tenant isolation, cross-tenant 404s, KYC-gated `link-escrow`, and unexpected-error propagation).

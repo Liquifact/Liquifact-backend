@@ -64,8 +64,16 @@ const derived = computeEscrowDerivedFields(state, {
 ```
 
 When `ledgerCloseTime` is absent (e.g. the Soroban stub does not return it),
-the function falls back transparently to the server wall clock with a warn-level
-log, preserving the existing behaviour.
+the function falls back transparently to the server wall clock, preserving the
+existing behaviour.
+
+Validation anomalies are emitted through the shared structured logger at
+`warn` level with `component: "escrowDerived"`. These warnings cover
+milliseconds accidentally passed as epoch seconds, non-numeric or negative
+ledger close times, absurd future maturity dates, and stale overdue maturity
+dates beyond the grace window. Logs include bounded numeric context such as
+`ledgerCloseTime`, `daysDiff`, and the relevant threshold, but do not include
+raw unbounded caller-supplied strings.
 
 ### Rounding
 
@@ -83,7 +91,7 @@ avoid IEEE 754 drift in UI rendering.
 | Stellar network | [`src/config/stellar.js`](../src/config/stellar.js), [`src/config/index.js`](../src/config/index.js) | `getStellarConfig`, Zod `validate()` |
 | Soroban wrapper | [`src/services/soroban.js`](../src/services/soroban.js) | `callSorobanContract` (retries) |
 | Read + legal hold | [`src/services/escrowRead.js`](../src/services/escrowRead.js) | `readEscrowState`, `fetchLegalHold` |
-| Batch read | [`src/services/escrowBatchRead.js`](../src/services/escrowBatchRead.js) | Uses `readEscrowState` with concurrency limits |
+| Batch read | [`src/services/escrowBatchRead.js`](../src/services/escrowBatchRead.js) | Uses `readEscrowState` with concurrency limits and per-invoice transient error retry |
 | Funding stub | [`src/services/escrowSubmit.js`](../src/services/escrowSubmit.js) | `submitEscrowFunding`, `FUND_OPERATION = 'fund_escrow'` |
 | Simulation | [`src/services/sorobanSim.js`](../src/services/sorobanSim.js) | `simulateOrThrowSync` (when signed XDR present) |
 | Indexer job | [`src/jobs/escrowIndexer.js`](../src/jobs/escrowIndexer.js) | `createEscrowIndexer`, `runEscrowIndexerCycle`, `persistEscrowEvent` |

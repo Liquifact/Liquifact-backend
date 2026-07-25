@@ -10,6 +10,7 @@
 
 const request = require('supertest');
 const express = require('express');
+const { StrKey } = require('@stellar/stellar-sdk');
 const { authorizeSmeWallet, verifyInvoiceOwner } = require('../../src/middleware/smeAuth');
 
 // ---------------------------------------------------------------------------
@@ -53,10 +54,10 @@ function injectUser(user) {
   };
 }
 
-// Valid Stellar address: G followed by 55 chars from [A-Z2-7]
-const VALID_WALLET = 'GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB';
-const VALID_WALLET_2 = 'GCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC';
-const MALFORMED_WALLET = 'XBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB'; // starts with X not G
+const VALID_WALLET = StrKey.encodeEd25519PublicKey(Buffer.alloc(32, 1));
+const VALID_WALLET_2 = StrKey.encodeEd25519PublicKey(Buffer.alloc(32, 2));
+const VALID_CONTRACT_ADDRESS = StrKey.encodeContract(Buffer.alloc(32, 3));
+const MALFORMED_WALLET = `X${VALID_WALLET.slice(1)}`; // starts with X not G/C
 const SHORT_WALLET = 'GABC2345'; // too short
 
 // ---------------------------------------------------------------------------
@@ -163,7 +164,7 @@ describe('authorizeSmeWallet — header spoofing rejection', () => {
 // ---------------------------------------------------------------------------
 
 describe('authorizeSmeWallet — Stellar address format validation', () => {
-  it('returns 400 when wallet does not start with G', async () => {
+  it('returns 400 when wallet does not start with G or C', async () => {
     const app = makeApp(
       injectUser({ id: 'user-001', walletAddress: MALFORMED_WALLET }),
       authorizeSmeWallet
@@ -202,7 +203,7 @@ describe('authorizeSmeWallet — Stellar address format validation', () => {
     expect(res.status).toBe(400);
   });
 
-  it('accepts a valid 56-character Stellar address starting with G', async () => {
+  it('accepts a valid Stellar account address starting with G', async () => {
     const app = makeApp(
       injectUser({ id: 'user-001', walletAddress: VALID_WALLET }),
       authorizeSmeWallet
@@ -212,14 +213,33 @@ describe('authorizeSmeWallet — Stellar address format validation', () => {
     expect(res.body.walletAddress).toBe(VALID_WALLET);
   });
 
-  it('accepts addresses with only uppercase letters and digits 2-7', async () => {
-    const validChars = 'G234567ABCDEFGHIJKLMNOPQRSTUVWXYZ234567234567234567ABCDE';
+  it('returns 400 for a valid contract address because SME wallets must be account public keys', async () => {
     const app = makeApp(
-      injectUser({ id: 'user-001', walletAddress: validChars }),
+      injectUser({ id: 'user-001', walletAddress: VALID_CONTRACT_ADDRESS }),
       authorizeSmeWallet
     );
     const res = await request(app).get('/test');
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(400);
+    expect(res.body.detail).toMatch(/Stellar wallet address format is invalid/);
+  });
+
+  it('returns 400 for wrong-length uppercase values that only look like StrKeys', async () => {
+    const almostValid = `${VALID_WALLET}A`;
+    const app = makeApp(
+      injectUser({ id: 'user-001', walletAddress: almostValid }),
+      authorizeSmeWallet
+    );
+    const res = await request(app).get('/test');
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 for trailing whitespace on otherwise valid addresses', async () => {
+    const app = makeApp(
+      injectUser({ id: 'user-001', walletAddress: `${VALID_CONTRACT_ADDRESS} ` }),
+      authorizeSmeWallet
+    );
+    const res = await request(app).get('/test');
+    expect(res.status).toBe(400);
   });
 });
 

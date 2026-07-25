@@ -8,10 +8,29 @@
  *    › scope enforcement  › valid + scoped access
  *    › req.apiClient population
  *    › env override for isolated tests
+ *    › metrics emission (duration histogram + error counter)
+ *    › structured logging (no key material exposed)
  */
+
+// The middleware now emits structured pino log lines for every auth outcome
+// (missing / invalid / revoked / insufficient_scope / success). Mock the
+// shared logger at the module boundary so the existing 100+ assertions stay
+// silent on stdout and don't get noisy under CI log-volume gates. Dedicated
+// audit-invoked coverage lives in tests/apiKey.test.js.
+jest.mock('../../src/logger', () => ({
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
+  debug: jest.fn(),
+  trace: jest.fn(),
+  fatal: jest.fn(),
+  child: jest.fn(),
+  createRequestLogger: jest.fn(),
+}));
 
 const request = require('supertest');
 const express = require('express');
+const apiKeysRouter = require('../../src/routes/apiKeys');
 
 const {
   parseApiKeys,
@@ -365,6 +384,314 @@ describe('middleware/apiKeyAuth — malformed API_KEYS env propagates error', ()
     const res = await request(app).get('/test').set('X-API-Key', 'lf_anything000');
     // The registry load throws; Express default error handler returns 500
     expect(res.status).toBe(500);
+  });
+});
+
+describe('api-keys endpoint integration', () => {
+  let app;
+
+  beforeEach(() => {
+    apiKeysRouter.resetRuntimeEntries();
+    app = express();
+    app.locals.env = { API_KEYS: '' };
+    app.use(apiKeysRouter);
+  });
+
+  it('creates a key and returns the expected success shape', async () => {
+    const res = await request(app)
+      .post('/api-keys')
+      .send({
+        key: 'lf_newkey0001',
+        clientId: 'svc-alpha',
+        scopes: ['invoices:read'],
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({
+      message: 'API key created successfully.',
+      data: {
+        key: 'lf_newkey0001',
+        clientId: 'svc-alpha',
+        scopes: ['invoices:read'],
+        revoked: false,
+      },
+    });
+  });
+
+  it('returns 404 for a missing key', async () => {
+    const res = await request(app).get('/api-keys/lf_missingkey001');
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({
+      error: 'API key not found.',
+      code: 'NOT_FOUND',
+    });
+  });
+
+  it('returns 422 for invalid input and reports validation details', async () => {
+    const res = await request(app)
+      .post('/api-keys')
+      .send({ key: 'bad-key', clientId: '', scopes: [] });
+
+    expect(res.status).toBe(422);
+    expect(res.body).toMatchObject({
+      error: 'Validation failed.',
+      code: 'VALIDATION_ERROR',
+    });
+    expect(res.body.details).toEqual(expect.arrayContaining([
+      expect.objectContaining({ field: 'body' }),
+    ]));
+  });
+
+  it('returns an idempotent success response when the same key is created twice', async () => {
+    const first = await request(app)
+      .post('/api-keys')
+      .send({
+        key: 'lf_repeatkey01',
+        clientId: 'svc-repeat',
+        scopes: ['invoices:write'],
+      });
+
+    const second = await request(app)
+      .post('/api-keys')
+      .send({
+        key: 'lf_repeatkey01',
+        clientId: 'svc-repeat',
+        scopes: ['invoices:write'],
+      });
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(200);
+    expect(second.body).toMatchObject({
+      idempotent: true,
+      message: 'API key already exists.',
+      data: {
+        key: 'lf_repeatkey01',
+        clientId: 'svc-repeat',
+        scopes: ['invoices:write'],
+        revoked: false,
+      },
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// middleware/apiKeyAuth — observability (metrics + structured logging)
+// ---------------------------------------------------------------------------
+
+describe('middleware/apiKeyAuth — observability', () => {
+  const logger = require('../../src/logger');
+  const {
+    apiKeyAuthDurationSeconds,
+    apiKeyAuthErrorsTotal,
+  } = require('../../src/metrics');
+
+  beforeEach(() => {
+    // Reset metric shims between tests so assertions are isolated.
+    apiKeyAuthDurationSeconds.reset();
+    apiKeyAuthErrorsTotal.reset();
+    jest.restoreAllMocks();
+  });
+
+  describe('metrics — duration histogram', () => {
+    it('records duration after successful auth', async () => {
+      const app = makeApp(authenticateApiKey({ env: REGISTRY_ENV }));
+      await request(app).get('/test').set('X-API-Key', VALID_KEY);
+
+      // Histogram shim stores entries in hashMap keyed by JSON.stringify(labels).
+      const keys = Object.keys(apiKeyAuthDurationSeconds.hashMap);
+      expect(keys.length).toBeGreaterThan(0);
+
+      const hashMap = apiKeyAuthDurationSeconds.hashMap;
+      const hasSuccessEntry = Object.values(hashMap).some(
+        (entry) => entry.labels && entry.labels.outcome === 'success',
+      );
+      expect(hasSuccessEntry).toBe(true);
+    });
+
+    it('records duration after 401 (missing key)', async () => {
+      const app = makeApp(authenticateApiKey({ env: REGISTRY_ENV }));
+      await request(app).get('/test');
+
+      const hashMap = apiKeyAuthDurationSeconds.hashMap;
+      const hasClientErrorEntry = Object.values(hashMap).some(
+        (entry) =>
+          entry.labels &&
+          entry.labels.outcome === 'client_error' &&
+          entry.labels.status === '401',
+      );
+      expect(hasClientErrorEntry).toBe(true);
+    });
+
+    it('records duration after 403 (insufficient scope)', async () => {
+      const app = makeApp(
+        authenticateApiKey({ requiredScope: 'invoices:write', env: REGISTRY_ENV }),
+      );
+      await request(app).get('/test').set('X-API-Key', SCOPED_KEY);
+
+      const hashMap = apiKeyAuthDurationSeconds.hashMap;
+      const hasForbiddenEntry = Object.values(hashMap).some(
+        (entry) =>
+          entry.labels &&
+          entry.labels.outcome === 'client_error' &&
+          entry.labels.status === '403',
+      );
+      expect(hasForbiddenEntry).toBe(true);
+    });
+
+    it('recorded labels never contain the API key', async () => {
+      const app = makeApp(authenticateApiKey({ env: REGISTRY_ENV }));
+      await request(app).get('/test').set('X-API-Key', VALID_KEY);
+
+      const allLabels = Object.values(
+        apiKeyAuthDurationSeconds.hashMap,
+      ).map((e) => JSON.stringify(e.labels));
+      for (const labelStr of allLabels) {
+        expect(labelStr).not.toContain(VALID_KEY);
+      }
+    });
+  });
+
+  describe('metrics — error counter', () => {
+    it('increments unauthorized counter on 401', async () => {
+      const app = makeApp(authenticateApiKey({ env: REGISTRY_ENV }));
+      await request(app).get('/test');
+
+      const unauthorizedVal = await apiKeyAuthErrorsTotal.get({ cause: 'unauthorized' });
+      // Real prom-client returns { values: [...] }; shim returns a number.
+      const value = typeof unauthorizedVal === 'object'
+        ? (unauthorizedVal.values && unauthorizedVal.values[0] ? unauthorizedVal.values[0].value : 0)
+        : unauthorizedVal;
+      expect(value).toBeGreaterThan(0);
+    });
+
+    it('increments forbidden counter on 403', async () => {
+      const app = makeApp(
+        authenticateApiKey({ requiredScope: 'invoices:write', env: REGISTRY_ENV }),
+      );
+      await request(app).get('/test').set('X-API-Key', SCOPED_KEY);
+
+      const forbiddenVal = await apiKeyAuthErrorsTotal.get({ cause: 'forbidden' });
+      const value = typeof forbiddenVal === 'object'
+        ? (forbiddenVal.values && forbiddenVal.values[0] ? forbiddenVal.values[0].value : 0)
+        : forbiddenVal;
+      expect(value).toBeGreaterThan(0);
+    });
+
+    it('does not increment error counter on 200', async () => {
+      const app = makeApp(authenticateApiKey({ env: REGISTRY_ENV }));
+      await request(app).get('/test').set('X-API-Key', VALID_KEY);
+
+      const unauthorizedRaw = await apiKeyAuthErrorsTotal.get({ cause: 'unauthorized' });
+      const forbiddenRaw = await apiKeyAuthErrorsTotal.get({ cause: 'forbidden' });
+      const internalRaw = await apiKeyAuthErrorsTotal.get({ cause: 'internal_error' });
+
+      const extract = (raw) =>
+        typeof raw === 'object'
+          ? (raw.values && raw.values[0] ? raw.values[0].value : 0)
+          : raw;
+
+      expect(extract(unauthorizedRaw)).toBe(0);
+      expect(extract(forbiddenRaw)).toBe(0);
+      expect(extract(internalRaw)).toBe(0);
+    });
+  });
+
+  describe('metrics — error counter for 500 (malformed registry)', () => {
+    it('increments internal_error counter and includes error_type in log on 500', async () => {
+      const warnSpy = jest.spyOn(logger, 'warn');
+      const badEnv = { API_KEYS: '{broken json;' };
+      const app = makeApp(authenticateApiKey({ env: badEnv }));
+
+      await request(app).get('/test').set('X-API-Key', 'lf_anything000');
+
+      const internalRaw = await apiKeyAuthErrorsTotal.get({ cause: 'internal_error' });
+      const value = typeof internalRaw === 'object'
+        ? (internalRaw.values && internalRaw.values[0] ? internalRaw.values[0].value : 0)
+        : internalRaw;
+      expect(value).toBeGreaterThan(0);
+
+      // Verify structured log includes correct error_type.
+      expect(warnSpy).toHaveBeenCalled();
+      const logArgs = warnSpy.mock.calls.find(
+        (call) => call[1] === 'API key auth request failed',
+      );
+      expect(logArgs).toBeDefined();
+      expect(logArgs[0]).toHaveProperty('error_type', 'internal_error');
+      expect(logArgs[0]).toHaveProperty('status', 500);
+      expect(logArgs[0]).toHaveProperty('outcome', 'server_error');
+    });
+  });
+
+  describe('structured logging', () => {
+    it('logs a success message on valid auth without exposing key material', async () => {
+      const infoSpy = jest.spyOn(logger, 'info');
+      const app = makeApp(authenticateApiKey({ env: REGISTRY_ENV }));
+
+      await request(app).get('/test').set('X-API-Key', VALID_KEY);
+
+      expect(infoSpy).toHaveBeenCalled();
+      const logArgs = infoSpy.mock.calls.find(
+        (call) =>
+          call[1] === 'API key auth request succeeded',
+      );
+      expect(logArgs).toBeDefined();
+
+      const logPayload = logArgs[0];
+      expect(logPayload).toHaveProperty('endpoint');
+      expect(logPayload).toHaveProperty('method');
+      expect(logPayload).toHaveProperty('status');
+      expect(logPayload).toHaveProperty('duration_ms');
+      expect(logPayload).toHaveProperty('outcome', 'success');
+
+      // Assert no key material in logs.
+      const logStr = JSON.stringify(logPayload);
+      expect(logStr).not.toContain(VALID_KEY);
+    });
+
+    it('logs a warning on 401 without exposing key material', async () => {
+      const warnSpy = jest.spyOn(logger, 'warn');
+      const app = makeApp(authenticateApiKey({ env: REGISTRY_ENV }));
+
+      await request(app).get('/test').set('X-API-Key', 'lf_badsecretkey');
+
+      expect(warnSpy).toHaveBeenCalled();
+      const logArgs = warnSpy.mock.calls.find(
+        (call) =>
+          call[1] === 'API key auth request failed',
+      );
+      expect(logArgs).toBeDefined();
+
+      const logPayload = logArgs[0];
+      expect(logPayload).toHaveProperty('endpoint');
+      expect(logPayload).toHaveProperty('status', 401);
+      expect(logPayload).toHaveProperty('error_type', 'unauthorized');
+
+      // Assert no key material in logs.
+      const logStr = JSON.stringify(logPayload);
+      expect(logStr).not.toContain('lf_badsecretkey');
+    });
+
+    it('logs a warning on 403 with forbidden error_type', async () => {
+      const warnSpy = jest.spyOn(logger, 'warn');
+      const app = makeApp(
+        authenticateApiKey({ requiredScope: 'invoices:write', env: REGISTRY_ENV }),
+      );
+
+      await request(app).get('/test').set('X-API-Key', SCOPED_KEY);
+
+      expect(warnSpy).toHaveBeenCalled();
+      const logArgs = warnSpy.mock.calls.find(
+        (call) =>
+          call[1] === 'API key auth request failed',
+      );
+      expect(logArgs).toBeDefined();
+
+      const logPayload = logArgs[0];
+      expect(logPayload).toHaveProperty('status', 403);
+      expect(logPayload).toHaveProperty('error_type', 'forbidden');
+      expect(logPayload).toHaveProperty('outcome', 'client_error');
+    });
   });
 });
 

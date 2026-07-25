@@ -4,6 +4,7 @@ const express = require('express');
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
+const configModule = require('../config');
 const { authenticateToken } = require('../middleware/auth');
 
 // Build a self-contained Express app so the middleware can be tested in isolation
@@ -39,12 +40,24 @@ const { privateKey } = crypto.generateKeyPairSync('rsa', {
 describe('Authentication Middleware', () => {
   const secret = process.env.JWT_SECRET || 'test-secret';
   const validPayload = { id: 1, role: 'user' };
+  const originalNodeEnv = process.env.NODE_ENV;
+  const originalJwtSecret = process.env.JWT_SECRET;
   let validToken;
   let expiredToken;
 
   beforeAll(() => {
     validToken = jwt.sign(validPayload, secret, { expiresIn: '1h' });
     expiredToken = jwt.sign(validPayload, secret, { expiresIn: '-1h' });
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    process.env.NODE_ENV = originalNodeEnv;
+    if (originalJwtSecret === undefined) {
+      delete process.env.JWT_SECRET;
+    } else {
+      process.env.JWT_SECRET = originalJwtSecret;
+    }
   });
 
   // ─── Route Protection — POST /api/invoices ────────────────────────────────
@@ -90,6 +103,18 @@ describe('Authentication Middleware', () => {
         .send({});
       expect(res.status).toBe(401);
       expect(res.body.detail).toBe('Token has expired');
+    });
+
+    it('should return 401 when token is not active yet', async () => {
+      const futureToken = jwt.sign(validPayload, secret, { expiresIn: '1h', notBefore: '1h' });
+
+      const res = await request(app)
+        .post('/api/invoices')
+        .set('Authorization', `Bearer ${futureToken}`)
+        .send({});
+
+      expect(res.status).toBe(401);
+      expect(res.body.detail).toBe('Token not yet active');
     });
 
     it('should return 201 when a valid token is provided', async () => {
@@ -207,6 +232,87 @@ describe('Authentication Middleware', () => {
         .get('/api/escrow/test-invoice')
         .set('Authorization', '');
       expect(res.status).toBe(401);
+    });
+  });
+
+  describe('JWT config fallback safety', () => {
+    it('rejects test-secret tokens outside test mode when config is unavailable', async () => {
+      process.env.NODE_ENV = 'production';
+      delete process.env.JWT_SECRET;
+      jest.spyOn(configModule, 'get').mockImplementation(() => {
+        throw new Error('Config not validated. Call validate() first.');
+      });
+
+      const forgedToken = jwt.sign(validPayload, 'test-secret', { expiresIn: '1h' });
+
+      const res = await request(app)
+        .post('/api/invoices')
+        .set('Authorization', `Bearer ${forgedToken}`)
+        .send({});
+
+      expect(res.status).toBe(401);
+      expect(res.body.detail).toBe('Authentication configuration is unavailable');
+    });
+
+    it('does not expose the secret or token when config is unavailable', async () => {
+      process.env.NODE_ENV = 'production';
+      process.env.JWT_SECRET = 'test-secret';
+      const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+      jest.spyOn(configModule, 'get').mockImplementation(() => {
+        throw new Error('Config not validated. Call validate() first.');
+      });
+      const token = jwt.sign(validPayload, 'test-secret', { expiresIn: '1h' });
+
+      const res = await request(app)
+        .post('/api/invoices')
+        .set('Authorization', `Bearer ${token}`)
+        .send({});
+
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+      expect(JSON.stringify(res.body)).not.toContain('test-secret');
+      expect(JSON.stringify(res.body)).not.toContain(token);
+    });
+
+    it('allows the fallback secret only while NODE_ENV is test', async () => {
+      process.env.NODE_ENV = 'test';
+      process.env.JWT_SECRET = 'test-secret';
+      jest.spyOn(configModule, 'get').mockImplementation(() => {
+        throw new Error('Config not validated. Call validate() first.');
+      });
+
+      const testToken = jwt.sign(validPayload, 'test-secret', { expiresIn: '1h' });
+
+      const res = await request(app)
+        .post('/api/invoices')
+        .set('Authorization', `Bearer ${testToken}`)
+        .send({ amount: 1000 });
+
+      expect(res.status).toBe(201);
+    });
+
+    it('uses validated config instead of the environment fallback when available', async () => {
+      process.env.NODE_ENV = 'production';
+      process.env.JWT_SECRET = 'test-secret';
+      const validatedSecret = 'validated-secret-at-least-32-characters-long';
+      jest.spyOn(configModule, 'get').mockReturnValue({
+        JWT_SECRET: validatedSecret,
+        JWT_ALGORITHMS: 'HS256',
+      });
+
+      const validConfiguredToken = jwt.sign(validPayload, validatedSecret, { expiresIn: '1h' });
+      const forgedFallbackToken = jwt.sign(validPayload, 'test-secret', { expiresIn: '1h' });
+
+      const accepted = await request(app)
+        .post('/api/invoices')
+        .set('Authorization', `Bearer ${validConfiguredToken}`)
+        .send({ amount: 1000 });
+      const rejected = await request(app)
+        .post('/api/invoices')
+        .set('Authorization', `Bearer ${forgedFallbackToken}`)
+        .send({ amount: 1000 });
+
+      expect(accepted.status).toBe(201);
+      expect(rejected.status).toBe(401);
     });
   });
 });
