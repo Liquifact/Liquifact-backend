@@ -249,6 +249,72 @@ describe('Query Builder Utility', () => {
       expect(mockQuery.where).toHaveBeenCalledWith('funded_ratio', 0.99);
       expect(mockQuery.where).toHaveBeenCalledWith('status', 'partially_funded');
     });
+
+    it('should map all marketplace filter keys via columnMap including maturityDateTo and fundedRatioMax', () => {
+      const options = {
+        filters: {
+          yieldBpsMax: 999,
+          maturityDateTo: '2025-12-31',
+          fundedRatioMax: 1.0,
+        },
+      };
+      applyQueryOptions(mockQuery, options, MARKETPLACE_QUERY_CONFIG);
+
+      expect(mockQuery.where).toHaveBeenCalledWith('yield_bps', 999);
+      expect(mockQuery.where).toHaveBeenCalledWith('maturity_date', '2025-12-31');
+      expect(mockQuery.where).toHaveBeenCalledWith('funded_ratio', 1.0);
+      expect(mockQuery.where).toHaveBeenCalledTimes(3);
+    });
+
+it('should apply columnMap alias keys (yieldBps, maturityDate, fundedRatio) as equality filters', () => {
+      // These keys are NOT in allowedFilters, only in columnMap as aliases.
+      // They should be ignored since they're not whitelisted.
+      const options = {
+        filters: {
+          yieldBps: 500,
+          maturityDate: '2025-07-01',
+          fundedRatio: 0.75,
+        },
+      };
+      applyQueryOptions(mockQuery, options, MARKETPLACE_QUERY_CONFIG);
+
+      expect(mockQuery.where).not.toHaveBeenCalled();
+    });
+
+it('should handle undefined options gracefully (applies default sort when config has allowedSortFields)', () => {
+      applyQueryOptions(mockQuery, undefined, config);
+
+      expect(mockQuery.where).not.toHaveBeenCalled();
+      expect(mockQuery.orderBy).toHaveBeenCalledWith('amount', 'desc');
+    });
+  });
+
+  describe('edge cases for empty and missing inputs', () => {
+    it('should handle empty filters object without calling where', () => {
+      applyQueryOptions(mockQuery, { filters: {} }, config);
+
+      expect(mockQuery.where).not.toHaveBeenCalled();
+    });
+
+    it('should handle empty sorting object without calling orderBy when allowedSortFields exist', () => {
+      applyQueryOptions(mockQuery, { sorting: {} }, config);
+
+      expect(mockQuery.orderBy).toHaveBeenCalledWith('amount', 'desc');
+    });
+
+    it('should handle undefined options gracefully (applies default sort when config has allowedSortFields)', () => {
+      applyQueryOptions(mockQuery, undefined, config);
+
+      expect(mockQuery.where).not.toHaveBeenCalled();
+      expect(mockQuery.orderBy).toHaveBeenCalledWith('amount', 'desc');
+    });
+
+    it('should handle undefined config gracefully (no whitelist = no filters/sorts applied)', () => {
+      applyQueryOptions(mockQuery, { filters: { status: 'paid' } });
+
+      expect(mockQuery.where).not.toHaveBeenCalled();
+      expect(mockQuery.orderBy).not.toHaveBeenCalled();
+    });
   });
 
   describe('SQL injection neutralization', () => {

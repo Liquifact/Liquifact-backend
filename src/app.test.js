@@ -6,8 +6,11 @@ jest.mock('./services/invoiceService', () => ({
 }));
 
 const { createApp, handleCorsError } = require('./app');
-const { CORS_REJECTION_MESSAGE } = require('./config/cors');
-const { createCorsOptions } = require('./config/cors');
+const {
+  CORS_REJECTION_CODE,
+  CORS_REJECTION_MESSAGE,
+  createCorsOptions,
+} = require('./config/cors');
 const invoiceService = require('./services/invoiceService');
 
 function withEnv(env, fn) {
@@ -197,6 +200,7 @@ describe('LiquiFact app integration', () => {
         expect(response.statusCode).toBe(403);
         expect(response.body).toEqual({
           error: CORS_REJECTION_MESSAGE,
+          code: CORS_REJECTION_CODE,
         });
       }
     );
@@ -254,6 +258,7 @@ describe('LiquiFact app integration', () => {
         expect(response.statusCode).toBe(403);
         expect(response.body).toEqual({
           error: CORS_REJECTION_MESSAGE,
+          code: CORS_REJECTION_CODE,
         });
       }
     );

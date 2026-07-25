@@ -9,7 +9,12 @@ const crypto = require('crypto');
 
 const DEV_CURSOR_SECRET = 'dev-cursor-secret-change-in-prod';
 
-const ALLOWED_SORT_FIELDS = Object.freeze(['yield_bps', 'maturity_date', 'funded_ratio', 'amount', 'created_at']);
+const ALLOWED_SORT_FIELDS = Object.freeze([
+  // Marketplace / invoice fields
+  'yield_bps', 'maturity_date', 'funded_ratio', 'amount', 'created_at',
+  // Indexer (escrow_events) fields
+  'ledger_sequence', 'observed_at',
+]);
 
 /**
  * Resolves the HMAC secret used to sign and verify opaque cursors.

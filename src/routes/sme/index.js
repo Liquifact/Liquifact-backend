@@ -13,6 +13,7 @@ const storageService = require('../../services/storage');
 const { extractTenant } = require('../../middleware/tenant');
 const idempotencyMiddleware = require('../../middleware/idempotency');
 const logger = require('../../logger');
+const { instrumentPersistence } = require('../../middleware/persistenceMetrics');
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -24,7 +25,7 @@ const upload = multer({
 router.use('/', metricsRoutes);
 
 // POST /api/sme/invoice/presigned-url - Request a presigned upload URL
-router.post('/invoice/presigned-url', express.json(), extractTenant, idempotencyMiddleware, async (req, res) => {
+router.post('/invoice/presigned-url', express.json(), extractTenant, idempotencyMiddleware, instrumentPersistence('sme_invoice_presigned_url', async (req, res) => {
   const requestLogger = logger.createRequestLogger(req);
   try {
     const { fileName, mimeType, fileSize } = req.body;
@@ -59,10 +60,10 @@ router.post('/invoice/presigned-url', express.json(), extractTenant, idempotency
     requestLogger.error({ err: error }, 'Presigned URL error');
     res.status(500).json({ error: 'Failed to generate presigned upload URL' });
   }
-});
+}));
 
 // POST /api/sme/invoice - Upload PDF invoice
-router.post('/invoice', upload.single('invoice'), extractTenant, async (req, res) => {
+router.post('/invoice', upload.single('invoice'), extractTenant, instrumentPersistence('sme_invoice_upload', async (req, res) => {
   const requestLogger = logger.createRequestLogger(req);
   try {
     if (!req.file) {
@@ -95,6 +96,6 @@ router.post('/invoice', upload.single('invoice'), extractTenant, async (req, res
     requestLogger.error({ err: error }, 'Upload error');
     res.status(500).json({ error: 'Failed to upload invoice' });
   }
-});
+}));
 
 module.exports = router;

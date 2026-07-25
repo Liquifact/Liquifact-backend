@@ -129,8 +129,13 @@ Expected response:
 | `NETWORK_PASSPHRASE` | Stellar network passphrase |
 | `ESCROW_CONTRACT_ID` | Deployed LiquifactEscrow contract address |
 | `JWT_SECRET` | Secret for verifying admin JWT tokens |
-| `API_KEYS_DB_PATH` | Path to the SQLite API key store |
+| `API_KEYS` | Encoded JSON list of API key entries for the env-backed registry (see [README — API Key Authentication](../README.md#api-key-authentication)) |
 | `ESCROW_REFRESH_ON_BOOT` | Set to `true` to auto-refresh on service start |
+
+> **Note**: The legacy `API_KEYS_DB_PATH` SQLite store was retired alongside
+> `src/middleware/apiKey.js` (issue #590). API key authentication is served
+> entirely from the environment-backed registry in `src/middleware/apiKeyAuth.js`; no
+> SQLite connection is opened per request.
 
 ---
 

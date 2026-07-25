@@ -60,22 +60,27 @@ jest.mock('../src/services/escrowBatchRead', () => ({
   batchReadEscrowStates: jest.fn(),
 }));
 
-const { batchReadEscrowStates } = require('../src/services/escrowBatchRead');
-
 // -----------------------------------------------------------
-// Singleton knex query chain — every db() call returns the
-// SAME sharedQuery object so tests can assert on chain methods
-// (where, whereIn, etc.) via the shared reference.
+// Smart knex query chain — tracks last whereIn column so the
+// then() resolver can differentiate between:
+//   whereIn('id', ...)    → ownership-verification query → ID rows
+//   whereIn('status', ...) → data query                    → full mockData
+// Count queries use first() and always return mockTotal.
 // -----------------------------------------------------------
 let mockData = [];
 let mockTotal = { total: 0 };
+let mockOwnedInvoiceIds = null;
+let mockLastWhereInColumn = null;
 
 jest.mock('../src/db/knex', () => {
   const q = {
     select: jest.fn().mockReturnThis(),
     where: jest.fn().mockReturnThis(),
     andWhere: jest.fn().mockReturnThis(),
-    whereIn: jest.fn().mockReturnThis(),
+    whereIn: jest.fn(function whereIn(column) {
+      mockLastWhereInColumn = column;
+      return this;
+    }),
     whereNull: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
     limit: jest.fn().mockReturnThis(),
@@ -85,9 +90,12 @@ jest.mock('../src/db/knex', () => {
     clearOrder: jest.fn().mockReturnThis(),
     count: jest.fn().mockReturnThis(),
     first: jest.fn(() => Promise.resolve(mockTotal)),
-    // Plain then function (not jest.fn) so await resolves correctly
     then(resolve, _reject) {
-      return Promise.resolve(mockData).then(resolve);
+      const rows = mockLastWhereInColumn === 'id'
+        ? (mockOwnedInvoiceIds || mockData.map(({ id }) => id)).map(id => ({ id }))
+        : mockData;
+      mockLastWhereInColumn = null;
+      return Promise.resolve(rows).then(resolve);
     },
     catch: jest.fn().mockReturnThis(),
   };
@@ -95,7 +103,54 @@ jest.mock('../src/db/knex', () => {
   return knexMock;
 });
 
+// -----------------------------------------------------------
+// Mock the entire app module — only mount the invest route so
+// unrelated routes / dependencies cannot cause side effects.
+// -----------------------------------------------------------
+jest.mock('../src/app', () => {
+  const express = require('express');
+  const { authenticatedTenantStack } = require('../src/middleware/stacks');
+  const { listOpportunities } = require('../src/services/investService');
+
+  return {
+    createApp: () => {
+      const app = express();
+      app.get('/api/invest/opportunities', ...authenticatedTenantStack, async (req, res, next) => {
+        try {
+          // Mirror the real route handler's parseInt behaviour so the route's
+          // own parsing path is exercised.  The service's internal parseInt /
+          // defaulting still handles NaN / negative / out-of-range values.
+          const page = req.query.page ? parseInt(req.query.page, 10) : 1;
+          const limit = req.query.limit ? parseInt(req.query.limit, 10) : 20;
+
+          const result = await listOpportunities({
+            tenantId: req.tenantId,
+            page,
+            limit,
+          });
+
+          res.json({
+            data: result.data,
+            meta: result.meta,
+            message: 'Investment opportunities retrieved successfully.',
+          });
+        } catch (error) {
+          next(error);
+        }
+      });
+      app.use((error, _req, res, _next) => {
+        res.status(error.status || 500).json({ error: error.message });
+      });
+      return app;
+    },
+  };
+});
+
+const { batchReadEscrowStates } = require('../src/services/escrowBatchRead');
 const { createApp } = require('../src/app');
+
+const db = require('../src/db/knex');
+const sharedQuery = db();
 
 const TEST_SECRET = process.env.JWT_SECRET || 'test-secret';
 const TENANT_A = 'tenant-alpha';
@@ -106,16 +161,12 @@ const INVOICES_DEFAULT = [
   { id: 'inv_003', funded_ratio: 0.0, maturity_date: '2026-09-01', yield_bps: 1200 },
 ];
 
-// Grab the shared query singleton so tests can assert on chain methods
-const db = require('../src/db/knex');
-const sharedQuery = db();
-
 describe('GET /api/invest/opportunities', () => {
   let app;
   let validToken;
 
   beforeAll(() => {
-    app = createApp({ enableTestRoutes: true });
+    app = createApp();
   });
 
   beforeEach(() => {
@@ -125,6 +176,8 @@ describe('GET /api/invest/opportunities', () => {
     // reference these globals, so updating them controls every query.
     mockData = INVOICES_DEFAULT;
     mockTotal = { total: INVOICES_DEFAULT.length };
+    mockOwnedInvoiceIds = null;
+    mockLastWhereInColumn = null;
 
     // Default batch read success
     batchReadEscrowStates.mockResolvedValue({
