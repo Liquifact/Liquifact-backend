@@ -4,6 +4,8 @@ This reference is aligned with [`.env.example`](../.env.example). It lists every
 
 Secret values are marked **Secret** and must come from local `.env` files, deployment secret stores, or a KMS. Do not commit real secret values.
 
+For operations guidance and incident response on the configuration subsystem, see [runbook-config.md](./runbook-config.md).
+
 ## Boot-Time Validation
 
 - `JWT_SECRET` is required by [`src/config/index.js`](../src/config/index.js) and must be at least 32 characters.
