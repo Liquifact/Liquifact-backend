@@ -27,10 +27,11 @@
 
 const db = require('../db/knex');
 const { applyQueryOptions } = require('../utils/queryBuilder');
+const { encodeCursor, decodeCursor, CursorError } = require('../utils/cursorPagination');
 const logger = require('../logger');
 const AppError = require('../errors/AppError');
 const { LOCKED_STATUSES } = require('../middleware/patchInvoice');
-const { executeTransition: stateMachineExecuteTransition } = require('./invoiceStateMachine');
+const { executeTransition } = require('./invoiceStateMachine');
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -94,9 +95,6 @@ function nowValue() {
     ? db.fn.now()
     : new Date().toISOString();
 }
-
-// executeTransition is now provided by the invoiceStateMachine module.
-// The local stub has been removed; stateMachineExecuteTransition is imported above.
 
 // ---------------------------------------------------------------------------
 // DB-backed methods
@@ -167,6 +165,125 @@ async function getInvoices(arg1 = {}, arg2) {
   return listInvoices(tenantId, { status: arg2 });
 }
 
+// ── Column map for cursor pagination (aligns with INVOICE_QUERY_CONFIG) ────
+
+const INVOICE_PAGINATION_COLUMN_MAP = {
+  amount: 'amount',
+  date: 'date',
+  created_at: 'created_at',
+};
+
+/**
+ * Applies invoice-list filters to a Knex query (shared by data + count queries).
+ *
+ * @param {import('knex').QueryBuilder} query
+ * @param {Object} filters - Validated filter params.
+ * @returns {import('knex').QueryBuilder}
+ */
+function _applyInvoiceFilters(query, filters) {
+  if (filters.status) { query.where('status', filters.status); }
+  if (filters.smeId)  { query.where('sme_id', filters.smeId); }
+  if (filters.buyerId) { query.where('buyer_id', filters.buyerId); }
+  if (filters.dateFrom) { query.where('date', '>=', filters.dateFrom); }
+  if (filters.dateTo)   { query.where('date', '<=', filters.dateTo); }
+  return query;
+}
+
+/**
+ * Paginated invoice listing with cursor-based (preferred) and offset-based
+ * (legacy) pagination modes.
+ *
+ * @param {Object}  options
+ * @param {Object}  [options.filters={}]     - Validated filters.
+ * @param {Object}  [options.sorting={}]     - Sorting config ({ sortBy, order }).
+ * @param {Object}  [options.pagination={}]  - Pagination config ({ cursor, page, limit }).
+ * @returns {Promise<{ data: Array, meta: Object }>}
+ * @throws {CursorError} When the cursor is malformed, tampered, or has a sort-field mismatch.
+ */
+async function getInvoicesWithPagination({ filters = {}, sorting = {}, pagination = {} } = {}) {
+  const limit = Math.max(1, Math.min(100, parseInt(pagination.limit, 10) || 10));
+  const sortField = (sorting.sortBy && INVOICE_PAGINATION_COLUMN_MAP[sorting.sortBy])
+    ? sorting.sortBy
+    : 'created_at';
+  const order = (sorting.order === 'asc') ? 'asc' : 'desc';
+
+  const baseQuery = () => db('invoices').whereNull('deleted_at');
+
+  let countQ = baseQuery();
+  _applyInvoiceFilters(countQ, filters);
+  const countRow = await countQ.count('* as total').first();
+  const total = parseInt(countRow.total ?? countRow['count(*)'] ?? 0, 10);
+
+  const useCursor = Boolean(pagination.cursor);
+
+  if (useCursor) {
+    const decoded = decodeCursor(pagination.cursor, sortField);
+    const { sortValue, id: lastId } = decoded;
+
+    let dataQ = baseQuery().select('*');
+    _applyInvoiceFilters(dataQ, filters);
+
+    const gtOp = order === 'asc' ? '>' : '<';
+    dataQ.where(function () {
+      this.where(sortField, gtOp, sortValue)
+        .orWhere(function () {
+          this.where(sortField, '=', sortValue).where('id', gtOp, lastId);
+        });
+    });
+
+    dataQ.orderBy(sortField, order).orderBy('id', order);
+
+    const rows = await dataQ.limit(limit + 1);
+    const hasMore = rows.length > limit;
+    const data = hasMore ? rows.slice(0, limit) : rows;
+
+    let nextCursor = null;
+    if (hasMore && data.length > 0) {
+      const lastRow = data[data.length - 1];
+      nextCursor = encodeCursor({
+        sortField,
+        sortValue: lastRow[sortField],
+        id: lastRow.id,
+      });
+    }
+
+    return { data, meta: { total, limit, hasMore, nextCursor } };
+  }
+
+  const page = Math.max(1, parseInt(pagination.page, 10) || 1);
+  const offset = (page - 1) * limit;
+
+  let dataQ = baseQuery().select('*');
+  _applyInvoiceFilters(dataQ, filters);
+  dataQ.orderBy(sortField, order).orderBy('id', order);
+
+  const pagedRows = await dataQ.limit(limit + 1).offset(offset);
+  const pagedHasMore = pagedRows.length > limit;
+  const pagedData = pagedHasMore ? pagedRows.slice(0, limit) : pagedRows;
+
+  let pagedNextCursor = null;
+  if (pagedHasMore && pagedData.length > 0) {
+    const lastRow = pagedData[pagedData.length - 1];
+    pagedNextCursor = encodeCursor({
+      sortField,
+      sortValue: lastRow[sortField],
+      id: lastRow.id,
+    });
+  }
+
+  return {
+    data: pagedData,
+    meta: {
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+      hasMore: pagedHasMore,
+      nextCursor: pagedNextCursor,
+    },
+  };
+}
+
 /**
  * Retrieves a single invoice by its public invoice_id, scoped to a tenant.
  * Returns null when the invoice does not exist or belongs to a different tenant.
@@ -192,18 +309,7 @@ async function getInvoiceById(id, tenantId) {
 /**
  * Creates a new invoice row in the database for the given tenant.
  *
- * Generates a unique `invoice_id` using the current timestamp + random suffix.
- * All callers are expected to validate the payload **before** calling this
- * function; no re-validation is performed here.
- *
  * @param {object} invoiceData              - Validated invoice fields.
- * @param {number} invoiceData.amount       - Positive invoice amount.
- * @param {string} invoiceData.customer     - Customer / buyer name.
- * @param {string} [invoiceData.currency]   - ISO 4217 currency code.
- * @param {string} [invoiceData.dueDate]    - Due date (YYYY-MM-DD).
- * @param {string} [invoiceData.description] - Optional description.
- * @param {string} [invoiceData.invoiceNumber] - Optional invoice number.
- * @param {object} [invoiceData.metadata]   - Additional metadata.
  * @param {string} tenantId                 - Tenant identifier.
  * @returns {Promise<object>} The newly created invoice row.
  * @throws {TypeError} When tenantId is missing.
@@ -240,23 +346,18 @@ async function createInvoice(invoiceData, tenantId) {
     ...(metadata !== undefined && { metadata: metadata ? JSON.stringify(metadata) : null }),
   };
 
-  // SQLite returns an array of primary-key integers from insert(); PostgreSQL
-  // returns full rows when `.returning('*')` is chained. We normalise both.
   const result = await db('invoices').insert(row).returning('*');
 
   if (Array.isArray(result) && result.length > 0 && typeof result[0] === 'object') {
-    // PostgreSQL path — full row returned
     return result[0];
   }
 
-  // SQLite path — result is an array of inserted PKs; refetch by invoice_id
   const inserted = await db('invoices').where({ invoice_id: invoiceId }).first();
   return inserted;
 }
 
 /**
  * Applies partial updates to an invoice, scoped to the owning tenant.
- * Automatically refreshes `updated_at`.
  *
  * @param {string} id          - The invoice_id to update.
  * @param {object} updates     - Column-value pairs to update.
@@ -268,13 +369,11 @@ async function updateInvoice(id, updates = {}, tenantId) {
   if (!id) {
     throw new TypeError('invoice id required');
   }
-  // Ensure invoice exists and belongs to tenant
   const existing = await db('invoices').where({ invoice_id: id, tenant_id: tenantId }).first();
   if (!existing) {
     return null;
   }
 
-  // Reject updates when invoice is in a locked status
   if (existing && LOCKED_STATUSES.has(existing.status)) {
     throw new AppError({
       type: 'https://liquifact.com/probs/validation-error',
@@ -293,7 +392,6 @@ async function updateInvoice(id, updates = {}, tenantId) {
     return result[0];
   }
 
-  // SQLite path
   return db('invoices').where({ invoice_id: id, tenant_id: tenantId }).first();
 }
 
@@ -310,13 +408,11 @@ async function deleteInvoice(id, tenantId) {
     throw new TypeError('invoice id required');
   }
 
-  // Ensure invoice exists and belongs to tenant
   const existing = await db('invoices').where({ invoice_id: id, tenant_id: tenantId }).first();
   if (!existing) {
     return null;
   }
 
-  // Reject deletes when invoice is in a locked status
   if (existing && LOCKED_STATUSES.has(existing.status)) {
     throw new AppError({
       type: 'https://liquifact.com/probs/validation-error',
@@ -338,7 +434,6 @@ async function deleteInvoice(id, tenantId) {
     return result[0];
   }
 
-  // SQLite path — refetch after update
   return db('invoices').where({ invoice_id: id, tenant_id: tenantId }).first();
 }
 
@@ -364,8 +459,6 @@ function parseInvoiceMetadata(raw) {
 
 /**
  * Resolves an invoice for the authenticated tenant.
- * Returns null when the invoice does not exist, is soft-deleted, or belongs to
- * another tenant — callers should respond with 404 without leaking existence.
  *
  * @param {string} invoiceId - Public invoice_id (e.g. "inv-001").
  * @param {string} tenantId  - Tenant identifier from extractTenant middleware.
@@ -381,22 +474,13 @@ async function resolveInvoiceForTenant(invoiceId, tenantId) {
 
 /**
  * Executes a validated state transition via the invoice state machine and
- * persists the resulting status to the database. Status is always derived from
- * the state machine result — client-supplied status fields are never written.
- *
- * Optionally merges `escrowId` into the invoice metadata when linking escrow.
+ * persists the resulting status to the database.
  *
  * @param {string} invoiceId   - Public invoice_id.
  * @param {string} targetState - Desired lifecycle state from the state machine.
  * @param {string} tenantId    - Tenant identifier.
  * @param {object} [options={}] - Transition context.
- * @param {string} options.actor - Actor performing the transition.
- * @param {string} [options.reason] - Human-readable reason (required for terminal targets).
- * @param {string} [options.ipAddress] - Request source IP.
- * @param {string} [options.userAgent] - Request user agent.
- * @param {object} [options.metadata] - Additional audit metadata.
- * @param {string|null|undefined} [options.escrowId] - Escrow contract ID to persist in metadata.
- * @returns {Promise<object>} State-machine transition result (previousState, newState, auditLog, …).
+ * @returns {Promise<object>} State-machine transition result.
  * @throws {Error} With `.code` / `.allowedTransitions` when validation fails.
  * @throws {Error} With `.code = 'INVOICE_NOT_FOUND'` and `.statusCode = 404` when not found.
  */
@@ -418,7 +502,7 @@ async function transitionInvoice(invoiceId, targetState, tenantId, options = {})
     escrowId,
   } = options;
 
-  const result = await stateMachineExecuteTransition({
+  const result = await executeTransition({
     invoiceId,
     currentState: invoice.status,
     targetState,
@@ -448,20 +532,6 @@ async function transitionInvoice(invoiceId, targetState, tenantId, options = {})
 // SME Dashboard Metrics
 // ---------------------------------------------------------------------------
 
-/**
- * Status-to-category mapping for SME dashboard metrics.
- *
- * Each invoice status maps to exactly one dashboard category:
- * - **open** — invoices awaiting verification or verified but not yet funded.
- * - **funded** — invoices that have been funded but not yet settled.
- * - **settled** — invoices that are fully settled or paid.
- * - **defaulted** — invoices that have entered default.
- *
- * Statuses **not** listed here (e.g. `withdrawn`) are intentionally excluded
- * from every category so they do not inflate any bucket.
- *
- * @constant {Record<string, string>}
- */
 const STATUS_CATEGORY_MAP = {
   pending_verification: 'open',
   verified: 'open',
@@ -471,16 +541,7 @@ const STATUS_CATEGORY_MAP = {
   defaulted: 'defaulted',
 };
 
-/**
- * Pre-computed grouping of statuses by dashboard category, derived once
- * from {@link STATUS_CATEGORY_MAP} at module load.
- *
- * E.g.: `{ open: ['pending_verification', 'verified'], funded: ['funded'], … }`
- *
- * @constant {Record<string, string[]>}
- */
 const CATEGORY_STATUSES = (() => {
-  /** @type {Record<string, string[]>} */
   const groups = {};
   for (const [status, category] of Object.entries(STATUS_CATEGORY_MAP)) {
     if (!groups[category]) {
@@ -491,39 +552,14 @@ const CATEGORY_STATUSES = (() => {
   return groups;
 })();
 
-/**
- * Ordered list of category names derived from {@link CATEGORY_STATUSES}.
- * Guarantees a deterministic SELECT clause order across invocations.
- *
- * @constant {string[]}
- */
 const CATEGORY_NAMES = Object.keys(CATEGORY_STATUSES);
 
 /**
- * Returns aggregated invoice counts grouped by SME dashboard category,
- * scoped to a single tenant and SME owner.
+ * Returns aggregated invoice counts grouped by SME dashboard category.
  *
- * The query produces a single database row with one integer column per
- * category defined in {@link STATUS_CATEGORY_MAP} (`open`, `funded`,
- * `settled`, `defaulted`).  The `SUM(CASE …)` clauses are built
- * **programmatically** from {@link STATUS_CATEGORY_MAP} so the constant
- * is the single source of truth — adding or removing a status mapping
- * automatically updates the aggregation without touching the SQL.
- *
- * Statuses not listed in the map (e.g. `withdrawn`) are excluded from
- * every category.  Soft-deleted invoices (`deleted_at IS NOT NULL`) are
- * always excluded.
- *
- * @param {string} tenantId - Tenant identifier (required, from `extractTenant` middleware).
- * @param {string} userId   - SME owner identifier (required, matches `sme_id` column).
+ * @param {string} tenantId - Tenant identifier.
+ * @param {string} userId   - SME owner identifier.
  * @returns {Promise<{open: number, funded: number, settled: number, defaulted: number}>}
- *   Always returns an object with all four keys; missing categories default to `0`.
- * @throws {TypeError} When tenantId or userId is missing or not a non-empty string.
- *
- * @security
- *   - Scoped to `tenant_id` and `sme_id` on every query — no cross-tenant or
- *     cross-owner data leakage.
- *   - Uses positional (parameterised) bindings via Knex `.where()`.
  */
 async function getSmeInvoiceCounts(tenantId, userId) {
   if (!tenantId || typeof tenantId !== 'string') {
@@ -533,13 +569,8 @@ async function getSmeInvoiceCounts(tenantId, userId) {
     throw new TypeError('userId is required');
   }
 
-  // Build one SUM(CASE WHEN status IN (...) THEN 1 ELSE 0 END) AS <category>
-  // per category using the pre-computed grouping so there is zero duplication
-  // between STATUS_CATEGORY_MAP and the SQL.
   const selectClauses = CATEGORY_NAMES.map((category) => {
     const statuses = CATEGORY_STATUSES[category];
-    // Status values come from the hardcoded STATUS_CATEGORY_MAP constant,
-    // so string interpolation is safe here — no user input reaches this path.
     const inClause = statuses.map((s) => `'${s}'`).join(', ');
     return db.raw(
       `SUM(CASE WHEN status IN (${inClause}) THEN 1 ELSE 0 END) AS ??`,
@@ -553,14 +584,89 @@ async function getSmeInvoiceCounts(tenantId, userId) {
     .select(...selectClauses)
     .first();
 
-  // When no rows match, the aggregate still returns one row with NULL
-  // values in SQLite; coerce every column to a safe integer.
-  /** @type {{open: number, funded: number, settled: number, defaulted: number}} */
   const result = {};
   for (const category of CATEGORY_NAMES) {
     result[category] = Number(row?.[category]) || 0;
   }
   return result;
+}
+
+/**
+ * Retrieves a cursor-paginated list of invoices for the SME dashboard.
+ *
+ * @param {string} tenantId - Tenant identifier (required).
+ * @param {string} userId   - SME owner identifier (required).
+ * @param {object} [options={}]
+ * @param {string} [options.cursor] - Opaque cursor from a prior page.
+ * @param {number} [options.limit=20] - Max rows per page (clamped to 1–100).
+ * @returns {Promise<{invoices: object[], meta: object}>}
+ */
+async function getSmeInvoiceList(tenantId, userId, { cursor, limit = 20 } = {}) {
+  if (!tenantId || typeof tenantId !== 'string') {
+    throw new TypeError('tenantId is required');
+  }
+  if (!userId || typeof userId !== 'string') {
+    throw new TypeError('userId is required');
+  }
+
+  const MAX_LIMIT = 100;
+  const safeLimit = Math.max(1, Math.min(MAX_LIMIT, parseInt(limit, 10) || 20));
+
+  const baseQuery = () =>
+    db('invoices')
+      .where({ tenant_id: tenantId, sme_id: userId })
+      .whereNull('deleted_at');
+
+  const countRow = await baseQuery().count('* as total').first();
+  const total = parseInt(countRow?.total ?? countRow?.['count(*)'] ?? 0, 10);
+
+  let cursorData = null;
+  if (cursor) {
+    try {
+      cursorData = decodeCursor(cursor, 'created_at');
+    } catch (err) {
+      if (err instanceof CursorError) {
+        throw err;
+      }
+      throw new CursorError('Invalid cursor');
+    }
+  }
+
+  let dataQuery = baseQuery()
+    .select('*')
+    .orderBy('created_at', 'desc')
+    .orderBy('id', 'desc')
+    .limit(safeLimit + 1);
+
+  if (cursorData) {
+    dataQuery = dataQuery.where(function () {
+      this.where('created_at', '<', cursorData.sortValue)
+        .orWhere(function () {
+          this.where('created_at', cursorData.sortValue)
+            .andWhere('id', '<', parseInt(String(cursorData.id), 10) || 0);
+        });
+    });
+  }
+
+  const rows = await dataQuery;
+
+  const hasMore = rows.length > safeLimit;
+  const pageRows = hasMore ? rows.slice(0, safeLimit) : rows;
+
+  let nextCursor = null;
+  if (hasMore && pageRows.length > 0) {
+    const lastRow = pageRows[pageRows.length - 1];
+    nextCursor = encodeCursor({
+      sortField: 'created_at',
+      sortValue: lastRow.created_at,
+      id: String(lastRow.id),
+    });
+  }
+
+  return {
+    invoices: pageRows,
+    meta: { total, limit: safeLimit, hasMore, nextCursor },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -626,6 +732,7 @@ module.exports = {
   // Primary DB-backed API
   listInvoices,
   getInvoices,
+  getInvoicesWithPagination,
   getInvoiceById,
   createInvoice,
   updateInvoice,
@@ -635,6 +742,7 @@ module.exports = {
   parseInvoiceMetadata,
   // SME dashboard metrics
   getSmeInvoiceCounts,
+  getSmeInvoiceList,
   STATUS_CATEGORY_MAP,
   // KYC helpers (in-memory)
   getInvoicesByKycStatus,
@@ -643,4 +751,7 @@ module.exports = {
   mockInvoices,
   // Config constant (legacy test compat)
   INVOICE_QUERY_CONFIG,
+  // Cursor pagination utility (re-exported for tests)
+  CursorError,
+  INVOICE_PAGINATION_COLUMN_MAP,
 };

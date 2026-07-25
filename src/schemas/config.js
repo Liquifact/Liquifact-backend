@@ -9,6 +9,7 @@
  *  - `kycConfigSchema`         — KYC provider connection settings
  *  - `retentionConfigSchema`   — data-retention and legal-hold rules
  *  - `fraudThresholdsSchema`   — per-tenant fraud & manual-review ceilings
+ *  - `corsConfigSchema`        — CORS allowed origins and max-age
  *  - `runtimeConfigSchema`     — top-level union accepted by POST /api/admin/config
  *
  * Security guarantees applied to every schema:
@@ -241,6 +242,50 @@ const retentionConfigSchema = z
     message: 'At least one retention config field must be provided',
   });
 
+// ── CORS config schema ──────────────────────────────────────────────────────
+
+/**
+ * Schema for CORS (Cross-Origin Resource Sharing) configuration writes.
+ *
+ * Fields:
+ *  - `origins`  — Array of allowed origin URLs (max 20 items, each a valid
+ *                 URL up to 2048 chars).
+ *  - `maxAge`   — Preflight Access-Control-Max-Age in seconds: integer in
+ *                 [60, 86400] (min 1 minute, max 24 hours).
+ *
+ * At least one field must be provided.
+ *
+ * @type {import('zod').ZodObject}
+ */
+const corsConfigSchema = z
+  .object({
+    origins: z
+      .array(
+        z
+          .string({ invalid_type_error: 'each origin must be a string' })
+          .url({ message: 'each origin must be a valid URL (e.g. https://app.example.com)' })
+          .max(2048, { message: 'each origin must not exceed 2048 characters' })
+          .refine((v) => {
+            try {
+              const url = new URL(v);
+              return url.origin === url.href || url.href.endsWith('/') && url.href.slice(0, -1) === url.origin;
+            } catch {
+              return false;
+            }
+          }, { message: 'each origin must be a root origin URL without path or query' }),
+        { invalid_type_error: 'origins must be an array' },
+      )
+      .min(1, { message: 'origins must contain at least one entry' })
+      .max(20, { message: 'origins must not exceed 20 entries' })
+      .optional(),
+
+    maxAge: boundedInt(60, 86400, 'maxAge').optional(),
+  })
+  .strict()
+  .refine((d) => Object.keys(d).length > 0, {
+    message: 'At least one CORS config field must be provided',
+  });
+
 // ── Fraud thresholds schema ──────────────────────────────────────────────────
 
 /**
@@ -294,6 +339,7 @@ const CONFIG_SECTIONS = /** @type {const} */ ([
   'kyc',
   'retention',
   'fraudThresholds',
+  'cors',
 ]);
 
 /**
@@ -342,6 +388,7 @@ const runtimeConfigSchema = z
       kyc: kycConfigSchema,
       retention: retentionConfigSchema,
       fraudThresholds: fraudThresholdsSchema,
+      cors: corsConfigSchema,
     };
 
     const sectionSchema = sectionSchemas[data.section];
@@ -371,6 +418,7 @@ module.exports = {
   kycConfigSchema,
   retentionConfigSchema,
   fraudThresholdsSchema,
+  corsConfigSchema,
 
   // Top-level schema consumed by the admin config route
   runtimeConfigSchema,
