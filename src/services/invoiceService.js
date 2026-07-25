@@ -30,6 +30,7 @@ const { applyQueryOptions } = require('../utils/queryBuilder');
 const logger = require('../logger');
 const AppError = require('../errors/AppError');
 const { LOCKED_STATUSES } = require('../middleware/patchInvoice');
+const { executeTransition: stateMachineExecute } = require('./invoiceStateMachine');
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -451,7 +452,7 @@ async function transitionInvoice(invoiceId, targetState, tenantId, options = {})
     escrowId,
   } = options;
 
-  const result = await executeTransition({
+  const result = await stateMachineExecute({
     invoiceId,
     currentState: invoice.status,
     targetState,
