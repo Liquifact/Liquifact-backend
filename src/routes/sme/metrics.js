@@ -12,6 +12,11 @@ const { extractTenant } = require('../../middleware/tenant');
 const { CursorError } = require('../../utils/cursorPagination');
 const invoiceService = require('../../services/invoiceService');
 const { validateMetricsRequest } = require('../../utils/metricsValidation');
+const {
+  toSmeMetricsResponse,
+  toSmeMetricsMeta,
+  toSmeMetricsApiResponse,
+} = require('../../dto/metrics');
 
 
 /**
@@ -120,21 +125,18 @@ router.get('/metrics', authenticateToken, extractTenant, async (req, res, next) 
 
     const { userId, tenantId } = ctx;
 
-    const metrics = await invoiceService.getSmeInvoiceCounts(tenantId, userId);
+    const rawMetrics = await invoiceService.getSmeInvoiceCounts(tenantId, userId);
+    const data = toSmeMetricsResponse(rawMetrics);
 
     const { cursor, limit } = req.query;
     const usePagination = cursor !== undefined || limit !== undefined;
 
     if (!usePagination) {
-      return res.json({
-        data: metrics,
-        meta: {
-          timestamp: new Date().toISOString(),
-          version: '0.1.0'
-        },
-        error: null,
-        timestamp: new Date().toISOString()
+      const meta = toSmeMetricsMeta({
+        timestamp: new Date().toISOString(),
+        version: '0.1.0'
       });
+      return res.json(toSmeMetricsApiResponse(data, meta));
     }
 
     let result;
@@ -149,20 +151,16 @@ router.get('/metrics', authenticateToken, extractTenant, async (req, res, next) 
       throw err;
     }
 
-    return res.json({
-      data: metrics,
-      meta: {
-        invoices: result.invoices,
-        total: result.meta.total,
-        limit: result.meta.limit,
-        hasMore: result.meta.hasMore,
-        nextCursor: result.meta.nextCursor,
-        timestamp: new Date().toISOString(),
-        version: '0.1.0'
-      },
-      error: null,
-      timestamp: new Date().toISOString()
+    const meta = toSmeMetricsMeta({
+      invoices: result.invoices,
+      total: result.meta.total,
+      limit: result.meta.limit,
+      hasMore: result.meta.hasMore,
+      nextCursor: result.meta.nextCursor,
+      timestamp: new Date().toISOString(),
+      version: '0.1.0'
     });
+    return res.json(toSmeMetricsApiResponse(data, meta));
   } catch (err) {
     return next(err);
   }
