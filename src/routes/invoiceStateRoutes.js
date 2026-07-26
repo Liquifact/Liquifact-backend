@@ -27,8 +27,14 @@ const { getAuditLogs } = require('../services/auditLog');
 const { requireKycForFunding, auditKycAccess } = require('../middleware/kycGating');
 const { extractTenant } = require('../middleware/tenant');
 const responseHelper = require('../utils/responseHelper');
+const { createCompressionMiddleware } = require('../middleware/compression');
 
 router.use(extractTenant);
+
+// Compress invoice-state responses above the default 1 KB threshold.
+// Respects Accept-Encoding (gzip preferred over deflate); small responses
+// are always sent as plain JSON regardless of the client's encoding preference.
+router.use(createCompressionMiddleware());
 
 // Per-client (API key / IP) rate limit on the invoice-state endpoints (#739).
 const { invoiceStateLimiter } = require('../middleware/rateLimit');
