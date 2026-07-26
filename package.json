@@ -54,6 +54,18 @@
         "lines": 95,
         "statements": 95
       },
+      "src/services/escrowReadSoftDelete.js": {
+        "branches": 95,
+        "functions": 95,
+        "lines": 95,
+        "statements": 95
+      },
+      "src/jobs/escrowReadPurge.js": {
+        "branches": 75,
+        "functions": 95,
+        "lines": 95,
+        "statements": 95
+      },
       "src/services/escrowRead.js": {
         "branches": 75,
         "functions": 95,

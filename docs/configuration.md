@@ -121,6 +121,10 @@ Any violation causes a fast startup failure with a clear, redacted error message
 | `IDEMPOTENCY_PURGE_BATCH_SIZE` | integer, `1..10000` | `1000` | No | No | [`src/jobs/idempotencyPurge.js`](../src/jobs/idempotencyPurge.js) |
 | `IDEMPOTENCY_PURGE_INTERVAL_MS` | integer milliseconds, min `60000` | `3600000` | No | No | [`src/jobs/idempotencyPurge.js`](../src/jobs/idempotencyPurge.js) |
 | `IDEMPOTENCY_PURGE_MAX_BATCHES` | integer, `1..1000` | `100` | No | No | [`src/jobs/idempotencyPurge.js`](../src/jobs/idempotencyPurge.js) |
+| `ESCROW_READ_SOFT_DELETE_RETENTION_DAYS` | integer days, `1..3650` | `30` | No | No | [`src/services/escrowReadSoftDelete.js`](../src/services/escrowReadSoftDelete.js) — restore window for soft-deleted escrow-read records |
+| `ESCROW_READ_PURGE_BATCH_SIZE` | integer, `1..10000` | `500` | No | No | [`src/services/escrowReadSoftDelete.js`](../src/services/escrowReadSoftDelete.js) |
+| `ESCROW_READ_PURGE_MAX_BATCHES` | integer, `1..1000` | `100` | No | No | [`src/services/escrowReadSoftDelete.js`](../src/services/escrowReadSoftDelete.js) |
+| `ESCROW_READ_PURGE_INTERVAL_MS` | integer milliseconds, min `60000` | `21600000` (6 h) | No | No | [`src/jobs/escrowReadPurge.js`](../src/jobs/escrowReadPurge.js) |
 <!-- env-reference:end -->
 
 ## Invoice Verification Thresholds
