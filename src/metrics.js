@@ -1288,7 +1288,7 @@ const sorobanRpcRetryCausesTotal = new client.Counter({
 });
 
 /**
- * Bounded enum of allowed `status_class` label values.
+ * Bounded enum of allowed `status_class` label values for persistence metrics.
  * @readonly
  */
 const PERSISTENCE_STATUS_CLASS_ENUM = Object.freeze(['2xx', '4xx', '5xx']);
@@ -1298,13 +1298,23 @@ const PERSISTENCE_STATUS_CLASS_ENUM = Object.freeze(['2xx', '4xx', '5xx']);
  * Raw error messages are NEVER used as labels.
  * @readonly
  */
-const PERSISTENCE_CAUSE_ENUM = Object.freeze(['validation', 'storage', 'internal', 'none']);
+const PERSISTENCE_CAUSE_ENUM = Object.freeze([
+  'validation',
+  'storage',
+  'internal',
+  'none',
+]);
 
 /**
- * Bounded enum of known persistence endpoint labels.
+ * Bounded enum of allowed `endpoint` label values for persistence metrics.
  * @readonly
  */
-const PERSISTENCE_ENDPOINT_ENUM = Object.freeze(['sme_invoice_presigned_url', 'sme_invoice_upload']);
+const PERSISTENCE_ENDPOINT_ENUM = Object.freeze([
+  'sme_invoice_upload',
+  'sme_invoice_download',
+  'sme_invoice_delete',
+  'unknown',
+]);
 
 /**
  * Maps a raw persistence endpoint hint to a bounded metric label value.
@@ -1313,7 +1323,8 @@ const PERSISTENCE_ENDPOINT_ENUM = Object.freeze(['sme_invoice_presigned_url', 's
  * @returns {string} Bounded value from {@link PERSISTENCE_ENDPOINT_ENUM}.
  */
 function normalizePersistenceEndpoint(raw) {
-  return typeof raw === 'string' && PERSISTENCE_ENDPOINT_ENUM.includes(raw) ? raw : 'unknown';
+  const str = typeof raw === 'string' ? raw.trim() : '';
+  return PERSISTENCE_ENDPOINT_ENUM.includes(str) ? str : 'unknown';
 }
 
 /**
@@ -1345,72 +1356,20 @@ function normalizePersistenceCause(err, status) {
   const code = Number(status);
   if (!err && code < 400) { return 'none'; }
 
-  const errCode = err && typeof err === 'object' ? err.code : undefined;
-  if (['INVALID_MIME_TYPE', 'FILE_TOO_LARGE', 'INVALID_TENANT_ID'].includes(errCode)) {
-    return 'validation';
-  }
-  if (code >= 400 && code < 500) { return 'validation'; }
-  if (errCode === 'STORAGE_ERROR') { return 'storage'; }
-  return 'internal';
-}
-
-/**
- * Bounded enum of allowed `status_class` label values for persistence endpoint.
- * @readonly
- */
-const PERSISTENCE_STATUS_CLASS_ENUM = Object.freeze(['2xx', '4xx', '5xx']);
-
-/**
- * Bounded enum of allowed `cause` label values for persistence endpoint errors.
- * @readonly
- */
-const PERSISTENCE_CAUSE_ENUM = Object.freeze([
-  'validation',
-  'storage',
-  'internal',
-  'none',
-]);
-
-/**
- * Maps a persistence endpoint identifier to a bounded metric label value.
- *
- * @param {unknown} raw - Raw endpoint identifier.
- * @returns {string} Bounded value from PERSISTENCE_ENDPOINT_ENUM.
- */
-function normalizePersistenceEndpoint(raw) {
-  const str = typeof raw === 'string' ? raw.trim() : '';
-  return str || 'unknown';
-}
-
-/**
- * Maps an HTTP status code to a bounded `status_class` label value.
- *
- * @param {unknown} status - HTTP status code.
- * @returns {string} Bounded value from {@link PERSISTENCE_STATUS_CLASS_ENUM}.
- */
-function normalizePersistenceStatusClass(status) {
-  const code = Number(status);
-  if (code >= 500) { return '5xx'; }
-  if (code >= 400) { return '4xx'; }
-  return '2xx';
-}
-
-/**
- * Maps a persistence endpoint failure to a bounded `cause` label value.
- *
- * @param {unknown} err - Raw error object or code.
- * @param {number} [status] - HTTP status code.
- * @returns {string} Bounded value from {@link PERSISTENCE_CAUSE_ENUM}.
- */
-function normalizePersistenceCause(err, status) {
-  const code = Number(status);
-  if (!err && code < 400) { return 'none'; }
-
   if (code >= 400 && code < 500) { return 'validation'; }
 
   if (err) {
-    const errMessage = typeof err === 'object' && 'message' in err ? String(err.message).toLowerCase() : '';
-    if (errMessage.includes('storage') || errMessage.includes('s3') || errMessage.includes('bucket')) {
+    const errCode = typeof err === 'object' && err !== null && 'code' in err
+      ? String(err.code)
+      : '';
+
+    // Known client-side validation codes from the storage service
+    if (['INVALID_MIME_TYPE', 'FILE_TOO_LARGE', 'INVALID_TENANT_ID'].includes(errCode)) {
+      return 'validation';
+    }
+
+    // Storage-layer I/O error codes
+    if (['STORAGE_WRITE_FAILED', 'ENOENT', 'EACCES', 'EPERM', 'ENOSPC'].includes(errCode)) {
       return 'storage';
     }
   }
@@ -1456,13 +1415,79 @@ const persistenceRequestErrorsTotal = new client.Counter({
  * Bounded enum of allowed `status_class` label values for metrics endpoint.
  * @readonly
  */
-const METRICS_STATUS_CLASS_ENUM = Object.freeze(['2xx', '4xx', '5xx']);
+const METRICS_ENDPOINT_STATUS_CLASS_ENUM = Object.freeze(['2xx', '4xx', '5xx']);
 
 /**
  * Bounded enum of allowed `cause` label values for metrics endpoint errors.
  * @readonly
  */
-const METRICS_CAUSE_ENUM = Object.freeze(['none', 'auth_failure', 'internal_error']);
+const METRICS_ENDPOINT_CAUSE_ENUM = Object.freeze([
+  'none',
+  'auth_failure',
+  'internal_error',
+]);
+
+/**
+ * Counter: Total metrics endpoint requests by status class.
+ * @type {import('prom-client').Counter}
+ */
+const metricsRequestsTotal = new client.Counter({
+  name: 'metrics_requests_total',
+  help: 'Total number of metrics endpoint requests',
+  labelNames: ['status_class'],
+  registers: [registry],
+});
+
+/**
+ * Counter: Metrics endpoint request errors by cause.
+ * @type {import('prom-client').Counter}
+ */
+const metricsRequestErrorsTotal = new client.Counter({
+  name: 'metrics_request_errors_total',
+  help: 'Total number of metrics endpoint request errors by cause',
+  labelNames: ['cause'],
+  registers: [registry],
+});
+
+/**
+ * Records metrics and a structured log for one completed metrics endpoint request.
+ *
+ * @param {object} params
+ * @param {number} params.statusCode - Final HTTP status code.
+ * @param {number} params.durationSeconds - Wall-clock duration in seconds.
+ * @param {unknown} [params.error] - Error thrown by the handler, if any.
+ * @param {import('express').Request} [params.req] - Request, for a scoped logger.
+ * @returns {void}
+ */
+function recordMetricsEndpointOutcome({ statusCode, durationSeconds, error, req }) {
+  const statusClass = normalizeMetricsEndpointStatusClass(statusCode);
+
+  metricsRequestDurationSeconds.labels(statusClass).observe(durationSeconds);
+  metricsRequestsTotal.labels(statusClass).inc();
+
+  const cause = normalizeMetricsEndpointCause(error, statusCode);
+  if (cause !== 'none') {
+    metricsRequestErrorsTotal.labels(cause).inc();
+  }
+
+  const log = (req && typeof logger.createRequestLogger === 'function')
+    ? logger.createRequestLogger(req)
+    : logger;
+  const fields = {
+    statusClass,
+    statusCode,
+    durationSeconds: Number(durationSeconds.toFixed(6)),
+    cause,
+  };
+
+  if (statusClass === '5xx') {
+    log.error(fields, 'metrics endpoint request failed');
+  } else if (statusClass === '4xx') {
+    log.warn(fields, 'metrics endpoint request rejected');
+  } else {
+    log.info(fields, 'metrics endpoint request completed');
+  }
+}
 
 /**
  * Maps an HTTP status code to a bounded `status_class` label value.
