@@ -1541,7 +1541,6 @@ module.exports = {
   normalizeSorobanRpcMethod,
   normalizeSorobanRpcOutcome,
   normalizeSorobanRetryCause,
-  normalizeReminderReason,
   healthRequestDurationSeconds,
   healthRequestsTotal,
   healthRequestErrorsTotal,

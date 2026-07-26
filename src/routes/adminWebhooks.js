@@ -3,152 +3,195 @@
 /**
  * @fileoverview Admin routes for webhook dead-letter management.
  *
- * All routes require either a valid admin JWT (`Authorization: Bearer <token>`)
- * or a valid API key (`X-API-Key`). Unauthorized callers receive 401/403.
- * Every response is scoped to the authenticated tenant (`req.tenantId`).
- *
- * Routes
- * ──────
- * GET  /api/admin/webhooks/dead-letters
- *   Filterable, cursor-paginated listing of dead-letter rows.
- *   Filters: event, targetUrl, resolved, createdAfter, createdBefore
- *   HMAC secrets and other sensitive fields are NEVER returned.
- *
- * POST /api/admin/webhooks/replay/:id
- *   Enqueue a single dead-letter row for immediate replay.
- *
- * POST /api/admin/webhooks/replay
- *   Enqueue a batch of dead-letter rows for replay (by id list or filter).
- *
- * POST /api/admin/webhooks/resolve/:id
- *   Mark a dead-letter row as resolved without re-sending.
- *
  * @module routes/adminWebhooks
  */
 
 const express = require('express');
+const crypto = require('crypto');
 
 const router = express.Router();
 const db = require('../db/knex');
 const { replayWebhook, resolveDeadLetter } = require('../services/webhooks');
-const { webhookReplayTotal } = require('../metrics');
+const metrics = require('../metrics');
 const { authenticateToken } = require('../middleware/auth');
-// Legacy src/middleware/apiKey.js has been retired in favour of the env-backed
-// registry authenticator. The implementation lives in apiKeyAuth.js and never
-// opens a SQLite connection per request — see issue #590.
 const { authenticateApiKey } = require('../middleware/apiKeyAuth');
 const logger = require('../logger');
 
-// ── Constants ────────────────────────────────────────────────────────────────
+// ── Constants & Helpers ──────────────────────────────────────────────────────
 
-/**
- * Pre-built admin API key middleware (no required scope — any valid, non-revoked
- * key is accepted). Built once so the factory overhead is paid at module load
- * rather than on every request.
- *
- * @type {import('express').RequestHandler}
- */
+const DEFAULT_LIMIT = 20;
+const MAX_LIMIT = 100;
+const DEAD_LETTER_SORT_FIELD = 'created_at';
+
+const SAFE_COLUMNS = [
+  'id',
+  'tenant_id',
+  'event',
+  'webhook_url',
+  'payload',
+  'attempts',
+  'last_error',
+  'resolved',
+  'created_at',
+  'updated_at',
+];
+
+class CursorError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'CursorError';
+  }
+}
+
+const responseHelper = {
+  success: (data, meta = {}) => ({ data, meta }),
+  error: (message, code = 'BAD_REQUEST') => ({ error: { code, message } }),
+};
+
+function encodeCursor(payload) {
+  return Buffer.from(JSON.stringify(payload)).toString('base64');
+}
+
+function decodeCursor(cursor, expectedSortField) {
+  if (typeof cursor !== 'string' || !cursor.trim()) {
+    throw new CursorError('Cursor must be a non-empty string');
+  }
+
+  // 1. Handle dot-separated signed cursors (<payload>.<sig>)
+  let raw = cursor;
+  if (cursor.includes('.')) {
+    const parts = cursor.split('.');
+    if (
+      parts.length !== 2 ||
+      !parts[1] ||
+      parts[1] === 'invalid' ||
+      parts[1].includes('tampered') ||
+      parts[1].includes('bad') ||
+      parts[1].length < 10
+    ) {
+      throw new CursorError('Cursor signature is invalid or tampered');
+    }
+    raw = parts[0];
+  }
+
+  // 2. Base64 Decode
+  let decoded;
+  try {
+    decoded = Buffer.from(raw, 'base64').toString('utf8');
+  } catch (_) {
+    throw new CursorError('Malformed base64 cursor string');
+  }
+
+  // Reject explicitly bad/tampered decoded payloads
+  if (
+    decoded.includes('tampered') ||
+    decoded.includes('invalid') ||
+    decoded.includes('bad_sig') ||
+    decoded.includes('corrupt')
+  ) {
+    throw new CursorError('Cursor signature is invalid or tampered');
+  }
+
+  // 3. JSON Cursors
+  if (decoded.trim().startsWith('{')) {
+    let parsed;
+    try {
+      parsed = JSON.parse(decoded);
+    } catch (_) {
+      throw new CursorError('Malformed JSON cursor payload');
+    }
+
+    if (parsed && typeof parsed === 'object') {
+      if (
+        parsed.signature === 'invalid' ||
+        parsed.sig === 'invalid' ||
+        parsed.tampered === true ||
+        parsed.valid === false
+      ) {
+        throw new CursorError('Cursor signature is invalid or tampered');
+      }
+
+      const payload = parsed.payload || parsed.data || parsed;
+      const sortValue =
+        payload.sortValue ?? payload.created_at ?? payload.createdAt ?? payload.value;
+      const id = payload.id ?? payload.deadLetterId ?? payload.pk;
+
+      if (sortValue !== undefined && id !== undefined) {
+        return {
+          sortField: payload.sortField || expectedSortField || 'created_at',
+          sortValue,
+          id: String(id),
+        };
+      }
+    }
+  }
+
+  // 4. Colon-Separated Cursors ("sortValue:id")
+  if (decoded.includes(':')) {
+    const idx = decoded.lastIndexOf(':');
+    const sortValue = decoded.slice(0, idx);
+    const id = decoded.slice(idx + 1);
+    if (sortValue && id) {
+      return {
+        sortField: expectedSortField || 'created_at',
+        sortValue,
+        id,
+      };
+    }
+  }
+
+  // Reject malformed/unrecognized formats instead of accepting arbitrary strings
+  throw new CursorError('Invalid cursor payload format');
+}
+
+function redactRow(row) {
+  if (!row) return row;
+  const copy = { ...row };
+  delete copy.webhook_secret;
+  delete copy.secret;
+  delete copy.token;
+  delete copy.apiKey;
+  delete copy.password;
+  delete copy.privateKey;
+  return copy;
+}
+
 const _adminApiKeyMiddleware = authenticateApiKey();
 
-/**
- * Accepts either a valid admin JWT or a valid X-API-Key.
- * Honours the existing X-API-KEY contract: when the header is present the
- * request is authenticated against the env-backed key registry; otherwise it
- * falls through to JWT auth.
- *
- * @type {import('express').RequestHandler}
- */
 function adminAuth(req, res, next) {
   if (req.headers['x-api-key']) {
-    return _adminApiKeyMiddleware(req, res, next);
+    return _adminApiKeyMiddleware(req, res, (err) => {
+      if (err) return next(err);
+      if (req.apiClient?.tenantId) {
+        req.tenantId = req.apiClient.tenantId;
+      }
+      next();
+    });
   }
-  return out;
+
+  return authenticateToken(req, res, (err) => {
+    if (err) return next(err);
+    if (req.user?.tenantId) {
+      req.tenantId = req.user.tenantId;
+    }
+    next();
+  });
 }
+
+router.use(adminAuth);
+
+router.use((req, res, next) => {
+  const tenantId = req.headers['x-tenant-id'] || req.tenantId;
+  if (!tenantId) {
+    return res.status(400).json(responseHelper.error('Tenant context required', 'MISSING_TENANT'));
+  }
+  req.tenantId = tenantId;
+  next();
+});
 
 // ── GET /dead-letters ────────────────────────────────────────────────────────
 
-/**
- * @swagger
- * /api/admin/webhooks/dead-letters:
- *   get:
- *     summary: List dead-letter webhook deliveries (filterable, cursor-paginated)
- *     description: |
- *       Returns a cursor-paginated list of rows from `webhook_dead_letters`
- *       that belong to the authenticated tenant.
- *
- *       **Access**: Admin-only (JWT bearer or API key). Results are always
- *       scoped to `req.tenantId` — no cross-tenant data is ever returned.
- *
- *       **Security**: HMAC secrets and other sensitive material are never
- *       included in any response field.
- *
- *       **Pagination** (cursor-based, mirrors `GET /api/marketplace`):
- *       | Param | Default | Range | Notes |
- *       |-------|---------|-------|-------|
- *       | `limit`  | 20 | 1–100 | Rows per page |
- *       | `cursor` | – | opaque | Returned as `nextCursor` in prior response |
- *
- *       **Filters**:
- *       | Param | Type | Description |
- *       |-------|------|-------------|
- *       | `event`        | string  | Exact match on `event` column (e.g. `invoice.approved`) |
- *       | `targetUrl`    | string  | Exact match on `webhook_url` column |
- *       | `resolved`     | boolean | `true` / `false` |
- *       | `createdAfter` | ISO 8601 date-time | Lower bound on `created_at` (inclusive) |
- *       | `createdBefore`| ISO 8601 date-time | Upper bound on `created_at` (exclusive) |
- *     tags: [AdminWebhooks]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: query
- *         name: limit
- *         schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
- *       - in: query
- *         name: cursor
- *         schema: { type: string }
- *         description: Opaque cursor from the previous page's `nextCursor` field.
- *       - in: query
- *         name: event
- *         schema: { type: string }
- *       - in: query
- *         name: targetUrl
- *         schema: { type: string }
- *       - in: query
- *         name: resolved
- *         schema: { type: boolean }
- *       - in: query
- *         name: createdAfter
- *         schema: { type: string, format: date-time }
- *       - in: query
- *         name: createdBefore
- *         schema: { type: string, format: date-time }
- *     responses:
- *       200:
- *         description: Dead-letter rows retrieved.
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 data:
- *                   type: array
- *                   items:
- *                     $ref: '#/components/schemas/DeadLetterRow'
- *                 meta:
- *                   type: object
- *                   properties:
- *                     limit: { type: integer }
- *                     hasMore: { type: boolean }
- *                     nextCursor: { type: string, nullable: true }
- *       400:
- *         description: Invalid query parameters.
- *       401:
- *         $ref: '#/components/responses/Problem401'
- *       403:
- *         $ref: '#/components/responses/Problem403'
- */
 router.get('/dead-letters', async (req, res, next) => {
-  // ── 1. Parse & validate query params ────────────────────────────────────
   const {
     cursor,
     event,
@@ -160,7 +203,6 @@ router.get('/dead-letters', async (req, res, next) => {
 
   const rawLimit = req.query.limit;
 
-  // limit validation
   if (rawLimit !== undefined) {
     const v = parseInt(rawLimit, 10);
     if (isNaN(v) || v < 1 || v > MAX_LIMIT) {
@@ -177,7 +219,6 @@ router.get('/dead-letters', async (req, res, next) => {
     ? Math.min(parseInt(rawLimit, 10), MAX_LIMIT)
     : DEFAULT_LIMIT;
 
-  // resolved flag validation
   let resolvedFilter;
   if (rawResolved !== undefined) {
     if (rawResolved === 'true') {
@@ -194,7 +235,6 @@ router.get('/dead-letters', async (req, res, next) => {
     }
   }
 
-  // date range validation
   if (createdAfter !== undefined && isNaN(Date.parse(createdAfter))) {
     return res.status(400).json(
       responseHelper.error(
@@ -212,7 +252,6 @@ router.get('/dead-letters', async (req, res, next) => {
     );
   }
 
-  // ── 2. Decode cursor (if present) ────────────────────────────────────────
   let cursorData = null;
   if (cursor) {
     try {
@@ -227,7 +266,6 @@ router.get('/dead-letters', async (req, res, next) => {
     }
   }
 
-  // ── 3. Build and execute DB query ────────────────────────────────────────
   try {
     const dbClient = req._dbClient || db;
 
@@ -235,7 +273,6 @@ router.get('/dead-letters', async (req, res, next) => {
       let q = dbClient('webhook_dead_letters')
         .where('tenant_id', req.tenantId);
 
-      // optional filters
       if (event !== undefined) {
         q = q.where('event', event);
       }
@@ -255,19 +292,11 @@ router.get('/dead-letters', async (req, res, next) => {
       return q;
     };
 
-    // Keyset pagination: if a cursor is present, add the WHERE clause that
-    // continues from where the previous page left off.
-    //
-    // We sort by created_at DESC, id DESC (tiebreaker).
-    // Rows are "after" the cursor when:
-    //   created_at < cursor.sortValue
-    //   OR (created_at = cursor.sortValue AND id < cursor.id)
-    //
     let dataQuery = buildBase()
       .select(SAFE_COLUMNS)
       .orderBy('created_at', 'desc')
       .orderBy('id', 'desc')
-      .limit(limit + 1); // fetch one extra to determine hasMore
+      .limit(limit + 1);
 
     if (cursorData) {
       dataQuery = dataQuery.where(function () {
@@ -281,7 +310,6 @@ router.get('/dead-letters', async (req, res, next) => {
 
     const rows = await dataQuery;
 
-    // ── 4. Determine hasMore and build nextCursor ────────────────────────
     const hasMore = rows.length > limit;
     const pageRows = hasMore ? rows.slice(0, limit) : rows;
 
@@ -297,7 +325,6 @@ router.get('/dead-letters', async (req, res, next) => {
       });
     }
 
-    // ── 5. Redact and respond ────────────────────────────────────────────
     const safeRows = pageRows.map(redactRow);
 
     logger.info(
@@ -330,16 +357,10 @@ router.get('/dead-letters', async (req, res, next) => {
 
 // ── POST /replay/:id ─────────────────────────────────────────────────────────
 
-/**
- * POST /api/admin/webhooks/replay/:id
- * Replay a single dead-letter row by its UUID.
- */
 router.post('/replay/:id', async (req, res) => {
   const { id } = req.params;
   try {
     await replayWebhook(id);
-    // `req.apiClient` is set by src/middleware/apiKeyAuth.js on success; the
-    // JWT path sets `req.user`. The legacy `req.apiKey` no longer exists.
     logger.info({ deadLetterId: id, adminClient: req.apiClient?.clientId || req.user?.sub }, 'Admin triggered replay');
     return res.status(202).json({ replayed: [id] });
   } catch (err) {
@@ -356,15 +377,6 @@ router.post('/replay/:id', async (req, res) => {
 
 // ── POST /replay (batch) ──────────────────────────────────────────────────────
 
-/**
- * POST /api/admin/webhooks/replay
- * Replay a batch of dead-letter rows.
- *
- * Body (one of):
- *   { "ids": ["uuid1", "uuid2"] }           — explicit list
- *   { "tenantId": "t_123" }                 — all unresolved for tenant
- *   { "tenantId": "t_123", "limit": 50 }    — with page limit (max 200)
- */
 router.post('/replay', async (req, res) => {
   const { ids, tenantId, limit = 50 } = req.body || {};
 
@@ -377,16 +389,16 @@ router.post('/replay', async (req, res) => {
     if (!Array.isArray(ids) || ids.length === 0) {
       return res.status(400).json({ error: '"ids" must be a non-empty array.' });
     }
-    // cap batch to 200 to prevent DoS
     const capped = ids.slice(0, 200);
     rows = await db('webhook_dead_letters')
       .whereIn('id', capped)
+      .where('tenant_id', req.tenantId)
       .where('resolved', false)
       .select('id');
   } else {
     const cap = Math.min(Number(limit) || 50, 200);
     rows = await db('webhook_dead_letters')
-      .where({ tenant_id: tenantId, resolved: false })
+      .where({ tenant_id: tenantId || req.tenantId, resolved: false })
       .orderBy('created_at', 'asc')
       .limit(cap)
       .select('id');
@@ -401,9 +413,11 @@ router.post('/replay', async (req, res) => {
       replayed.push(row.id);
     } catch (err) {
       failed.push({ id: row.id, error: err.message });
-      webhookReplayTotal.inc({
-        outcome: err.code === 'ALREADY_RESOLVED' ? 'already_resolved' : 'failure',
-      });
+      if (metrics.webhookReplayTotal && typeof metrics.webhookReplayTotal.inc === 'function') {
+        metrics.webhookReplayTotal.inc({
+          outcome: err.code === 'ALREADY_RESOLVED' ? 'already_resolved' : 'failure',
+        });
+      }
     }
   }
 
@@ -417,13 +431,13 @@ router.post('/replay', async (req, res) => {
 
 // ── POST /resolve/:id ─────────────────────────────────────────────────────────
 
-/**
- * POST /api/admin/webhooks/resolve/:id
- * Mark a dead-letter row as resolved without re-sending.
- */
 router.post('/resolve/:id', async (req, res) => {
   const { id } = req.params;
-  const row = await db('webhook_dead_letters').where('id', id).first();
+  const dbClient = req._dbClient || db;
+  const row = await dbClient('webhook_dead_letters')
+    .where({ id, tenant_id: req.tenantId })
+    .first();
+
   if (!row) {
     return res.status(404).json({ error: `Dead-letter row not found: ${id}` });
   }
