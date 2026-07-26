@@ -36,7 +36,7 @@ const {
 const { adminConfigLimiter } = require('../middleware/rateLimit');
 const idempotencyMiddleware = require('../middleware/idempotency');
 const logger = require('../logger');
-const { applyConfigSection } = require('../services/configService');
+const idempotencyMiddleware = require('../middleware/idempotency');
 
 const router = express.Router();
 
@@ -103,11 +103,10 @@ const optionalIdempotency = (req, res, next) => {
  *     parameters:
  *       - in: header
  *         name: Idempotency-Key
- *         required: true
  *         schema:
  *           type: string
- *           pattern: '^[A-Za-z0-9._:-]{8,128}$'
- *         description: Unique idempotency key for this config update. Safe to retry with the same key.
+ *         required: false
+ *         description: Optional 8-128 character URL-safe string to safely retry requests without double-applying.
  *     requestBody:
  *       required: true
  *       content:
@@ -138,7 +137,7 @@ const optionalIdempotency = (req, res, next) => {
  *                 message:
  *                   type: string
  *       400:
- *         description: Validation error — body contains invalid or missing fields, or missing/malformed Idempotency-Key.
+ *         description: Validation error — body contains invalid or missing fields, or idempotency key is malformed.
  *         content:
  *           application/problem+json:
  *             schema:
@@ -157,17 +156,17 @@ const optionalIdempotency = (req, res, next) => {
  *       403:
  *         $ref: '#/components/responses/Problem403'
  *       409:
- *         description: Idempotency key reused with a different request body.
+ *         description: Idempotency conflict — the key was reused with a different payload.
  *         content:
  *           application/problem+json:
  *             schema:
  *               type: object
  *               properties:
- *                 type:    { type: string }
- *                 title:   { type: string }
- *                 status:  { type: integer }
- *                 detail:  { type: string }
- *                 requestId: { type: string }
+ *                 type:  { type: string }
+ *                 title: { type: string }
+ *                 status: { type: integer }
+ *                 detail: { type: string }
+ *                 code:   { type: string }
  *       429:
  *         description: Rate limit exceeded (issue #754) — see Retry-After header.
  *         headers:
@@ -190,7 +189,7 @@ const optionalIdempotency = (req, res, next) => {
  *                 error:   { type: string }
  *                 message: { type: string }
  */
-router.post('/', idempotencyMiddleware, validateBody(runtimeConfigSchema), (req, res) => {
+router.post('/', validateBody(runtimeConfigSchema), optionalIdempotency, (req, res) => {
   // validateBody attaches the parsed, coerced payload to req.validated
   const { section, config: validatedConfig } = req.validated;
 
