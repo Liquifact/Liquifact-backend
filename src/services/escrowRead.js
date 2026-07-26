@@ -41,6 +41,7 @@ const db = require("../db/knex");
 const { createRedisEscrowSummaryCache } = require("../cache/redis");
 const { escrowReadCache } = require("./escrowReadCache");
 const { emitEscrowReadWebhook } = require("./webhooks");
+const { get: getConfig } = require("../config");
 
 const cache = createRedisEscrowSummaryCache();
 
@@ -255,14 +256,40 @@ function _coerceFundedAmount(raw) {
  * @param {string} safeId - Validated, trimmed invoice ID.
  * @param {import('knex').Knex} [dbClient=db] - Knex instance.
  * @returns {Promise<object|null>} Normalised base state, or null when missing.
+ * Security notes:
+ *  - We never trust `eventBody.status` / `eventBody.fundedAmount` to override
+ *    `latest_event_type` blindly; the envelope (`latest_event_type`) is the
+ *    indexer's source of truth, while `eventBody` provides enrichments.
+ *  - Decimals that may appear on the projection are display-only. They are
+ *    never copied into the base-state return value and must NEVER be used to
+ *    scale on-chain principal math (see `src/services/tokenMeta.js`).
+ *  - Soft-deleted rows (`deleted_at` set, issue #31) are treated as absent so
+ *    every default read falls through to the neutral `not_found` state. The
+ *    filter is applied in JS rather than in the WHERE clause because the row
+ *    is fetched by primary key either way, and callers that need the tombstone
+ *    (the restore path) go through `services/escrowReadSoftDelete`.
+ *
+ * @param {string} safeId - Validated, trimmed invoice ID.
+ * @param {import('knex').Knex} [dbClient=db] - Knex instance (injectable for tests).
+ * @param {object} [options={}]
+ * @param {boolean} [options.includeDeleted=false] - Include soft-deleted rows.
+ * @returns {Promise<object|null>} Normalised base state, or null when no
+ *   projection row exists for the invoice, the row is soft-deleted, or the DB
+ *   read fails.
  */
-async function _readBaseStateFromProjection(safeId, dbClient = db) {
+async function _readBaseStateFromProjection(safeId, dbClient = db, options = {}) {
   try {
     const projection = await dbClient("escrow_event_projection")
       .where("invoice_id", safeId)
       .first();
 
     if (!projection) {
+      return null;
+    }
+
+    // Issue #31 — soft-deleted escrow-read records are excluded from default
+    // reads; they remain restorable until the retention window elapses.
+    if (!options.includeDeleted && projection.deleted_at != null) {
       return null;
     }
 
@@ -314,6 +341,10 @@ async function _readBaseStateFromProjection(safeId, dbClient = db) {
  * @param {string} invoiceId - Validated invoice ID.
  * @param {Function} [adapter] - Optional async test adapter.
  * @param {object} [options={}]
+ * @param {import('knex').Knex} [options.dbClient=db] - Override the default
+ *   Knex instance for tests.
+ * @param {boolean} [options.includeDeleted=false] - When true, soft-deleted
+ *   (issue #31) projection rows are read instead of being hidden.
  * @returns {Promise<object>} Base escrow state without `legal_hold`.
  */
 async function _fetchBaseEscrowState(invoiceId, adapter, options = {}) {
@@ -324,6 +355,7 @@ async function _fetchBaseEscrowState(invoiceId, adapter, options = {}) {
   const projectionState = await _readBaseStateFromProjection(
     invoiceId,
     options.dbClient,
+    { includeDeleted: options.includeDeleted === true },
   );
   if (projectionState) {
     return projectionState;
@@ -589,6 +621,32 @@ async function readFundedAmount(invoiceId, options = {}) {
  * @param {string} invoiceId - Invoice identifier.
  * @param {object} [options={}]
  * @returns {Promise<Object>}
+ * Resolves whether the projection/cache-based escrow read path is enabled.
+ * Checks the `ESCROW_READ_PROJECTION_ENABLED` environment flag.
+ * Defaults to `true` when config is not yet validated (e.g. in tests).
+ *
+ * @returns {boolean} `true` when projection-based reads are enabled.
+ */
+function isProjectionEnabled() {
+  try {
+    const cfg = getConfig();
+    return cfg.ESCROW_READ_PROJECTION_ENABLED === 'true';
+  } catch (_e) {
+    // Config not validated yet — safe default is enabled
+    return true;
+  }
+}
+
+/**
+ * Retrieves the escrow state from the projection or cache,
+ * falling back to live read if necessary.
+ *
+ * When `ESCROW_READ_PROJECTION_ENABLED` is set to `false`, the
+ * projection/cache path is skipped entirely and the function falls
+ * through directly to a live Soroban contract read.
+ *
+ * @param {string} invoiceId - Invoice identifier
+ * @returns {Promise<Object>} The escrow state
  */
 async function getEscrowStateWithProjection(invoiceId, options = {}) {
   const safeId = invoiceId.trim();
@@ -599,6 +657,19 @@ async function getEscrowStateWithProjection(invoiceId, options = {}) {
     return localCached;
   }
 
+  // Gate: if the projection feature flag is disabled, skip cache & DB
+  // and go directly to a live Soroban read.
+  if (!isProjectionEnabled()) {
+    const baseState = await _fetchBaseEscrowState(safeId);
+    const legalHold = await fetchLegalHold(safeId);
+    return {
+      ...baseState,
+      legal_hold: legalHold,
+      latest_event_type: 'live_read',
+    };
+  }
+
+  // Try cache first if enabled
   if (cache) {
     const cacheResult = await cache.getSummary(safeId);
     if (cacheResult.hit) {
@@ -679,4 +750,6 @@ module.exports = {
   LEGAL_HOLD_STATUS,
   LEGAL_HOLD_UNKNOWN_REASONS,
   coerceLegalHoldStatus,
+};
+  isProjectionEnabled,
 };

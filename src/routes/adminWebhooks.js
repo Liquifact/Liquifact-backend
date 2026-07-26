@@ -191,6 +191,87 @@ router.use((req, res, next) => {
 
 // ── GET /dead-letters ────────────────────────────────────────────────────────
 
+/**
+ * @swagger
+ * /api/admin/webhooks/dead-letters:
+ *   get:
+ *     operationId: listDeadLetterWebhooks
+ *     summary: List dead-letter webhook deliveries (filterable, cursor-paginated)
+ *     description: |
+ *       Returns a cursor-paginated list of rows from `webhook_dead_letters`
+ *       that belong to the authenticated tenant.
+ *
+ *       **Access**: Admin-only (JWT bearer or API key). Results are always
+ *       scoped to `req.tenantId` — no cross-tenant data is ever returned.
+ *
+ *       **Security**: HMAC secrets and other sensitive material are never
+ *       included in any response field.
+ *
+ *       **Pagination** (cursor-based, mirrors `GET /api/marketplace`):
+ *       | Param | Default | Range | Notes |
+ *       |-------|---------|-------|-------|
+ *       | `limit`  | 20 | 1–100 | Rows per page |
+ *       | `cursor` | – | opaque | Returned as `nextCursor` in prior response |
+ *
+ *       **Filters**:
+ *       | Param | Type | Description |
+ *       |-------|------|-------------|
+ *       | `event`        | string  | Exact match on `event` column (e.g. `invoice.approved`) |
+ *       | `targetUrl`    | string  | Exact match on `webhook_url` column |
+ *       | `resolved`     | boolean | `true` / `false` |
+ *       | `createdAfter` | ISO 8601 date-time | Lower bound on `created_at` (inclusive) |
+ *       | `createdBefore`| ISO 8601 date-time | Upper bound on `created_at` (exclusive) |
+ *     tags: [AdminWebhooks]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+ *       - in: query
+ *         name: cursor
+ *         schema: { type: string }
+ *         description: Opaque cursor from the previous page's `nextCursor` field.
+ *       - in: query
+ *         name: event
+ *         schema: { type: string }
+ *       - in: query
+ *         name: targetUrl
+ *         schema: { type: string }
+ *       - in: query
+ *         name: resolved
+ *         schema: { type: boolean }
+ *       - in: query
+ *         name: createdAfter
+ *         schema: { type: string, format: date-time }
+ *       - in: query
+ *         name: createdBefore
+ *         schema: { type: string, format: date-time }
+ *     responses:
+ *       200:
+ *         description: Dead-letter rows retrieved.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     $ref: '#/components/schemas/DeadLetterRow'
+ *                 meta:
+ *                   type: object
+ *                   properties:
+ *                     limit: { type: integer }
+ *                     hasMore: { type: boolean }
+ *                     nextCursor: { type: string, nullable: true }
+ *       400:
+ *         description: Invalid query parameters.
+ *       401:
+ *         $ref: '#/components/responses/Problem401'
+ *       403:
+ *         $ref: '#/components/responses/Problem403'
+ */
 router.get('/dead-letters', async (req, res, next) => {
   const {
     cursor,

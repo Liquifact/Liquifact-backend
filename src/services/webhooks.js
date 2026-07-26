@@ -401,6 +401,266 @@ async function replayWebhook(deadLetterId) {
   logger.info({ deadLetterId, webhook_url: row.webhook_url }, 'Webhook replayed successfully');
 }
 
+const MAX_CONFIG_WEBHOOK_PAYLOAD_BYTES = 32768;
+
+/**
+ * Enqueues a webhook delivery job via the shared BackgroundWorker.
+ *
+ * @param {Object} params
+ * @param {string} [params.invoiceId] - Related invoice ID (optional).
+ * @param {string} [params.tenantId] - Target tenant ID (optional if invoiceId provided).
+ * @param {string} params.event - Event type string.
+ * @param {Object} [params.transition] - State transition details.
+ * @param {string} [params.section] - Config section name.
+ * @param {Object} [params.config] - Config object payload.
+ * @param {string} [params.actor] - Actor identifier.
+ * @returns {Promise<string|null>} Enqueued job ID or null.
+ */
+async function enqueueWebhookDelivery({ invoiceId, tenantId: explicitTenantId, event, transition = {}, section, config, actor }) {
+  if (!_sharedWorker) {
+    logger.info({ invoiceId, tenantId: explicitTenantId }, 'webhook: shared worker not set, skipping enqueue');
+    return null;
+  }
+
+  let tenantId = explicitTenantId;
+  if (!tenantId && invoiceId) {
+    const invoice = await db('invoices').select('tenant_id').where('id', invoiceId).first();
+    if (!invoice) {
+      logger.warn({ invoiceId }, 'Invoice not found for webhook delivery enqueue');
+      return null;
+    }
+    tenantId = invoice.tenant_id;
+  }
+
+  if (!tenantId) {
+    logger.warn({ invoiceId }, 'Tenant ID not specified or found for webhook enqueue');
+    return null;
+  }
+
+  const tenant = await db('tenants').select('settings').where('id', tenantId).first();
+  if (!tenant || !tenant.settings) {
+    logger.warn({ tenantId, invoiceId }, 'Tenant settings not found for webhook delivery enqueue');
+    return null;
+  }
+
+  const { webhook_url, webhook_secret } = tenant.settings;
+  if (!webhook_url || !webhook_secret) {
+    logger.info({ tenantId, invoiceId }, 'Webhook URL or secret not configured');
+    return null;
+  }
+
+  const payload = {
+    invoiceId,
+    tenantId,
+    webhookUrl: webhook_url,
+    webhookSecret: webhook_secret,
+    event,
+    transition,
+  };
+
+  if (section) { payload.section = section; }
+  if (config) { payload.config = config; }
+  if (actor) { payload.actor = actor; }
+
+  try {
+    const jobId = _sharedWorker.enqueue('webhook_delivery', payload);
+    return jobId;
+  } catch (error) {
+    logger.error({ invoiceId, tenantId, error: error.message }, 'webhook: failed to enqueue delivery job');
+    return null;
+  }
+}
+
+/**
+ * Emits an outbound webhook callback on notable runtime config events.
+ *
+ * @param {Object} params
+ * @param {string} params.tenantId - Target tenant ID.
+ * @param {string} params.section - Configuration section name.
+ * @param {Object} params.config - Section configuration payload.
+ * @param {string} [params.actor='system'] - Actor who triggered the change.
+ * @param {string} [params.event='config.updated'] - Event label.
+ * @returns {Promise<void>}
+ */
+async function emitConfigWebhook({ tenantId, section, config, actor = 'system', event = 'config.updated' }) {
+  try {
+    if (!tenantId) {
+      logger.warn({ section }, 'Tenant ID missing for config webhook emission');
+      return;
+    }
+
+    const tenant = await db('tenants').select('settings').where('id', tenantId).first();
+    if (!tenant || !tenant.settings) {
+      logger.info({ tenantId, section }, 'Tenant settings not found for config webhook');
+      return;
+    }
+
+    const { webhook_url, webhook_secret, webhook_events } = tenant.settings;
+    if (!webhook_url || !webhook_secret) {
+      logger.info({ tenantId, section }, 'Webhook URL or secret not configured for config event');
+      return;
+    }
+
+    if (Array.isArray(webhook_events) && webhook_events.length > 0) {
+      const allowed = webhook_events.includes('*') || webhook_events.includes(event) || webhook_events.includes('config.*');
+      if (!allowed) {
+        logger.info({ tenantId, section, event }, 'Config webhook event filtered out by tenant settings');
+        return;
+      }
+    }
+
+    let boundedConfig = config;
+    let truncated = false;
+    const rawConfigString = JSON.stringify(config || {});
+    if (rawConfigString.length > MAX_CONFIG_WEBHOOK_PAYLOAD_BYTES) {
+      truncated = true;
+      boundedConfig = {
+        _summary: 'Config payload exceeded maximum size limit',
+        keys: Object.keys(config || {}),
+      };
+    }
+
+    const payload = sortKeys({
+      event,
+      timestamp: new Date().toISOString(),
+      tenantId,
+      section,
+      config: boundedConfig,
+      actor,
+      truncated,
+    });
+
+    const body = JSON.stringify(payload);
+    const signatureHeader = createSignatureHeader(webhook_secret, body);
+
+    if (_sharedWorker) {
+      try {
+        _sharedWorker.enqueue('webhook_delivery', {
+          tenantId,
+          webhookUrl: webhook_url,
+          webhookSecret: webhook_secret,
+          event,
+          section,
+          config: boundedConfig,
+          actor,
+          truncated,
+          rawBody: body,
+        });
+        logger.info({ tenantId, section, event }, 'Config webhook enqueued via shared worker');
+        return;
+      } catch (err) {
+        logger.warn({ err: err.message }, 'Failed to enqueue config webhook, falling back to direct delivery');
+      }
+    }
+
+    const maxRetries = Number(process.env.WEBHOOK_MAX_RETRIES || 3);
+    const baseDelay = Number(process.env.WEBHOOK_BASE_DELAY || 500);
+    const maxDelay = Number(process.env.WEBHOOK_MAX_DELAY || 10000);
+
+    const shouldRetry = (err) => {
+      if (!err) { return false; }
+      if (err.code) {
+        return ['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN'].includes(err.code) || err.name === 'AbortError';
+      }
+      if (err.status) {
+        const s = Number(err.status);
+        return s >= 500 && s < 600;
+      }
+      return false;
+    };
+
+    const operation = async () => {
+      const controller = new AbortController();
+      const timeoutMs = Number(process.env.WEBHOOK_TIMEOUT_MS || 5000);
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(webhook_url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Signature': signatureHeader,
+          },
+          body,
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          const err = new Error(`Webhook responded with ${response.status}`);
+          err.status = response.status;
+          throw err;
+        }
+
+        return { ok: true, status: response.status };
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    };
+
+    const onRetry = async ({ attempt, error }) => {
+      try {
+        await appendAuditEvent({
+          eventType: 'webhook_delivery',
+          action: 'config.webhook.dispatch',
+          actorType: 'system',
+          actorId: tenantId,
+          targetType: 'config',
+          targetId: section,
+          statusCode: error && error.status ? Number(error.status) : null,
+          metadata: {
+            attempt,
+            url: webhook_url,
+            error: error && error.message ? error.message : String(error),
+            payload,
+          },
+        });
+      } catch (e) {
+        logger.warn({ err: e.message }, 'Failed to append audit event for config webhook attempt');
+      }
+    };
+
+    try {
+      const result = await withRetry(operation, { maxRetries, baseDelay, maxDelay, shouldRetry, onRetry });
+      try {
+        await appendAuditEvent({
+          eventType: 'webhook_delivery',
+          action: 'config.webhook.dispatch',
+          actorType: 'system',
+          actorId: tenantId,
+          targetType: 'config',
+          targetId: section,
+          statusCode: result && result.status ? Number(result.status) : 200,
+          metadata: { url: webhook_url, payload, attempt: 1 },
+        });
+      } catch (e) {
+        logger.warn({ err: e.message }, 'Failed to append audit event for config webhook success');
+      }
+
+      logger.info({ event, section, tenantId }, 'Config event webhook emitted successfully');
+    } catch (error) {
+      try {
+        await db('webhook_dead_letters').insert({
+          tenant_id: tenantId,
+          invoice_id: null,
+          event,
+          payload: JSON.stringify(payload),
+          webhook_url,
+          last_error: error && error.message ? error.message : String(error),
+          attempts: maxRetries + 1,
+          created_at: new Date(),
+        });
+      } catch (e) {
+        logger.warn({ err: e.message }, 'Failed to persist config webhook dead-letter');
+      }
+
+      logger.error({ event, section, tenantId, error: error.message }, 'Failed to emit config event webhook');
+    }
+  } catch (error) {
+    logger.error({ event, section, tenantId, error: error.message }, 'Failed to emit config event webhook');
+  }
+}
+
+
+
 /**
  * Marks a dead-letter row as resolved without re-sending.
  */
@@ -418,4 +678,19 @@ module.exports = {
   sortKeys,
   enqueueWebhookDelivery,
   setSharedWorker,
+  emitWebhook,
+  emitConfigWebhook,
+  enqueueWebhookDelivery,
+  setSharedWorker,
+  verifySignature,
+  createSignature,
+  createSignatureHeader,
+  writeDeadLetter,
+  replayWebhook,
+  resolveDeadLetter,
+  sortKeys,
+  setSharedWorker,
+  SIGNATURE_VERSION,
+  TOLERANCE_MS,
+  MAX_CONFIG_WEBHOOK_PAYLOAD_BYTES,
 };

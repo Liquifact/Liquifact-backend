@@ -479,6 +479,63 @@ Computation is delegated to `computeEscrowDerivedFields(state, { ledgerCloseTime
 
 ---
 
+## Soft Delete and Restore (issue #31)
+
+Escrow-read records (`escrow_event_projection` rows) are never hard-deleted by operators. A delete writes a tombstone; the row survives, hidden, until its retention window elapses, and a maintenance task purges it after that.
+
+### Lifecycle
+
+| State | Row condition | Default reads see | Restorable |
+|---|---|---|---|
+| Live | `deleted_at IS NULL` | The projection state (`source: "projection"`) | n/a |
+| Soft-deleted | `deleted_at` set, within window | Neutral `not_found` state (`fundedAmount: 0`) | Yes |
+| Window expired | `deleted_at` set, `now - deleted_at >= window` | Neutral `not_found` state | **No** — `410 Gone` |
+| Purged | Row removed by the purge job | Neutral `not_found` state | No — `404` |
+
+The retention window is `ESCROW_READ_SOFT_DELETE_RETENTION_DAYS` (default **30**, clamped to 1–3650). Restorability is decided by the window alone, never by whether the purge job has run yet — so the API contract does not drift with job scheduling.
+
+### Read exclusion
+
+`_readBaseStateFromProjection` treats a tombstoned row as absent, so `readEscrowState`, `readEscrowStateWithAttestations`, `readFundedAmount`, and `getEscrowStateWithProjection` all fall through to the neutral RPC stub. Both delete and restore invalidate the local and Redis escrow caches, so a cached summary can never keep serving a hidden record.
+
+### Admin endpoints
+
+All four require admin authentication (JWT bearer or API key) via `adminStack`.
+
+| Route | Purpose | Notable statuses |
+|---|---|---|
+| `DELETE /api/admin/escrow/reads/:invoiceId` | Soft-delete. Optional JSON body `{ "reason": "..." }` (≤ 500 chars) recorded for audit | `404` unknown record · `409` already deleted |
+| `POST /api/admin/escrow/reads/:invoiceId/restore` | Restore within the window | `409` not deleted · `410` window expired · `404` purged |
+| `GET /api/admin/escrow/reads/:invoiceId/deletion-state` | Inspect the tombstone (the only read that surfaces deleted records) | `404` unknown record |
+| `POST /api/admin/escrow/reads/purge` | Run the retention purge on demand | — |
+
+Delete response body:
+
+```json
+{
+  "invoiceId": "inv_001",
+  "deleted": true,
+  "deletedAt": "2026-07-25T12:00:00.000Z",
+  "deletedBy": "admin-user",
+  "deleteReason": "duplicate projection",
+  "restoredAt": null,
+  "restoredBy": null,
+  "purgeAfter": "2026-08-24T12:00:00.000Z",
+  "restorable": true,
+  "retentionDays": 30
+}
+```
+
+Re-deleting an already-tombstoned record returns `409` rather than refreshing `deleted_at` — otherwise a retried delete would extend the window on every attempt and a record could evade purge indefinitely.
+
+### Maintenance task
+
+`src/jobs/escrowReadPurge.js` runs `purgeExpiredSoftDeletes` on a schedule (`ESCROW_READ_PURGE_INTERVAL_MS`, default 6 h) through the shared job queue. Each run deletes rows with `deleted_at <= now - window` in batches of `ESCROW_READ_PURGE_BATCH_SIZE`, capped at `ESCROW_READ_PURGE_MAX_BATCHES` per run; a remaining backlog is reported as `maxBatchesReached` and picked up next run. Metrics: `liquifact_escrow_read_purge_rows_deleted_total` and `liquifact_escrow_read_purge_runs_total{status}`.
+
+Schema: `migrations/20260725000000_add_soft_delete_to_escrow_event_projection.sql` adds `deleted_at`, `deleted_by`, `delete_reason`, `restored_at`, `restored_by`, plus a partial index on `deleted_at` so the purge scan never touches live rows.
+
+---
+
 ## Cross-Reference Index
 
 | Symbol | File | Line | Used by |
@@ -496,6 +553,9 @@ Computation is delegated to `computeEscrowDerivedFields(state, { ledgerCloseTime
 | `legalHoldGate` | `src/middleware/legalHoldGate.js` | — | Funding routes (not read routes) |
 | `createStandardizedApp` | `src/app.js` | — | Wraps all JSON responses in the standard envelope |
 | `AppError` | `src/errors/AppError.js` | — | Used by route handlers for structured errors |
+| `softDeleteEscrowRead` | `src/services/escrowReadSoftDelete.js` | — | `DELETE /api/admin/escrow/reads/:invoiceId` |
+| `restoreEscrowRead` | `src/services/escrowReadSoftDelete.js` | — | `POST /api/admin/escrow/reads/:invoiceId/restore` |
+| `purgeExpiredSoftDeletes` | `src/services/escrowReadSoftDelete.js` | — | `src/jobs/escrowReadPurge.js`, `POST /api/admin/escrow/reads/purge` |
 | `formatProblemDetails` | `src/utils/problemDetails.js` | — | Canonical RFC 7807 builder used by `AppError` |
 
 ---
@@ -505,3 +565,4 @@ Computation is delegated to `computeEscrowDerivedFields(state, { ledgerCloseTime
 | Date | Change |
 |---|---|
 | 2026-07-25 | Initial documentation of escrow-read API contract and error codes |
+| 2026-07-25 | Added soft-delete, restore, and retention purge for escrow-read records (issue #31) |

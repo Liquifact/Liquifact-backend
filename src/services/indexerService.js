@@ -35,6 +35,7 @@
 
 const db = require('../db/knex');
 const { encodeCursor, decodeCursor } = require('../utils/cursorPagination');
+const { indexerEventSchema, parseValidationErrors } = require('../schemas/indexerEvent');
 
 /**
  * Allowed sort fields for the indexer listing endpoint.
@@ -68,6 +69,13 @@ const MAX_PAGE_SIZE = 100;
  * @type {number}
  */
 const DEFAULT_PAGE_SIZE = 20;
+
+/**
+ * Maximum number of events accepted in a single bulk ingestion request.
+ * Protects against oversized payloads and unbounded write amplification.
+ * @type {number}
+ */
+const MAX_BULK_BATCH_SIZE = 50;
 
 /**
  * Columns selected from `escrow_events`.
@@ -154,6 +162,16 @@ async function listIndexerEvents({
   dbClient,
 } = {}) {
   const knex = dbClient || db;
+  const useCache = !dbClient;
+
+  // ── Cache lookup ────────────────────────────────────────────────────────
+  if (useCache) {
+    const cacheKey = IndexerCache.buildKey({ filters, sorting, pagination });
+    const cached = indexerCache.get(cacheKey);
+    if (cached !== undefined) {
+      return cached;
+    }
+  }
 
   // ── Resolve validated query parameters ───────────────────────────────────
   const limit = Math.max(1, Math.min(MAX_PAGE_SIZE, parseInt(pagination.limit) || DEFAULT_PAGE_SIZE));
@@ -214,7 +232,7 @@ async function listIndexerEvents({
       });
     }
 
-    return {
+    const cursorResult = {
       data,
       meta: {
         total,
@@ -223,6 +241,13 @@ async function listIndexerEvents({
         nextCursor,
       },
     };
+
+    if (useCache) {
+      const cacheKey = IndexerCache.buildKey({ filters, sorting, pagination });
+      indexerCache.set(cacheKey, cursorResult);
+    }
+
+    return cursorResult;
   }
 
   // ── Offset-based pagination (legacy, backward-compatible) ─────────────────
@@ -247,7 +272,7 @@ async function listIndexerEvents({
     });
   }
 
-  return {
+  const offsetResult = {
     data: pagedData,
     meta: {
       total,
@@ -256,15 +281,128 @@ async function listIndexerEvents({
       totalPages: Math.ceil(total / limit),
       hasMore: pagedHasMore,
       nextCursor: pagedNextCursor,
-    },
+    }),
+  };
+
+  if (useCache) {
+    const cacheKey = IndexerCache.buildKey({ filters, sorting, pagination });
+    indexerCache.set(cacheKey, offsetResult);
+  }
+
+  return offsetResult;
+}
+
+/**
+ * Validates the shape of the incoming batch payload before item-level
+ * processing begins.  Rejects non-arrays, arrays exceeding the cap, and
+ * arrays containing non-object entries early.
+ *
+ * @param {unknown} body - Parsed JSON request body.
+ * @returns {{ ok: boolean, events?: object[], error?: object }} When `ok` is
+ *   false the `error` field contains the response envelope to send.
+ */
+function validateBulkPayload(body) {
+  if (!Array.isArray(body)) {
+    return {
+      ok: false,
+      error: { status: 400, message: 'Request body must be a JSON array of event objects.', code: 'VALIDATION_ERROR', details: { _root: 'Expected an array.' } },
+    };
+  }
+
+  if (body.length === 0) {
+    return {
+      ok: false,
+      error: { status: 400, message: 'Batch must contain at least one event.', code: 'VALIDATION_ERROR', details: { _root: 'Array must not be empty.' } },
+    };
+  }
+
+  if (body.length > MAX_BULK_BATCH_SIZE) {
+    return {
+      ok: false,
+      error: { status: 413, message: `Batch exceeds maximum size of ${MAX_BULK_BATCH_SIZE} events.`, code: 'BATCH_TOO_LARGE', details: { maxBatchSize: MAX_BULK_BATCH_SIZE, received: body.length } },
+    };
+  }
+
+  for (let i = 0; i < body.length; i++) {
+    if (body[i] === null || typeof body[i] !== 'object') {
+      return {
+        ok: false,
+        error: { status: 400, message: `Item at index ${i} must be a non-null object.`, code: 'VALIDATION_ERROR', details: { [`items[${i}]`]: 'Expected a non-null object.' } },
+      };
+    }
+  }
+
+  return { ok: true, events: body };
+}
+
+/**
+ * Accepts a bounded array of raw indexer events, validates each one
+ * individually, persists valid events, and returns per-item results.
+ *
+ * Failures on one item never abort the rest of the batch — callers always
+ * receive a result entry for every input item.
+ *
+ * @param {object} options
+ * @param {object[]} options.events - Raw event payloads to ingest.
+ * @param {import('knex').Knex} [options.dbClient] - Injectable Knex client.
+ * @returns {Promise<{ data: object[], meta: object }>}
+ *   `data` is an array of per-item result objects. `meta` contains
+ *   `succeeded`, `failed`, and `total` counts.
+ */
+async function bulkIndexerEvents({ events, dbClient } = {}) {
+  const knex = dbClient || db;
+  const results = [];
+
+  for (let i = 0; i < events.length; i++) {
+    const raw = events[i];
+    try {
+      const parsed = indexerEventSchema.safeParse(raw);
+      if (!parsed.success) {
+        results.push({ index: i, success: false, error: { code: 'VALIDATION_ERROR', details: parseValidationErrors(parsed.error) } });
+        continue;
+      }
+
+      const d = parsed.data;
+      const normalized = {
+        event_id: d.eventId,
+        invoice_id: d.invoiceId,
+        event_type: d.eventType,
+        ledger_sequence: d.ledgerSequence,
+        paging_token: d.pagingToken || null,
+        contract_id: d.contractId !== undefined ? d.contractId : null,
+        tx_hash: d.txHash !== undefined ? d.txHash : null,
+        event_body: d.eventBody !== undefined ? JSON.stringify(d.eventBody) : null,
+        observed_at: d.observedAt || new Date().toISOString(),
+      };
+
+      await knex('escrow_events')
+        .insert(normalized)
+        .onConflict('event_id')
+        .merge();
+
+      results.push({ index: i, success: true, eventId: normalized.event_id });
+    } catch (err) {
+      results.push({ index: i, success: false, error: { code: 'PERSIST_ERROR', message: err.message || 'Unexpected error.' } });
+    }
+  }
+
+  const succeeded = results.filter((r) => r.success).length;
+  const failed = results.length - succeeded;
+
+  return {
+    data: results,
+    meta: { succeeded, failed, total: results.length },
   };
 }
 
 module.exports = {
   listIndexerEvents,
+  bulkIndexerEvents,
+  validateBulkPayload,
   INDEXER_SORT_FIELDS,
   DEFAULT_SORT_FIELD,
   DEFAULT_ORDER,
   MAX_PAGE_SIZE,
   DEFAULT_PAGE_SIZE,
+  MAX_BULK_BATCH_SIZE,
 };

@@ -29,6 +29,7 @@ const { CursorError } = require('./utils/cursorPagination');
 const { resolveEscrowAddress } = require('./config/escrowMap');
 const { getEscrowStateWithProjection } = require('./services/escrowRead');
 const { createCorsOptions, isCorsOriginRejectedError } = require('./config/cors');
+const { get: getConfig } = require('./config');
 const { validateInvoiceQueryParams } = require('./utils/validators');
 const { computeEscrowDerivedFields } = require('./services/escrowDerived');
 const { invoiceCreateSchema, parseValidationErrors } = require('./schemas/invoice');
@@ -44,6 +45,7 @@ const { validateHealthQuery, rejectBodyOnGet } = require('./schemas/health');
 const responseHelper = require('./utils/responseHelper');
 const logger = require('./logger');
 const { metricsAuth, metricsHandler } = require('./metrics');
+const { metricsLimiter } = require('./middleware/rateLimit');
 const { instrumentHealth } = require('./middleware/healthMetrics');
 const smeRoutes = require('./routes/sme');
 const invoiceFileRoutes = require('./routes/invoiceFile');
@@ -246,7 +248,9 @@ function createApp() {
     });
   });
 
-  // Invoices — GET (list) with cursor pagination
+  app.use('/api/api-keys', apiKeysRoutes);
+
+  // Invoices — GET (list)
   app.get('/api/invoices', async (req, res) => {
     const { isValid, fieldErrors, validatedParams } = validateInvoiceQueryParams(req.query);
     if (!isValid) {
@@ -381,7 +385,9 @@ function createApp() {
    */
   mountFeatureRouter(app, '/api/sme', smeRoutes);
   mountFeatureRouter(app, '/api/invoices', invoiceFileRoutes);
-  mountFeatureRouter(app, '/api/invoices', invoiceStateRoutes);
+  if (getConfig().INVOICE_STATE_ENABLED === 'true') {
+    mountFeatureRouter(app, '/api/invoices', invoiceStateRoutes);
+  }
   mountFeatureRouter(app, '/api/invest', investRoutes);
   mountFeatureRouter(app, '/api/investor', investorRoutes);
   mountFeatureRouter(app, '/api/kyc', kycRoutes);

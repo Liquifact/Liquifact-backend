@@ -391,6 +391,8 @@ let allowedOrigins = getAllowedOriginsFromEnv();
  */
 function reloadCorsOrigins() {
   allowedOrigins = getAllowedOriginsFromEnv();
+  const { getCorsCache } = require('./corsCache');
+  getCorsCache().clear();
 }
 
 /**
@@ -417,7 +419,13 @@ function validateCorsOrigin(origin, allowlist) {
   if (origin === undefined) {
     return true;
   }
-  return allowlist.length > 0 && isAllowedOrigin(origin, allowlist);
+  const { getCorsCache } = require('./corsCache');
+  const cache = getCorsCache();
+  const cached = cache.get(origin);
+  if (cached !== undefined) return cached;
+  const allowed = allowlist.length > 0 && isAllowedOrigin(origin, allowlist);
+  cache.set(origin, allowed);
+  return allowed;
 }
 
 /**
@@ -519,7 +527,204 @@ function createCorsOptions(env = process.env) {
   };
 }
 
+// ── Bulk operations ───────────────────────────────────────────────────────────
+
+/**
+ * Maximum number of operations allowed in a single bulk CORS request.
+ * Bounded to prevent unbounded memory use and keep per-request time predictable.
+ *
+ * @constant {number}
+ */
+const BULK_CORS_MAX_OPERATIONS = 25;
+
+/**
+ * @typedef {'add'|'remove'|'replace'} CorsOperationType
+ */
+
+/**
+ * @typedef {Object} CorsOperation
+ * @property {CorsOperationType} op   - The operation to perform.
+ * @property {string}            origin - The origin to add, remove, or replace.
+ * @property {string}            [newOrigin] - The replacement origin (required when op === 'replace').
+ */
+
+/**
+ * @typedef {Object} CorsOperationResult
+ * @property {number}       index        - Zero-based position in the submitted array.
+ * @property {boolean}      success      - Whether the operation succeeded.
+ * @property {string}       op           - The operation that was attempted.
+ * @property {string}       origin       - The origin value supplied.
+ * @property {string|null}  [newOrigin]  - For 'replace': the replacement value supplied.
+ * @property {string|null}  error        - Human-readable error when success is false.
+ */
+
+/**
+ * Validates a single bulk CORS operation entry.
+ *
+ * Rules enforced:
+ * - `op` must be `add`, `remove`, or `replace`.
+ * - `origin` must be a valid, parseable origin URL.
+ * - `newOrigin` is required (and must be valid) when `op` is `replace`.
+ * - `newOrigin` must not be provided for `add` or `remove`.
+ *
+ * @param {unknown} item - The raw operation entry from the request.
+ * @returns {{ valid: boolean, error: string|null, normalized: { op: string, origin: string, newOrigin?: string }|null }}
+ */
+function validateBulkCorsItem(item) {
+  if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+    return { valid: false, error: 'each operation must be a plain object', normalized: null };
+  }
+
+  const { op, origin, newOrigin } = item;
+
+  const VALID_OPS = ['add', 'remove', 'replace'];
+  if (typeof op !== 'string' || !VALID_OPS.includes(op)) {
+    return {
+      valid: false,
+      error: `op must be one of: ${VALID_OPS.join(', ')}`,
+      normalized: null,
+    };
+  }
+
+  const originCheck = validateOriginEntry(origin);
+  if (!originCheck.valid) {
+    return { valid: false, error: `origin: ${originCheck.error}`, normalized: null };
+  }
+
+  if (op === 'replace') {
+    if (newOrigin === undefined) {
+      return { valid: false, error: 'newOrigin is required for replace operations', normalized: null };
+    }
+    const newOriginCheck = validateOriginEntry(newOrigin);
+    if (!newOriginCheck.valid) {
+      return { valid: false, error: `newOrigin: ${newOriginCheck.error}`, normalized: null };
+    }
+    return {
+      valid: true,
+      error: null,
+      normalized: {
+        op,
+        origin: originCheck.normalized,
+        newOrigin: newOriginCheck.normalized,
+      },
+    };
+  }
+
+  // 'add' or 'remove' — newOrigin must not be provided
+  if (newOrigin !== undefined) {
+    return {
+      valid: false,
+      error: `newOrigin must not be provided for ${op} operations`,
+      normalized: null,
+    };
+  }
+
+  return { valid: true, error: null, normalized: { op, origin: originCheck.normalized } };
+}
+
+/**
+ * Processes a bounded array of CORS origin operations in isolation.
+ *
+ * Each operation is validated and applied independently — a failure in one
+ * item does not prevent subsequent items from being processed.
+ *
+ * Supported operations:
+ * - `add`     — Appends the origin to the allowlist if not already present.
+ * - `remove`  — Removes the origin from the allowlist if present.
+ * - `replace` — Replaces an existing origin with a new one. If the origin to
+ *               replace is not present, the operation fails with an error.
+ *
+ * The batch size is capped at {@link BULK_CORS_MAX_OPERATIONS}. Callers
+ * receive a structured response even on partial failure; the overall request
+ * never returns 4xx/5xx due to individual item failures.
+ *
+ * @param {unknown[]} operations - Raw array of operation objects from the request body.
+ * @returns {{ results: CorsOperationResult[], updatedOrigins: string[] }}
+ *   `results` holds per-item outcomes; `updatedOrigins` is the new allowlist
+ *   after all successful operations have been applied.
+ */
+function processBulkCorsOperations(operations) {
+  // Work on a mutable copy of the current allowlist so that each operation
+  // sees the result of the preceding successful one (order matters).
+  const workingList = allowedOrigins.slice();
+
+  const results = operations.map((item, index) => {
+    const validation = validateBulkCorsItem(item);
+
+    // Build common base for the result entry
+    const rawOp = item && typeof item === 'object' ? String(item.op || '') : '';
+    const rawOrigin = item && typeof item === 'object' ? String(item.origin || '') : '';
+    const rawNewOrigin = item && typeof item === 'object' ? item.newOrigin : undefined;
+
+    if (!validation.valid) {
+      return {
+        index,
+        success: false,
+        op: rawOp,
+        origin: rawOrigin,
+        ...(rawNewOrigin !== undefined ? { newOrigin: String(rawNewOrigin) } : {}),
+        error: validation.error,
+      };
+    }
+
+    const { op, origin, newOrigin } = validation.normalized;
+
+    if (op === 'add') {
+      const alreadyPresent = workingList.some(
+        (entry) => normalizeOrigin(entry) === normalizeOrigin(origin),
+      );
+      if (!alreadyPresent) {
+        workingList.push(origin);
+      }
+      return { index, success: true, op, origin, error: null };
+    }
+
+    if (op === 'remove') {
+      const beforeLen = workingList.length;
+      const normalized = normalizeOrigin(origin);
+      const filtered = workingList.filter(
+        (entry) => normalizeOrigin(entry) !== normalized,
+      );
+      workingList.length = 0;
+      filtered.forEach((o) => workingList.push(o));
+      const removed = beforeLen > workingList.length;
+      return {
+        index,
+        success: true,
+        op,
+        origin,
+        error: removed ? null : 'origin was not in the allowlist; no-op',
+      };
+    }
+
+    // op === 'replace'
+    const normalizedOld = normalizeOrigin(origin);
+    const existingIndex = workingList.findIndex(
+      (entry) => normalizeOrigin(entry) === normalizedOld,
+    );
+    if (existingIndex === -1) {
+      return {
+        index,
+        success: false,
+        op,
+        origin,
+        newOrigin,
+        error: 'origin to replace was not found in the allowlist',
+      };
+    }
+    workingList[existingIndex] = newOrigin;
+    return { index, success: true, op, origin, newOrigin, error: null };
+  });
+
+  // Persist the updated allowlist for live traffic
+  allowedOrigins.length = 0;
+  workingList.forEach((o) => allowedOrigins.push(o));
+
+  return { results, updatedOrigins: allowedOrigins.slice() };
+}
+
 module.exports = {
+  BULK_CORS_MAX_OPERATIONS,
   CORS_REJECTION_CODE,
   CORS_REJECTION_MESSAGE,
   DEV_DEFAULT_ORIGINS,
@@ -535,8 +740,11 @@ module.exports = {
   normalizeOrigin,
   parseAllowedOrigins,
   parseMaxAge,
+  processBulkCorsOperations,
   reloadCorsMaxAge,
   reloadCorsOrigins,
   resolveAllowlist,
+  validateBulkCorsItem,
   validateCorsOrigin,
+  validateOriginEntry,
 };

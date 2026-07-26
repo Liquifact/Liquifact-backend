@@ -45,6 +45,8 @@ jest.mock('../src/metrics', () => {
       registerMetric: jest.fn(),
     })),
     Counter: jest.fn(() => mockCounter),
+    registerJobQueue: jest.fn(),
+    registerWorker: jest.fn(),
   };
 });
 
