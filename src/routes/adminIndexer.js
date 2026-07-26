@@ -16,21 +16,13 @@
 const express = require('express');
 
 const router = express.Router();
-const { listIndexerEvents, INDEXER_SORT_FIELDS } = require('../services/indexerService');
+const { listIndexerEvents } = require('../services/indexerService');
 const { CursorError } = require('../utils/cursorPagination');
 const { adminStack } = require('../middleware/stacks');
 const { indexerLimiter } = require('../middleware/rateLimit');
 const responseHelper = require('../utils/responseHelper');
 const logger = require('../logger');
-const idempotencyMiddleware = require('../middleware/idempotency');
-const { persistEscrowEvent, createKnexEscrowEventStore, ValidationError } = require('../jobs/escrowIndexer');
-const db = require('../db/knex');
-
-/**
- * Maximum page size clamped by the service layer.
- * @constant {number}
- */
-const MAX_LIMIT = 100;
+const { validateIndexerQuery } = require('../schemas/indexerQuery');
 
 // Apply a per-client rate limit before admin auth so bursts are contained
 // even when the caller is unauthenticated or misconfigured.
@@ -39,102 +31,6 @@ router.use(indexerLimiter);
 // Apply admin auth (JWT or API key) + tenant extraction to every route in this
 // file.
 router.use(...adminStack);
-
-/**
- * Validates and normalises query parameters for the events listing endpoint.
- *
- * @param {object} query - Express `req.query` object.
- * @returns {{ isValid: boolean, fieldErrors: Record<string,string>, params: object }}
- */
-function _parseQuery(query) {
-  const fieldErrors = {};
-  const params = { filters: {}, sorting: {}, pagination: {} };
-
-  const ALLOWED_PARAMS = new Set(['invoiceId', 'eventType', 'contractId', 'sortBy', 'order', 'cursor', 'page', 'limit']);
-  const unknown = Object.keys(query).filter((k) => !ALLOWED_PARAMS.has(k));
-  if (unknown.length > 0) {
-    fieldErrors._unknown = `Unknown query parameters: ${unknown.join(', ')}`;
-  }
-
-  const { invoiceId, eventType, contractId, sortBy, order, cursor, page, limit } = query;
-
-  // ── Filters ───────────────────────────────────────────────────────────────
-  if (invoiceId !== undefined) {
-    if (typeof invoiceId === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(invoiceId.trim())) {
-      params.filters.invoiceId = invoiceId.trim();
-    } else {
-      fieldErrors.invoiceId = 'invoiceId must be 1–128 alphanumeric/underscore/hyphen characters';
-    }
-  }
-
-  if (eventType !== undefined) {
-    if (typeof eventType === 'string' && eventType.trim().length > 0 && eventType.trim().length <= 128) {
-      params.filters.eventType = eventType.trim();
-    } else {
-      fieldErrors.eventType = 'eventType must be a non-empty string (max 128 chars)';
-    }
-  }
-
-  if (contractId !== undefined) {
-    if (typeof contractId === 'string' && /^C[A-Z2-7]{55}$/.test(contractId.trim())) {
-      params.filters.contractId = contractId.trim();
-    } else {
-      fieldErrors.contractId = 'contractId must be a valid Stellar contract address (C… 56 chars)';
-    }
-  }
-
-  // ── Sorting ───────────────────────────────────────────────────────────────
-  if (sortBy !== undefined) {
-    if (INDEXER_SORT_FIELDS.includes(sortBy)) {
-      params.sorting.sortBy = sortBy;
-    } else {
-      fieldErrors.sortBy = `sortBy must be one of: ${INDEXER_SORT_FIELDS.join(', ')}`;
-    }
-  }
-
-  if (order !== undefined) {
-    const lowerOrder = String(order).toLowerCase();
-    if (lowerOrder === 'asc' || lowerOrder === 'desc') {
-      params.sorting.order = lowerOrder;
-    } else {
-      fieldErrors.order = 'order must be "asc" or "desc"';
-    }
-  }
-
-  // ── Pagination ────────────────────────────────────────────────────────────
-  if (cursor !== undefined) {
-    if (typeof cursor === 'string' && cursor.length > 0 && cursor.length <= 2048) {
-      params.pagination.cursor = cursor;
-    } else {
-      fieldErrors.cursor = 'cursor must be a non-empty string (max 2048 chars)';
-    }
-  }
-
-  // page is only relevant when no cursor is provided
-  if (cursor === undefined && page !== undefined) {
-    const val = parseInt(page, 10);
-    if (!isNaN(val) && val >= 1) {
-      params.pagination.page = val;
-    } else {
-      fieldErrors.page = 'page must be an integer >= 1';
-    }
-  }
-
-  if (limit !== undefined) {
-    const val = parseInt(limit, 10);
-    if (!isNaN(val) && val >= 1 && val <= MAX_LIMIT) {
-      params.pagination.limit = val;
-    } else {
-      fieldErrors.limit = `limit must be an integer between 1 and ${MAX_LIMIT}`;
-    }
-  }
-
-  return {
-    isValid: Object.keys(fieldErrors).length === 0,
-    fieldErrors,
-    params,
-  };
-}
 
 /**
  * @swagger
@@ -260,8 +156,8 @@ function _parseQuery(query) {
  */
 router.get('/events', instrumentIndexer(async (req, res, next) => {
   try {
-    // ── 1. Parse and validate query parameters ──────────────────────────────
-    const { isValid, fieldErrors, params } = _parseQuery(req.query);
+    // ── 1. Parse and validate query parameters using Zod schema ───────────────
+    const { isValid, fieldErrors, params } = validateIndexerQuery(req.query);
 
     if (!isValid) {
       return res.status(400).json(
