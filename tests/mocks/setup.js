@@ -284,6 +284,7 @@ jest.mock('../../src/middleware/rateLimit', () => {
     sensitiveLimiter: noopMiddleware,
     apiKeyLimiter: noopMiddleware,
     adminConfigLimiter: noopMiddleware,
+    metricsLimiter: noopMiddleware,
     healthLimiter: noopMiddleware,
     createConfigRateLimiter: jest.fn(() => noopMiddleware),
     invoiceStateLimiter: noopMiddleware,

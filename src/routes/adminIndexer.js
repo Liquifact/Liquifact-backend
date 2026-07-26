@@ -16,7 +16,7 @@
 const express = require('express');
 
 const router = express.Router();
-const { listIndexerEvents, INDEXER_SORT_FIELDS } = require('../services/indexerService');
+const { listIndexerEvents, bulkIndexerEvents, validateBulkPayload, INDEXER_SORT_FIELDS, MAX_BULK_BATCH_SIZE } = require('../services/indexerService');
 const { CursorError } = require('../utils/cursorPagination');
 const { adminStack } = require('../middleware/stacks');
 const responseHelper = require('../utils/responseHelper');
@@ -300,6 +300,76 @@ router.get('/events', async (req, res, next) => {
     return res.status(200).json({
       ...responseHelper.success(result.data, result.meta),
       message: 'Indexer events retrieved successfully.',
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+/**
+ * @swagger
+ * /api/admin/indexer/events/bulk:
+ *   post:
+ *     operationId: bulkIndexerEvents
+ *     summary: Bulk-ingest indexer events
+ *     description: |
+ *       Accepts a bounded JSON array of raw event objects, validates each
+ *       independently, and persists valid entries.  Invalid items produce an
+ *       error entry in the response without aborting the rest of the batch.
+ *
+ *       **Access**: Admin-only (JWT bearer or API key).
+ *
+ *       **Limits**: Maximum **50** items per request (HTTP 413 when exceeded).
+ *     tags: [Indexer]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: array
+ *             maxItems: 50
+ *             items:
+ *               $ref: '#/components/schemas/IndexerEvent'
+ *     responses:
+ *       200:
+ *         description: Per-item results (partial failure is reported, not thrown)
+ *       400:
+ *         description: Request body is not an array, is empty, or contains a non-object item
+ *         $ref: '#/components/responses/Problem400'
+ *       401:
+ *         $ref: '#/components/responses/Problem401'
+ *       403:
+ *         $ref: '#/components/responses/Problem403'
+ *       413:
+ *         description: Batch exceeds maximum allowed size
+ */
+router.post('/events/bulk', async (req, res, next) => {
+  try {
+    const validation = validateBulkPayload(req.body);
+
+    if (!validation.ok) {
+      return res.status(validation.error.status).json(
+        responseHelper.error(validation.error.message, validation.error.code, validation.error.details),
+      );
+    }
+
+    const result = await bulkIndexerEvents({
+      events: validation.events,
+      dbClient: req._dbClient,
+    });
+
+    const statusCode = result.meta.failed > 0 ? 207 : 200;
+
+    logger.info(
+      { requestId: req.id, succeeded: result.meta.succeeded, failed: result.meta.failed, total: result.meta.total },
+      'Bulk indexer events processed',
+    );
+
+    return res.status(statusCode).json({
+      ...responseHelper.success(result.data, result.meta),
+      message: 'Bulk indexer events processed.',
     });
   } catch (error) {
     return next(error);
