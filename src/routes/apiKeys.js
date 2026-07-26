@@ -1,383 +1,264 @@
-/**
- * API Keys endpoints with cursor-based pagination and key lifecycle management.
- *
- * GET /v1/api-keys
- *   Query params:
- *     limit   {number}  items per page (default 20, max 100)
- *     cursor  {string}  opaque cursor from previous page
- *   Response:
- *     { data: ApiKeyEntry[], nextCursor: string | null }
- *
- * POST /v1/api-keys
- *   Body: { key: string, clientId: string, scopes: string[], revoked?: boolean }
- *   Response 201: { data: ApiKeyEntry, message: string }
- *
- * GET /v1/api-keys/:key
- *   Response 200: { data: ApiKeyEntry }
- *   Response 404: { error: string }
- *
- * @module routes/apiKeys
- */
-
 'use strict';
 
 const express = require('express');
-const { loadApiKeyRegistry, validateEntry } = require('../config/apiKeys');
+const { z } = require('zod');
+const { hashApiKey, initDb } = require('../middleware/apiKey');
+const AppError = require('../errors/AppError');
 
 const router = express.Router();
 
-const DEFAULT_LIMIT = 20;
-const MAX_LIMIT = 100;
+const MAX_BULK_ITEMS = 25;
 
-// ── Runtime entries store (in-memory) ─────────────────────────────────────────
-// Keys created via POST are stored here so they appear in subsequent GET
-// listings and GET /:key lookups. This mirrors the env-based registry for
-// dynamically created keys.
-
-/** @type {Map<string, import('../config/apiKeys').ApiKeyEntry>} */
-let runtimeEntries = new Map();
+const bulkItemSchema = z.discriminatedUnion('action', [
+  z.object({
+    action: z.literal('create'),
+    name: z.string().trim().min(1).max(255),
+    apiKey: z.string().trim().min(8).max(4096),
+  }),
+  z.object({
+    action: z.literal('rename'),
+    id: z.number().int().positive(),
+    name: z.string().trim().min(1).max(255),
+  }),
+  z.object({
+    action: z.literal('activate'),
+    id: z.number().int().positive(),
+  }),
+  z.object({
+    action: z.literal('deactivate'),
+    id: z.number().int().positive(),
+  }),
+]);
 
 /**
- * Resets the runtime entries store. Exported so test suites can clean up
- * between cases without restarting the process.
+ * Closes the SQLite database handle.
  *
- * @returns {void}
+ * @param {object} db - SQLite database handle.
+ * @returns {Promise<void>}
  */
-function resetRuntimeEntries() {
-  runtimeEntries = new Map();
-}
-
-/**
- * Builds the combined registry (env-based entries + runtime entries).
- * Runtime entries take precedence so a dynamically created key with the
- * same key string as a static entry overrides it.
- *
- * @returns {Map<string, import('../config/apiKeys').ApiKeyEntry>}
- */
-function buildCombinedRegistry() {
-  const staticRegistry = loadApiKeyRegistry();
-  const combined = new Map(staticRegistry);
-  for (const [key, entry] of runtimeEntries) {
-    combined.set(key, entry);
-  }
-  return combined;
-}
-
-/**
- * Validates an API key creation/update request body.
- *
- * Shared validation consumed by POST and any future write endpoints so
- * that every handler enforces the same contract.
- *
- * @param {unknown} body - The request body to validate.
- * @returns {{ valid: true, entry: import('../config/apiKeys').ApiKeyEntry } | { valid: false, error: string }}
- */
-function validateApiKeyBody(body) {
-  try {
-    const entry = validateEntry(body, 0);
-    return { valid: true, entry };
-  } catch (err) {
-    return { valid: false, error: `Validation failed: ${err.message}` };
-  }
-}
-
-// ── Encode/decode cursors ────────────────────────────────────────────────────
-
-/**
- * Module-level runtime store for dynamically created API keys.
- * Reset via {@link resetRuntimeEntries} between tests.
- * @type {Map<string, import('../config/apiKeys').ApiKeyEntry>}
- */
-const runtimeRegistry = new Map();
-
-/**
- * Resets the runtime key registry. Used between tests to isolate state.
- * @returns {void}
- */
-function resetRuntimeEntries() {
-  runtimeRegistry.clear();
-}
-
-/**
- * Combines the environment-based registry with the runtime store.
- * Runtime entries take precedence when a key exists in both.
- *
- * @param {NodeJS.ProcessEnv} [env] - Optional env override for loading the config registry.
- * @returns {import('../config/apiKeys').ApiKeyEntry[]} Ordered array of all known entries.
- */
-function getAllEntries(env) {
-  const configRegistry = loadApiKeyRegistry(env || process.env);
-  const configEntries = Array.from(configRegistry.values());
-  const seen = new Set();
-
-  for (const entry of configEntries) {
-    seen.add(entry.key);
-  }
-
-  const runtimeEntries = Array.from(runtimeRegistry.values());
-  const merged = [...configEntries];
-
-  for (const entry of runtimeEntries) {
-    if (!seen.has(entry.key)) {
-      merged.push(entry);
-      seen.add(entry.key);
-    }
-  }
-
-  return merged;
-}
-
-// ── Existing cursor-based listing (V1 mount: /v1/api-keys) ──────────────
-
-/**
- * Encode a simple opaque cursor from the last key string.
- * @param {string} key
- * @returns {string}
- */
-function encodeCursor(key) {
-  return Buffer.from(key).toString('base64');
-}
-
-/**
- * Decode the opaque cursor back to the key string.
- * @param {string} cursor
- * @returns {string | null}
- */
-function decodeCursor(cursor) {
-  try {
-    return Buffer.from(cursor, 'base64').toString('utf8');
-  } catch {
-    return null;
-  }
-}
-
-// ── Route handler definitions (reusable) ─────────────────────────────────────
-
-/**
- * GET list handler — returns a paginated list of registered API keys.
- */
-function listHandler(req, res) {
-  // Parse and clamp limit
-  let limit = parseInt(req.query.limit, 10);
-  if (Number.isNaN(limit) || limit < 1) {
-    limit = DEFAULT_LIMIT;
-  }
-  if (limit > MAX_LIMIT) {
-    limit = MAX_LIMIT;
-  }
-
-  // Load all keys from the combined registry
-  const registry = buildCombinedRegistry();
-  const allEntries = Array.from(registry.values());
-
-  let startIndex = 0;
-  if (req.query.cursor) {
-    const decoded = decodeCursor(req.query.cursor);
-    if (!decoded) {
-      return res.status(400).json({ error: 'Invalid cursor' });
-    }
-
-    const foundIndex = allEntries.findIndex((entry) => entry.key === decoded);
-    if (foundIndex === -1) {
-      return res.status(400).json({ error: 'Invalid cursor' });
-    }
-    startIndex = foundIndex + 1;
-  }
-
-  const page = allEntries.slice(startIndex, startIndex + limit);
-
-  let nextCursor = null;
-  if (startIndex + limit < allEntries.length) {
-    const lastItem = page[page.length - 1];
-    nextCursor = encodeCursor(lastItem.key);
-  }
-
-  return res.json({
-    data: page,
-    count: allEntries.length,
-    nextCursor,
+function closeDb(db) {
+  return new Promise((resolve, reject) => {
+    db.close((err) => (err ? reject(err) : resolve()));
   });
 }
 
 /**
- * POST create handler — creates a new API key in the runtime store.
+ * Runs an SQL statement on the provided database handle.
+ *
+ * @param {object} db - SQLite database handle.
+ * @param {string} sql - SQL statement to execute.
+ * @param {unknown[]} [params=[]] - Statement parameters.
+ * @returns {Promise<object>} Statement metadata.
  */
-function createHandler(req, res) {
-  const validation = validateApiKeyBody(req.body);
+function run(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function onRun(err) {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve(this);
+    });
+  });
+}
 
-  if (!validation.valid) {
-    return res.status(422).json({ error: validation.error });
+/**
+ * Fetches a single row from the provided database handle.
+ *
+ * @param {object} db - SQLite database handle.
+ * @param {string} sql - SQL statement to execute.
+ * @param {unknown[]} [params=[]] - Statement parameters.
+ * @returns {Promise<object|undefined>} Query result row.
+ */
+function get(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve(row);
+    });
+  });
+}
+
+/**
+ * Ensures the api_keys table exists before processing a bulk request.
+ *
+ * @param {object} db - SQLite database handle.
+ * @returns {Promise<void>}
+ */
+async function ensureApiKeyTable(db) {
+  await run(db, `
+    CREATE TABLE IF NOT EXISTS api_keys (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      key_hash TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      last_used_at DATETIME,
+      is_active BOOLEAN DEFAULT 1,
+      audit_log TEXT
+    )
+  `);
+}
+
+/**
+ * Creates a new API key entry.
+ *
+ * @param {object} db - SQLite database handle.
+ * @param {object} item - Parsed bulk operation.
+ * @returns {Promise<object>} Created key summary.
+ */
+async function createKey(db, item) {
+  const keyHash = hashApiKey(item.apiKey);
+  await run(db, 'INSERT INTO api_keys (key_hash, name, is_active) VALUES (?, ?, 1)', [
+    keyHash,
+    item.name,
+  ]);
+  const row = await get(db, 'SELECT id, name, is_active FROM api_keys WHERE key_hash = ?', [keyHash]);
+  return {
+    id: row.id,
+    name: row.name,
+    isActive: Boolean(row.is_active),
+  };
+}
+
+/**
+ * Updates an existing API key entry.
+ *
+ * @param {object} db - SQLite database handle.
+ * @param {object} item - Parsed bulk operation.
+ * @returns {Promise<object>} Updated key summary.
+ */
+async function updateKey(db, item) {
+  const existing = await get(db, 'SELECT id, name, is_active FROM api_keys WHERE id = ?', [item.id]);
+  if (!existing) {
+    throw new AppError({
+      type: 'https://liquifact.com/probs/not-found',
+      title: 'API Key Not Found',
+      status: 404,
+      detail: `API key ${item.id} was not found`,
+    });
   }
 
-  const entry = validation.entry;
+  if (item.action === 'rename') {
+    await run(db, 'UPDATE api_keys SET name = ? WHERE id = ?', [item.name, item.id]);
+  } else {
+    await run(db, 'UPDATE api_keys SET is_active = ? WHERE id = ?', [item.action === 'activate' ? 1 : 0, item.id]);
+  }
 
-  // Check for duplicate key in the combined registry
-  const existing = buildCombinedRegistry().get(entry.key);
-  if (existing) {
+  const updated = await get(db, 'SELECT id, name, is_active FROM api_keys WHERE id = ?', [item.id]);
+  return {
+    id: updated.id,
+    name: updated.name,
+    isActive: Boolean(updated.is_active),
+  };
+}
+
+/**
+ * Normalizes thrown errors into a human-readable message string.
+ *
+ * @param {unknown} err - Thrown value.
+ * @returns {string} Readable error message.
+ */
+function normalizeError(err) {
+  if (err instanceof z.ZodError) {
+    return err.issues.map((issue) => issue.message).join(', ');
+  }
+  if (err && typeof err.message === 'string') {
+    return err.message;
+  }
+  return 'Unknown item error';
+}
+
+/**
+ * Processes a bounded bulk batch of api-key operations.
+ *
+ * @param {import('express').Request} req - Express request.
+ * @param {import('express').Response} res - Express response.
+ * @param {import('express').NextFunction} next - Express next callback.
+ * @returns {Promise<import('express').Response|void>}
+ */
+router.post('/bulk', async (req, res, next) => {
+  const items = req.body;
+
+  if (!Array.isArray(items)) {
+    return next(
+      new AppError({
+        type: 'https://liquifact.com/probs/validation-error',
+        title: 'Validation Error',
+        status: 400,
+        detail: 'Request body must be a JSON array of api-key operations',
+      })
+    );
+  }
+
+  if (items.length === 0) {
+    return next(
+      new AppError({
+        type: 'https://liquifact.com/probs/validation-error',
+        title: 'Validation Error',
+        status: 400,
+        detail: 'Batch must contain at least one api-key operation',
+      })
+    );
+  }
+
+  if (items.length > MAX_BULK_ITEMS) {
+    return next(
+      new AppError({
+        type: 'https://liquifact.com/probs/validation-error',
+        title: 'Validation Error',
+        status: 400,
+        detail: `Batch size exceeds maximum of ${MAX_BULK_ITEMS}`,
+      })
+    );
+  }
+
+  const db = initDb();
+  try {
+    await ensureApiKeyTable(db);
+    const results = [];
+
+    for (const [index, rawItem] of items.entries()) {
+      try {
+        const item = bulkItemSchema.parse(rawItem);
+        let result;
+
+        if (item.action === 'create') {
+          result = await createKey(db, item);
+        } else {
+          result = await updateKey(db, item);
+        }
+
+        results.push({ index, success: true, action: item.action, result });
+      } catch (err) {
+        results.push({
+          index,
+          success: false,
+          error: normalizeError(err),
+        });
+      }
+    }
+
+    const summary = {
+      total: results.length,
+      succeeded: results.filter((item) => item.success).length,
+      failed: results.filter((item) => !item.success).length,
+    };
+
     return res.status(200).json({
-      data: existing,
-      message: 'API key already exists (idempotent).',
-      idempotent: true,
+      data: results,
+      summary,
     });
+  } catch (err) {
+    return next(err);
+  } finally {
+    await closeDb(db);
   }
-
-  // Store in runtime entries
-  runtimeEntries.set(entry.key, entry);
-
-  return res.status(201).json({
-    data: entry,
-    message: 'API key created successfully.',
-  });
-}
-
-/**
- * GET single-key handler — returns a single API key by its key string.
- */
-function singleKeyHandler(req, res) {
-  const key = req.params.key;
-  if (!key || typeof key !== 'string') {
-    return res.status(400).json({ error: 'Missing or invalid key parameter' });
-  }
-
-  const registry = buildCombinedRegistry();
-  const entry = registry.get(key);
-
-  if (!entry) {
-    return res.status(404).json({ error: 'API key not found' });
-  }
-
-  return res.json({ data: entry });
-}
-
-// ── Route registration ───────────────────────────────────────────────────────
-// Static path aliases are registered BEFORE parameterised routes so they
-// take priority in Express 5 routing.
-
-// GET list — accessible at /, /keys, and /api-keys
-router.get('/', listHandler);
-router.get('/keys', listHandler);
-router.get('/api-keys', listHandler);
-
-// POST create — accessible at / and /keys
-router.post('/', createHandler);
-router.post('/keys', createHandler);
-
-// GET single key
-router.get('/:key', singleKeyHandler);
-
-// ── New list + get + create routes (mounted at /api and /) ──────────────
-
-/**
- * GET /keys
- * GET /api-keys
- * Returns a flat list of all known API keys (config + runtime).
- */
-router.get('/keys', (req, res) => {
-  const all = getAllEntries(req.app && req.app.locals && req.app.locals.env);
-  return res.json(toListApiKeysResponseDto(all));
 });
 
-router.get('/api-keys', (req, res) => {
-  const all = getAllEntries(req.app && req.app.locals && req.app.locals.env);
-  return res.json(toListApiKeysResponseDto(all));
-});
-
-/**
- * POST /keys
- * POST /api-keys
- * Creates a new API key in the runtime store.
- * Idempotency is handled by the idempotencyMiddleware.
- */
-router.post('/keys', (req, res) => {
-  const errors = validateCreateApiKeyRequest(req.body);
-  if (errors.length > 0) {
-    return res.status(422).json({
-      error: 'Validation failed.',
-      code: 'VALIDATION_ERROR',
-      details: errors,
-    });
-  }
-
-  const { key } = req.body;
-
-  const all = getAllEntries(req.app && req.app.locals && req.app.locals.env);
-  const existing = all.find((e) => e.key === key);
-
-  if (existing) {
-    return res.status(200).json(
-      toDuplicateApiKeyResponseDto(existing, 'API key already exists.')
-    );
-  }
-
-  const entry = fromCreateApiKeyRequestDto(req.body);
-  runtimeRegistry.set(entry.key, entry);
-
-  return res.status(201).json(
-    toCreateApiKeyResponseDto(entry, 'API key created successfully.')
-  );
-});
-
-router.post('/api-keys', (req, res) => {
-  const errors = validateCreateApiKeyRequest(req.body);
-  if (errors.length > 0) {
-    return res.status(422).json({
-      error: 'Validation failed.',
-      code: 'VALIDATION_ERROR',
-      details: errors,
-    });
-  }
-
-  const { key } = req.body;
-
-  const all = getAllEntries(req.app && req.app.locals && req.app.locals.env);
-  const existing = all.find((e) => e.key === key);
-
-  if (existing) {
-    return res.status(200).json(
-      toDuplicateApiKeyResponseDto(existing, 'API key already exists.')
-    );
-  }
-
-  const entry = fromCreateApiKeyRequestDto(req.body);
-  runtimeRegistry.set(entry.key, entry);
-
-  return res.status(201).json(
-    toCreateApiKeyResponseDto(entry, 'API key created successfully.')
-  );
-});
-
-/**
- * GET /keys/:key
- * GET /api-keys/:key
- * Returns a single API key by its key string.
- */
-router.get('/keys/:key', (req, res) => {
-  const all = getAllEntries(req.app && req.app.locals && req.app.locals.env);
-  const entry = all.find((e) => e.key === req.params.key);
-
-  if (!entry) {
-    return res.status(404).json({
-      error: 'API key not found.',
-      code: 'NOT_FOUND',
-    });
-  }
-
-  return res.json(toGetApiKeyResponseDto(entry));
-});
-
-router.get('/api-keys/:key', (req, res) => {
-  const all = getAllEntries(req.app && req.app.locals && req.app.locals.env);
-  const entry = all.find((e) => e.key === req.params.key);
-
-  if (!entry) {
-    return res.status(404).json({
-      error: 'API key not found.',
-      code: 'NOT_FOUND',
-    });
-  }
-
-  return res.json(toGetApiKeyResponseDto(entry));
-});
-
-module.exports = router;
-module.exports.resetRuntimeEntries = resetRuntimeEntries;
+module.exports = {
+  router,
+  MAX_BULK_ITEMS,
+};
