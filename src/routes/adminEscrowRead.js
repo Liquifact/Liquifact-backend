@@ -6,8 +6,15 @@
 
 const express = require('express');
 const { adminStack } = require('../middleware/stacks');
-const { createAuditLog, getAuditLogs } = require('../services/auditLog');
+const { getAuditLogs } = require('../services/auditLog');
 const AppError = require('../errors/AppError');
+const { validateBody, validateQuery } = require('../schemas/invoice');
+const {
+  escrowReadPostSchema,
+  escrowReadPutSchema,
+  escrowReadAuditQuerySchema,
+  escrowReadResponseSchema,
+} = require('../schemas/escrowRead');
 
 const router = express.Router();
 
@@ -20,21 +27,27 @@ const escrowReadStore = new Map();
  * GET /api/admin/escrow-read
  * Lists all current escrow-read configurations.
  */
-router.get('/', (req, res) => {
-  const items = Array.from(escrowReadStore.entries()).map(([id, data]) => ({ id, ...data }));
-  res.json({ data: items });
+router.get('/', (req, res, next) => {
+  try {
+    const items = Array.from(escrowReadStore.entries()).map(([id, data]) => ({ id, ...data }));
+    const payload = { data: items };
+    const result = escrowReadResponseSchema.safeParse(payload);
+    if (!result.success) {
+      throw new AppError({ status: 500, title: 'Response Validation Error', detail: 'Invalid response payload' });
+    }
+    res.json(result.data);
+  } catch (err) {
+    next(err);
+  }
 });
 
 /**
  * POST /api/admin/escrow-read
  * Creates a new escrow-read configuration and logs an audit entry.
  */
-router.post('/', async (req, res, next) => {
+router.post('/', validateBody(escrowReadPostSchema), async (req, res, next) => {
   try {
-    const { id, config, secretKey } = req.body;
-    if (!id) {
-      return next(new AppError({ status: 400, title: 'Validation Error', detail: 'ID is required' }));
-    }
+    const { id, config, secretKey } = req.validated;
     if (escrowReadStore.has(id)) {
       return next(new AppError({ status: 409, title: 'Conflict', detail: 'Already exists' }));
     }
@@ -43,7 +56,12 @@ router.post('/', async (req, res, next) => {
     const newData = { config, secretKey };
     escrowReadStore.set(id, newData);
     
-    res.status(201).json({ data: { id, ...newData } });
+    const payload = { data: { id, ...newData } };
+    const result = escrowReadResponseSchema.safeParse(payload);
+    if (!result.success) {
+      throw new AppError({ status: 500, title: 'Response Validation Error', detail: 'Invalid response payload' });
+    }
+    res.status(201).json(result.data);
   } catch (err) {
     next(err);
   }
@@ -54,15 +72,21 @@ router.post('/', async (req, res, next) => {
  * Exposes a read view for escrow-read audit logs, bounded to avoid excessive queries.
  * Secrets are automatically redacted by the auditLog service.
  */
-router.get('/audit', async (req, res, next) => {
+router.get('/audit', validateQuery(escrowReadAuditQuerySchema), async (req, res, next) => {
   try {
     // Bound the log
-    const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
+    const limit = req.validatedQuery.limit;
     const logs = await getAuditLogs({
       resourceType: 'escrow-read',
       limit,
     });
-    res.json({ data: logs });
+    
+    const payload = { data: logs };
+    const result = escrowReadResponseSchema.safeParse(payload);
+    if (!result.success) {
+      throw new AppError({ status: 500, title: 'Response Validation Error', detail: 'Invalid response payload' });
+    }
+    res.json(result.data);
   } catch (err) {
     next(err);
   }
@@ -72,10 +96,10 @@ router.get('/audit', async (req, res, next) => {
  * PUT /api/admin/escrow-read/:id
  * Updates an existing escrow-read configuration and logs an audit entry.
  */
-router.put('/:id', async (req, res, next) => {
+router.put('/:id', validateBody(escrowReadPutSchema), async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { config, secretKey } = req.body;
+    const { config, secretKey } = req.validated;
     
     if (!escrowReadStore.has(id)) {
       return next(new AppError({ status: 404, title: 'Not Found', detail: 'Configuration not found' }));
@@ -92,7 +116,12 @@ router.put('/:id', async (req, res, next) => {
     
     escrowReadStore.set(id, after);
     
-    res.json({ data: { id, ...after } });
+    const payload = { data: { id, ...after } };
+    const result = escrowReadResponseSchema.safeParse(payload);
+    if (!result.success) {
+      throw new AppError({ status: 500, title: 'Response Validation Error', detail: 'Invalid response payload' });
+    }
+    res.json(result.data);
   } catch (err) {
     next(err);
   }
@@ -108,9 +137,6 @@ router.delete('/:id', async (req, res, next) => {
     if (!escrowReadStore.has(id)) {
       return next(new AppError({ status: 404, title: 'Not Found', detail: 'Configuration not found' }));
     }
-    
-    const before = escrowReadStore.get(id);
-
     
     escrowReadStore.delete(id);
     

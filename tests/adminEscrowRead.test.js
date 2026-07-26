@@ -48,6 +48,18 @@ describe('adminEscrowRead mutations', () => {
 
   const testId = 'config-test-123';
 
+  it('should list configurations via GET /', async () => {
+    // Insert a record first
+    const uniqueId = 'config-test-get-123';
+    const payload = { id: uniqueId, config: { cacheTtl: 60 }, secretKey: 'my-secret' };
+    await request(app).post('/api/admin/escrow-read').send(payload).expect(201);
+    
+    const res = await request(app).get('/api/admin/escrow-read').expect(200);
+    expect(res.body.data).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: uniqueId, config: { cacheTtl: 60 } })
+    ]));
+  });
+
   it('should cover CREATE audit entries', async () => {
     const payload = { id: testId, config: { cacheTtl: 60 }, secretKey: 'my-secret' };
     
@@ -65,6 +77,25 @@ describe('adminEscrowRead mutations', () => {
       resourceId: 'escrow-read',
       after: expect.objectContaining({ secretKey: 'my-secret' })
     }));
+  });
+
+  it('should reject POST with missing id', async () => {
+    const payload = { config: { cacheTtl: 60 } };
+    const res = await request(app).post('/api/admin/escrow-read').send(payload).expect(400);
+    expect(res.body.error).toBeDefined();
+    expect(res.body.error.code).toBe('BAD_REQUEST');
+  });
+
+  it('should reject POST with invalid config', async () => {
+    const payload = { id: 'invalid-config', config: { cacheTtl: 'not-a-number' } };
+    const res = await request(app).post('/api/admin/escrow-read').send(payload).expect(400);
+    expect(res.body.error).toBeDefined();
+    expect(res.body.error.code).toBe('BAD_REQUEST');
+  });
+
+  it('should reject POST with duplicate id', async () => {
+    const payload = { id: testId, config: { cacheTtl: 60 } };
+    await request(app).post('/api/admin/escrow-read').send(payload).expect(409);
   });
 
   it('should cover UPDATE audit entries', async () => {
@@ -86,6 +117,18 @@ describe('adminEscrowRead mutations', () => {
     }));
   });
 
+  it('should reject PUT with no fields', async () => {
+    const res = await request(app).put(`/api/admin/escrow-read/${testId}`).send({}).expect(400);
+    expect(res.body.error).toBeDefined();
+    expect(res.body.error.code).toBe('BAD_REQUEST');
+  });
+
+  it('should return 404 for PUT on non-existent config', async () => {
+    const payload = { config: { cacheTtl: 120 } };
+    const res = await request(app).put('/api/admin/escrow-read/does-not-exist').send(payload).expect(404);
+    expect(res.body.error.code).toBe('NOT_FOUND');
+  });
+
   it('should cover DELETE audit entries', async () => {
     await request(app)
       .delete(`/api/admin/escrow-read/${testId}`)
@@ -97,6 +140,11 @@ describe('adminEscrowRead mutations', () => {
       resourceType: 'admin',
       resourceId: 'escrow-read',
     }));
+  });
+
+  it('should return 404 for DELETE on non-existent config', async () => {
+    const res = await request(app).delete('/api/admin/escrow-read/does-not-exist').expect(404);
+    expect(res.body.error.code).toBe('NOT_FOUND');
   });
 
   it('should expose a read view for audit logs bounded correctly', async () => {
