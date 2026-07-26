@@ -35,7 +35,7 @@
 
 const db = require('../db/knex');
 const { encodeCursor, decodeCursor } = require('../utils/cursorPagination');
-const { mapRowToEscrowEventDTO, mapMetaToDTO } = require('../dto/indexer');
+const { indexerCache, IndexerCache } = require('./indexerCache');
 
 /**
  * Allowed sort fields for the indexer listing endpoint.
@@ -155,6 +155,16 @@ async function listIndexerEvents({
   dbClient,
 } = {}) {
   const knex = dbClient || db;
+  const useCache = !dbClient;
+
+  // ── Cache lookup ────────────────────────────────────────────────────────
+  if (useCache) {
+    const cacheKey = IndexerCache.buildKey({ filters, sorting, pagination });
+    const cached = indexerCache.get(cacheKey);
+    if (cached !== undefined) {
+      return cached;
+    }
+  }
 
   // ── Resolve validated query parameters ───────────────────────────────────
   const limit = Math.max(1, Math.min(MAX_PAGE_SIZE, parseInt(pagination.limit) || DEFAULT_PAGE_SIZE));
@@ -215,10 +225,22 @@ async function listIndexerEvents({
       });
     }
 
-    return {
-      data: data.map(mapRowToEscrowEventDTO),
-      meta: mapMetaToDTO({ total, limit, hasMore, nextCursor }),
+    const cursorResult = {
+      data,
+      meta: {
+        total,
+        limit,
+        hasMore,
+        nextCursor,
+      },
     };
+
+    if (useCache) {
+      const cacheKey = IndexerCache.buildKey({ filters, sorting, pagination });
+      indexerCache.set(cacheKey, cursorResult);
+    }
+
+    return cursorResult;
   }
 
   // ── Offset-based pagination (legacy, backward-compatible) ─────────────────
@@ -243,9 +265,9 @@ async function listIndexerEvents({
     });
   }
 
-  return {
-    data: pagedData.map(mapRowToEscrowEventDTO),
-    meta: mapMetaToDTO({
+  const offsetResult = {
+    data: pagedData,
+    meta: {
       total,
       page,
       limit,
@@ -254,6 +276,13 @@ async function listIndexerEvents({
       nextCursor: pagedNextCursor,
     }),
   };
+
+  if (useCache) {
+    const cacheKey = IndexerCache.buildKey({ filters, sorting, pagination });
+    indexerCache.set(cacheKey, offsetResult);
+  }
+
+  return offsetResult;
 }
 
 module.exports = {
@@ -263,4 +292,5 @@ module.exports = {
   DEFAULT_ORDER,
   MAX_PAGE_SIZE,
   DEFAULT_PAGE_SIZE,
+  indexerCache,
 };
