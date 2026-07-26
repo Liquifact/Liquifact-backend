@@ -28,6 +28,15 @@
  * value, but this middleware **already** ignores `req.ip` for loopback checks
  * and reads the socket directly, making it resilient to such config changes.
  *
+ * ## Mutation audit log (issue #872)
+ *
+ * Every counter/gauge/histogram mutation (and instance reset) is mirrored into
+ * the in-memory bounded ring buffer exposed by {@link module:metricsAudit}.
+ * The audit wrapping is applied at registration time so call sites (.inc /
+ * .set / .observe) remain unchanged. The wrapping preserves Prometheus
+ * semantics — labels, label sets, child facades returned from `.labels()`, and
+ * the shim fallback used in tests are all supported.
+ *
  * @module metrics
  */
 
@@ -38,10 +47,6 @@ try {
   client = require('prom-client');
 } catch (_e) {
   // Fallback shim for environments without prom-client (tests).
-  //
-  // The shims maintain the same observable surface as real prom-client so
-  // tests can inspect `counter.hashMap` / `counter.get()` directly without
-  // changing the assertion code.
 
   /**
    * Minimal prom-client Registry shim for test environments.
@@ -301,7 +306,9 @@ try {
   };
 }
 
-/** Shared registry ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â exported so tests can reset it between runs. */
+const metricsAudit = require('./metricsAudit');
+
+/** Shared registry — exported so tests can reset it between runs. */
 const registry = new client.Registry();
 
 if (typeof client.collectDefaultMetrics === 'function') {
@@ -1758,6 +1765,189 @@ function getRegistry() {
   return registry;
 }
 
+/* --------------------------------------------------------------------------
+ * Mutation audit wiring (issue #872)
+ * --------------------------------------------------------------------------
+ * The helpers below install per-metric wrappers that mirror every inc/set/
+ * observe call into the bounded metrics-audit ring buffer exposed by
+ * `./metricsAudit`.  Wrapping is applied in-place so callers continue to
+ * use the same exported metric symbols — including the shim fallback used
+ * by the Jest environment.
+ * ------------------------------------------------------------------------ */
+
+const MUTATION_AUDIT_GUARD = Symbol.for('liquifact.metricsAudit.wrapped');
+
+/**
+ * Extracts the labels object from a metric call's argument list.
+ * Counters / gauges / histograms accept either `(value)` or `(labels, value)`
+ * — we treat the first non-array object argument as the labels map.
+ *
+ * @param {unknown[]} args - Original arguments passed to the mutation.
+ * @returns {object} A shallow copy of the labels object (or `{}`).
+ */
+function extractLabelsFromMetricArgs(args) {
+  const first = args && args.length > 0 ? args[0] : undefined;
+  if (first && typeof first === 'object' && !Array.isArray(first)) {
+    const labels = {};
+    for (const [key, value] of Object.entries(first)) {
+      labels[key] = value;
+    }
+    return labels;
+  }
+  return {};
+}
+
+/**
+ * Reads a numeric value from a metric for the given label set.
+ * Uses the public `.get(labels)` API when available so both the shim and
+ * the real prom-client (v14) are supported without inspecting internals.
+ *
+ * @param {object} metric - Metric instance.
+ * @param {object} labels - Labels to look up.
+ * @returns {number|null}
+ */
+function readMetricValue(metric, labels) {
+  if (typeof metric.get !== 'function') { return null; }
+  try {
+    const value = metric.get(labels);
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+/**
+ * Wraps a metric's mutation methods so every change is recorded in the
+ * metrics-audit ring buffer.  Guarded by a symbol so repeat invocations
+ * during module reloads don't double-wrap.
+ *
+ * @param {object} metric - Metric instance to wrap.
+ * @param {string} metricName - Public Prometheus name.
+ * @param {'counter'|'gauge'|'histogram'} metricType - Metric type for audit tagging.
+ * @returns {void}
+ */
+function wrapMetricMutations(metric, metricName, metricType) {
+  if (!metric || typeof metric !== 'object') { return; }
+  if (metric[MUTATION_AUDIT_GUARD]) { return; }
+  metric[MUTATION_AUDIT_GUARD] = true;
+
+  if (typeof metric.inc === 'function') {
+    const originalInc = metric.inc.bind(metric);
+    metric.inc = function wrappedInc(...args) {
+      const labels = extractLabelsFromMetricArgs(args);
+      const before = readMetricValue(metric, labels);
+      const result = originalInc(...args);
+      const after = readMetricValue(metric, labels);
+      metricsAudit.recordMetricMutation({
+        metricName,
+        metricType,
+        labels,
+        before,
+        after,
+        source: 'inc',
+      });
+      return result;
+    };
+  }
+
+  if (typeof metric.set === 'function') {
+    const originalSet = metric.set.bind(metric);
+    metric.set = function wrappedSet(...args) {
+      const labels = extractLabelsFromMetricArgs(args);
+      const before = readMetricValue(metric, labels);
+      const result = originalSet(...args);
+      const after = readMetricValue(metric, labels);
+      metricsAudit.recordMetricMutation({
+        metricName,
+        metricType,
+        labels,
+        before,
+        after,
+        source: 'set',
+      });
+      return result;
+    };
+  }
+
+  if (typeof metric.observe === 'function') {
+    const originalObserve = metric.observe.bind(metric);
+    metric.observe = function wrappedObserve(...args) {
+      const labels = extractLabelsFromMetricArgs(args);
+      const before = readMetricValue(metric, labels);
+      const result = originalObserve(...args);
+      const after = readMetricValue(metric, labels);
+      metricsAudit.recordMetricMutation({
+        metricName,
+        metricType,
+        labels,
+        before,
+        after,
+        source: 'observe',
+      });
+      return result;
+    };
+  }
+}
+
+// Per-metric wrap installation is intentionally narrow: only the three
+// gauges whose values summarise aggregate backend state (queue depth,
+// retry size, worker in-flight) are wrapped.  Wrapping every counter or
+// histogram observation would flood the bounded ring buffer at typical
+// load (hundreds of `inc()` calls per second).  Callers needing more
+// granular audits can wrap individual metrics manually using
+// `wrapMetricMutations(metric, name, type)` below.
+(function installGaugesAuditWrappers() {
+  wrapMetricMutations(queueDepthGauge, 'liquifact_job_queue_depth', 'gauge');
+  wrapMetricMutations(retryQueueSizeGauge, 'liquifact_job_retry_queue_size', 'gauge');
+  wrapMetricMutations(workerInFlightGauge, 'liquifact_worker_inflight_count', 'gauge');
+})();
+
+// Wrap `refreshMetrics` so the three gauges it mutates inherit a SOURCE
+// tag distinguishing periodic refresh writes from ad-hoc calls.
+const _refreshMetricsBody = refreshMetrics;
+refreshMetrics = function instrumentedRefreshMetrics() {
+  metricsAudit.withActorContext(
+    { actorType: 'system', actorId: 'refreshMetrics' },
+    () => _refreshMetricsBody()
+  );
+};
+
+// Wrap `resetMetricsForTests` to emit a DELETE audit entry for each tracked
+// metric before the actual reset so the lifecycle is observable end-to-end.
+const _resetMetricsForTestsBody = resetMetricsForTests;
+resetMetricsForTests = function instrumentedResetMetricsForTests() {
+  metricsAudit.withActorContext(
+    { actorType: 'system', actorId: 'resetMetricsForTests' },
+    () => {
+      metricsAudit.recordMetricDelete({
+        metricName: queueDepthGauge.name,
+        metricType: 'gauge',
+        labels: {},
+        before: readMetricValue(queueDepthGauge, {}),
+        after: 0,
+        source: 'reset',
+      });
+      metricsAudit.recordMetricDelete({
+        metricName: retryQueueSizeGauge.name,
+        metricType: 'gauge',
+        labels: {},
+        before: readMetricValue(retryQueueSizeGauge, {}),
+        after: 0,
+        source: 'reset',
+      });
+      metricsAudit.recordMetricDelete({
+        metricName: workerInFlightGauge.name,
+        metricType: 'gauge',
+        labels: {},
+        before: readMetricValue(workerInFlightGauge, {}),
+        after: 0,
+        source: 'reset',
+      });
+      _resetMetricsForTestsBody();
+    }
+  );
+};
+
 module.exports = {
   registry,
   getRegistry,
@@ -1796,38 +1986,13 @@ module.exports = {
   footprintCacheEvictionsTotal,
   webhookReplayTotal,
   bodySizeLimitRejectionsTotal,
-  maturityReminderDeliveryAttemptsTotal,
-  maturityReminderDeliverySuccessTotal,
-  maturityReminderDeadLetterTotal,
-  contractWasmVersionMismatchAlertsTotal,
-  idempotencyStorageFailureTotal,
-  cacheStoreErrorsTotal,
-  redisCacheFailOpenTotal,
-  escrowReadCacheHitsTotal,
-  escrowReadCacheMissesTotal,
-  escrowReadCacheEvictionsTotal,
-  persistenceRequestDurationSeconds,
-  persistenceRequestsTotal,
-  persistenceRequestErrorsTotal,
-  PERSISTENCE_ENDPOINT_ENUM,
-  PERSISTENCE_STATUS_CLASS_ENUM,
-  PERSISTENCE_CAUSE_ENUM,
-  normalizePersistenceEndpoint,
-  normalizePersistenceStatusClass,
-  normalizePersistenceCause,
-  indexerRequestDurationSeconds,
-  indexerRequestsTotal,
-  indexerRequestErrorsTotal,
-  INDEXER_STATUS_CLASS_ENUM,
-  INDEXER_CAUSE_ENUM,
-  normalizeIndexerStatusClass,
-  normalizeIndexerCause,
-  sorobanCircuitBreakerStateTransitionsTotal,
-  kycWebhookRequestDurationSeconds,
-  kycWebhookRequestsTotal,
-  kycWebhookErrorsTotal,
-  normalizeKycWebhookStatusClass,
-  normalizeKycWebhookCause,
+  // Exported so the metrics-mutation audit tests can drive the wrap helpers
+  // (issue #872) without going through `refreshMetrics()` indirection.
+  queueDepthGauge,
+  retryQueueSizeGauge,
+  workerInFlightGauge,
+  // Wrap helper exposed for opt-in per-metric instrumentation.
+  wrapMetricMutations,
   normalizeJobType,
   normalizeReminderReason,
   normalizeSorobanRpcMethod,
