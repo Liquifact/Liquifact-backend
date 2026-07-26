@@ -21,7 +21,9 @@ const { CursorError } = require('../utils/cursorPagination');
 const { adminStack } = require('../middleware/stacks');
 const responseHelper = require('../utils/responseHelper');
 const logger = require('../logger');
-const { instrumentIndexer } = require('../middleware/indexerMetrics');
+const { mapQueryToDTO, mapDTOToServiceParams } = require('../dto/indexer');
+// NOTE: indexerService already applies mapRowToEscrowEventDTO + mapMetaToDTO
+// internally, so the route consumes typed DTOs directly from `result`.
 
 /**
  * Maximum page size clamped by the service layer.
@@ -226,15 +228,15 @@ function _parseQuery(query) {
  *                   items:
  *                     type: object
  *                     properties:
- *                       event_id:       { type: string }
- *                       invoice_id:     { type: string }
- *                       event_type:     { type: string }
- *                       ledger_sequence: { type: integer }
- *                       paging_token:   { type: string, nullable: true }
- *                       contract_id:    { type: string, nullable: true }
- *                       tx_hash:        { type: string, nullable: true }
- *                       observed_at:    { type: string, format: date-time }
- *                       created_at:     { type: string, format: date-time }
+ *                       eventId:        { type: string }
+ *                       invoiceId:      { type: string }
+ *                       eventType:      { type: string }
+ *                       ledgerSequence: { type: integer }
+ *                       pagingToken:    { type: string, nullable: true }
+ *                       contractId:     { type: string, nullable: true }
+ *                       txHash:         { type: string, nullable: true }
+ *                       observedAt:     { type: string, format: date-time }
+ *                       createdAt:      { type: string, format: date-time }
  *                 meta:
  *                   type: object
  *                   properties:
@@ -262,13 +264,15 @@ router.get('/events', instrumentIndexer(async (req, res, next) => {
       );
     }
 
-    // ── 2. Call service ─────────────────────────────────────────────────────
+    // ── 2. Map validated params → request DTO → service options ────────────
+    const queryDTO = mapQueryToDTO(params);
+    const serviceParams = mapDTOToServiceParams(queryDTO);
+
+    // ── 3. Call service ─────────────────────────────────────────────────────
     let result;
     try {
       result = await listIndexerEvents({
-        filters: params.filters,
-        sorting: params.sorting,
-        pagination: params.pagination,
+        ...serviceParams,
         dbClient: req._dbClient, // injectable in tests
       });
     } catch (err) {
@@ -285,19 +289,21 @@ router.get('/events', instrumentIndexer(async (req, res, next) => {
       throw err;
     }
 
-    // ── 3. Logging ──────────────────────────────────────────────────────────
+    // ── 4. Logging ──────────────────────────────────────────────────────────
     logger.info(
       {
         requestId: req.id,
         count: result.data.length,
         total: result.meta.total,
         hasMore: result.meta.hasMore,
-        usedCursor: Boolean(params.pagination.cursor),
+        usedCursor: Boolean(queryDTO.pagination.cursor),
       },
       'Indexer events retrieved',
     );
 
-    // ── 4. Respond ──────────────────────────────────────────────────────────
+    // ── 5. Respond ──────────────────────────────────────────────────────────
+    // result.data is already an EscrowEventRowDTO[] and result.meta is an
+    // IndexerEventsMetaDTO — both mapped by indexerService at the boundary.
     return res.status(200).json({
       ...responseHelper.success(result.data, result.meta),
       message: 'Indexer events retrieved successfully.',

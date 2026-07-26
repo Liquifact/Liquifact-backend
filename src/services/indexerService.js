@@ -35,6 +35,7 @@
 
 const db = require('../db/knex');
 const { encodeCursor, decodeCursor } = require('../utils/cursorPagination');
+const { mapRowToEscrowEventDTO, mapMetaToDTO } = require('../dto/indexer');
 
 /**
  * Allowed sort fields for the indexer listing endpoint.
@@ -215,13 +216,8 @@ async function listIndexerEvents({
     }
 
     return {
-      data,
-      meta: {
-        total,
-        limit,
-        hasMore,
-        nextCursor,
-      },
+      data: data.map(mapRowToEscrowEventDTO),
+      meta: mapMetaToDTO({ total, limit, hasMore, nextCursor }),
     };
   }
 
@@ -248,15 +244,15 @@ async function listIndexerEvents({
   }
 
   return {
-    data: pagedData,
-    meta: {
+    data: pagedData.map(mapRowToEscrowEventDTO),
+    meta: mapMetaToDTO({
       total,
       page,
       limit,
       totalPages: Math.ceil(total / limit),
       hasMore: pagedHasMore,
       nextCursor: pagedNextCursor,
-    },
+    }),
   };
 }
 
