@@ -60,10 +60,17 @@ router.use(adminConfigLimiter);
 // ── Apply admin auth + tenant extraction to every route ──────────────────────
 router.use(...adminStack);
 
-
+/**
+ * Conditionally applies idempotency logic if the client provides the header.
+ * Allows gradual rollout without breaking existing API clients.
+ *
+ * @param {object} req - Express request
+ * @param {object} res - Express response
+ * @param {function} next - Express next callback
+ * @returns {void}
+*/
 
 // ── POST /api/admin/config ────────────────────────────────────────────────────
-
 /**
  * @swagger
  * /api/admin/config:

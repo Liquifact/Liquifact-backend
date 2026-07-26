@@ -1,6 +1,12 @@
 /**
- * @fileoverview SME Dashboard Metrics endpoint.
- * Provides aggregated invoice counts for the authenticated user.
+ * @fileoverview SME Dashboard Metrics endpoints.
+ *
+ * Provides:
+ *  - `GET /metrics`  — aggregated invoice counts for the authenticated user
+ *  - `POST /metrics/bulk` — batch endpoint accepting an array of
+ *    (tenantId, userId) pairs with per-item success/error results
+ *
+ * @module routes/sme/metrics
  */
 
 'use strict';
@@ -12,11 +18,7 @@ const { extractTenant } = require('../../middleware/tenant');
 const { CursorError } = require('../../utils/cursorPagination');
 const invoiceService = require('../../services/invoiceService');
 const { validateMetricsRequest } = require('../../utils/metricsValidation');
-const {
-  toSmeMetricsResponse,
-  toSmeMetricsMeta,
-  toSmeMetricsApiResponse,
-} = require('../../dto/metrics');
+const { validateBulkMetricsBody } = require('../../schemas/metrics');
 
 
 /**
@@ -161,6 +163,153 @@ router.get('/metrics', authenticateToken, extractTenant, async (req, res, next) 
       version: '0.1.0'
     });
     return res.json(toSmeMetricsApiResponse(data, meta));
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/sme/metrics/bulk:
+ *   post:
+ *     operationId: bulkSmeMetrics
+ *     summary: Bulk SME dashboard metrics
+ *     description: |
+ *       Accepts an array of `{ tenantId, userId }` pairs and returns
+ *       per-item invoice counts without failing the whole batch.
+ *
+ *       **Batch limit:** 25 operations per request.
+ *
+ *       **Authorization:** Each item's `tenantId` must match the
+ *       authenticated user's tenant scope. Cross-tenant pairs are
+ *       rejected per-item with a 403-equivalent error entry.
+ *     tags: [SME]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [operations]
+ *             properties:
+ *               operations:
+ *                 type: array
+ *                 maxItems: 25
+ *                 minItems: 1
+ *                 items:
+ *                   type: object
+ *                   required: [tenantId, userId]
+ *                   properties:
+ *                     tenantId:
+ *                       type: string
+ *                       maxLength: 128
+ *                     userId:
+ *                       type: string
+ *                       maxLength: 128
+ *     responses:
+ *       200:
+ *         description: Bulk metrics results
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 results:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       tenantId:
+ *                         type: string
+ *                       userId:
+ *                         type: string
+ *                       status:
+ *                         type: string
+ *                         enum: [success, error]
+ *                       data:
+ *                         type: object
+ *                         nullable: true
+ *                       error:
+ *                         type: string
+ *                         nullable: true
+ *                 meta:
+ *                   type: object
+ *                   properties:
+ *                     total:
+ *                       type: integer
+ *                     succeeded:
+ *                       type: integer
+ *                     failed:
+ *                       type: integer
+ *                     timestamp:
+ *                       type: string
+ *       400:
+ *         description: Validation error (empty array, over-cap, missing fields)
+ *       401:
+ *         description: Unauthorized
+ */
+router.post('/metrics/bulk', authenticateToken, extractTenant, express.json({ limit: '100kb' }), validateBulkMetricsBody, async (req, res, next) => {
+  try {
+    const callerCtx = validateMetricsRequest(req, res);
+    if (!callerCtx) {
+      return;
+    }
+
+    const { tenantId: callerTenantId } = callerCtx;
+    const { operations } = req.validated;
+
+    const results = [];
+    let succeeded = 0;
+    let failed = 0;
+
+    for (const op of operations) {
+      const { tenantId, userId } = op;
+
+      if (tenantId !== callerTenantId) {
+        results.push({
+          tenantId,
+          userId,
+          status: 'error',
+          data: null,
+          error: 'Cross-tenant access denied',
+        });
+        failed++;
+        continue;
+      }
+
+      try {
+        const data = await invoiceService.getSmeInvoiceCounts(tenantId, userId);
+        results.push({
+          tenantId,
+          userId,
+          status: 'success',
+          data,
+          error: null,
+        });
+        succeeded++;
+      } catch (err) {
+        results.push({
+          tenantId,
+          userId,
+          status: 'error',
+          data: null,
+          error: err.message || 'Internal error',
+        });
+        failed++;
+      }
+    }
+
+    return res.json({
+      results,
+      meta: {
+        total: operations.length,
+        succeeded,
+        failed,
+        timestamp: new Date().toISOString(),
+      },
+    });
   } catch (err) {
     return next(err);
   }

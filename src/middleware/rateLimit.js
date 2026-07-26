@@ -24,8 +24,8 @@
 
 const rateLimit = require('express-rate-limit');
 
-const WINDOW_MS = parseRateLimitEnv('RATE_LIMIT_WINDOW_MS', 15 * 60 * 1000);
-const MAX_REQUESTS = parseRateLimitEnv('RATE_LIMIT_MAX_REQUESTS', 100);
+const WINDOW_MS = 15 * 60 * 1000;
+const MAX_REQUESTS = 100;
 
 /**
  * Resolves the Redis-backed store for a scope when the shared Redis client is
@@ -731,11 +731,15 @@ const invoiceStateLimiter = rateLimit({
 });
 
 /**
- * 429 response body handler for metricsLimiter.
+ * 429 response body for {@link metricsLimiter}.
  *
- * @param {import('express').Request} _req - Express request.
+ * Emits the canonical RFC 7807 extensions consistent with the rest of
+ * the platform's problem+json responses. Uses the same wire format as
+ * {@link adminConfigHandler} with `scope: 'metrics'`.
+ *
+ * @param {import('express').Request} _req - Express request (unused).
  * @param {import('express').Response} res - Express response.
- * @param {import('express').NextFunction} _next - Express next function.
+ * @param {import('express').NextFunction} _next - Express next (unused).
  * @param {{ statusCode: number, windowMs: number }} options - RateLimit options.
  * @returns {void}
  */
@@ -753,6 +757,15 @@ function metricsRateLimitHandler(_req, res, _next, options) {
   });
 }
 
+/**
+ * Per-client rate limiter for /metrics (issue #744).
+ *
+ * Env vars:
+ *   - `METRICS_RATE_LIMIT_WINDOW_MS` (default 60 000)
+ *   - `METRICS_RATE_LIMIT_MAX`       (default 30)
+ *
+ * @type {import('express').RequestHandler}
+ */
 const metricsLimiter = rateLimit({
   windowMs: METRICS_RATE_LIMIT_WINDOW_MS,
   limit: METRICS_RATE_LIMIT_MAX,
@@ -767,12 +780,14 @@ const metricsLimiter = rateLimit({
 });
 
 /**
- * Factory to create metrics rate limiter.
+ * Factory variant of {@link metricsLimiter} for callers (mostly tests)
+ * that need to construct a fresh limiter with different bounds. Production
+ * code should mount `metricsLimiter` directly so the Redis/console.warn
+ * handshake runs once at module load.
  *
- * @returns {import('express').RequestHandler} Express middleware.
+ * @returns {import('express').RequestHandler}
  */
 function createMetricsRateLimiter() {
-
   return rateLimit({
     windowMs: METRICS_RATE_LIMIT_WINDOW_MS,
     limit: METRICS_RATE_LIMIT_MAX,
