@@ -37,7 +37,8 @@ const { adminConfigLimiter } = require('../middleware/rateLimit');
 const idempotencyMiddleware = require('../middleware/idempotency');
 const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
 const logger = require('../logger');
-const idempotencyMiddleware = require('../middleware/idempotency');
+const { emitConfigWebhook } = require('../services/webhooks');
+
 
 const router = express.Router();
 
@@ -191,7 +192,7 @@ const optionalIdempotency = (req, res, next) => {
  *                 error:   { type: string }
  *                 message: { type: string }
  */
-router.post('/', idempotencyMiddleware, validateBody(runtimeConfigSchema), (req, res) => {
+router.post('/', optionalIdempotency, validateBody(runtimeConfigSchema), (req, res) => {
   // validateBody attaches the parsed, coerced payload to req.validated
   const { section, config: validatedConfig } = req.validated;
 
@@ -208,14 +209,29 @@ router.post('/', idempotencyMiddleware, validateBody(runtimeConfigSchema), (req,
     }
   }
 
+  const adminClient = req.apiClient?.clientId || req.user?.sub || 'system';
+
   logger.info(
     {
       tenantId: req.tenantId,
       section,
-      adminClient: req.apiClient?.clientId || req.user?.sub,
+      adminClient,
     },
     'Admin runtime config update accepted',
   );
+
+  // Fire-and-forget outbound webhook emission for config update
+  emitConfigWebhook({
+    tenantId: req.tenantId,
+    section,
+    config: validatedConfig,
+    actor: adminClient,
+  }).catch((err) => {
+    logger.error(
+      { err: err.message, tenantId: req.tenantId, section },
+      'Failed to emit config event webhook',
+    );
+  });
 
   return res.status(200).json({
     section,

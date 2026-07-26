@@ -326,12 +326,31 @@ async function executeTransition({
     auditLogId: auditLog.id,
   }, 'Invoice state transition executed');
 
+  const transitionedAt = auditLog.timestamp;
+  const event = `invoice.${currentState}_to_${targetState}`;
+
+  // Fire-and-forget enqueue of signed webhook delivery
+  const { enqueueWebhookDelivery } = require('./webhooks');
+  enqueueWebhookDelivery({
+    invoiceId,
+    event,
+    transition: {
+      from: currentState,
+      to: targetState,
+      actor,
+      reason: normalizedReason,
+      transitionedAt,
+    },
+  }).catch((err) => {
+    logger.error({ invoiceId, error: err.message }, 'webhook: failed to enqueue delivery job');
+  });
+
   return {
     success: true,
     previousState: currentState,
     newState: targetState,
     auditLog,
-    transitionedAt: auditLog.timestamp,
+    transitionedAt,
     transitionedBy: actor,
   };
 }
