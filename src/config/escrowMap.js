@@ -227,7 +227,7 @@ function isInvoiceAllowlisted(invoiceId, environment) {
  * @returns {string|null} Stellar contract address or null if not found
  * @throws {Error} If invoice ID is invalid or not allowlisted
  */
-function resolveEscrowAddress(invoiceId, environment) {
+function _legacyResolveEscrowAddress(invoiceId, environment) {
   // Input validation
   if (!invoiceId || typeof invoiceId !== 'string') {
     throw new Error('Invoice ID is required and must be a string');

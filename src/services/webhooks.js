@@ -420,6 +420,8 @@ module.exports = {
   writeDeadLetter,
   replayWebhook,
   resolveDeadLetter,
+  sortKeys,
+  setSharedWorker,
   SIGNATURE_VERSION,
   TOLERANCE_MS,
 };

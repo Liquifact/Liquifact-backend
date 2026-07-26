@@ -41,66 +41,6 @@
  */
 
 let client;
-
-try {
-  client = require('prom-client');
-} catch (_error) {
-  /* eslint-disable jsdoc/require-jsdoc */
-  /**
-   * Minimal registry fallback used when prom-client is unavailable in the
-   * local workspace.
-   */
-  class FallbackRegistry {
-    constructor() {
-      this.contentType = 'text/plain';
-    }
-
-    resetMetrics() {}
-
-    /**
-     * Returns the current metrics payload.
-     *
-     * @returns {Promise<string>} Empty metrics text.
-     */
-    async metrics() {
-      return '';
-    }
-  }
-
-  /**
-   * No-op counter fallback.
-   */
-  class FallbackCounter {
-    constructor() {}
-
-    /**
-     * Increments the counter.
-     */
-    inc() {}
-  }
-
-  /**
-   * No-op histogram fallback.
-   */
-  class FallbackHistogram {
-    constructor() {}
-
-    /**
-     * Records an observation.
-     */
-    observe() {}
-  }
-
-  client = {
-    Registry: FallbackRegistry,
-    collectDefaultMetrics() {},
-    Counter: FallbackCounter,
-    Histogram: FallbackHistogram,
-  };
-  /* eslint-enable jsdoc/require-jsdoc */
-}
-
-let client;
 try {
   client = require('prom-client');
 } catch (_e) {
@@ -336,21 +276,6 @@ try {
     }
   }
 
-  /**
-   * Histogram shim for test environments.
-   * @implements {import('prom-client').Histogram}
-   */
-  class HistogramShim {
-    /** @param {void} */
-    constructor() {}
-    /** @returns {void} */
-    observe() {}
-    /** @returns {Function} */
-    labels() { return this; }
-    /** @returns {void} */
-    inc() {}
-  }
-
   client = {
     Registry: RegistryShim,
     /**
@@ -377,12 +302,6 @@ const METRIC_REFRESH_INTERVAL_MS = 5000;
 const registeredJobQueues = new Set();
 const registeredWorkers = new Set();
 let refreshTimer = null;
-
-const registry = new client.Registry();
-
-if (typeof client.collectDefaultMetrics === 'function') {
-  client.collectDefaultMetrics({ register: registry });
-}
 
 const queueDepthGauge = new client.Gauge({
   name: 'liquifact_job_queue_depth',
@@ -880,6 +799,73 @@ async function metricsHandler(req, res) {
   }
 }
 
+const kycWebhookRequestDurationSeconds = new client.Histogram({
+  name: 'kyc_webhook_request_duration_seconds',
+  help: 'Duration of KYC webhook ingestion requests in seconds',
+  labelNames: ['status_class'],
+  registers: [registry],
+});
+
+const kycWebhookRequestsTotal = new client.Counter({
+  name: 'kyc_webhook_requests_total',
+  help: 'Total KYC webhook ingestion requests',
+  labelNames: ['status_class'],
+  registers: [registry],
+});
+
+const kycWebhookErrorsTotal = new client.Counter({
+  name: 'kyc_webhook_errors_total',
+  help: 'Total KYC webhook ingestion error count by cause',
+  labelNames: ['cause'],
+  registers: [registry],
+});
+
+function normalizeKycWebhookStatusClass(status) {
+  const code = Number(status);
+  if (!code || isNaN(code)) return '5xx';
+  if (code >= 200 && code < 300) return '2xx';
+  if (code >= 400 && code < 500) return '4xx';
+  return '5xx';
+}
+
+function normalizeKycWebhookCause({ status, errorCode }) {
+  if (errorCode) return errorCode;
+  const code = Number(status);
+  if (code >= 200 && code < 300) return 'none';
+  if (code >= 400) return `http_${code}`;
+  return 'none';
+}
+
+const apiKeyAuthDurationSeconds = new client.Histogram({
+  name: 'api_key_auth_duration_seconds',
+  help: 'Duration of API key authentication checks in seconds',
+  labelNames: ['endpoint', 'method', 'status', 'outcome'],
+  registers: [registry],
+});
+
+const apiKeyAuthErrorsTotal = new client.Counter({
+  name: 'api_key_auth_errors_total',
+  help: 'Total API key authentication errors by cause',
+  labelNames: ['cause'],
+  registers: [registry],
+});
+
+function classifyApiKeyOutcome(status) {
+  const code = Number(status);
+  if (code >= 200 && code < 300) return 'success';
+  if (code === 401) return 'unauthorized';
+  if (code === 403) return 'forbidden';
+  return 'error';
+}
+
+function classifyApiKeyErrorCause(status) {
+  const code = Number(status);
+  if (code === 401) return 'invalid_key';
+  if (code === 403) return 'insufficient_scope';
+  if (code >= 500) return 'server_error';
+  return 'unknown';
+}
+
 module.exports = {
   registry,
   metricsAuth,
@@ -888,4 +874,13 @@ module.exports = {
   configReadCacheMisses,
   invoiceStateRequestDurationMs,
   invoiceStateRequestCount,
+  kycWebhookRequestDurationSeconds,
+  kycWebhookRequestsTotal,
+  kycWebhookErrorsTotal,
+  normalizeKycWebhookStatusClass,
+  normalizeKycWebhookCause,
+  apiKeyAuthDurationSeconds,
+  apiKeyAuthErrorsTotal,
+  classifyApiKeyOutcome,
+  classifyApiKeyErrorCause,
 };
