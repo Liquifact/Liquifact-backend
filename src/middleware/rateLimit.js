@@ -451,18 +451,8 @@ const invoiceStateLimiter = rateLimit({
   },
 });
 
-/**
- * Metrics limiter 429 handler and factory (kept local to this module).
- */
-function metricsRateLimitHandler(_req, res, _next, options) {
+function metricsRateLimitHandler(req, res, next, options) {
   res.status(options.statusCode).json({
-    type: 'https://liquifact.com/probs/too-many-requests',
-    title: 'Too Many Requests',
-    status: options.statusCode,
-    code: 'RATE_LIMITED',
-    retryable: true,
-    retry_hint: 'Wait for the rate-limit window to reset before retrying.',
-    scope: 'metrics',
     error: 'Too many requests.',
     message: 'Rate limit threshold breached for /metrics. Please try again later.',
   });
@@ -471,19 +461,24 @@ function metricsRateLimitHandler(_req, res, _next, options) {
 function createMetricsRateLimiter() {
   return rateLimit({
     windowMs: METRICS_RATE_LIMIT_WINDOW_MS,
-    max: METRICS_RATE_LIMIT_MAX,
+    limit: METRICS_RATE_LIMIT_MAX,
     standardHeaders: true,
     legacyHeaders: false,
-    store: resolveRateLimitStore('metrics'),
-    keyGenerator: adminConfigKeyGenerator,
-    validate: {
-      xForwardedForHeader: false,
-    },
+    keyGenerator,
+    validate: { xForwardedForHeader: false },
     handler: metricsRateLimitHandler,
   });
 }
 
-const metricsLimiter = createMetricsRateLimiter();
+const metricsLimiter = rateLimit({
+  windowMs: METRICS_RATE_LIMIT_WINDOW_MS,
+  limit: METRICS_RATE_LIMIT_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator,
+  validate: { xForwardedForHeader: false },
+  handler: metricsRateLimitHandler,
+});
 
 module.exports = {
   createRateLimiter,

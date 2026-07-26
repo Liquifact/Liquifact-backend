@@ -48,6 +48,7 @@ const responseHelper = require('./utils/responseHelper');
 const logger = require('./logger');
 const { escrowReadLimiter } = require('./middleware/rateLimit');
 const { metricsAuth, metricsHandler } = require('./metrics');
+const { metricsLimiter } = require('./middleware/rateLimit');
 const { instrumentHealth } = require('./middleware/healthMetrics');
 const { metricsLimiter } = require('./middleware/rateLimit');
 const smeRoutes = require('./routes/sme');
@@ -386,6 +387,8 @@ function createApp() {
    *
    * @see docs/request-lifecycle-middleware-order.md
    */
+  const adminEscrowReadRoutes = require('./routes/adminEscrowRead');
+
   mountFeatureRouter(app, '/api/sme', smeRoutes);
   mountFeatureRouter(app, '/api/invoices', invoiceFileRoutes);
   mountFeatureRouter(app, '/api/invoices', invoiceStateRoutes);
@@ -397,6 +400,7 @@ function createApp() {
   mountFeatureRouter(app, '/api/retention', retentionRoutes);
   mountFeatureRouter(app, '/api/admin/audit', auditTrailRoutes);
   mountFeatureRouter(app, '/api/admin/escrow', adminEscrowRoutes);
+  mountFeatureRouter(app, '/api/admin/escrow-read', adminEscrowReadRoutes);
   mountFeatureRouter(app, '/api/admin/webhooks', adminWebhooksRoutes);
   mountFeatureRouter(app, '/api/admin/config', adminConfigRoutes);
   mountFeatureRouter(app, '/api/admin/metrics/audit', adminMetricsAuditRoutes);
@@ -411,7 +415,7 @@ function createApp() {
   // Rate limiter mounted BEFORE metricsAuth so unauthenticated attempts
   // still consume quota — defending against brute-force token guessing
   // on the metrics surface (issue #744).
-  app.get('/metrics', metricsLimiter, metricsAuth, metricsHandler);
+  app.get('/metrics', (req, res, next) => metricsLimiter ? metricsLimiter(req, res, next) : next(), metricsAuth, metricsHandler);
 
   // ── 7. 404 catch-all ─────────────────────────────────────────────────────
   app.use((req, res) => {

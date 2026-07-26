@@ -1460,67 +1460,68 @@ const metricsRequestDurationSeconds = new client.Histogram({
   registers: [registry],
 });
 
-/**
- * Counter: Metrics endpoint scrapes by bounded status class.
- * @type {import('prom-client').Counter}
- */
 const metricsRequestsTotal = new client.Counter({
   name: 'metrics_requests_total',
-  help: 'Total metrics endpoint requests by status class',
+  help: 'Total number of metrics endpoint requests',
   labelNames: ['status_class'],
   registers: [registry],
 });
 
-/**
- * Counter: Metrics endpoint failures by bounded cause. Only incremented for
- * non-`none` causes so a healthy scrape never emits an error series.
- * @type {import('prom-client').Counter}
- */
 const metricsRequestErrorsTotal = new client.Counter({
   name: 'metrics_request_errors_total',
-  help: 'Total metrics endpoint request errors by cause',
+  help: 'Total number of metrics endpoint request errors',
   labelNames: ['cause'],
   registers: [registry],
 });
 
-/**
- * Records the outcome of a metrics endpoint request: duration histogram,
- * request counter, bounded error counter, and one structured log line at the
- * severity matching the status class.
- *
- * Labels are always drawn from the bounded normalisers — raw status codes and
- * error messages are never used as label values (unbounded cardinality).
- *
- * @param {object} params
- * @param {number} params.statusCode - Final HTTP status code.
- * @param {number} [params.durationSeconds=0] - Wall-clock duration.
- * @param {unknown} [params.error] - Error associated with the outcome, if any.
- * @param {import('express').Request} [params.req] - Request, used for the
- *   correlated request logger.
- * @returns {void}
- */
-function recordMetricsEndpointOutcome({ statusCode, durationSeconds = 0, error, req } = {}) {
+function recordMetricsEndpointOutcome({ statusCode, durationSeconds, error, req }) {
   const statusClass = normalizeMetricsEndpointStatusClass(statusCode);
   const cause = normalizeMetricsEndpointCause(error, statusCode);
-
-  metricsRequestsTotal.labels(statusClass).inc();
-  metricsRequestDurationSeconds.labels(statusClass).observe(
-    Number.isFinite(durationSeconds) ? durationSeconds : 0
-  );
+  metricsRequestDurationSeconds.observe({ status_class: statusClass }, durationSeconds);
+  metricsRequestsTotal.inc({ status_class: statusClass });
   if (cause !== 'none') {
-    metricsRequestErrorsTotal.labels(cause).inc();
+    metricsRequestErrorsTotal.inc({ cause });
   }
+}
 
-  const requestLogger = logger.createRequestLogger(req || {});
-  const payload = { event: 'metrics.scrape', statusClass, cause, durationSeconds };
+const persistenceRequestDurationSeconds = new client.Histogram({
+  name: 'persistence_request_duration_seconds',
+  help: 'Duration of persistence-endpoint requests in seconds',
+  labelNames: ['status_class', 'endpoint'],
+  buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5],
+  registers: [registry],
+});
 
-  if (statusClass === '5xx') {
-    requestLogger.error({ ...payload, err: error && error.message }, 'metrics endpoint request failed');
-  } else if (statusClass === '4xx') {
-    requestLogger.warn(payload, 'metrics endpoint request rejected');
-  } else {
-    requestLogger.info(payload, 'metrics endpoint request served');
-  }
+const persistenceRequestsTotal = new client.Counter({
+  name: 'persistence_requests_total',
+  help: 'Total number of persistence-endpoint requests',
+  labelNames: ['status_class', 'endpoint'],
+  registers: [registry],
+});
+
+const persistenceRequestErrorsTotal = new client.Counter({
+  name: 'persistence_request_errors_total',
+  help: 'Total number of persistence-endpoint request errors',
+  labelNames: ['cause', 'endpoint'],
+  registers: [registry],
+});
+
+const PERSISTENCE_STATUS_CLASS_ENUM = Object.freeze(['2xx', '4xx', '5xx']);
+const PERSISTENCE_CAUSE_ENUM = Object.freeze(['validation', 'storage', 'internal', 'none']);
+
+function normalizePersistenceEndpoint(endpoint) {
+  return typeof endpoint === 'string' ? endpoint : 'unknown';
+}
+
+function normalizePersistenceStatusClass(status) {
+  const code = Number(status);
+  if (code >= 500) return '5xx';
+  if (code >= 400) return '4xx';
+  return '2xx';
+}
+
+function normalizePersistenceCause(cause) {
+  return PERSISTENCE_CAUSE_ENUM.includes(cause) ? cause : 'internal';
 }
 
 // ── KYC webhook metrics (issue #731) ────────────────────────────────────────
