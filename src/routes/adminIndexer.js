@@ -212,7 +212,7 @@ router.get('/events', instrumentIndexer(async (req, res, next) => {
   } catch (error) {
     return next(error);
   }
-});
+}));
 
 /**
  * @swagger

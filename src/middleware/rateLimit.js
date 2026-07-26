@@ -487,76 +487,6 @@ function createConfigRateLimiter() {
 // metricsLimiter (issue #744)
 // ────────────────────────────────────────────────────────────────────────────
 
-/**
- * 429 response body for {@link metricsLimiter}.
- *
- * @param {import('express').Request} _req - Express request (unused).
- * @param {import('express').Response} res - Express response.
- * @param {import('express').NextFunction} _next - Express next (unused).
- * @param {{ statusCode: number, windowMs: number }} options - RateLimit options.
- * @returns {void}
- */
-function metricsRateLimitHandler(_req, res, _next, options) {
-  res.status(options.statusCode).json({
-    type: 'https://liquifact.com/probs/too-many-requests',
-    title: 'Too Many Requests',
-    status: options.statusCode,
-    code: 'RATE_LIMITED',
-    retryable: true,
-    retry_hint: 'Wait for the rate-limit window to reset before retrying.',
-    scope: 'metrics',
-    error: 'Too many requests.',
-    message: 'Rate limit threshold breached for /metrics. Please try again later.',
-  });
-}
-
-/**
- * Per-client rate limiter for /metrics (issue #744).
- *
- * Mounted BEFORE metricsAuth in app.js so unauthenticated attempts still
- * consume quota, defending against brute-force token guessing on the
- * metrics surface.
- *
- * Env vars:
- *   - `METRICS_RATE_LIMIT_WINDOW_MS` (default 60 000)
- *   - `METRICS_RATE_LIMIT_MAX`       (default 30)
- *
- * @type {import('express').RequestHandler}
- */
-const metricsLimiter = rateLimit({
-  windowMs: METRICS_RATE_LIMIT_WINDOW_MS,
-  limit: METRICS_RATE_LIMIT_MAX,
-  standardHeaders: true,
-  legacyHeaders: false,
-  store: resolveRateLimitStore('metrics'),
-  keyGenerator: adminConfigKeyGenerator,
-  validate: {
-    xForwardedForHeader: false,
-  },
-  handler: metricsRateLimitHandler,
-});
-
-/**
- * Factory variant of {@link metricsLimiter} for callers (mostly tests) that
- * need to construct a fresh limiter with different bounds.
- *
- * @returns {import('express').RequestHandler}
- */
-function createMetricsRateLimiter() {
-  return rateLimit({
-    windowMs: METRICS_RATE_LIMIT_WINDOW_MS,
-    limit: METRICS_RATE_LIMIT_MAX,
-    standardHeaders: true,
-    legacyHeaders: false,
-    store: resolveRateLimitStore('metrics'),
-    keyGenerator: adminConfigKeyGenerator,
-    validate: {
-      xForwardedForHeader: false,
-    },
-    handler: metricsRateLimitHandler,
-  });
-}
-
 // ────────────────────────────────────────────────────────────────────────────
 // kycWebhookLimiter (issue #729)
 // ────────────────────────────────────────────────────────────────────────────
@@ -730,77 +660,20 @@ const invoiceStateLimiter = rateLimit({
   },
 });
 
-/**
- * 429 response body for {@link metricsLimiter}.
- *
- * Emits the canonical RFC 7807 extensions consistent with the rest of
- * the platform's problem+json responses. Uses the same wire format as
- * {@link adminConfigHandler} with `scope: 'metrics'`.
- *
- * @param {import('express').Request} _req - Express request (unused).
- * @param {import('express').Response} res - Express response.
- * @param {import('express').NextFunction} _next - Express next (unused).
- * @param {{ statusCode: number, windowMs: number }} options - RateLimit options.
- * @returns {void}
- */
-function metricsRateLimitHandler(_req, res, _next, options) {
-  res.status(options.statusCode).json({
-    type: 'https://liquifact.com/probs/too-many-requests',
-    title: 'Too Many Requests',
-    status: options.statusCode,
-    code: 'RATE_LIMITED',
-    retryable: true,
-    retry_hint: 'Wait for the rate-limit window to reset before retrying.',
-    scope: 'metrics',
-    error: 'Too many requests.',
-    message: 'Rate limit threshold breached for /metrics. Please try again later.',
-  });
-}
-
-/**
- * Per-client rate limiter for /metrics (issue #744).
- *
- * Env vars:
- *   - `METRICS_RATE_LIMIT_WINDOW_MS` (default 60 000)
- *   - `METRICS_RATE_LIMIT_MAX`       (default 30)
- *
- * @type {import('express').RequestHandler}
- */
-const metricsLimiter = rateLimit({
-  windowMs: METRICS_RATE_LIMIT_WINDOW_MS,
-  limit: METRICS_RATE_LIMIT_MAX,
+const indexerLimiter = rateLimit({
+  windowMs: INDEXER_RATE_LIMIT_WINDOW_MS,
+  limit: INDEXER_RATE_LIMIT_MAX,
+  message: {
+    error: `Too many indexer requests. Max ${INDEXER_RATE_LIMIT_MAX} per ${Math.round(INDEXER_RATE_LIMIT_WINDOW_MS / 60000)} minutes.`,
+  },
   standardHeaders: true,
   legacyHeaders: false,
-  store: resolveRateLimitStore('metrics'),
-  keyGenerator: adminConfigKeyGenerator,
+  keyGenerator: indexerKeyGenerator,
   validate: {
     xForwardedForHeader: false,
   },
-  handler: metricsRateLimitHandler,
 });
 
-/**
- * Factory variant of {@link metricsLimiter} for callers (mostly tests)
- * that need to construct a fresh limiter with different bounds. Production
- * code should mount `metricsLimiter` directly so the Redis/console.warn
- * handshake runs once at module load.
- *
- * @returns {import('express').RequestHandler}
- */
-function createMetricsRateLimiter() {
-  return rateLimit({
-    windowMs: METRICS_RATE_LIMIT_WINDOW_MS,
-    limit: METRICS_RATE_LIMIT_MAX,
-    standardHeaders: true,
-    legacyHeaders: false,
-    store: resolveRateLimitStore('metrics'),
-    keyGenerator: adminConfigKeyGenerator,
-    validate: {
-      xForwardedForHeader: false,
-    },
-    handler: metricsRateLimitHandler,
-  });
-}
 
 module.exports = {
   createRateLimiter,

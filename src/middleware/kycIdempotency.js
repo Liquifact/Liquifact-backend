@@ -24,6 +24,11 @@
 const crypto = require('crypto');
 const { IDEMPOTENCY_KEY_PATTERN } = require('../services/escrowSubmit');
 const db = require('../db/knex');
+const {
+  HTTP_HEADERS,
+  KYC_WEBHOOK_MESSAGES,
+  KYC_WEBHOOK_DB,
+} = require('../constants/kycWebhooks');
 
 const DEFAULT_TTL_HOURS = 24;
 
@@ -61,17 +66,16 @@ function fingerprintRawBody(rawBody) {
  * @returns {void}
  */
 function kycIdempotencyMiddleware(req, res, next) {
-  const key = req.header('Idempotency-Key');
+  const key = req.header(HTTP_HEADERS.IDEMPOTENCY_KEY);
   if (!key) {
     return res.status(400).json({
-      error: 'Idempotency-Key header is required for this endpoint.',
+      error: KYC_WEBHOOK_MESSAGES.IDEMPOTENCY_KEY_REQUIRED,
     });
   }
 
   if (!IDEMPOTENCY_KEY_PATTERN.test(key)) {
     return res.status(400).json({
-      error:
-        'Idempotency-Key must be 8–128 URL-safe characters (A-Za-z0-9._:-).',
+      error: KYC_WEBHOOK_MESSAGES.IDEMPOTENCY_KEY_INVALID,
     });
   }
 
@@ -84,7 +88,7 @@ function kycIdempotencyMiddleware(req, res, next) {
   const ttlHours = getTTLHours();
 
   db.transaction(async (trx) => {
-    const existing = await trx('idempotency_keys')
+    const existing = await trx(KYC_WEBHOOK_DB.TABLE_IDEMPOTENCY_KEYS)
       .where({ idempotency_key: key })
       .first();
 
@@ -92,8 +96,7 @@ function kycIdempotencyMiddleware(req, res, next) {
       // Key reuse — verify same body
       if (existing.request_fingerprint !== bodyFingerprint) {
         return res.status(409).json({
-          error:
-            'Idempotency-Key reused with a different request body. Use a unique key for each distinct payload.',
+          error: KYC_WEBHOOK_MESSAGES.IDEMPOTENCY_KEY_REUSED,
         });
       }
 
@@ -109,7 +112,7 @@ function kycIdempotencyMiddleware(req, res, next) {
     }
 
     // New key — insert placeholder row
-    await trx('idempotency_keys').insert({
+    await trx(KYC_WEBHOOK_DB.TABLE_IDEMPOTENCY_KEYS).insert({
       idempotency_key: key,
       request_fingerprint: bodyFingerprint,
       response_status: null,
@@ -120,7 +123,7 @@ function kycIdempotencyMiddleware(req, res, next) {
     // Intercept res.json to capture and store the response for future replays
     const originalJson = res.json.bind(res);
     res.json = function (body) {
-      trx('idempotency_keys')
+      trx(KYC_WEBHOOK_DB.TABLE_IDEMPOTENCY_KEYS)
         .where({ idempotency_key: key })
         .update({
           response_status: res.statusCode,
@@ -137,7 +140,7 @@ function kycIdempotencyMiddleware(req, res, next) {
   }).catch((err) => {
     if (!res.headersSent) {
       return res.status(500).json({
-        error: 'Internal server error processing idempotency key.',
+        error: KYC_WEBHOOK_MESSAGES.IDEMPOTENCY_SERVER_ERROR,
       });
     }
     console.error('[kyc-idempotency] Post-response storage error:', err.message);

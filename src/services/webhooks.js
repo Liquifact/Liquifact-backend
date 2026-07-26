@@ -684,6 +684,7 @@ module.exports = {
   replayWebhook,
   resolveDeadLetter,
   sortKeys,
+  setSharedWorker,
   SIGNATURE_VERSION,
   TOLERANCE_MS,
   MAX_CONFIG_WEBHOOK_PAYLOAD_BYTES,

@@ -15,6 +15,10 @@
 'use strict';
 
 const { verifySignature } = require('../services/webhooks');
+const {
+  KYC_WEBHOOK_ERROR_CODES,
+  KYC_WEBHOOK_MESSAGES,
+} = require('../constants/kycWebhooks');
 
 /**
  * Parse JSON from a raw request body string.
@@ -27,7 +31,7 @@ function parseJsonPayload(rawBody) {
   try {
     return JSON.parse(rawBody);
   } catch (_e) {
-    throw new Error('Invalid JSON payload');
+    throw new Error(KYC_WEBHOOK_MESSAGES.INVALID_PAYLOAD);
   }
 }
 
@@ -67,7 +71,11 @@ function validateKycWebhookRequest(rawBody, signatureHeader, secret, requestTena
   if (!secret) {
     return {
       valid: false,
-      error: { status: 503, body: { error: 'KYC webhook ingestion is not configured' }, errorCode: 'missing_secret' },
+      error: {
+        status: 503,
+        body: { error: KYC_WEBHOOK_MESSAGES.MISSING_SECRET },
+        errorCode: KYC_WEBHOOK_ERROR_CODES.MISSING_SECRET,
+      },
     };
   }
 
@@ -75,7 +83,11 @@ function validateKycWebhookRequest(rawBody, signatureHeader, secret, requestTena
   if (!signatureHeader) {
     return {
       valid: false,
-      error: { status: 401, body: { error: 'Missing X-Signature header' }, errorCode: 'missing_signature' },
+      error: {
+        status: 401,
+        body: { error: KYC_WEBHOOK_MESSAGES.MISSING_SIGNATURE },
+        errorCode: KYC_WEBHOOK_ERROR_CODES.MISSING_SIGNATURE,
+      },
     };
   }
 
@@ -86,8 +98,8 @@ function validateKycWebhookRequest(rawBody, signatureHeader, secret, requestTena
       valid: false,
       error: {
         status: 401,
-        body: { error: 'Invalid webhook signature' },
-        errorCode: 'invalid_signature',
+        body: { error: KYC_WEBHOOK_MESSAGES.INVALID_SIGNATURE },
+        errorCode: KYC_WEBHOOK_ERROR_CODES.INVALID_SIGNATURE,
         verificationError: verification.error || null,
       },
     };
@@ -100,7 +112,11 @@ function validateKycWebhookRequest(rawBody, signatureHeader, secret, requestTena
   } catch (parseError) {
     return {
       valid: false,
-      error: { status: 400, body: { error: parseError.message }, errorCode: 'invalid_payload' },
+      error: {
+        status: 400,
+        body: { error: parseError.message },
+        errorCode: KYC_WEBHOOK_ERROR_CODES.INVALID_PAYLOAD,
+      },
     };
   }
 
@@ -115,14 +131,22 @@ function validateKycWebhookRequest(rawBody, signatureHeader, secret, requestTena
   if (payloadTenantId && requestTenantId && payloadTenantId !== requestTenantId) {
     return {
       valid: false,
-      error: { status: 403, body: { error: 'Tenant scope mismatch.' }, errorCode: 'tenant_mismatch' },
+      error: {
+        status: 403,
+        body: { error: KYC_WEBHOOK_MESSAGES.TENANT_MISMATCH },
+        errorCode: KYC_WEBHOOK_ERROR_CODES.TENANT_MISMATCH,
+      },
     };
   }
 
   if (payloadTenantId && !requestTenantId) {
     return {
       valid: false,
-      error: { status: 400, body: { error: 'Missing tenant context.' }, errorCode: 'missing_tenant_context' },
+      error: {
+        status: 400,
+        body: { error: KYC_WEBHOOK_MESSAGES.MISSING_TENANT_CONTEXT },
+        errorCode: KYC_WEBHOOK_ERROR_CODES.MISSING_TENANT_CONTEXT,
+      },
     };
   }
 
@@ -130,7 +154,11 @@ function validateKycWebhookRequest(rawBody, signatureHeader, secret, requestTena
   if (!smeId || typeof smeId !== 'string') {
     return {
       valid: false,
-      error: { status: 400, body: { error: 'Missing or invalid smeId' }, errorCode: 'missing_sme_id' },
+      error: {
+        status: 400,
+        body: { error: KYC_WEBHOOK_MESSAGES.MISSING_SME_ID },
+        errorCode: KYC_WEBHOOK_ERROR_CODES.MISSING_SME_ID,
+      },
     };
   }
 
@@ -138,7 +166,11 @@ function validateKycWebhookRequest(rawBody, signatureHeader, secret, requestTena
   if (!status || typeof status !== 'string') {
     return {
       valid: false,
-      error: { status: 400, body: { error: 'Missing or invalid status' }, errorCode: 'missing_status' },
+      error: {
+        status: 400,
+        body: { error: KYC_WEBHOOK_MESSAGES.MISSING_STATUS },
+        errorCode: KYC_WEBHOOK_ERROR_CODES.MISSING_STATUS,
+      },
     };
   }
 
@@ -149,10 +181,10 @@ function validateKycWebhookRequest(rawBody, signatureHeader, secret, requestTena
       valid: false,
       error: {
         status: 400,
-        body: { error: `Unknown provider status: ${status}` },
-        errorCode: 'unknown_status',
+        body: { error: `${KYC_WEBHOOK_MESSAGES.UNKNOWN_STATUS_PREFIX}${status}` },
+        errorCode: KYC_WEBHOOK_ERROR_CODES.UNKNOWN_STATUS,
         smeId,
-        status,
+        providerStatus: status,
       },
     };
   }

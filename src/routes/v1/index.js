@@ -174,8 +174,7 @@ router.post('/invoices', extractTenant, async (req, res, next) => {
 // Rate limiter runs BEFORE authenticateToken so that abuse is stopped
 // before any auth processing (IP-based limiting for this endpoint).
 router.get('/escrow/:invoiceId', escrowReadLimiter, authenticateToken, async (req, res, next) => {
-  try {
-    // Validate path parameters
+  // Validate path parameters
     const { success, error, data: validatedParams } = validateEscrowReadParams.safeParse(req.params);
     if (!success) {
       return res.status(400).json({
