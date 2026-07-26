@@ -654,6 +654,62 @@ function indexerKeyGenerator(req) {
 }
 
 /**
+ * 429 response body for {@link metricsLimiter}.
+ *
+ * @param {import('express').Request} _req - Express request (unused).
+ * @param {import('express').Response} res - Express response.
+ * @returns {void}
+ */
+function metricsRateLimitHandler(_req, res) {
+  res.status(429).json({
+    error: 'Too many metrics requests',
+  });
+}
+
+/**
+ * Per-client rate limiter for /metrics (issue #744).
+ *
+ * Env vars:
+ *   - `METRICS_RATE_LIMIT_WINDOW_MS` (default 60 000)
+ *   - `METRICS_RATE_LIMIT_MAX` (default 30)
+ *
+ * @type {import('express').RequestHandler}
+ */
+const metricsLimiter = rateLimit({
+  windowMs: METRICS_RATE_LIMIT_WINDOW_MS,
+  limit: METRICS_RATE_LIMIT_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: resolveRateLimitStore('metrics'),
+  keyGenerator,
+  validate: {
+    xForwardedForHeader: false,
+  },
+  handler: metricsRateLimitHandler,
+});
+
+/**
+ * Factory variant of {@link metricsLimiter} for callers (mostly tests)
+ * that need to construct a fresh limiter with different bounds.
+ *
+ * @returns {import('express').RequestHandler}
+ */
+function createMetricsRateLimiter() {
+  return rateLimit({
+    windowMs: METRICS_RATE_LIMIT_WINDOW_MS,
+    limit: METRICS_RATE_LIMIT_MAX,
+    standardHeaders: true,
+    legacyHeaders: false,
+    store: resolveRateLimitStore('metrics'),
+    keyGenerator,
+    validate: {
+      xForwardedForHeader: false,
+    },
+    handler: metricsRateLimitHandler,
+  });
+}
+
+/**
  * Per-client (API key / IP) rate limiter for the invoice-state endpoints.
  * Config-driven via RATE_LIMIT_INVOICE_STATE_WINDOW_MS / RATE_LIMIT_INVOICE_STATE_MAX.
  * express-rate-limit sets Retry-After via standardHeaders on 429.

@@ -1335,12 +1335,76 @@ function normalizePersistenceCause(err, status) {
 }
 
 /**
+ * Bounded enum of allowed `status_class` label values for persistence endpoint.
+ * @readonly
+ */
+const PERSISTENCE_STATUS_CLASS_ENUM = Object.freeze(['2xx', '4xx', '5xx']);
+
+/**
+ * Bounded enum of allowed `cause` label values for persistence endpoint errors.
+ * @readonly
+ */
+const PERSISTENCE_CAUSE_ENUM = Object.freeze([
+  'validation',
+  'storage',
+  'internal',
+  'none',
+]);
+
+/**
+ * Maps a persistence endpoint identifier to a bounded metric label value.
+ *
+ * @param {unknown} raw - Raw endpoint identifier.
+ * @returns {string} Bounded value from PERSISTENCE_ENDPOINT_ENUM.
+ */
+function normalizePersistenceEndpoint(raw) {
+  const str = typeof raw === 'string' ? raw.trim() : '';
+  return str || 'unknown';
+}
+
+/**
+ * Maps an HTTP status code to a bounded `status_class` label value.
+ *
+ * @param {unknown} status - HTTP status code.
+ * @returns {string} Bounded value from {@link PERSISTENCE_STATUS_CLASS_ENUM}.
+ */
+function normalizePersistenceStatusClass(status) {
+  const code = Number(status);
+  if (code >= 500) { return '5xx'; }
+  if (code >= 400) { return '4xx'; }
+  return '2xx';
+}
+
+/**
+ * Maps a persistence endpoint failure to a bounded `cause` label value.
+ *
+ * @param {unknown} err - Raw error object or code.
+ * @param {number} [status] - HTTP status code.
+ * @returns {string} Bounded value from {@link PERSISTENCE_CAUSE_ENUM}.
+ */
+function normalizePersistenceCause(err, status) {
+  const code = Number(status);
+  if (!err && code < 400) { return 'none'; }
+
+  if (code >= 400 && code < 500) { return 'validation'; }
+
+  if (err) {
+    const errMessage = typeof err === 'object' && 'message' in err ? String(err.message).toLowerCase() : '';
+    if (errMessage.includes('storage') || errMessage.includes('s3') || errMessage.includes('bucket')) {
+      return 'storage';
+    }
+  }
+
+  return 'internal';
+}
+
+/**
  * Histogram: Wall-clock duration of persistence-endpoint requests in seconds.
  * @type {import('prom-client').Histogram}
  */
 const persistenceRequestDurationSeconds = new client.Histogram({
   name: 'persistence_request_duration_seconds',
-  help: 'Duration of persistence-endpoint requests in seconds',
+  help: 'Duration of persistence endpoint requests in seconds',
   labelNames: ['endpoint', 'status_class'],
   buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5],
   registers: [registry],
@@ -1352,7 +1416,7 @@ const persistenceRequestDurationSeconds = new client.Histogram({
  */
 const persistenceRequestsTotal = new client.Counter({
   name: 'persistence_requests_total',
-  help: 'Total number of persistence-endpoint requests by status class',
+  help: 'Total number of persistence endpoint requests',
   labelNames: ['endpoint', 'status_class'],
   registers: [registry],
 });
@@ -1363,7 +1427,7 @@ const persistenceRequestsTotal = new client.Counter({
  */
 const persistenceRequestErrorsTotal = new client.Counter({
   name: 'persistence_request_errors_total',
-  help: 'Total number of persistence-endpoint request errors by cause',
+  help: 'Total number of persistence endpoint request errors by cause',
   labelNames: ['endpoint', 'cause'],
   registers: [registry],
 });
@@ -1372,11 +1436,13 @@ const persistenceRequestErrorsTotal = new client.Counter({
  * Bounded enum of allowed `status_class` label values for metrics endpoint.
  * @readonly
  */
+const METRICS_STATUS_CLASS_ENUM = Object.freeze(['2xx', '4xx', '5xx']);
 
 /**
  * Bounded enum of allowed `cause` label values for metrics endpoint errors.
  * @readonly
  */
+const METRICS_CAUSE_ENUM = Object.freeze(['none', 'auth_failure', 'internal_error']);
 
 /**
  * Maps an HTTP status code to a bounded `status_class` label value.
@@ -1403,6 +1469,28 @@ function normalizeMetricsEndpointCause(err, status) {
   if (!err && code < 400) { return 'none'; }
   if (code >= 400 && code < 500) { return 'auth_failure'; }
   return 'internal_error';
+}
+
+/**
+ * Records metrics endpoint outcome (duration, status, errors).
+ *
+ * @param {object} params - Recording parameters.
+ * @param {number} params.statusCode - HTTP status code.
+ * @param {number} params.durationSeconds - Request duration in seconds.
+ * @param {Error|null} [params.error] - Error if any occurred.
+ * @param {import('express').Request} [params.req] - Express request (for IP logging).
+ * @returns {void}
+ */
+function recordMetricsEndpointOutcome({ statusCode, durationSeconds, error, req }) {
+  const statusClass = normalizeMetricsEndpointStatusClass(statusCode);
+  const cause = normalizeMetricsEndpointCause(error, statusCode);
+
+  metricsRequestDurationSeconds.observe({ status_class: statusClass }, durationSeconds);
+  metricsRequestsTotal.inc({ status_class: statusClass });
+
+  if (error) {
+    metricsRequestErrorsTotal.inc({ cause });
+  }
 }
 
 /**
@@ -1438,7 +1526,6 @@ const metricsRequestErrorsTotal = new client.Counter({
   labelNames: ['cause'],
   registers: [registry],
 });
-
 
 // ── KYC webhook metrics (issue #731) ────────────────────────────────────────
 

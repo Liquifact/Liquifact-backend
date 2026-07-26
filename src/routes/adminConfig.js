@@ -37,8 +37,6 @@ const {
 const { adminConfigLimiter } = require('../middleware/rateLimit');
 const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
 const logger = require('../logger');
-const { emitConfigWebhook } = require('../services/webhooks');
-
 
 const router = express.Router();
 
