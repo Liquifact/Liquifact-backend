@@ -57,6 +57,12 @@ Part of the LiquiFact stack: frontend (Next.js) | backend (this repo) | contract
 ## Configuration Reference
 
 For a complete, tested mapping of every environment variable to its type, default, consumer, and secret status, see [`docs/configuration.md`](./docs/configuration.md).
+## SME wallet authorization
+
+SME-capital routes bind authorization to the authenticated principal's wallet address. The middleware resolves the wallet from the user's authenticated profile only, so values supplied through headers, query strings, or request bodies are ignored and cannot spoof a bound wallet.
+
+When no wallet is bound to the authenticated account, the middleware returns a uniform RFC 7807-style 403 Forbidden response. Valid account addresses must still match the Stellar public-key format, as enforced by the shared validator.
+
 ## Response Caching
 
 The backend includes a TTL-based response-cache middleware backed by an in-memory store. Caching is applied to expensive read endpoints to reduce latency and database load.
@@ -108,16 +114,17 @@ Cache store errors are caught and logged; they never block the request.
 ---
 
 ## Observability
+## Sentry Observability
 
-Optional Sentry error tracking is supported through the `SENTRY_DSN` environment variable. When enabled, the server scrubs sensitive values before sending events, including:
+The backend uses Sentry for error tracking with enhanced security scrubbing:
 
-- Invoice payload bodies and invoice-related fields
-- Authorization headers and bearer tokens
-- JWT claims (issuer, audience) and algorithms
-- API keys and secret values
-- Stellar XDR / Stellar-specific payloads
+- Recursive deep scrubbing for nested objects
+- Redaction of sensitive fields (password, token, api-key, etc.)
+- URL and query string scrubbing to prevent PII leakage
+- Bounded recursion to prevent DoS attacks
 
-### Prometheus metrics endpoint (`GET /metrics`)
+See `src/observability/sentry.js` for implementation details.
+
 
 The `/metrics` endpoint exposes Prometheus-formatted metrics via a dedicated route handler at `GET /metrics`. It is **never** served to unauthenticated or non-loopback clients.
 
@@ -181,6 +188,83 @@ Environment variables:
 
 Do not store secrets in source control. Use `.env` locally and deployment secrets in production.
 
+### API Key Auth Metrics
+
+Every request that passes through the `authenticateApiKey` middleware emits structured metrics and logs to support operational visibility. No API keys, authorization headers, secrets, or PII are ever included in metric labels or log output.
+
+#### Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `api_key_auth_duration_seconds` | Histogram | `endpoint`, `method`, `status`, `outcome` | Duration of API key authenticated requests |
+| `api_key_auth_errors_total` | Counter | `cause` | Error count by bounded cause |
+
+**Duration label values**
+
+| Label | Source | Bounded? |
+|-------|--------|----------|
+| `endpoint` | `req.path` | Yes — limited to known route paths |
+| `method` | HTTP verb (GET, POST, etc.) | Yes — finite set |
+| `status` | HTTP status code string | Yes — finite set |
+| `outcome` | `success` \| `client_error` \| `server_error` | Yes — 3 values |
+
+**Error cause label values**
+
+| `cause` value | HTTP status |
+|---------------|-------------|
+| `unauthorized` | 401 |
+| `forbidden` | 403 |
+| `internal_error` | 500+ |
+
+Cardinality is strictly bounded — raw exception messages, dynamic identifiers, or request data are never used as labels.
+
+#### Structured logs
+
+Every API key authenticated request emits one structured log line (pino JSON) on response finish:
+
+```json
+{
+  "endpoint": "/api/admin/escrow/batch",
+  "method": "POST",
+  "status": 200,
+  "duration_ms": 12.34,
+  "outcome": "success"
+}
+```
+
+For failures, an `error_type` field is included:
+
+```json
+{
+  "endpoint": "/api/admin/escrow/batch",
+  "method": "POST",
+  "status": 401,
+  "duration_ms": 3.21,
+  "outcome": "client_error",
+  "error_type": "unauthorized"
+}
+```
+
+The ambient request context (`requestId`, `correlationId`, `tenantId`, `userId`) is automatically merged into every log line by the pino proxy (`src/logger.js`) when the request runs within an `AsyncLocalStorage` context.
+
+#### Example PromQL
+
+```promql
+# 95th percentile API key auth latency by endpoint
+histogram_quantile(
+  0.95,
+  sum(rate(api_key_auth_duration_seconds_bucket[5m])) by (le, endpoint)
+)
+
+# API key auth error rate by cause
+sum(rate(api_key_auth_errors_total[5m])) by (cause)
+
+# Proportion of 401 responses across all API key auth endpoints
+sum(rate(api_key_auth_duration_seconds_count{outcome="client_error",status="401"}[5m]))
+  /
+sum(rate(api_key_auth_duration_seconds_count[5m]))
+```
+
 ### Prometheus metrics
 
 The application exposes Prometheus metrics on `GET /metrics` (subject to the same auth rules). Additional gauges added for background job observability:
@@ -190,6 +274,8 @@ The application exposes Prometheus metrics on `GET /metrics` (subject to the sam
 - `liquifact_worker_inflight_count`: Number of jobs currently being processed by registered background workers.
 - `soroban_rpc_call_duration_seconds`: Histogram of end-to-end Soroban RPC wrapper latency, labelled by bounded `method` and `outcome` values. The timing includes retry delays because it measures the full `callSorobanContract()` wrapper path.
 - `soroban_rpc_retry_causes_total`: Counter of Soroban retry attempts, labelled by bounded `cause` values (`timeout`, `429`, `5xx`, `unknown`).
+- `api_key_auth_duration_seconds`: Histogram of API key authenticated request duration, labelled by bounded `endpoint`, `method`, `status`, and `outcome` values.
+- `api_key_auth_errors_total`: Counter of API key auth errors by bounded `cause` label (`unauthorized`, `forbidden`, `internal_error`).
 
 These gauges are updated by sampling registered `JobQueue` and `BackgroundWorker` instances and are intentionally bounded to avoid high-cardinality labels.
 
@@ -353,6 +439,70 @@ Error: Mismatch: STELLAR_NETWORK=TESTNET requires SOROBAN_RPC_URL="https://sorob
 - The validation is a hard fail - no partial or degraded operation is permitted.
 - This ensures the backend never signs transactions with a mismatched network, which could result in fund loss.
 - The passphrase is derived from the network constant and is not user-configurable.
+
+---
+
+## CORS Policy
+
+Cross-Origin Resource Sharing is configured in `src/config/cors.js`.
+
+### Configuration
+
+Set the allowed origins via environment variable (comma-separated):
+
+```bash
+CORS_ORIGINS=https://app.example.com,https://admin.example.com
+```
+
+`CORS_ALLOWED_ORIGINS` is accepted as an alias for backward compatibility. When both are set, `CORS_ALLOWED_ORIGINS` takes precedence.
+
+In `NODE_ENV=development` with no variable set, a hard-coded set of `localhost` origins is permitted automatically.
+
+In all other environments with no variable set, every browser origin is denied.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CORS_ORIGINS` | unset | Comma-separated list of trusted origins |
+| `CORS_ALLOWED_ORIGINS` | unset | Alias for `CORS_ORIGINS` (preferred when both are present) |
+| `CORS_MAX_AGE` | `600` | Preflight `Access-Control-Max-Age` in seconds |
+
+### Origin normalization
+
+Incoming origins are normalized before allowlist comparison to eliminate case and trailing-slash bypasses:
+
+1. The origin is parsed with the WHATWG `URL` parser (`new URL(origin)`).
+2. `url.origin` is used as the canonical form — the URL parser lowercases the scheme and host, and never includes a trailing slash.
+3. Both the incoming request origin **and** each allowlist entry are normalized before comparison.
+
+Practical consequences:
+
+- `HTTPS://APP.EXAMPLE.COM` → compared as `https://app.example.com` ✅ allowed if listed
+- `https://app.example.com/` → compared as `https://app.example.com` ✅ allowed if listed
+- `HTTPS://APP.EXAMPLE.COM/` → compared as `https://app.example.com` ✅ allowed if listed
+- `https://attacker.example.com` → not in allowlist ❌ rejected
+
+### `null`-origin handling
+
+The literal string `"null"` is sent by browsers for requests from sandboxed `<iframe>` elements, `data:` URIs, and local `file://` navigations. It is **never** an acceptable origin value for credentialed responses:
+
+- `normalizeOrigin("null")` returns `null` immediately — it is never parsed as a URL.
+- `isAllowedOrigin("null", allowlist)` always returns `false`, even if the string `"null"` appears in the allowlist.
+- Requests arriving with `Origin: null` receive a `403 Forbidden` response.
+
+### Credentialed origin policy
+
+Arbitrary origins are never reflected into `Access-Control-Allow-Origin` when `Access-Control-Allow-Credentials: true` is set. Only origins that are explicitly present in the allowlist receive the `Access-Control-Allow-Origin` response header. All other origins — including `"null"`, unparseable values, and any origin absent from the allowlist — receive an error response.
+
+### No-Origin requests
+
+Requests with **no** `Origin` header (curl, Postman, service-to-service, server-side fetch) are always passed through. The CORS middleware only acts when the browser sends an `Origin` header.
+
+### Security notes
+
+- No origin is reflected without being explicitly allowlisted.
+- The literal `"null"` origin is unconditionally denied regardless of allowlist contents.
+- Case variants (`HTTPS://APP.EXAMPLE.COM`) and trailing-slash variants (`https://app.example.com/`) are normalized before comparison — they match the allowlist entry if present, but cannot bypass it.
+- The allowlist can be reloaded at runtime via `reloadCorsOrigins()` without restarting the server.
 
 ---
 
@@ -613,6 +763,43 @@ curl -H "Authorization: Bearer <token>" \
 curl -H "Authorization: Bearer <token>" \
      "http://localhost:3001/api/marketplace?yieldBpsMin=500&sortBy=yield_bps&order=desc&page=2&limit=10"
 ```
+
+- **Investment Opportunities**: `GET /api/invest/opportunities` — List open investment opportunities available for funding. Returns tenant-scoped invoices enriched with live on-chain escrow state via batched Soroban reads.
+
+  **Response DTO fields**
+
+  | Field | Type | Description |
+  |---|---|---|
+  | `invoiceId` | string | Unique identifier of the underlying invoice |
+  | `fundedBpsOfTarget` | number | Funding progress in basis points (10000 = 100%) |
+  | `maturityAt` | string (ISO 8601) | Investment maturity timestamp |
+  | `yieldBpsDisplay` | number | Expected return in basis points (e.g. 500 = 5%) |
+  | `onChain` | object | Live blockchain state pointers |
+  | `onChain.escrowAddress` | string | Stellar/Soroban escrow contract address |
+  | `onChain.ledgerIndex` | string \| null | Last synchronized ledger index |
+
+  **Pagination**
+
+  | Param | Type | Default | Range | Description |
+  |---|---|---|---|---|
+  | `page` | integer | 1 | ≥ 1 | 1-based page number |
+  | `limit` | integer | 20 | 1–100 | Items per page |
+
+  **Security**
+
+  - Tenant-scoped: requires `x-tenant-id` header or JWT `tenantId` claim.
+  - Non-investable invoice statuses (draft, cancelled, etc.) are never exposed.
+  - Per-invoice on-chain read failures silently skip enrichment for that invoice; the full list is never 500'd.
+  - Cross-tenant invoice IDs are filtered before any escrow read is made.
+
+  **Example**
+  ```bash
+  curl -H "Authorization: Bearer <token>" \
+       "http://localhost:3001/api/invest/opportunities?page=1&limit=10"
+  # Response: { data: [...], meta: { total, page, limit, totalPages } }
+  ```
+
+  **Funding endpoint**: `POST /api/invest/fund-invoice` — Submit a funding commitment to an escrow contract. Requires KYC verification, validates the investor address, and enforces idempotency to prevent double-funding. See [`docs/escrow-integration-overview.md`](./docs/escrow-integration-overview.md) for the full funding flow.
 
 ---
 
@@ -1656,39 +1843,48 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for branch naming, local checks, testing 
 
 ### Maturity Reminders
 
-The backend sends maturity reminders to relevant parties before invoices reach their settlement date. Email delivery includes built-in resiliency:
+The backend sends maturity reminders to relevant parties before invoices reach their settlement date. Email delivery includes built-in resiliency that prevents silent message loss and never crashes the background worker.
 
-- **Exponential backoff**: Transient SMTP failures (4xx, network errors) are automatically retried with configurable backoff (default: 3 attempts, ~1s base delay, doubling each attempt)
-- **Error classification**: Permanent SMTP failures (5xx, invalid recipient) fail immediately without retry to avoid wasting resources
-- **Dead-lettering**: Emails that fail after all retries are recorded as sanitized rows in `maturity_reminder_dead_letters` for durable inspection
-- **Observability**: Prometheus counters track delivery attempts, successes, and dead-lettered messages with fine-grained failure reasons
+- **Exponential backoff**: Transient SMTP failures (4xx, network errors) are automatically retried with configurable backoff. Default: 3 attempts, ~1 s base delay, doubling each attempt, ±20% jitter.
+- **Error classification**: Permanent SMTP failures (5xx response codes, "user unknown", "mailbox not found") fail immediately without retry. Transient failures are retried up to `SMTP_MAX_RETRIES` times.
+- **Dead-lettering**: After all retries are exhausted — or immediately on a permanent failure — a sanitized record is written to `maturity_reminder_dead_letters`. Recipient email, customer name, invoice amount, and raw SMTP errors are never stored.
+- **Observability**: Three Prometheus counters track every attempt, every successful delivery, and every dead-letter event with bounded, PII-free labels.
 
 #### Configuration
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `SMTP_HOST` | - | SMTP server hostname |
-| `SMTP_PORT` | 587 | SMTP server port |
-| `SMTP_USER` | - | SMTP authenticated username |
-| `SMTP_PASS` | - | SMTP authenticated password |
-| `SMTP_FROM` | `noreply@liquifact.com` | Sender email address |
-| `SMTP_MAX_RETRIES` | 3 | Maximum retry attempts for transient failures |
+| `SMTP_HOST` | unset | SMTP server hostname. When absent, the system runs in dry-run mode. |
+| `SMTP_PORT` | `587` | SMTP server port. |
+| `SMTP_USER` | unset | SMTP authenticated username. |
+| `SMTP_PASS` | unset | SMTP authenticated password. Never logged. |
+| `SMTP_FROM` | `noreply@liquifact.com` | Sender email address. |
+| `SMTP_MAX_RETRIES` | `3` | Maximum delivery attempts for transient failures. Clamped to 1–10. |
 
-When `SMTP_HOST` is unset, the system runs in **dry-run** mode (logs to console instead of sending real emails), which is ideal for local development and CI testing.
+When `SMTP_HOST` is unset, the system runs in **dry-run** mode: emails are logged to the console instead of being sent, ideal for local development and CI.
 
 #### Metrics
 
 Three Prometheus counters track reminder delivery:
 
 ```
-maturity_reminder_delivery_attempts_total{job_type="maturity_reminder"}    # Each attempt (including retries)
-maturity_reminder_delivery_success_total{job_type="maturity_reminder"}     # Successful deliveries
-maturity_reminder_dead_letter_total{job_type,reason}                       # Dead-lettered reminders
-  ├─ reason="permanent_error"      # Permanent SMTP failures (5xx)
-  └─ reason="max_retries_exceeded" # Exhausted all transient retries
+maturity_reminder_delivery_attempts_total{job_type,reason}   # Every attempt, including retries
+maturity_reminder_delivery_success_total{job_type}           # Confirmed successful deliveries
+maturity_reminder_dead_letter_total{job_type,reason}         # Dead-lettered reminders
+  ├─ reason="smtp_timeout"         # Network / connection timeout
+  ├─ reason="smtp_reject"          # SMTP 5xx / permanent rejection
+  ├─ reason="template_error"       # Template rendering failure
+  └─ reason="unknown"              # Unmapped failure
 ```
 
-See [`docs/email-ops.md`](./docs/email-ops.md) for full technical details on retry logic, error classification, and dead-letter queue management.
+#### Security notes
+
+- SMTP credentials (`SMTP_USER`, `SMTP_PASS`) are never written to any log line.
+- Recipient email addresses are not stored in dead-letter records or Prometheus labels.
+- The `attempts` bound (1–10) prevents unbounded retry loops.
+- The dead-letter persistence call is fire-and-forget; a database outage cannot stall reminder delivery.
+
+See [`docs/email-ops.md`](./docs/email-ops.md) for full technical details on retry logic, error classification, dead-letter column schema, and PromQL alert examples.
 
 ---
 

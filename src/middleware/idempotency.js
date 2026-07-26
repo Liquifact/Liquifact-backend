@@ -32,7 +32,8 @@ const { createProblemDetails, LIQUifact_PROBLEM_BASE } = require('./problemJson'
 const logger = require('../logger');
 let idempotencyStorageFailureTotal;
 try {
-  idempotencyStorageFailureTotal = require('../metrics').idempotencyStorageFailureTotal;
+  idempotencyStorageFailureTotal =
+    require('../metrics').idempotencyStorageFailureTotal || { inc: () => {} };
 } catch (_e) {
   idempotencyStorageFailureTotal = { inc: () => {} };
 }
@@ -129,18 +130,21 @@ function calculateBackoff(attempt) {
  * Persist the response body atomically with the key, with retry logic.
  * Creates or updates the idempotency record to mark completion.
  *
- * @param {object} trx - Knex transaction object.
+ * Uses the global `db` (not the transaction `trx`) because the transaction
+ * commits before the response handler runs asynchronously.
+ *
+ * @param {object} knexClient - Knex database client (global db, not trx).
  * @param {string} key - The idempotency key.
  * @param {number} status - HTTP response status code.
  * @param {object} body - Response body to persist.
  * @returns {Promise<void>}
  */
-async function persistResponse(trx, key, status, body) {
+async function persistResponse(knexClient, key, status, body) {
   let lastError;
 
   for (let attempt = 0; attempt < MAX_RETRY_ATTEMPTS; attempt++) {
     try {
-      await trx('idempotency_keys')
+      await knexClient('idempotency_keys')
         .where({ idempotency_key: key })
         .update({
           response_status: status,
@@ -174,7 +178,7 @@ async function persistResponse(trx, key, status, body) {
   // Mark the key as incomplete by setting a sentinel status
   // This ensures replay will re-execute instead of returning broken data
   try {
-    await trx('idempotency_keys')
+    await knexClient('idempotency_keys')
       .where({ idempotency_key: key })
       .update({
         response_status: -1, // Sentinel: incomplete storage
@@ -332,8 +336,10 @@ function idempotencyMiddleware(req, res, next) {
     // Calling `trx(...)` after commit throws "Transaction committed".
     const originalJson = res.json.bind(res);
     res.json = function (body) {
-      // Persist response synchronously - wait for completion to ensure reliability
-      persistResponse(trx, key, res.statusCode, body).catch((err) => {
+      // Persist response with the global `db` (NOT the trx). The trx has
+      // already committed by the time res.json() is called, so using it
+      // would throw "Transaction query already complete".
+      persistResponse(db, key, res.statusCode, body).catch((err) => {
         // This catch is for synchronous context errors (shouldn't happen)
         // Background retries are handled inside persistResponse
         logger.error({ key, error: err.message }, 'idempotency: unexpected persistence error');

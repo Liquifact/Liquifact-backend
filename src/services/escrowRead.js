@@ -39,6 +39,7 @@ const logger = require("../logger");
 const { getTokenMetadata } = require("./tokenMeta");
 const db = require("../db/knex");
 const { createRedisEscrowSummaryCache } = require("../cache/redis");
+const { escrowReadCache } = require("./escrowReadCache");
 
 const cache = createRedisEscrowSummaryCache();
 
@@ -680,15 +681,22 @@ async function getEscrowStateWithProjection(invoiceId, options = {}) {
   const safeId = invoiceId.trim();
   const { dbClient } = options;
 
-  // 1. Try cache first if enabled. Cache wins on hit.
+  // 1. The bounded local cache avoids DB/Redis work on the hottest reads.
+  const localCached = escrowReadCache.get(safeId);
+  if (localCached !== undefined) {
+    return localCached;
+  }
+
+  // 2. Try the optional shared Redis cache. Cache wins on hit.
   if (cache) {
     const cacheResult = await cache.getSummary(safeId);
     if (cacheResult.hit) {
+      escrowReadCache.set(safeId, cacheResult.value);
       return cacheResult.value;
     }
   }
 
-  // 2. Read from the projection table via the shared helper, so projection
+  // 3. Read from the projection table via the shared helper, so projection
   //    shape stays consistent with readEscrowState / readFundedAmount /
   //    readEscrowStateWithAttestations.
   const projectionState = await _readBaseStateFromProjection(safeId, dbClient);
@@ -700,10 +708,11 @@ async function getEscrowStateWithProjection(invoiceId, options = {}) {
         projectionState.latest_ledger_sequence,
       );
     }
+    escrowReadCache.set(safeId, projectionState);
     return projectionState;
   }
 
-  // 3. Fallback to live RPC read (neutral stub currently; real Soroban call
+  // 4. Fallback to live RPC read (neutral stub currently; real Soroban call
   //    once the contract is deployed).
   const baseState = await _fetchBaseEscrowState(safeId, undefined, { dbClient });
   // Issue #424 — read the tri-state so unknown failures stay distinguishable
@@ -735,8 +744,26 @@ async function getEscrowStateWithProjection(invoiceId, options = {}) {
     // For live reads, we might not know the exact ledger, so we omit it.
     await cache.setSummary(safeId, state);
   }
+  escrowReadCache.set(safeId, state);
 
   return state;
+}
+
+/**
+ * Invalidates the cached response for an invoice after an escrow write.
+ * @param {string} invoiceId Invoice whose cached read is stale.
+ * @returns {Promise<boolean>} Whether a local or shared entry was removed.
+ */
+async function invalidateEscrowReadCache(invoiceId) {
+  if (typeof invoiceId !== "string") {
+    return false;
+  }
+  const safeId = invoiceId.trim();
+  const localInvalidated = escrowReadCache.invalidate(safeId);
+  const redisInvalidated = cache
+    ? await cache.deleteSummary(safeId)
+    : false;
+  return localInvalidated || redisInvalidated;
 }
 
 module.exports = {
@@ -748,6 +775,7 @@ module.exports = {
   fetchAttestationAppendLog,
   validateInvoiceId,
   getEscrowStateWithProjection,
+  invalidateEscrowReadCache,
   LEGAL_HOLD_STATUS,
   LEGAL_HOLD_UNKNOWN_REASONS,
   // Exported so the gate can reuse the canonical rule instead of

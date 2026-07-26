@@ -37,11 +37,21 @@ const VALID_CURRENCIES = new Set(SUPPORTED_CURRENCIES);
  * @param {Object} query - The Express `req.query` object.
  * @returns {{ isValid: boolean, fieldErrors: Object.<string, string>, validatedParams: Object }}
  */
+/**
+ * Validates `GET /api/invoices` query parameters.
+ *
+ * Supports both cursor-based pagination (`cursor` + `limit`) and offset-based
+ * (`page` + `limit`).  When `cursor` is supplied, `page` is ignored.
+ * Bounded default page size: 10, max: 100.
+ *
+ * @param {Object} query - The Express `req.query` object.
+ * @returns {{ isValid: boolean, fieldErrors: Object.<string, string>, validatedParams: Object }}
+ */
 function validateInvoiceQueryParams(query) {
   const fieldErrors = {};
-  const validatedParams = { filters: {}, sorting: {} };
+  const validatedParams = { filters: {}, sorting: {}, pagination: {} };
 
-  const { status, smeId, buyerId, dateFrom, dateTo, sortBy, order } = query;
+  const { status, smeId, buyerId, dateFrom, dateTo, sortBy, order, cursor, limit, page } = query;
 
   if (status !== undefined) {
     const validStatuses = ALL_INVOICE_STATUSES;
@@ -100,6 +110,35 @@ function validateInvoiceQueryParams(query) {
       validatedParams.sorting.order = lowerOrder;
     } else {
       fieldErrors.order = 'Invalid order. Must be "asc" or "desc"';
+    }
+  }
+
+  // ── Cursor-based pagination ────────────────────────────────────────────────
+  if (cursor !== undefined) {
+    if (typeof cursor === 'string' && cursor.length > 0 && cursor.length <= 2048) {
+      validatedParams.pagination.cursor = cursor;
+    } else {
+      fieldErrors.cursor = 'cursor must be a non-empty string (max 2048 chars)';
+    }
+  }
+
+  // ── Offset pagination (ignored when cursor is supplied) ───────────────────
+  if (cursor === undefined && page !== undefined) {
+    const val = parseInt(page, 10);
+    if (!isNaN(val) && val >= 1) {
+      validatedParams.pagination.page = val;
+    } else {
+      fieldErrors.page = 'page must be an integer >= 1';
+    }
+  }
+
+  // ── Limit (applies to both modes) ──────────────────────────────────────────
+  if (limit !== undefined) {
+    const val = parseInt(limit, 10);
+    if (!isNaN(val) && val >= 1 && val <= 100) {
+      validatedParams.pagination.limit = val;
+    } else {
+      fieldErrors.limit = 'limit must be an integer between 1 and 100';
     }
   }
 

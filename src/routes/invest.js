@@ -26,6 +26,7 @@ const { requireKycForFunding } = require('../middleware/kycGating');
 const { legalHoldGate } = require('../middleware/legalHoldGate');
 const { resolveEscrowAddress, EscrowNotFoundError } = require('../config/escrowMap');
 const { submitFundEscrow, EscrowSubmitError } = require('../services/escrowSubmit');
+const { invalidateEscrowReadCache } = require('../services/escrowRead');
 const {
   persistCommitment,
   normalizeAmountStroopsInput,
@@ -80,6 +81,20 @@ function validateFundInvoiceBody(body) {
 
 /**
  * GET /api/invest/opportunities — list open investment opportunities
+ *
+ * Retrieves a paginated list of invoices available for funding, scoped to the
+ * authenticated tenant. Each opportunity is enriched with live on-chain escrow
+ * state via batched Soroban contract reads. Invoices are filtered to
+ * {@link PUBLIC_INVESTABLE_INVOICE_STATUSES} only; non-investable statuses are
+ * never exposed. Per-invoice on-chain read failures are tolerated — the invoice
+ * is still returned with default on-chain pointers rather than 500'ing the
+ * entire list.
+ *
+ * @param {import('express').Request} req - Express request with `req.tenantId`
+ *   set by the `authenticatedTenantStack` middleware.
+ * @param {import('express').Response} res - Express response.
+ * @returns {Promise<void>} Responds with a JSON envelope containing `data`
+ *   (array of {@link InvestmentOpportunity} DTOs) and pagination `meta`.
  *
  * @swagger
  * /api/invest/opportunities:
@@ -280,6 +295,9 @@ router.post(
       ledger: submitResult.ledger,
       idempotencyKey,
     });
+
+    // A successful escrow write makes any previously cached read stale.
+    await invalidateEscrowReadCache(invoiceId);
 
     // 7. Return real status — never return internal detail fields like idempotencyKey
     return res.status(200).json({

@@ -43,16 +43,22 @@ jest.mock('../src/middleware/auth', () => ({
   },
 }));
 
+// The legacy `src/middleware/apiKey.js` has been retired in favour of the
+// env-backed registry authenticator (issue #590). Mock the new module and
+// mirror its real shape: the registry middleware sets `req.apiClient` (not
+// the legacy `req.apiKey`) when authentication succeeds.
 jest.mock('../src/middleware/apiKeyAuth', () => ({
   authenticateApiKey: () => (req, res, next) => {
     if (req.headers['x-api-key'] === 'valid-admin-key') {
-      req.apiKey = { id: 1, name: 'test-admin' };
+      req.apiClient = { clientId: 'test-admin', scopes: [] };
       return next();
     }
     const err = new Error('Invalid API key');
     err.status = 401;
     return next(err);
   },
+  API_KEY_HEADER: 'x-api-key',
+  timingSafeStringEqual: (a, b) => a === b,
 }));
 
 const db = require('../src/db/knex');

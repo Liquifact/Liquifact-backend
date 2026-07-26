@@ -57,13 +57,13 @@ const CACHE_TTL_MS = parseInt(process.env.SOROBAN_CACHE_TTL_MS || String(5 * 60 
 /**
  * LRU footprint cache.
  *
- * Each entry: { footprint, timestamp, ledgerSequence }
+ * Each entry: { footprint, timestamp, ledgerSequence, contractVersion }
  *
  * LRU is implemented with a plain Map: Map preserves insertion order, so the
  * oldest-accessed entry is always at the front. On every read we delete and
  * re-insert the entry to move it to the back (most-recently-used position).
  *
- * @type {Map<string, {footprint: Object, timestamp: number, ledgerSequence: number|null}>}
+ * @type {Map<string, {footprint: Object, timestamp: number, ledgerSequence: number|null, contractVersion: string|null}>}
  */
 const footprintCache = new Map();
 
@@ -88,9 +88,11 @@ function generateCacheKey(operation, invoiceId, funderPublicKey) {
  * @param {string} key
  * @param {number|null} [currentLedger] - Latest known ledger sequence. When
  *   provided any entry from an older ledger is treated as stale.
+ * @param {string|null} [contractVersion] - Current contract version. When
+ *   provided any entry from an older contract version is treated as stale.
  * @returns {Object|null} The footprint or null.
  */
-function getCachedFootprint(key, currentLedger = null) {
+function getCachedFootprint(key, currentLedger = null, contractVersion = null) {
   const entry = footprintCache.get(key);
   if (!entry) {
     footprintCacheMissesTotal.inc();
@@ -102,8 +104,12 @@ function getCachedFootprint(key, currentLedger = null) {
     currentLedger !== null &&
     entry.ledgerSequence !== null &&
     entry.ledgerSequence < currentLedger;
+  const staleContractVersion =
+    contractVersion !== null &&
+    entry.contractVersion !== null &&
+    entry.contractVersion !== contractVersion;
 
-  if (expired || staleLedger) {
+  if (expired || staleLedger || staleContractVersion) {
     footprintCache.delete(key);
     footprintCacheEvictionsTotal.inc();
     footprintCacheMissesTotal.inc();
@@ -124,9 +130,10 @@ function getCachedFootprint(key, currentLedger = null) {
  * @param {string} key
  * @param {Object} footprint
  * @param {number|null} [ledgerSequence] - Ledger sequence at simulation time.
+ * @param {string|null} [contractVersion] - Contract version at simulation time.
  * @returns {void}
  */
-function cacheFootprint(key, footprint, ledgerSequence = null) {
+function cacheFootprint(key, footprint, ledgerSequence = null, contractVersion = null) {
   // If already present, remove first so the re-insert lands at the MRU end.
   if (footprintCache.has(key)) {
     footprintCache.delete(key);
@@ -141,6 +148,7 @@ function cacheFootprint(key, footprint, ledgerSequence = null) {
     footprint,
     timestamp: Date.now(),
     ledgerSequence,
+    contractVersion,
   });
 }
 
@@ -264,6 +272,7 @@ function validateSimulationParams(params) {
  * @param {Object} [params.options]
  * @param {boolean} [params.options.useCache=true]
  * @param {number|null} [params.options.currentLedger] - Latest ledger for staleness check.
+ * @param {string|null} [params.options.contractVersion] - Current contract version for invalidation.
  * @param {Object} [params.options.rpcConfig]
  * @returns {Promise<Object>}
  */
@@ -275,10 +284,11 @@ async function simulateOrThrow(params) {
 
     const useCache = options.useCache !== false;
     const currentLedger = options.currentLedger ?? null;
+    const contractVersion = options.contractVersion ?? null;
     const cacheKey = generateCacheKey(operation, invoiceId, funderPublicKey);
 
     if (useCache) {
-      const cached = getCachedFootprint(cacheKey, currentLedger);
+      const cached = getCachedFootprint(cacheKey, currentLedger, contractVersion);
       if (cached) {
         return {
           status: SIMULATION_STATUS.SUCCESS,
@@ -317,7 +327,7 @@ async function simulateOrThrow(params) {
     const ledgerSequence = simulationResult.ledgerSequence ?? null;
 
     if (useCache && simulationResult.footprint) {
-      cacheFootprint(cacheKey, simulationResult.footprint, ledgerSequence);
+      cacheFootprint(cacheKey, simulationResult.footprint, ledgerSequence, contractVersion);
     }
 
     return {

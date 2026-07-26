@@ -1,5 +1,6 @@
 const { CAPITAL_MOVING_STATES } = require('../services/invoiceStateMachine');
 const kycService = require('../services/kycService');
+const logger = require('../logger');
 
 /**
  * Blocks invoice state transitions that move capital unless the user has KYC.
@@ -61,6 +62,32 @@ async function requireKycForFunding(req, res, next) {
     }
 }
 
+/**
+ * Logs successful access to a KYC-gated endpoint for audit trails.
+ * Intended to run immediately after `requireKycForFunding` on gated routes.
+ *
+ * @param {import('express').Request} req - Express request.
+ * @param {import('express').Response} res - Express response.
+ * @param {import('express').NextFunction} next - Express next callback.
+ * @returns {void}
+ */
+function auditKycAccess(req, res, next) {
+    const smeId = req.user && req.user.smeId;
+
+    logger.info(
+        {
+            userId: req.user && (req.user.id || req.user.sub),
+            smeId,
+            endpoint: req.originalUrl,
+            method: req.method,
+        },
+        'KYC-gated endpoint accessed',
+    );
+
+    next();
+}
+
 kycGatingMiddleware.requireKycForFunding = requireKycForFunding;
+kycGatingMiddleware.auditKycAccess = auditKycAccess;
 
 module.exports = kycGatingMiddleware;

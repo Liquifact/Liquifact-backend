@@ -39,14 +39,31 @@ const LOCKED_STATUSES = new Set([
 ]);
 
 /**
+ * Keys that must never appear in a trusted payload because they can be
+ * used to manipulate prototype chains or constructor references.
+ *
+ * Belt-and-suspenders guard: `Object.entries` already skips non-own and
+ * non-enumerable properties, and the MUTABLE_FIELDS allowlist would strip
+ * these anyway — but making the intent explicit provides an extra safety
+ * layer and is document-worthy.
+ *
+ * @type {ReadonlySet<string>}
+ */
+const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/**
  * Extracts only the allowed mutable keys from the raw request body.
+ * Explicitly excludes prototype-pollution vectors even when they appear
+ * as own-enumerable properties (e.g. after `Object.defineProperty`).
  *
  * @param {Record<string, unknown>} body - Raw request body.
  * @returns {Record<string, unknown>} Filtered update payload.
  */
 function extractAllowedFields(body) {
   return Object.fromEntries(
-    Object.entries(body).filter(([key]) => MUTABLE_FIELDS.has(key))
+    Object.entries(body).filter(
+      ([key]) => MUTABLE_FIELDS.has(key) && !DANGEROUS_KEYS.has(key)
+    )
   );
 }
 
@@ -90,6 +107,17 @@ function validatePatchFields(req, res, next) {
     return res.status(400).json({ error: 'Request body must be a JSON object.' });
   }
 
+  // Reject payloads that attempt prototype / constructor manipulation.
+  // Using Object.prototype.hasOwnProperty.call (not body.hasOwnProperty)
+  // is safe even when body has a null prototype.
+  if (
+    Object.prototype.hasOwnProperty.call(body, '__proto__') ||
+    Object.prototype.hasOwnProperty.call(body, 'constructor') ||
+    Object.prototype.hasOwnProperty.call(body, 'prototype')
+  ) {
+    return res.status(400).json({ error: 'Request body must be a JSON object.' });
+  }
+
   const sanitized = extractAllowedFields(body);
 
   if (Object.keys(sanitized).length === 0) {
@@ -106,6 +134,7 @@ module.exports = {
   MUTABLE_FIELDS,
   PENDING_ONLY_FIELDS,
   LOCKED_STATUSES,
+  DANGEROUS_KEYS,
   extractAllowedFields,
   detectLockedFieldChange,
   validatePatchFields,

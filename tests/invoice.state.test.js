@@ -210,6 +210,11 @@ describe('Transition Rules — individual assertions', () => {
     expect(isTransitionAllowed('pending', 'linked_escrow')).toBe(false);
   });
 
+  it('should NOT allow transitions involving an unrecognized state', () => {
+    expect(isTransitionAllowed('invalid', 'pending')).toBe(false);
+    expect(isTransitionAllowed('pending', 'invalid')).toBe(false);
+  });
+
   it('should NOT allow approved → rejected', () => {
     expect(isTransitionAllowed('approved', 'rejected')).toBe(false);
   });
@@ -853,6 +858,16 @@ describe('Invoice State API Routes', () => {
       expect(res.status).toBe(404);
       expect(res.body.error.code).toBe('INVOICE_NOT_FOUND');
     });
+
+    it('should handle unexpected errors when reading state', async () => {
+      jest.spyOn(invoiceService, 'getInvoiceById').mockRejectedValue(new Error('DB unavailable'));
+
+      const res = await request(app)
+        .get('/api/invoices/inv-001/state')
+        .set('x-tenant-id', TENANT_A);
+
+      expect(res.status).toBe(500);
+    });
   });
 
   describe('POST /api/invoices/:id/transition', () => {
@@ -1005,6 +1020,44 @@ describe('Invoice State API Routes', () => {
       expect(res.status).toBe(400);
       expect(res.body.error.code).toBe('CANNOT_LINK_TO_ESCROW');
     });
+
+    it('should return 404 for non-existent invoice', async () => {
+      const res = await request(app)
+        .post('/api/invoices/inv-999/link-escrow')
+        .set('x-tenant-id', TENANT_A)
+        .send({ escrowId: 'escrow-000' });
+
+      expect(res.status).toBe(404);
+      expect(res.body.error.code).toBe('INVOICE_NOT_FOUND');
+    });
+
+    it('should return 404 for cross-tenant link-escrow attempt', async () => {
+      const res = await request(app)
+        .post('/api/invoices/inv-002/link-escrow')
+        .set('x-tenant-id', TENANT_B)
+        .send({ escrowId: 'escrow-000' });
+
+      expect(res.status).toBe(404);
+      expect(res.body.error.code).toBe('INVOICE_NOT_FOUND');
+    });
+
+    it('should surface coded transition errors from the state machine', async () => {
+      jest.spyOn(invoiceService, 'transitionInvoice').mockRejectedValue(
+        Object.assign(new Error('Invoice is already in state: linked_escrow'), {
+          code: 'ALREADY_IN_TARGET_STATE',
+        }),
+      );
+
+      const res = await request(app)
+        .post('/api/invoices/inv-002/link-escrow')
+        .set('x-tenant-id', TENANT_A)
+        .send({ escrowId: 'escrow-123' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe('ALREADY_IN_TARGET_STATE');
+
+      invoiceService.transitionInvoice.mockRestore();
+    });
   });
 
   describe('POST /api/invoices/:id/reject', () => {
@@ -1084,6 +1137,16 @@ describe('Invoice State API Routes', () => {
 
       expect(res.status).toBe(404);
       expect(res.body.error.code).toBe('INVOICE_NOT_FOUND');
+    });
+
+    it('should handle unexpected errors when reading history', async () => {
+      jest.spyOn(invoiceService, 'getInvoiceById').mockRejectedValue(new Error('DB unavailable'));
+
+      const res = await request(app)
+        .get('/api/invoices/inv-001/history')
+        .set('x-tenant-id', TENANT_A);
+
+      expect(res.status).toBe(500);
     });
   });
 

@@ -28,6 +28,9 @@
  */
 const CORS_REJECTION_MESSAGE = 'CORS policy: origin is not allowed.';
 
+/** Machine-readable code returned for blocked-origin responses. */
+const CORS_REJECTION_CODE = 'CORS_ORIGIN_REJECTED';
+
 /** @type {string[]} Origins allowed when no env var is set during development. */
 const DEV_DEFAULT_ORIGINS = [
   'http://localhost:3000',
@@ -46,6 +49,15 @@ const DEV_DEFAULT_ORIGINS = [
 const DEFAULT_MAX_AGE = 600;
 
 /**
+ * Maximum allowed preflight max-age in seconds (24 hours). Browsers already
+ * cap `Access-Control-Max-Age` at 86400 per the Fetch spec; enforcing this
+ * server-side prevents misconfiguration from setting an overly large value.
+ *
+ * @constant {number}
+ */
+const MAX_MAX_AGE = 86400;
+
+/**
  * Returns the hard-coded development fallback origin list.
  *
  * @returns {string[]} Array of development-safe origins.
@@ -55,24 +67,109 @@ function getDevelopmentFallbackOrigins() {
 }
 
 /**
+ * Maximum length (in characters) allowed for a single origin entry string.
+ * Origin URLs are typically under 50-100 chars; 500 provides a generous
+ * safety margin while blocking obviously oversized inputs.
+ *
+ * @constant {number}
+ */
+const MAX_ORIGIN_LENGTH = 500;
+
+/**
+ * Validates a single origin entry string against format and length rules.
+ *
+ * Rules:
+ * 1. Must be a non-empty string.
+ * 2. Must not equal the literal `"null"` (sandboxed-iframe origin).
+ * 3. Must be parseable by `new URL()` and contain a valid scheme.
+ * 4. Must not exceed {@link MAX_ORIGIN_LENGTH} characters.
+ *
+ * @param {unknown} entry - A single raw origin string from the allowlist.
+ * @returns {{ valid: boolean, normalized: string|null, error: string|null }}
+ */
+function validateOriginEntry(entry) {
+  if (typeof entry !== 'string' || entry === '') {
+    return { valid: false, normalized: null, error: 'origin entry must be a non-empty string' };
+  }
+  if (entry === 'null') {
+    return { valid: false, normalized: null, error: 'origin entry cannot be the literal string "null"' };
+  }
+  if (entry.length > MAX_ORIGIN_LENGTH) {
+    return {
+      valid: false,
+      normalized: null,
+      error: `origin entry exceeds maximum length of ${MAX_ORIGIN_LENGTH} characters`,
+    };
+  }
+  try {
+    const url = new URL(entry);
+    if (!url.origin || url.origin === 'null') {
+      return { valid: false, normalized: null, error: 'origin entry is not a parseable origin URL' };
+    }
+    return { valid: true, normalized: url.origin, error: null };
+  } catch {
+    return { valid: false, normalized: null, error: 'origin entry is not a valid URL' };
+  }
+}
+
+/**
  * Parses `CORS_ORIGINS` into a trimmed, de-duplicated array of origin
  * strings. Returns `[]` when the value is absent or blank.
  *
+ * When `strict` is `true`, each entry is validated via
+ * {@link validateOriginEntry}. Rejected entries are excluded from the
+ * returned origins array and reported in `rejected` / `fieldErrors`. When
+ * `strict` is `false` (default), invalid entries are silently omitted to
+ * preserve backward compatibility.
+ *
  * @param {string|undefined} raw - Raw value of the environment variable.
- * @returns {string[]} Array of allowed origins (empty when unset).
+ * @param {{ strict?: boolean }} [opts] - Parsing options.
+ * @param {boolean} [opts.strict=false] - When true, returns a structured
+ *   result with rejected entries and fieldErrors.
+ * @returns {string[]|{ origins: string[], rejected: string[], fieldErrors: string[][], valid: boolean }}
+ *   In non-strict mode (default): `string[]` of allowed origins. In strict
+ *   mode: an object with `origins`, `rejected`, `fieldErrors`, and `valid`.
  */
-function parseAllowedOrigins(raw) {
+function parseAllowedOrigins(raw, opts) {
+  const strict = opts && opts.strict === true;
+
   if (!raw || raw.trim() === '') {
-    return [];
+    return strict ? { origins: [], rejected: [], fieldErrors: [], valid: true } : [];
   }
-  return [
-    ...new Set(
-      raw
-        .split(',')
-        .map((o) => o.trim())
-        .filter(Boolean)
-    ),
-  ];
+
+  const rawEntries = raw
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean);
+
+  if (!strict) {
+    return [
+      ...new Set(
+        rawEntries
+          .map((entry) => (validateOriginEntry(entry).valid ? validateOriginEntry(entry).normalized : null))
+          .filter(Boolean)
+      ),
+    ];
+  }
+
+  const validated = rawEntries.map(validateOriginEntry);
+  const origins = [...new Set(validated.filter((r) => r.valid).map((r) => r.normalized))];
+
+  const rejected = [];
+  const fieldErrors = [];
+  validated.forEach((r, i) => {
+    if (!r.valid) {
+      rejected.push(rawEntries[i]);
+      fieldErrors.push(r.error);
+    }
+  });
+
+  return {
+    origins,
+    rejected,
+    fieldErrors,
+    valid: rejected.length === 0,
+  };
 }
 
 /**
@@ -163,6 +260,7 @@ function isAllowedOrigin(origin, allowlist) {
  */
 function createCorsRejectionError(_origin) {
   const err = new Error(CORS_REJECTION_MESSAGE);
+  err.code = CORS_REJECTION_CODE;
   err.isCorsOriginRejected = true;
   err.isCorsOriginRejectedError = true;
   err.status = 403;
@@ -190,15 +288,65 @@ function isCorsOriginRejectedError(err) {
  * @param {string|undefined} raw - Raw value from the environment.
  * @returns {number} Validated preflight max-age in seconds.
  */
-function parseMaxAge(raw) {
-  if (raw === undefined || raw === null || raw.trim() === '') {
-    return DEFAULT_MAX_AGE;
+/**
+ * Parses the `CORS_MAX_AGE` environment variable and returns a validated
+ * positive integer suitable for the `maxAge` option of the `cors` package.
+ *
+ * Defaults to {@link DEFAULT_MAX_AGE} (600 seconds / 10 minutes) when the
+ * value is unset, empty, or not a valid positive integer.
+ *
+ * When `strict` is `true`, returns a structured result with validation
+ * details. When `strict` is `false` (default), returns the numeric value
+ * directly for backward compatibility.
+ *
+ * @param {string|undefined} raw - Raw value from the environment.
+ * @param {{ strict?: boolean, max?: number }} [opts] - Parsing options.
+ * @param {boolean} [opts.strict=false] - When true, returns a structured result.
+ * @param {number} [opts.max=MAX_MAX_AGE] - Upper bound for the max-age value.
+ * @returns {number|{ value: number, valid: boolean, error: string|null }}
+ *   In non-strict mode (default): validated preflight max-age in seconds.
+ *   In strict mode: object with `value`, `valid`, and `error`.
+ */
+function parseMaxAge(raw, opts) {
+  const strict = opts && opts.strict === true;
+  const max = (opts && opts.max) || MAX_MAX_AGE;
+
+  if (raw === undefined || raw === null) {
+    return strict
+      ? { value: DEFAULT_MAX_AGE, valid: true, error: null }
+      : DEFAULT_MAX_AGE;
   }
+  if (typeof raw !== 'string') {
+    return strict
+      ? { value: DEFAULT_MAX_AGE, valid: false, error: 'max-age must be a string' }
+      : DEFAULT_MAX_AGE;
+  }
+  if (raw.trim() === '') {
+    return strict
+      ? { value: DEFAULT_MAX_AGE, valid: true, error: null }
+      : DEFAULT_MAX_AGE;
+  }
+
   const parsed = Number(raw);
-  if (Number.isInteger(parsed) && parsed > 0) {
-    return parsed;
+  if (!Number.isInteger(parsed)) {
+    return strict
+      ? { value: DEFAULT_MAX_AGE, valid: false, error: 'max-age must be an integer' }
+      : DEFAULT_MAX_AGE;
   }
-  return DEFAULT_MAX_AGE;
+  if (parsed <= 0) {
+    return strict
+      ? { value: DEFAULT_MAX_AGE, valid: false, error: 'max-age must be a positive integer' }
+      : DEFAULT_MAX_AGE;
+  }
+  if (parsed > max) {
+    return strict
+      ? { value: DEFAULT_MAX_AGE, valid: false, error: `max-age must not exceed ${max}` }
+      : DEFAULT_MAX_AGE;
+  }
+
+  return strict
+    ? { value: parsed, valid: true, error: null }
+    : parsed;
 }
 
 /**
@@ -243,6 +391,33 @@ let allowedOrigins = getAllowedOriginsFromEnv();
  */
 function reloadCorsOrigins() {
   allowedOrigins = getAllowedOriginsFromEnv();
+}
+
+/**
+ * Reloads the CORS preflight max-age from process.env.CORS_MAX_AGE and
+ * returns the new value. Call this after updating CORS_MAX_AGE at runtime.
+ *
+ * @returns {number} Updated max-age in seconds.
+ */
+function reloadCorsMaxAge() {
+  maxAge = parseMaxAge(process.env.CORS_MAX_AGE);
+  return maxAge;
+}
+
+/**
+ * Validates that `origin` (if present) is in the provided allowlist.
+ * Returns `true` when the origin is absent (non-browser client) or present
+ * in the allowlist.
+ *
+ * @param {string|undefined} origin - Incoming request origin header.
+ * @param {string[]} allowlist - Array of allowed origin strings.
+ * @returns {boolean}
+ */
+function validateCorsOrigin(origin, allowlist) {
+  if (origin === undefined) {
+    return true;
+  }
+  return allowlist.length > 0 && isAllowedOrigin(origin, allowlist);
 }
 
 /**
@@ -303,15 +478,10 @@ function createCorsOptions(env = process.env) {
        * @returns {void}
        */
       origin(origin, callback) {
-        if (origin === undefined) {
+        if (validateCorsOrigin(origin, allowedOrigins)) {
           return callback(null, true);
         }
-
-        if (allowedOrigins.length === 0 || !isAllowedOrigin(origin, allowedOrigins)) {
-          return callback(createCorsRejectionError(origin));
-        }
-
-        return callback(null, true);
+        return callback(createCorsRejectionError(origin));
       },
 
       maxAge,
@@ -325,28 +495,23 @@ function createCorsOptions(env = process.env) {
 
   return {
     /**
-     * Validates request origin against the test-specific allowlist.
-     *
-     * - `undefined` (no Origin header): always passed — non-browser clients.
-     * - `"null"` (sandboxed iframe): always rejected.
-     * - Otherwise: normalized comparison against the allowlist.
-     *   Only an explicitly listed origin receives `Allow-Origin`; arbitrary
-     *   origins are never reflected together with credentials.
-     *
-     * @param {string|undefined} origin - The request origin header value.
-     * @param {Function} callback - CORS callback (err, allow).
-     * @returns {void}
-     */
+       * Validates request origin against the test-specific allowlist.
+       *
+       * - `undefined` (no Origin header): always passed — non-browser clients.
+       * - `"null"` (sandboxed iframe): always rejected.
+       * - Otherwise: normalized comparison against the allowlist.
+       *   Only an explicitly listed origin receives `Allow-Origin`; arbitrary
+       *   origins are never reflected together with credentials.
+       *
+       * @param {string|undefined} origin - The request origin header value.
+       * @param {Function} callback - CORS callback (err, allow).
+       * @returns {void}
+       */
     origin(origin, callback) {
-      if (origin === undefined) {
+      if (validateCorsOrigin(origin, testAllowlist)) {
         return callback(null, true);
       }
-
-      if (testAllowlist.length === 0 || !isAllowedOrigin(origin, testAllowlist)) {
-        return callback(createCorsRejectionError(origin));
-      }
-
-      return callback(null, true);
+      return callback(createCorsRejectionError(origin));
     },
 
     maxAge,
@@ -355,8 +520,11 @@ function createCorsOptions(env = process.env) {
 }
 
 module.exports = {
+  CORS_REJECTION_CODE,
   CORS_REJECTION_MESSAGE,
   DEV_DEFAULT_ORIGINS,
+  MAX_MAX_AGE,
+  MAX_ORIGIN_LENGTH,
   createCorsOptions,
   createCorsRejectionError,
   getAllowedOriginsFromEnv,
@@ -367,6 +535,8 @@ module.exports = {
   normalizeOrigin,
   parseAllowedOrigins,
   parseMaxAge,
+  reloadCorsMaxAge,
   reloadCorsOrigins,
   resolveAllowlist,
+  validateCorsOrigin,
 };

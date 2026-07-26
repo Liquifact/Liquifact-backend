@@ -1,9 +1,11 @@
 const request = require('supertest');
 const { createApp } = require('../app');
 const { ALL_INVOICE_STATUSES } = require('../services/invoiceStateMachine');
+const { CursorError } = require('../utils/cursorPagination');
 
 jest.mock('../services/invoiceService', () => ({
   getInvoices: jest.fn(),
+  getInvoicesWithPagination: jest.fn(),
 }));
 
 const invoiceService = require('../services/invoiceService');
@@ -17,66 +19,75 @@ describe('Invoice API Integration', () => {
   });
 
   describe('GET /api/invoices', () => {
-    it('should return 200 and invoices when no query params are provided', async () => {
-      const mockInvoices = [{ id: 1, amount: 100 }, { id: 2, amount: 200 }];
-      invoiceService.getInvoices.mockResolvedValue(mockInvoices);
+    it('should return 200 with data, meta, and message when no query params are provided', async () => {
+      const mockResult = {
+        data: [{ id: 1, amount: 100 }, { id: 2, amount: 200 }],
+        meta: { total: 2, limit: 10, hasMore: false, nextCursor: null },
+      };
+      invoiceService.getInvoicesWithPagination.mockResolvedValue(mockResult);
 
       const res = await request(app).get('/api/invoices');
 
       expect(res.statusCode).toBe(200);
-      expect(res.body.data).toEqual(mockInvoices);
+      expect(res.body.data).toEqual(mockResult.data);
+      expect(res.body.meta).toEqual(mockResult.meta);
       expect(res.body.message).toBe('Invoices retrieved successfully.');
-      expect(invoiceService.getInvoices).toHaveBeenCalledWith({
+      expect(invoiceService.getInvoicesWithPagination).toHaveBeenCalledWith({
         filters: {},
-        sorting: {}
+        sorting: {},
+        pagination: {},
       });
     });
 
     it('should filter by status', async () => {
-      invoiceService.getInvoices.mockResolvedValue([]);
+      invoiceService.getInvoicesWithPagination.mockResolvedValue({ data: [], meta: { total: 0, limit: 10, hasMore: false, nextCursor: null } });
       
       const res = await request(app).get('/api/invoices?status=paid');
 
       expect(res.statusCode).toBe(200);
-      expect(invoiceService.getInvoices).toHaveBeenCalledWith({
+      expect(invoiceService.getInvoicesWithPagination).toHaveBeenCalledWith({
         filters: { status: 'paid' },
-        sorting: {}
+        sorting: {},
+        pagination: {},
       });
     });
 
     it('should filter by SME ID', async () => {
-      invoiceService.getInvoices.mockResolvedValue([]);
+      invoiceService.getInvoicesWithPagination.mockResolvedValue({ data: [], meta: { total: 0, limit: 10, hasMore: false, nextCursor: null } });
       
       const res = await request(app).get('/api/invoices?smeId=sme-123');
 
       expect(res.statusCode).toBe(200);
-      expect(invoiceService.getInvoices).toHaveBeenCalledWith({
+      expect(invoiceService.getInvoicesWithPagination).toHaveBeenCalledWith({
         filters: { smeId: 'sme-123' },
-        sorting: {}
+        sorting: {},
+        pagination: {},
       });
     });
 
     it('should filter by date range', async () => {
-      invoiceService.getInvoices.mockResolvedValue([]);
+      invoiceService.getInvoicesWithPagination.mockResolvedValue({ data: [], meta: { total: 0, limit: 10, hasMore: false, nextCursor: null } });
       
       const res = await request(app).get('/api/invoices?dateFrom=2023-01-01&dateTo=2023-12-31');
 
       expect(res.statusCode).toBe(200);
-      expect(invoiceService.getInvoices).toHaveBeenCalledWith({
+      expect(invoiceService.getInvoicesWithPagination).toHaveBeenCalledWith({
         filters: { dateFrom: '2023-01-01', dateTo: '2023-12-31' },
-        sorting: {}
+        sorting: {},
+        pagination: {},
       });
     });
 
     it('should apply sorting', async () => {
-      invoiceService.getInvoices.mockResolvedValue([]);
+      invoiceService.getInvoicesWithPagination.mockResolvedValue({ data: [], meta: { total: 0, limit: 10, hasMore: false, nextCursor: null } });
       
       const res = await request(app).get('/api/invoices?sortBy=amount&order=asc');
 
       expect(res.statusCode).toBe(200);
-      expect(invoiceService.getInvoices).toHaveBeenCalledWith({
+      expect(invoiceService.getInvoicesWithPagination).toHaveBeenCalledWith({
         filters: {},
-        sorting: { sortBy: 'amount', order: 'asc' }
+        sorting: { sortBy: 'amount', order: 'asc' },
+        pagination: {},
       });
     });
 
@@ -84,33 +95,34 @@ describe('Invoice API Integration', () => {
       const res = await request(app).get('/api/invoices?status=invalid');
 
       expect(res.statusCode).toBe(400);
-      expect(res.body.errors).toContain(`Invalid status. Must be one of: ${ALL_INVOICE_STATUSES.join(', ')}`);
-      expect(invoiceService.getInvoices).not.toHaveBeenCalled();
+      expect(res.body.fieldErrors.status).toBe(`Invalid status. Must be one of: ${ALL_INVOICE_STATUSES.join(', ')}`);
+      expect(invoiceService.getInvoicesWithPagination).not.toHaveBeenCalled();
     });
 
     it('should reject invalid date format with 400', async () => {
       const res = await request(app).get('/api/invoices?dateFrom=2023/01/01');
 
       expect(res.statusCode).toBe(400);
-      expect(res.body.errors).toContain('Invalid dateFrom format. Use YYYY-MM-DD');
+      expect(res.body.fieldErrors.dateFrom).toBe('Invalid dateFrom format. Use YYYY-MM-DD');
     });
 
     it('should reject an invalid smeId with 400', async () => {
       const res = await request(app).get('/api/invoices?smeId=');
 
       expect(res.statusCode).toBe(400);
-      expect(res.body.errors).toContain('Invalid smeId format');
+      expect(res.body.fieldErrors.smeId).toBe('Invalid smeId format');
     });
 
     it('should filter by buyer ID', async () => {
-      invoiceService.getInvoices.mockResolvedValue([]);
+      invoiceService.getInvoicesWithPagination.mockResolvedValue({ data: [], meta: { total: 0, limit: 10, hasMore: false, nextCursor: null } });
 
       const res = await request(app).get('/api/invoices?buyerId=buyer-456');
 
       expect(res.statusCode).toBe(200);
-      expect(invoiceService.getInvoices).toHaveBeenCalledWith({
+      expect(invoiceService.getInvoicesWithPagination).toHaveBeenCalledWith({
         filters: { buyerId: 'buyer-456' },
-        sorting: {}
+        sorting: {},
+        pagination: {},
       });
     });
 
@@ -118,32 +130,57 @@ describe('Invoice API Integration', () => {
       const res = await request(app).get('/api/invoices?buyerId=');
 
       expect(res.statusCode).toBe(400);
-      expect(res.body.errors).toContain('Invalid buyerId format');
+      expect(res.body.fieldErrors.buyerId).toBe('Invalid buyerId format');
     });
 
     it('should reject an invalid dateTo format with 400', async () => {
       const res = await request(app).get('/api/invoices?dateTo=2023/12/31');
 
       expect(res.statusCode).toBe(400);
-      expect(res.body.errors).toContain('Invalid dateTo format. Use YYYY-MM-DD');
+      expect(res.body.fieldErrors.dateTo).toBe('Invalid dateTo format. Use YYYY-MM-DD');
     });
 
     it('should reject an invalid order value with 400', async () => {
       const res = await request(app).get('/api/invoices?order=sideways');
 
       expect(res.statusCode).toBe(400);
-      expect(res.body.errors).toContain('Invalid order. Must be "asc" or "desc"');
+      expect(res.body.fieldErrors.order).toBe('Invalid order. Must be "asc" or "desc"');
     });
 
     it('should reject multiple invalid inputs with 400', async () => {
       const res = await request(app).get('/api/invoices?status=bad&sortBy=wrong');
 
       expect(res.statusCode).toBe(400);
-      expect(res.body.errors.length).toBe(2);
+      expect(Object.keys(res.body.fieldErrors).length).toBe(2);
+    });
+
+    it('should reject bad limit values with 400', async () => {
+      const res = await request(app).get('/api/invoices?limit=999');
+
+      expect(res.statusCode).toBe(400);
+      expect(res.body.fieldErrors.limit).toBe('limit must be an integer between 1 and 100');
+    });
+
+    it('should reject bad cursor values with 400', async () => {
+      const res = await request(app).get('/api/invoices?cursor=');
+
+      expect(res.statusCode).toBe(400);
+      expect(res.body.fieldErrors.cursor).toBe('cursor must be a non-empty string (max 2048 chars)');
+    });
+
+    it('should handle CursorError by returning 400 with cursor field error', async () => {
+      invoiceService.getInvoicesWithPagination.mockRejectedValue(
+        new CursorError('Cursor has expired')
+      );
+
+      const res = await request(app).get('/api/invoices?cursor=some.invalid');
+
+      expect(res.statusCode).toBe(400);
+      expect(res.body.fieldErrors.cursor).toBe('Cursor has expired');
     });
 
     it('should handle service errors with 500', async () => {
-      invoiceService.getInvoices.mockRejectedValue(new Error('Service failure'));
+      invoiceService.getInvoicesWithPagination.mockRejectedValue(new Error('Service failure'));
 
       const res = await request(app).get('/api/invoices');
 

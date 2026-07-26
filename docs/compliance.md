@@ -335,8 +335,144 @@ When environment variables are **not set**, the system defaults to:
 
 ---
 
-## Security Considerations
+## External KYC Provider Transport Hardening (Issue #592)
 
+**Status**: Production-ready.  
+**Date**: July 2026.  
+**Relates to**: Issue #592 — Implement the external KYC provider HTTP integration behind the existing stub.
+
+### What changed
+
+The `verifyWithExternalProvider()` HTTP call is hardened end-to-end so a flaky
+or hostile KYC provider cannot (a) hang the request, (b) silently auto-verify
+an SME, or (c) leak credentials:
+
+| Concern | Mitigation |
+|---|---|
+| Hanging request | `AbortController` with `KYC_PROVIDER_TIMEOUT_MS` (clamped 100–30000 ms, default 5000). |
+| Transient outages | Exponential back-off retries via `src/utils/retry.js`, capped at `KYC_PROVIDER_MAX_RETRIES` (0–10, default 3). |
+| Sustained outages | Shared `CircuitBreaker(name=kyc)` trips after `KYC_PROVIDER_CB_FAILURE_THRESHOLD` failures (default 5) and fails fast with `code=CIRCUIT_OPEN` for `KYC_PROVIDER_CB_RECOVERY_TIMEOUT_MS` (default 10000 ms). |
+| Provider-side 4xx | Permanent — `KycProviderError{retryable: false}` is raised immediately, never auto-verifies. |
+| Provider-side 5xx / 429 / network code | Retried up to `KYC_PROVIDER_MAX_RETRIES` with `KYC_PROVIDER_BASE_DELAY_MS` (default 200) base / `KYC_PROVIDER_MAX_DELAY_MS` (default 5000) cap. |
+| Spoofed response | Defensive verification when the provider sends `X-KYC-Signature` / `X-KYC-Response-Signature`. Mismatches fail closed with `code=invalid_response_signature`. |
+| Unsigned response from non-signing providers | Accepted by default; `KYC_PROVIDER_VERIFY_RESPONSE_SIGNATURE=true` enables strict mode that REQUIRES the header. |
+| Outbound forgery | HMAC request signing reuses `createSignatureHeader` (`t=<ts>,v1=<hex>`) over the JSON body when `KYC_PROVIDER_SIGN_REQUESTS=true` and `KYC_PROVIDER_SECRET` is set. |
+
+### Status flow
+
+`verifyWithExternalProvider()` raises a typed `KycProviderError`:
+
+```text
+retryable=true  on: network ETIMEDOUT/ECONNRESET/ECONNREFUSED/ENOTFOUND/EAI_AGAIN,
+                HTTP 408/425/429/5xx, AbortError (timeout)
+retryable=false on: HTTP 4xx (other), invalid JSON, mismatched signature,
+                missing-in-strict-mode signature, CIRCUIT_OPEN-escalated errors
+```
+
+The retry helper inspects `err.retryable` (or `classifyKycError(err)` for raw
+fetch errors) to decide whether to attempt again. After exhaustion the error
+propagates to `getKycStatus()`, which **always falls back to the persisted DB
+record** before returning `pending` — the system NEVER auto-verifies on a
+provider failure.
+
+### Fail-closed security contract
+
+1. **No auto-verify on failure**: a `KycProviderError` (retryable or not) is
+   raised to the caller. `getKycStatus` catches it and returns the previously
+   persisted record. If no record exists, returns `pending` — never `verified`.
+2. **Secrets never logged**: API key, signing secret, raw provider JSON body,
+   and any signature header are excluded from `logger.warn` / `logger.error`
+   payloads. Tests in `tests/kyc.provider.test.js` assert this directly.
+3. **Secrets never returned**: the result object (`{status, recordId, verifiedAt}`)
+   contains only normalised KYC values — no upstream field names, no provider
+   IDs that map back to a credential.
+4. **Bounded retries**: `KYC_PROVIDER_MAX_RETRIES ∈ [0, 10]`,
+   `KYC_PROVIDER_TIMEOUT_MS ∈ [100, 30000]`,
+   `KYC_PROVIDER_CB_FAILURE_THRESHOLD ∈ [1, 100]`,
+   `KYC_PROVIDER_CB_RECOVERY_TIMEOUT_MS ∈ [100, 60000]`. A typo in any of these
+   cannot disable the safety bounds.
+
+### Provider URL leak hardening
+
+`verifyWithExternalProvider()` derives a `providerHost` from the configured
+base URL using `new URL(baseUrl).host` and logs ONLY the host (e.g.
+`kyc.example.com`) — never the path, query string, or fragments. This prevents
+secret-laden query parameters (`?api_key=…`) from being captured in
+application logs.
+
+### Sign / verify response: format reference
+
+Both share the `t=<unix_ts>,v1=<hex_sha256>` header format used by inbound
+webhooks (`createSignatureHeader` / `verifySignature` in
+`src/services/webhooks.js`). The signed canonical string is
+`${timestamp_seconds}.${raw_body}`. The HMAC uses SHA-256 in hex mode, and
+verification uses `crypto.timingSafeEqual` so a brute-force attacker cannot
+recover the secret from timing differences.
+
+```
+// Outbound X-KYC-Signature example
+t=1753372800,v1=4f7c8e1a9b2d...
+
+// Inbound X-Signature example (existing webhook scheme)
+t=1753372800,v1=4f7c8e1a9b2d...
+```
+
+### New environment variables
+
+| Variable | Default | Range | Effect |
+|---|---|---|---|
+| `KYC_PROVIDER_TIMEOUT_MS` | 5000 | 100–30000 | Per-request AbortController timeout. |
+| `KYC_PROVIDER_MAX_RETRIES` | 3 | 0–10 | Retry attempts for transient failures. |
+| `KYC_PROVIDER_BASE_DELAY_MS` | 200 | 0–10000 | Initial back-off for retries. |
+| `KYC_PROVIDER_MAX_DELAY_MS` | 5000 | 0–60000 | Cap on back-off between attempts. |
+| `KYC_PROVIDER_SIGN_REQUESTS` | false | true/false | Enable outbound HMAC signing. |
+| `KYC_PROVIDER_VERIFY_RESPONSE_SIGNATURE` | false | true/false | Require provider response signature. |
+| `KYC_PROVIDER_CB_FAILURE_THRESHOLD` | 5 | 1–100 | Consecutive failures before tripping. |
+| `KYC_PROVIDER_CB_RECOVERY_TIMEOUT_MS` | 10000 | 100–60000 | Wait time before half-open probe. |
+
+All variables are validated at boot in `src/config/index.js` via Zod and are
+also clamped at module load in `getKycProviderConfig()`, so a missing
+`validate()` call in tests still produces safe bounds.
+
+### Observability
+
+Circuit-breaker state transitions are emitted on the existing
+`sorobanCircuitBreakerStateTransitionsTotal` Prometheus counter with the
+label `name=kyc`. Operators can alert on
+`increase(sorobanCircuitBreakerStateTransitionsTotal{name="kyc", to="OPEN"}[5m]) > 0`
+the same way they already monitor the Soroban dependency breaker.
+
+### Test coverage
+
+`tests/kyc.provider.test.js` covers (16 describe blocks, 50+ cases):
+
+1. Provider success — correct URL, bearer auth, content-type, return shape.
+2. Provider 5xx fallback — retries exhausted, persisted record returned.
+3. Provider network failure fallback — `pending` returned, never throws.
+4. Persistence read-back — direct DB lookups honoured when provider is off.
+5. Funding gate — `canFundWithKycStatus` allowlist, `verified` / `exempted` only.
+6. Input validation — empty / non-string `smeId`.
+7. `verifyWithExternalProvider` — new-error-type contract, signing-off default.
+8. Bounded timeout — `AbortController` fires within `KYC_PROVIDER_TIMEOUT_MS`.
+9. Retry — transient 503 retried then succeeds; permanent 400 retried zero times.
+10. Circuit breaker — `failureThreshold` consecutive failures trips OPEN; subsequent
+    call fails fast without invoking fetch.
+11. Outbound HMAC signing — `X-KYC-Signature` matches `verifySignature` recomputation.
+12. Response integrity verification — mismatched signature rejected; valid signature accepted;
+    strict-mode missing signature rejected; non-strict missing signature accepted.
+13. `classifyKycError` — 5xx / network codes retryable, 4xx non-retryable.
+14. Secret-leak prevention — error messages and logger payloads never contain key/secret.
+15. `parseClampedInt` — fallback, clamp, type coercion.
+16. Mock path preservation — provider unconfigured or only URL set never invokes fetch.
+17. KYC webhook route — unchanged inbound signature verification (already covered).
+
+Run:
+
+```bash
+npm test -- tests/kyc.provider.test.js
+```
+
+---
 ### Input Validation
 
 All user inputs are validated before KYC checks:

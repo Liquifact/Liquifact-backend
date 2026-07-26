@@ -99,6 +99,28 @@ describe('Soroban Integration Wrapper', () => {
       expect(metricsText).not.toContain(secretLikeMethod);
     });
 
+    it('records an error latency outcome when the call fails with a non-transient error', async () => {
+      // Non-transient errors use outcome="error" distinct from
+      // "circuit_open" and "success" branches in callSorobanContract.
+      const operation = jest.fn().mockRejectedValue(new Error('Invalid arguments'));
+
+      await expect(
+        callSorobanContract(operation, {
+          maxRetries: 0,
+          baseDelay: 0,
+          maxDelay: 0,
+          metricMethod: 'contract_call',
+        })
+      ).rejects.toThrow('Invalid arguments');
+
+      const metricsText = await getMetricsText();
+      expect(metricsText).toMatch(
+        /soroban_rpc_call_duration_seconds_count\{method="contract_call",outcome="error"\} 1/
+      );
+      // Method and outcome are the only labels on the histogram — no extras.
+      expect(metricsText).not.toMatch(/soroban_rpc_call_duration_seconds_count\{[^}]*,[^}]*,[^}]*\}/);
+    });
+
     it('should fail immediately on non-transient error', async () => {
       const error = new Error('Invalid arguments');
       const operation = jest.fn().mockRejectedValue(error);

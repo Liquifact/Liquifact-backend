@@ -120,6 +120,15 @@ describe('RedisEscrowSummaryCache', () => {
     expect(result.value).toEqual({ invoiceId: 'inv_ok', status: 'not_found' });
   });
 
+  it('deletes the affected invoice on write invalidation', async () => {
+    const client = new FakeRedisClient();
+    const cache = new RedisEscrowSummaryCache({ client });
+    await cache.setSummary('inv_write', { status: 'pending' }, 10);
+
+    expect(await cache.deleteSummary('inv_write')).toBe(true);
+    expect((await cache.getSummary('inv_write')).hit).toBe(false);
+  });
+
   it('does not create cache instance when optional redis cache is disabled', () => {
     const cache = createRedisEscrowSummaryCache({
       env: {

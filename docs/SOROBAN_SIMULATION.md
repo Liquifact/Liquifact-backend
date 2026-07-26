@@ -8,9 +8,11 @@ The `simulateOrThrow` utility module (`src/services/sorobanSim.js`) provides tra
 
 - **Pre-submission validation**: Simulates transactions before actual submission
 - **Footprint caching**: Stores simulation footprints to avoid redundant simulations
+- **Bounded cache policy**: Applies a TTL and a size cap with LRU eviction to prevent unbounded growth
+- **Stale-state invalidation**: Rejects cached footprints when the ledger or contract version changes
 - **Error classification**: Categorizes simulation errors (insufficient resources, auth, contract, network, validation)
 - **Retry guidance**: Provides retry hints based on error type
-- **Configurable caching**: Optional cache usage with TTL-based expiration
+- **Configurable caching**: Optional cache usage with TTL-based expiration and explicit invalidation hooks
 
 ## API Reference
 
@@ -28,6 +30,8 @@ Simulates a Soroban transaction and returns a result object (does not throw).
   transactionXdr: string,     // Transaction XDR (base64 encoded)
   options: {
     useCache: boolean,        // Whether to use footprint cache (default: true)
+    currentLedger: number|null, // Latest known ledger sequence for stale-entry invalidation
+    contractVersion: string|null, // Current contract version for stale-entry invalidation
     rpcConfig: object         // RPC configuration overrides
   }
 }
@@ -132,11 +136,13 @@ try {
 
 ### Footprint Cache
 
-The utility uses an in-memory cache (can be replaced with Redis in production) to store simulation footprints. Cache keys are generated from operation, invoiceId, and funderPublicKey.
+The utility uses an in-memory, bounded cache (can be replaced with Redis in production) to store simulation footprints. Cache keys are generated from operation, invoiceId, and funderPublicKey and remain server-controlled, preventing cache-key injection.
 
 - **TTL**: 5 minutes (configurable via `CACHE_TTL_MS`)
-- **Max size**: 10,000 entries (configurable via `MAX_CACHE_SIZE`)
-- **Eviction policy**: FIFO when limit reached
+- **Max size**: 1000 entries by default (configurable via `MAX_CACHE_SIZE`)
+- **Eviction policy**: LRU when the size cap is reached
+- **Invalidation**: Cached entries are rejected when they are older than the TTL, when the ledger moved forward, or when the contract version changed
+- **Metrics**: Cache hits, misses, and evictions are exported through the Prometheus counters in `src/metrics.js`
 
 ### Cache Functions
 

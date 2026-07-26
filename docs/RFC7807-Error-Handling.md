@@ -92,6 +92,37 @@ The following problem types are defined:
 - **Title**: "Internal Server Error"
 - **Description**: Unexpected server error
 
+## Stable Error Codes
+
+In addition to the RFC 7807 `type`/`title`/`status` fields above, every error response includes a stable, machine-readable `code` field (plus `retryable` and `retry_hint`) produced by `httpStatusToCode()` in `src/errors/mapError.js`. These codes are safe to key application logic and log searches on, since they will not change even if `title`/`detail` wording is revised.
+
+| Status | Code                    | Retryable | Retry Hint                                                   |
+|--------|-------------------------|-----------|----------------------------------------------------------------|
+| 400    | `BAD_REQUEST`            | No        | ``                                                              |
+| 401    | `UNAUTHORIZED`           | No        | ``                                                              |
+| 403    | `FORBIDDEN`              | No        | ``                                                              |
+| 404    | `NOT_FOUND`              | No        | ``                                                              |
+| 409    | `CONFLICT`               | No        | Resolve the conflicting state before retrying.                |
+| 422    | `UNPROCESSABLE_ENTITY`   | No        | Fix the validation errors and resubmit.                        |
+| 429    | `TOO_MANY_REQUESTS`      | Yes       | Wait for the rate limit window to reset before retrying.      |
+| 500    | `INTERNAL_SERVER_ERROR`  | No        | Do not retry until the issue is resolved or support is contacted. |
+| 503    | `SERVICE_UNAVAILABLE`    | Yes       | Retry the request in a few moments.                            |
+
+Any status not covered by this table (or by the `AppError` caller's explicit `code`) falls back to a generic `HTTP_<status>` label, e.g. `HTTP_418`, so no error response is ever left without a searchable code.
+
+### Special-cased 503s
+
+Two upstream-failure conditions are mapped to more specific codes than the generic `SERVICE_UNAVAILABLE`, both still at HTTP status 503 and both `retryable: true`:
+
+- A connection failure (`error.code === 'ECONNREFUSED'`) maps to `UPSTREAM_ERROR`.
+- An open circuit breaker (`error.code === 'CIRCUIT_OPEN'`) maps to `CIRCUIT_OPEN`.
+
+These take priority over the generic 503 mapping because they carry more specific diagnostic meaning for API consumers deciding how long to back off before retrying.
+
+### Rate limiting and 429
+
+`src/middleware/rateLimit.js`'s Express rate limiters (`globalLimiter`, `sensitiveLimiter`, `apiKeyLimiter`, `createRateLimiter`) currently respond directly via their own `express-rate-limit` handler rather than throwing an `AppError` that flows through `mapError.js`. This means 429 responses from the rate limiter middleware do not yet carry the `code`/`retryable`/`retry_hint` contract documented here — only errors that reach `mapError()` (e.g. an `AppError` with `status: 429` thrown elsewhere in application code) do. Wiring the rate limiter's handler to go through `AppError`/`mapError` instead is tracked as follow-up work outside the scope of this change.
+
 ## API Examples
 
 ### 1. Validation Error (Request Body)
@@ -227,9 +258,80 @@ Content-Type: application/problem+json
 
 ## Implementation Details
 
-### Canonical Builder
+### Architecture / Data Flow
 
-All RFC 7807 problem details objects are constructed via the canonical formatter builder in `src/utils/problemDetails.js` (`formatProblemDetails`):
+Every RFC 7807 response follows this flow through the system:
+
+```
+Route / Service
+  │
+  ├─ throw new AppError({...})     ──┐
+  │      OR                          │
+  └─ next(Error)                   ──┤
+                                     ▼
+                          ┌──────────────────┐
+                          │  problemJson     │
+                          │  Middleware       │
+                          │  (Express error   │
+                          │   handler)        │
+                          └────────┬─────────┘
+                                   │
+                     ┌─────────────▼─────────────┐
+                     │      mapError()           │
+                     │  Normalises any thrown    │
+                     │  value to a stable        │
+                     │  { status, code, message, │
+                     │    retryable, retryHint } │
+                     └─────────────┬─────────────┘
+                                   │
+                     ┌─────────────▼──────────────┐
+                     │  formatProblemDetails()    │
+                     │  (Canonical Builder)       │
+                     │  src/utils/problemDetails  │
+                     │                             │
+                     │  The **only** place that   │
+                     │  assembles RFC 7807 fields │
+                     └─────────────┬──────────────┘
+                                   │
+                     ┌─────────────▼──────────────┐
+                     │  200+ JSON response with   │
+                     │  Content-Type:             │
+                     │    application/problem+json│
+                     └────────────────────────────┘
+```
+
+#### 1. AppError (optional, for structured errors)
+
+Route handlers may throw `AppError` (defined in `src/errors/AppError.js`) to attach explicit RFC 7807 fields:
+
+```javascript
+throw new AppError({
+  type: "https://liquifact.com/probs/validation-error",
+  title: "Validation Error",
+  status: 400,
+  detail: "Amount is required",
+  instance: req.originalUrl,
+  code: "VALIDATION_FAILED",
+  retryable: false,
+  retryHint: "Check field values",
+});
+```
+
+Internally, `AppError.constructor` calls `formatProblemDetails` and reads back every field (including extensions) from the builder's output, making `formatProblemDetails` the sole source of truth.
+
+#### 2. mapError (error normaliser)
+
+`mapError` (`src/errors/mapError.js`) converts any thrown value to a stable contract:
+
+```
+{ status: number, code: string, message: string, retryable: boolean, retryHint: string }
+```
+
+It handles `AppError`, body-parser syntax errors, CORS rejections, network errors (`ECONNREFUSED`), circuit-breaker state, and generic fallbacks. The mapped object is then consumed by the middleware. **mapError does not construct RFC 7807 objects**; it only provides the raw data that flows into the canonical builder.
+
+#### 3. Canonical Builder (`formatProblemDetails`)
+
+`src/utils/problemDetails.js` exports `formatProblemDetails` — the **single canonical builder** for all RFC 7807 problem objects:
 
 ```javascript
 const formatProblemDetails = require("./utils/problemDetails");
@@ -246,34 +348,30 @@ const problem = formatProblemDetails({
 });
 ```
 
-Both `AppError` and the global `problemJsonHandler` middleware delegate field assembly and formatting to this canonical builder, ensuring standardized title, type, and status shapes across all endpoints.
+The builder:
+- Resolves defaults for `type` (`"about:blank"`), `title` (`"An unexpected error occurred"`), and `status` (`500`)
+- Conditionally includes `detail`, `instance`, and all extensions only when present
+- Strips `stack` in production (`NODE_ENV === "production"`)
+- Always outputs `retry_hint` (snake_case) in the JSON response for the `retryHint` input
 
-### Middleware
+Both `AppError.constructor` and `problemJsonHandler` call this builder — no other code path assembles RFC 7807 fields.
 
-The problem+json middleware is implemented in `src/middleware/problemJson.js` and includes:
+#### 4. Middleware (problemJson)
 
-- Error type mapping for common HTTP errors
-- Request correlation via instance URI (defaults to request correlation ID `urn:uuid:${requestId}`)
-- Secure logging with pino logger
-- Production-safe error responses (no stack traces)
+The middleware (`src/middleware/problemJson.js`):
 
-### Error Handling
+1. Calls `mapError(error)` to normalise the thrown value
+2. Resolves problem-specific fields (`type`, `title`, `instance`) based on error type
+3. Calls `formatProblemDetails` with the resolved fields → obtains the final problem object
+4. Sets `Content-Type: application/problem+json` and sends the response
 
-All route handlers now use the `AppError` class to throw structured errors:
-
-```javascript
-throw new AppError({
-  type: "https://liquifact.com/probs/validation-error",
-  title: "Validation Error",
-  status: 400,
-  detail: "Amount and customer are required fields",
-  instance: req.originalUrl,
-});
-```
+It also provides:
+- `createProblemDetails(options)` — thin convenience wrapper over `formatProblemDetails`
+- `notFoundHandler(req, res, next)` — creates a `404` AppError and passes it through the normal flow
 
 ### Request Correlation
 
-Each error response includes an `instance` field that references the original request URL, enabling request correlation and debugging.
+Each error response includes an `instance` field that references the request correlation ID (`urn:uuid:${requestId}`), enabling end-to-end tracing.
 
 ## Security Considerations
 

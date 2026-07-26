@@ -96,6 +96,12 @@ describe('sorobanSim - Simulation Utility', () => {
       expect(getCachedFootprint(key, 100)).not.toBeNull();
     });
 
+    it('rejects a footprint when contractVersion has advanced', () => {
+      const key = 'test:contract-version';
+      cacheFootprint(key, { read: ['addr1'] }, 100, 'v1');
+      expect(getCachedFootprint(key, 100, 'v2')).toBeNull();
+    });
+
     it('accepts a footprint when no currentLedger is supplied', () => {
       const key = 'test:ledger-null';
       cacheFootprint(key, { read: ['addr1'] }, 100);
@@ -328,6 +334,24 @@ describe('sorobanSim - Simulation Utility', () => {
       });
 
       const result = await simulateOrThrow(baseParams({ options: { currentLedger: 11 } }));
+      expect(result.cached).toBe(false);
+      expect(result.footprint).toEqual(freshFootprint);
+      expect(callSorobanContract).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-simulates when contractVersion is newer than cached version', async () => {
+      const key = generateCacheKey('fund_escrow', 'inv_123', PUBLIC_KEY);
+      cacheFootprint(key, { read: ['stale'] }, 10, 'v1');
+
+      const freshFootprint = { read: ['fresh'] };
+      callSorobanContract.mockResolvedValue({
+        success: true,
+        footprint: freshFootprint,
+        resourceConfig: {},
+        ledgerSequence: 10,
+      });
+
+      const result = await simulateOrThrow(baseParams({ options: { contractVersion: 'v2' } }));
       expect(result.cached).toBe(false);
       expect(result.footprint).toEqual(freshFootprint);
       expect(callSorobanContract).toHaveBeenCalledTimes(1);
