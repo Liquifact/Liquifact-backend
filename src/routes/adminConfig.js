@@ -31,13 +31,10 @@ const { adminStack } = require('../middleware/stacks');
 const {
   runtimeConfigSchema,
   validateBody,
-  CONFIG_SECTIONS,
 } = require('../schemas/config');
 const { adminConfigLimiter } = require('../middleware/rateLimit');
 const idempotencyMiddleware = require('../middleware/idempotency');
-const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
-const logger = require('../logger');
-const idempotencyMiddleware = require('../middleware/idempotency');
+const { applyConfig, getConfigSections } = require('../services/configService');
 
 const router = express.Router();
 
@@ -195,33 +192,13 @@ router.post('/', idempotencyMiddleware, validateBody(runtimeConfigSchema), (req,
   // validateBody attaches the parsed, coerced payload to req.validated
   const { section, config: validatedConfig } = req.validated;
 
-  // Apply runtime configuration changes for supported sections.
-  if (section === 'cors') {
-    if (validatedConfig.origins) {
-      // Update the env var so reloadCorsOrigins can re-read it.
-      process.env.CORS_ALLOWED_ORIGINS = validatedConfig.origins.join(',');
-      reloadCorsOrigins();
-    }
-    if (validatedConfig.maxAge !== undefined) {
-      process.env.CORS_MAX_AGE = String(validatedConfig.maxAge);
-      reloadCorsMaxAge();
-    }
-  }
-
-  logger.info(
-    {
-      tenantId: req.tenantId,
-      section,
-      adminClient: req.apiClient?.clientId || req.user?.sub,
-    },
-    'Admin runtime config update accepted',
-  );
-
-  return res.status(200).json({
-    section,
-    config: validatedConfig,
-    message: `Configuration section '${section}' validated and accepted.`,
+  // Delegate business logic to the service layer
+  const result = applyConfig(section, validatedConfig, {
+    tenantId: req.tenantId,
+    adminClient: req.apiClient?.clientId || req.user?.sub,
   });
+
+  return res.status(200).json(result);
 });
 
 // ── GET /api/admin/config/sections ───────────────────────────────────────────
@@ -255,7 +232,7 @@ router.post('/', idempotencyMiddleware, validateBody(runtimeConfigSchema), (req,
  *         $ref: '#/components/responses/Problem403'
  */
 router.get('/sections', (req, res) => {
-  return res.status(200).json({ sections: CONFIG_SECTIONS });
+  return res.status(200).json({ sections: getConfigSections() });
 });
 
 module.exports = router;
