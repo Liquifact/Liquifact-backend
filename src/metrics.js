@@ -1112,16 +1112,35 @@ const sorobanRpcRetryCausesTotal = new client.Counter({
   registers: [registry],
 });
 
-/**
- * Bounded enum of allowed `status_class` label values.
- * @readonly
- */
+// ── Persistence endpoint metrics (issue #774) ──────────────────────────────
 
 /**
- * Bounded enum of allowed `cause` label values for persistence errors.
+ * Bounded enum of allowed `endpoint` label values for persistence metrics.
+ * @readonly
+ */
+const PERSISTENCE_ENDPOINT_ENUM = Object.freeze([
+  'sme_invoice_upload',
+  'sme_invoice_presigned_url',
+  'unknown',
+]);
+
+/**
+ * Bounded enum of allowed `status_class` label values for persistence metrics.
+ * @readonly
+ */
+const PERSISTENCE_STATUS_CLASS_ENUM = Object.freeze(['2xx', '4xx', '5xx']);
+
+/**
+ * Bounded enum of allowed `cause` label values for persistence error metrics.
  * Raw error messages are NEVER used as labels.
  * @readonly
  */
+const PERSISTENCE_CAUSE_ENUM = Object.freeze([
+  'validation',
+  'storage',
+  'internal',
+  'none',
+]);
 
 /**
  * Maps a raw persistence endpoint hint to a bounded metric label value.
@@ -1129,6 +1148,10 @@ const sorobanRpcRetryCausesTotal = new client.Counter({
  * @param {unknown} raw - Raw endpoint identifier.
  * @returns {string} Bounded value from {@link PERSISTENCE_ENDPOINT_ENUM}.
  */
+function normalizePersistenceEndpoint(raw) {
+  const str = typeof raw === 'string' ? raw.trim() : '';
+  return PERSISTENCE_ENDPOINT_ENUM.includes(str) ? str : 'unknown';
+}
 
 /**
  * Maps an HTTP status code to a bounded `status_class` label value.
@@ -1136,6 +1159,12 @@ const sorobanRpcRetryCausesTotal = new client.Counter({
  * @param {unknown} status - HTTP status code.
  * @returns {string} Bounded value from {'2xx'|'4xx'|'5xx'}.
  */
+function normalizePersistenceStatusClass(status) {
+  const code = Number(status);
+  if (code >= 500) { return '5xx'; }
+  if (code >= 400) { return '4xx'; }
+  return '2xx';
+}
 
 /**
  * Maps a raw persistence failure to a bounded `cause` label value.
@@ -1149,21 +1178,159 @@ const sorobanRpcRetryCausesTotal = new client.Counter({
  * @param {number} [status] - HTTP status code, used to disambiguate.
  * @returns {string} Bounded value from {'validation'|'storage'|'internal'|'none'}.
  */
+function normalizePersistenceCause(err, status) {
+  const code = Number(status);
+  if (!err && code < 400) { return 'none'; }
+
+  if (code >= 400 && code < 500) {
+    // Recognize storage-service validation error codes
+    if (err && typeof err === 'object' && 'code' in err) {
+      const errCode = String(err.code);
+      if (errCode === 'INVALID_MIME_TYPE' || errCode === 'FILE_TOO_LARGE' || errCode === 'INVALID_TENANT_ID') {
+        return 'validation';
+      }
+    }
+    return 'validation';
+  }
+
+  if (err && typeof err === 'object' && 'code' in err) {
+    const errCode = String(err.code);
+    // Recognize storage-layer error codes
+    if (
+      errCode === 'STORAGE_WRITE_FAILED' ||
+      errCode === 'ENOENT' ||
+      errCode === 'EACCES' ||
+      errCode.startsWith('ERR_')
+    ) {
+      return 'storage';
+    }
+  }
+
+  return 'internal';
+}
 
 /**
  * Histogram: Wall-clock duration of persistence-endpoint requests in seconds.
  * @type {import('prom-client').Histogram}
  */
+const persistenceRequestDurationSeconds = new client.Histogram({
+  name: 'persistence_request_duration_seconds',
+  help: 'Duration of persistence endpoint requests in seconds',
+  labelNames: ['endpoint', 'status_class'],
+  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5],
+  registers: [registry],
+});
 
 /**
  * Counter: Total persistence-endpoint requests.
  * @type {import('prom-client').Counter}
  */
+const persistenceRequestsTotal = new client.Counter({
+  name: 'persistence_requests_total',
+  help: 'Total number of persistence endpoint requests',
+  labelNames: ['endpoint', 'status_class'],
+  registers: [registry],
+});
 
 /**
  * Counter: Persistence-endpoint request errors by cause.
  * @type {import('prom-client').Counter}
  */
+const persistenceRequestErrorsTotal = new client.Counter({
+  name: 'persistence_request_errors_total',
+  help: 'Total number of persistence endpoint request errors by cause',
+  labelNames: ['endpoint', 'cause'],
+  registers: [registry],
+});
+
+// ── Indexer endpoint metrics (issue #761) ──────────────────────────────────
+
+/**
+ * Bounded enum of allowed `status_class` label values for indexer metrics.
+ * @readonly
+ */
+const INDEXER_STATUS_CLASS_ENUM = Object.freeze(['2xx', '4xx', '5xx']);
+
+/**
+ * Bounded enum of allowed `cause` label values for indexer error metrics.
+ * Raw error messages are NEVER used as labels.
+ * @readonly
+ */
+const INDEXER_CAUSE_ENUM = Object.freeze([
+  'validation',
+  'authorization',
+  'internal',
+  'none',
+]);
+
+/**
+ * Maps an HTTP status code to a bounded `status_class` label value.
+ *
+ * @param {unknown} status - HTTP status code.
+ * @returns {string} Bounded value from {'2xx'|'4xx'|'5xx'}.
+ */
+function normalizeIndexerStatusClass(status) {
+  const code = Number(status);
+  if (code >= 500) { return '5xx'; }
+  if (code >= 400) { return '4xx'; }
+  return '2xx';
+}
+
+/**
+ * Maps a raw indexer failure to a bounded `cause` label value.
+ *
+ * A 2xx outcome maps to `none`. 4xx responses are treated as validation errors
+ * unless they're 401/403 which indicate authorization failures. 5xx errors
+ * are treated as internal errors.
+ *
+ * @param {unknown} err - Raw error object or code (null/undefined for success).
+ * @param {number} [status] - HTTP status code, used to disambiguate.
+ * @returns {string} Bounded value from {'validation'|'authorization'|'internal'|'none'}.
+ */
+function normalizeIndexerCause(err, status) {
+  const code = Number(status);
+  if (!err && code < 400) { return 'none'; }
+
+  if (code === 401 || code === 403) { return 'authorization'; }
+  if (code >= 400 && code < 500) { return 'validation'; }
+
+  return 'internal';
+}
+
+/**
+ * Histogram: Wall-clock duration of indexer endpoint requests in seconds.
+ * @type {import('prom-client').Histogram}
+ */
+const indexerRequestDurationSeconds = new client.Histogram({
+  name: 'indexer_request_duration_seconds',
+  help: 'Duration of indexer endpoint requests in seconds',
+  labelNames: ['status_class'],
+  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5],
+  registers: [registry],
+});
+
+/**
+ * Counter: Total indexer endpoint requests.
+ * @type {import('prom-client').Counter}
+ */
+const indexerRequestsTotal = new client.Counter({
+  name: 'indexer_requests_total',
+  help: 'Total number of indexer endpoint requests',
+  labelNames: ['status_class'],
+  registers: [registry],
+});
+
+/**
+ * Counter: Indexer endpoint request errors by cause.
+ * @type {import('prom-client').Counter}
+ */
+const indexerRequestErrorsTotal = new client.Counter({
+  name: 'indexer_request_errors_total',
+  help: 'Total number of indexer endpoint request errors by cause',
+  labelNames: ['cause'],
+  registers: [registry],
+});
+
 
 /**
  * Bounded enum of allowed `status_class` label values for metrics endpoint.
@@ -1579,11 +1746,19 @@ module.exports = {
   persistenceRequestDurationSeconds,
   persistenceRequestsTotal,
   persistenceRequestErrorsTotal,
+  PERSISTENCE_ENDPOINT_ENUM,
   PERSISTENCE_STATUS_CLASS_ENUM,
   PERSISTENCE_CAUSE_ENUM,
   normalizePersistenceEndpoint,
   normalizePersistenceStatusClass,
   normalizePersistenceCause,
+  indexerRequestDurationSeconds,
+  indexerRequestsTotal,
+  indexerRequestErrorsTotal,
+  INDEXER_STATUS_CLASS_ENUM,
+  INDEXER_CAUSE_ENUM,
+  normalizeIndexerStatusClass,
+  normalizeIndexerCause,
   sorobanCircuitBreakerStateTransitionsTotal,
   kycWebhookRequestDurationSeconds,
   kycWebhookRequestsTotal,
