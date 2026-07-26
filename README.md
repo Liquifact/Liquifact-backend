@@ -169,6 +169,7 @@ Error: Mismatch: STELLAR_NETWORK=TESTNET requires SOROBAN_RPC_URL="https://sorob
 Default port: `3001`.
 Escrow Redis cache is optional and disabled by default; set `REDIS_ESCROW_CACHE_ENABLED=true` with `REDIS_URL` to enable it.
 `REDIS_ESCROW_CACHE_TTL_SECONDS` is strictly clamped to `5..300`, and `REDIS_ESCROW_LEDGER_GAP_THRESHOLD` controls ledger-gap invalidation.
+`ESCROW_READ_PROJECTION_ENABLED` — feature flag that gates the projection/cache-based escrow read path (`getEscrowStateWithProjection`). When set to `false`, the service skips the Redis cache and `escrow_event_projection` table and reads directly from the Soroban contract (live read). Defaults to `true`.
 
 Incremental TypeScript setup and migration guidance lives in `docs/typescript-plan.md`.
 

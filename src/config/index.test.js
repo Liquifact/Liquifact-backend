@@ -67,5 +67,26 @@ describe('Config Validation', () => {
     });
     expect(result).toMatchObject({ NODE_ENV: 'test', PORT: 3001 });
   });
+
+  // ── ESCROW_READ_PROJECTION_ENABLED flag ──────────────────────────────────
+
+  test('ESCROW_READ_PROJECTION_ENABLED defaults to "true"', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    const config = validate();
+    expect(config.ESCROW_READ_PROJECTION_ENABLED).toBe('true');
+  });
+
+  test('ESCROW_READ_PROJECTION_ENABLED accepts "false"', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    process.env.ESCROW_READ_PROJECTION_ENABLED = 'false';
+    const config = validate();
+    expect(config.ESCROW_READ_PROJECTION_ENABLED).toBe('false');
+  });
+
+  test('ESCROW_READ_PROJECTION_ENABLED rejects invalid value', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    process.env.ESCROW_READ_PROJECTION_ENABLED = 'invalid';
+    expect(() => validate()).toThrow();
+  });
 });
 

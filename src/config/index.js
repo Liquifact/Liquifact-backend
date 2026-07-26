@@ -24,6 +24,8 @@ const ConfigSchema = z
     // Escrow indexer configuration
     ESCROW_INDEXER_ENABLED: z.enum(['true', 'false']).default('false'),
     ESCROW_INDEXER_STALE_THRESHOLD_SECONDS: z.coerce.number().min(1).default(300),
+    // Escrow read projection — gates the new projection/cache-based escrow read path
+    ESCROW_READ_PROJECTION_ENABLED: z.enum(['true', 'false']).default('true'),
     // KYC provider — all optional, but URL+key must be provided together in non-test envs
     KYC_PROVIDER_URL: z.string().url().optional(),
     KYC_PROVIDER_API_KEY: z.string().min(1).optional(),

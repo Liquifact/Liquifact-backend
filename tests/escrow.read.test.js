@@ -100,3 +100,91 @@ describe('GET /api/escrow/:invoiceId', () => {
     expect(cacheResult.reason).toBe('ledger_gap');
   });
 });
+
+describe('ESCROW_READ_PROJECTION_ENABLED feature flag', () => {
+  let app;
+  let testCache;
+
+  beforeAll(() => {
+    app = createStandardizedApp();
+    testCache = createRedisEscrowSummaryCache();
+  });
+
+  beforeEach(async () => {
+    await db('escrow_event_projection').del();
+    if (testCache && testCache.client) {
+      await testCache.client.flushall();
+    }
+  });
+
+  it('reads from projection when flag is enabled (default)', async () => {
+    // Seed projection
+    await db('escrow_event_projection').insert({
+      invoice_id: 'inv-flag-on-1',
+      latest_event_id: 'evt_flag_1',
+      latest_event_type: 'funded',
+      latest_ledger_sequence: 55555,
+      latest_event_body: JSON.stringify({ status: 'funded', fundedAmount: 3000 }),
+      latest_observed_at: new Date()
+    });
+
+    // Default: ESCROW_READ_PROJECTION_ENABLED is 'true' (no env override needed)
+    const res = await request(app).get('/api/escrow/inv-flag-on-1');
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('funded');
+    expect(res.body.data.fundedAmount).toBe(3000);
+    expect(res.body.data.fromProjection).toBe(true);
+    expect(res.body.message).toMatch(/from event projection/);
+  });
+
+  it('skips projection and goes to live read when flag is disabled', async () => {
+    // Temporarily set env to disable the feature
+    const origEnv = process.env.ESCROW_READ_PROJECTION_ENABLED;
+    process.env.ESCROW_READ_PROJECTION_ENABLED = 'false';
+
+    // Re-import modules with fresh config
+    jest.resetModules();
+
+    // Seed projection data (should be ignored when flag is off)
+    await db('escrow_event_projection').insert({
+      invoice_id: 'inv-flag-off-1',
+      latest_event_id: 'evt_flag_off',
+      latest_event_type: 'funded',
+      latest_ledger_sequence: 66666,
+      latest_event_body: JSON.stringify({ status: 'funded', fundedAmount: 5000 }),
+      latest_observed_at: new Date()
+    });
+
+    // Create fresh app with updated env
+    const { createStandardizedApp: createAppFresh } = require('../src/app');
+    const freshApp = createAppFresh();
+
+    const res = await request(freshApp).get('/api/escrow/inv-flag-off-1');
+    // Should fall through to live read, which returns not_found with 0 amount
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('not_found');
+    expect(res.body.data.fundedAmount).toBe(0);
+    expect(res.body.data.latest_event_type).toBe('live_read');
+    // The projection fields should NOT be present
+    expect(res.body.data.fromProjection).toBeUndefined();
+
+    process.env.ESCROW_READ_PROJECTION_ENABLED = origEnv;
+  });
+
+  it('returns live read data when flag is off even with no projection data', async () => {
+    const origEnv = process.env.ESCROW_READ_PROJECTION_ENABLED;
+    process.env.ESCROW_READ_PROJECTION_ENABLED = 'false';
+    jest.resetModules();
+
+    const { createStandardizedApp: createAppFresh } = require('../src/app');
+    const freshApp = createAppFresh();
+
+    const res = await request(freshApp).get('/api/escrow/inv-flag-off-none');
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('not_found');
+    expect(res.body.data.latest_event_type).toBe('live_read');
+    expect(res.body.data.fromProjection).toBeUndefined();
+
+    process.env.ESCROW_READ_PROJECTION_ENABLED = origEnv;
+  });
+});
