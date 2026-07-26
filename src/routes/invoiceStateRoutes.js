@@ -13,6 +13,16 @@ const { getAuditLogs } = require('../services/auditLog');
 const { requireKycForFunding, auditKycAccess } = require('../middleware/kycGating');
 const { authenticatedTenantStack } = require('../middleware/stacks');
 const responseHelper = require('../utils/responseHelper');
+const {
+  mapTransitionRequest,
+  mapApproveRequest,
+  mapLinkEscrowRequest,
+  mapRejectRequest,
+  toInvoiceStateResponse,
+  toTransitionResponse,
+  toLinkEscrowResponse,
+  toInvoiceHistoryResponse,
+} = require('../dtos/invoiceStateDtos');
 
 router.use(...authenticatedTenantStack);
 
@@ -81,10 +91,30 @@ function getActor(req) {
  * GET /api/invoices/:id/state
  * Returns the current state and allowed transitions for an invoice.
  */
-router.get('/:id/state', async (req, res) => {
-  const ctx = await resolveInvoiceStateContext(req, req.params.id);
-  if (ctx.error) {
-    return sendValidationError(res, ctx.error);
+router.get('/:id/state', async (req, res, next) => {
+  const { id } = req.params;
+
+  try {
+    const invoice = await invoiceService.resolveInvoiceForTenant(id, req.tenantId);
+
+    if (!invoice) {
+      return sendInvoiceNotFound(res);
+    }
+
+    const currentState = invoice.status;
+    const allowedTransitions = getAllowedTransitions(currentState);
+    const stateDto = toInvoiceStateResponse({
+      invoiceId: id,
+      currentState,
+      allowedTransitions,
+    });
+
+    return res.json({
+      ...responseHelper.success(stateDto),
+      message: 'Invoice state retrieved successfully',
+    });
+  } catch (error) {
+    return next(error);
   }
 
   const { invoiceId, invoice } = ctx;
@@ -105,14 +135,9 @@ router.get('/:id/state', async (req, res) => {
  * POST /api/invoices/:id/transition
  * Executes a state transition to the requested target state.
  */
-router.post('/:id/transition', async (req, res) => {
-  const ctx = await resolveInvoiceStateContext(req, req.params.id);
-  if (ctx.error) {
-    return sendValidationError(res, ctx.error);
-  }
-
-  const { invoiceId, tenantId } = ctx;
-  const { targetState, reason } = req.body;
+router.post('/:id/transition', async (req, res, next) => {
+  const { id } = req.params;
+  const { targetState, reason } = mapTransitionRequest(req.body);
 
   try {
     const result = await invoiceService.transitionInvoice(
@@ -127,16 +152,10 @@ router.post('/:id/transition', async (req, res) => {
       },
     );
 
-    res.json({
-      data: {
-        invoiceId,
-        previousState: result.previousState,
-        currentState: result.newState,
-        transitionedBy: result.transitionedBy,
-        reason: (result.auditLog && result.auditLog.metadata && result.auditLog.metadata.reason) || reason || null,
-        auditLogId: (result.auditLog && result.auditLog.id) || null,
-      },
-      message: 'Invoice transitioned successfully',
+    const responseDto = toTransitionResponse({ invoiceId: id, result, reason });
+    return res.status(200).json({
+      ...responseHelper.success(responseDto),
+      message: `Invoice transitioned from ${result.previousState} to ${result.newState}`,
     });
   } catch (err) {
     sendTransitionError(res, err);
@@ -147,14 +166,9 @@ router.post('/:id/transition', async (req, res) => {
  * POST /api/invoices/:id/approve
  * Convenience endpoint to approve an invoice.
  */
-router.post('/:id/approve', async (req, res) => {
-  const ctx = await resolveInvoiceStateContext(req, req.params.id);
-  if (ctx.error) {
-    return sendValidationError(res, ctx.error);
-  }
-
-  const { invoiceId, tenantId } = ctx;
-  const { reason } = req.body;
+router.post('/:id/approve', async (req, res, next) => {
+  const { id } = req.params;
+  const { reason } = mapApproveRequest(req.body);
 
   try {
     const result = await invoiceService.transitionInvoice(
@@ -169,15 +183,9 @@ router.post('/:id/approve', async (req, res) => {
       },
     );
 
-    res.json({
-      data: {
-        invoiceId,
-        previousState: result.previousState,
-        currentState: result.newState,
-        transitionedBy: result.transitionedBy,
-        reason: (result.auditLog && result.auditLog.metadata && result.auditLog.metadata.reason) || reason || null,
-        auditLogId: (result.auditLog && result.auditLog.id) || null,
-      },
+    const responseDto = toTransitionResponse({ invoiceId: id, result });
+    return res.status(200).json({
+      ...responseHelper.success(responseDto),
       message: 'Invoice approved successfully',
     });
   } catch (err) {
@@ -189,20 +197,9 @@ router.post('/:id/approve', async (req, res) => {
  * POST /api/invoices/:id/link-escrow
  * Convenience endpoint to link an approved invoice to an escrow contract.
  */
-router.post('/:id/link-escrow', async (req, res) => {
-  const ctx = await resolveInvoiceStateContext(req, req.params.id);
-  if (ctx.error) {
-    return sendValidationError(res, ctx.error);
-  }
-
-  const { invoiceId, tenantId, invoice } = ctx;
-  const { escrowId, reason } = req.body;
-
-  const linkCheck = canLinkToEscrow(invoice);
-  if (!linkCheck.canLink) {
-    const errObj = buildInvoiceStateError('CANNOT_LINK_TO_ESCROW', linkCheck.reason || 'Invoice cannot be linked to escrow.', 400);
-    return sendValidationError(res, errObj);
-  }
+router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, async (req, res, next) => {
+  const { id } = req.params;
+  const { escrowId, reason } = mapLinkEscrowRequest(req.body);
 
   try {
     const result = await invoiceService.transitionInvoice(
@@ -218,16 +215,9 @@ router.post('/:id/link-escrow', async (req, res) => {
       },
     );
 
-    res.json({
-      data: {
-        invoiceId,
-        previousState: result.previousState,
-        currentState: result.newState,
-        transitionedBy: result.transitionedBy,
-        escrowId: escrowId || null,
-        reason: (result.auditLog && result.auditLog.metadata && result.auditLog.metadata.reason) || reason || null,
-        auditLogId: (result.auditLog && result.auditLog.id) || null,
-      },
+    const responseDto = toLinkEscrowResponse({ invoiceId: id, result, escrowId });
+    return res.status(200).json({
+      ...responseHelper.success(responseDto),
       message: 'Invoice linked to escrow successfully',
     });
   } catch (err) {
@@ -239,14 +229,9 @@ router.post('/:id/link-escrow', async (req, res) => {
  * POST /api/invoices/:id/reject
  * Convenience endpoint to reject an invoice.
  */
-router.post('/:id/reject', async (req, res) => {
-  const ctx = await resolveInvoiceStateContext(req, req.params.id);
-  if (ctx.error) {
-    return sendValidationError(res, ctx.error);
-  }
-
-  const { invoiceId, tenantId } = ctx;
-  const { reason } = req.body;
+router.post('/:id/reject', async (req, res, next) => {
+  const { id } = req.params;
+  const { reason } = mapRejectRequest(req.body);
 
   try {
     const result = await invoiceService.transitionInvoice(
@@ -261,15 +246,9 @@ router.post('/:id/reject', async (req, res) => {
       },
     );
 
-    res.json({
-      data: {
-        invoiceId,
-        previousState: result.previousState,
-        currentState: result.newState,
-        transitionedBy: result.transitionedBy,
-        reason: (result.auditLog && result.auditLog.metadata && result.auditLog.metadata.reason) || reason || null,
-        auditLogId: (result.auditLog && result.auditLog.id) || null,
-      },
+    const responseDto = toTransitionResponse({ invoiceId: id, result, reason });
+    return res.status(200).json({
+      ...responseHelper.success(responseDto),
       message: 'Invoice rejected successfully',
     });
   } catch (err) {
@@ -281,10 +260,29 @@ router.post('/:id/reject', async (req, res) => {
  * GET /api/invoices/:id/history
  * Returns the transition history for an invoice.
  */
-router.get('/:id/history', async (req, res) => {
-  const ctx = await resolveInvoiceStateContext(req, req.params.id);
-  if (ctx.error) {
-    return sendValidationError(res, ctx.error);
+router.get('/:id/history', async (req, res, next) => {
+  const { id } = req.params;
+
+  try {
+    const invoice = await invoiceService.resolveInvoiceForTenant(id, req.tenantId);
+
+    if (!invoice) {
+      return sendInvoiceNotFound(res);
+    }
+
+    const transitions = await getTransitionHistory(id, getAuditLogs);
+    const historyDto = toInvoiceHistoryResponse({
+      invoiceId: id,
+      currentState: invoice.status,
+      transitions,
+    });
+
+    return res.json({
+      ...responseHelper.success(historyDto),
+      message: 'Invoice transition history retrieved successfully',
+    });
+  } catch (error) {
+    return next(error);
   }
 
   const { invoiceId, invoice } = ctx;
