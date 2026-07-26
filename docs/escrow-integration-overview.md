@@ -273,7 +273,7 @@ Documented in [README](../README.md) and asserted in [`src/config/stellar.test.j
 | `ESCROW_INDEXER_BATCH_SIZE` | `100` | `runEscrowIndexerCycle` |
 | `STELLAR_HORIZON_URL` | testnet Horizon | `fetchEscrowEventsFromHorizon` |
 | `REDIS_ESCROW_CACHE_ENABLED` | `false` | Optional read cache |
-| `SOROBAN_MAX_RETRIES` / `SOROBAN_BASE_DELAY` / `SOROBAN_MAX_DELAY` | 3 / 200 / 5000 | [`soroban.js`](../src/services/soroban.js) |
+| `SOROBAN_MAX_RETRIES` / `SOROBAN_BASE_DELAY` / `SOROBAN_MAX_DELAY` / `SOROBAN_MAX_ELAPSED_MS` | 3 / 200 / 5000 / 10000 | [`soroban.js`](../src/services/soroban.js) |
 
 Never commit secrets; use `.env` locally and deployment secret stores.
 

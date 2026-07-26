@@ -2,7 +2,6 @@ const metrics = require('../metrics');
 const {
   callSorobanContract,
   withRetry,
-  computeBackoff,
   sharedBreaker,
   getRetryCauseLabel,
 } = require('./soroban');
