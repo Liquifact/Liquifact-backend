@@ -36,14 +36,9 @@ const {
 const { adminConfigLimiter } = require('../middleware/rateLimit');
 const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
 const logger = require('../logger');
-const {
-  toAdminConfigRequestDto,
-  fromAdminConfigRequestDto,
-  toAdminConfigResponseDto,
-  fromConfigSectionsResponseDto,
-} = require('../dto/config');
 
 const router = express.Router();
+
 
 // ── Apply per-client rate limit *before* admin auth + tenant extraction ─────
 // Mounting the limiter ahead of adminStack ensures failed authentication

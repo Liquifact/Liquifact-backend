@@ -285,12 +285,15 @@ jest.mock('../../src/middleware/rateLimit', () => {
     apiKeyLimiter: noopMiddleware,
     adminConfigLimiter: noopMiddleware,
     healthLimiter: noopMiddleware,
+    metricsLimiter: noopMiddleware,
     createConfigRateLimiter: jest.fn(() => noopMiddleware),
+    createMetricsRateLimiter: jest.fn(() => noopMiddleware),
     invoiceStateLimiter: noopMiddleware,
     createRateLimiter: jest.fn(() => noopMiddleware),
     adminConfigHandler: jest.fn(),
     adminConfigKeyGenerator: jest.fn((req) => req.ip || '127.0.0.1'),
     healthHandler: jest.fn(),
+    metricsRateLimitHandler: jest.fn(),
     parseRateLimitEnv: jest.fn((_, def) => def),
     keyGenerator: jest.fn((req) => req.ip || '127.0.0.1'),
     apiKeyKeyGenerator: jest.fn((req) => req.ip || '127.0.0.1'),
@@ -299,5 +302,7 @@ jest.mock('../../src/middleware/rateLimit', () => {
     CONFIG_RATE_LIMIT_MAX: 20,
     HEALTH_RATE_LIMIT_WINDOW_MS: 15000,
     HEALTH_RATE_LIMIT_MAX: 60,
+    METRICS_RATE_LIMIT_WINDOW_MS: 60000,
+    METRICS_RATE_LIMIT_MAX: 30,
   };
 }, { virtual: true });

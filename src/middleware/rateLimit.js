@@ -451,22 +451,10 @@ const invoiceStateLimiter = rateLimit({
   },
 });
 
-function metricsRateLimitHandler(req, res, next, options) {
+function metricsRateLimitHandler(_req, res, _next, options) {
   res.status(options.statusCode).json({
     error: 'Too many requests.',
     message: 'Rate limit threshold breached for /metrics. Please try again later.',
-  });
-}
-
-function createMetricsRateLimiter() {
-  return rateLimit({
-    windowMs: METRICS_RATE_LIMIT_WINDOW_MS,
-    limit: METRICS_RATE_LIMIT_MAX,
-    standardHeaders: true,
-    legacyHeaders: false,
-    keyGenerator,
-    validate: { xForwardedForHeader: false },
-    handler: metricsRateLimitHandler,
   });
 }
 
@@ -475,10 +463,29 @@ const metricsLimiter = rateLimit({
   limit: METRICS_RATE_LIMIT_MAX,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator,
-  validate: { xForwardedForHeader: false },
+  store: resolveRateLimitStore('metrics'),
+  keyGenerator: adminConfigKeyGenerator,
+  validate: {
+    xForwardedForHeader: false,
+  },
   handler: metricsRateLimitHandler,
 });
+
+function createMetricsRateLimiter() {
+  return rateLimit({
+    windowMs: METRICS_RATE_LIMIT_WINDOW_MS,
+    limit: METRICS_RATE_LIMIT_MAX,
+    standardHeaders: true,
+    legacyHeaders: false,
+    store: resolveRateLimitStore('metrics'),
+    keyGenerator: adminConfigKeyGenerator,
+    validate: {
+      xForwardedForHeader: false,
+    },
+    handler: metricsRateLimitHandler,
+  });
+}
+
 
 module.exports = {
   createRateLimiter,

@@ -50,7 +50,9 @@ const { escrowReadLimiter } = require('./middleware/rateLimit');
 const { metricsAuth, metricsHandler } = require('./metrics');
 const { metricsLimiter } = require('./middleware/rateLimit');
 const { instrumentHealth } = require('./middleware/healthMetrics');
-const { metricsLimiter } = require('./middleware/rateLimit');
+
+
+
 const smeRoutes = require('./routes/sme');
 const invoiceFileRoutes = require('./routes/invoiceFile');
 const auditTrailRoutes = require('./routes/auditTrail');
@@ -416,6 +418,10 @@ function createApp() {
   // still consume quota — defending against brute-force token guessing
   // on the metrics surface (issue #744).
   app.get('/metrics', (req, res, next) => metricsLimiter ? metricsLimiter(req, res, next) : next(), metricsAuth, metricsHandler);
+
+
+
+
 
   // ── 7. 404 catch-all ─────────────────────────────────────────────────────
   app.use((req, res) => {

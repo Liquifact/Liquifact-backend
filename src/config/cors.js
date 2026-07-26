@@ -738,4 +738,5 @@ module.exports = {
   resolveAllowlist,
   validateBulkCorsItem,
   validateCorsOrigin,
+  validateOriginEntry,
 };
