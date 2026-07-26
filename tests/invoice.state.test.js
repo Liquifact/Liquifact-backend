@@ -800,10 +800,13 @@ describe('Invoice State API Routes', () => {
       return invoiceStore.get(storeKey(tenantId, id)) || null;
     });
 
-    jest.spyOn(invoiceService, 'updateInvoice').mockImplementation(async (id, updates, tenantId) => {
+    jest.spyOn(invoiceService, 'updateInvoice').mockImplementation(async (id, updates, tenantId, options = {}) => {
       const key = storeKey(tenantId, id);
       const existing = invoiceStore.get(key);
       if (!existing) {
+        return null;
+      }
+      if (options.expectedStatus !== undefined && existing.status !== options.expectedStatus) {
         return null;
       }
       const updated = { ...existing, ...updates };
@@ -1273,15 +1276,30 @@ describe('Invoice State API Routes', () => {
 
   describe('Security and Edge Cases', () => {
     it('should handle concurrent transition attempts gracefully', async () => {
-      const promises = [
+      // Yield between read and write so concurrent requests can interleave.
+      jest.spyOn(invoiceService, 'getInvoiceById').mockImplementation(async (id, tenantId) => {
+        await new Promise((resolve) => setImmediate(resolve));
+        return invoiceStore.get(storeKey(tenantId, id)) || null;
+      });
+
+      const results = await Promise.all([
         request(app).post('/api/invoices/inv-001/approve').set('x-tenant-id', TENANT_A).send({ reason: 'Concurrent 1' }),
         request(app).post('/api/invoices/inv-001/approve').set('x-tenant-id', TENANT_A).send({ reason: 'Concurrent 2' }),
-      ];
+      ]);
 
-      const results = await Promise.all(promises);
+      const successCount = results.filter((r) => r.status === 200).length;
+      const conflictOrAlready = results.filter((r) =>
+        r.status === 409 ||
+        (r.status === 400 && r.body?.error?.code === 'ALREADY_IN_TARGET_STATE'),
+      ).length;
 
-      const successCount = results.filter(r => r.status === 200).length;
-      expect(successCount).toBeGreaterThanOrEqual(1);
+      expect(successCount).toBe(1);
+      expect(conflictOrAlready).toBe(1);
+      expect(invoiceStore.get(storeKey(TENANT_A, 'inv-001')).status).toBe('approved');
+
+      const logs = await getAuditLogs({ resourceId: 'inv-001' });
+      expect(logs).toHaveLength(1);
+      expect(logs[0].changes.after.state).toBe('approved');
     });
 
     it('should handle special characters in reason', async () => {

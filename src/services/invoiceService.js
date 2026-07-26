@@ -31,7 +31,7 @@ const { encodeCursor, decodeCursor, CursorError } = require('../utils/cursorPagi
 const logger = require('../logger');
 const AppError = require('../errors/AppError');
 const { LOCKED_STATUSES } = require('../middleware/patchInvoice');
-const { executeTransition: stateMachineExecute } = require('./invoiceStateMachine');
+const { executeTransition, validateTransition } = require('./invoiceStateMachine');
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -395,13 +395,35 @@ async function createInvoice(invoiceData, tenantId) {
  * @returns {Promise<object|null>} Updated row, or null if not found.
  * @throws {TypeError} When id is missing.
  */
-async function updateInvoice(id, updates = {}, tenantId) {
+/**
+ * Updates an invoice row for a tenant.
+ *
+ * When `options.expectedStatus` is set, the UPDATE is compare-and-swap (CAS):
+ * it only applies if the row's current `status` still matches. A concurrent
+ * writer that already flipped the status causes this call to return `null`
+ * instead of overwriting (lost-update prevention for state transitions).
+ *
+ * @param {string} id - Public invoice_id.
+ * @param {object} [updates={}] - Column updates to apply.
+ * @param {string} tenantId - Tenant identifier.
+ * @param {object} [options={}] - Update options.
+ * @param {string} [options.expectedStatus] - Required current status for CAS.
+ * @returns {Promise<object|null>} Updated row, or null when missing / CAS miss.
+ */
+async function updateInvoice(id, updates = {}, tenantId, options = {}) {
   if (!id) {
     throw new TypeError('invoice id required');
   }
+  const { expectedStatus } = options;
+
   // Ensure invoice exists and belongs to tenant
   const existing = await db('invoices').where({ invoice_id: id, tenant_id: tenantId }).first();
   if (!existing) {
+    return null;
+  }
+
+  // CAS pre-check (still enforced atomically in the UPDATE below)
+  if (expectedStatus !== undefined && existing.status !== expectedStatus) {
     return null;
   }
 
@@ -415,8 +437,14 @@ async function updateInvoice(id, updates = {}, tenantId) {
       code: 'LOCKED_STATUS',
     });
   }
+
+  const where = { invoice_id: id, tenant_id: tenantId };
+  if (expectedStatus !== undefined) {
+    where.status = expectedStatus;
+  }
+
   const result = await db('invoices')
-    .where({ invoice_id: id, tenant_id: tenantId })
+    .where(where)
     .update({ ...updates, updated_at: nowValue() })
     .returning('*');
 
@@ -426,7 +454,20 @@ async function updateInvoice(id, updates = {}, tenantId) {
     return result[0];
   }
 
-  // SQLite path
+  // SQLite / drivers that return affected-row count instead of returning(*)
+  if (typeof result === 'number') {
+    if (result === 0) {
+      return null;
+    }
+    return db('invoices').where({ invoice_id: id, tenant_id: tenantId }).first();
+  }
+
+  if (expectedStatus !== undefined) {
+    // Empty returning array ⇒ CAS miss under Postgres
+    return null;
+  }
+
+  // SQLite path (non-CAS)
   return db('invoices').where({ invoice_id: id, tenant_id: tenantId }).first();
 }
 
@@ -553,18 +594,22 @@ async function transitionInvoice(invoiceId, targetState, tenantId, options = {})
     escrowId,
   } = options;
 
-  const result = await stateMachineExecute({
+  // Validate before any side effects so concurrent losers do not emit phantom audits.
+  const validation = validateTransition({
     invoiceId,
     currentState: invoice.status,
     targetState,
     actor,
     reason,
-    ipAddress,
-    userAgent,
-    metadata,
   });
+  if (!validation.isValid) {
+    const error = new Error(validation.error);
+    error.code = validation.code;
+    error.allowedTransitions = validation.allowedTransitions;
+    throw error;
+  }
 
-  const updates = { status: result.newState };
+  const updates = { status: targetState };
 
   if (escrowId !== undefined) {
     const meta = parseInvoiceMetadata(invoice.metadata);
@@ -574,9 +619,53 @@ async function transitionInvoice(invoiceId, targetState, tenantId, options = {})
     updates.metadata = JSON.stringify(meta);
   }
 
-  await module.exports.updateInvoice(invoiceId, updates, tenantId);
+  // Optimistic CAS: only persist when status is still the state we validated against.
+  const persisted = await module.exports.updateInvoice(invoiceId, updates, tenantId, {
+    expectedStatus: invoice.status,
+  });
 
-  return result;
+  if (!persisted) {
+    const latest = await module.exports.resolveInvoiceForTenant(invoiceId, tenantId);
+    if (!latest) {
+      const err = new Error('Invoice not found');
+      err.code = 'INVOICE_NOT_FOUND';
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const retryValidation = validateTransition({
+      invoiceId,
+      currentState: latest.status,
+      targetState,
+      actor,
+      reason,
+    });
+    if (!retryValidation.isValid) {
+      const error = new Error(retryValidation.error);
+      error.code = retryValidation.code;
+      error.allowedTransitions = retryValidation.allowedTransitions;
+      throw error;
+    }
+
+    const err = new Error(
+      `Concurrent modification of invoice ${invoiceId}; transition from ${invoice.status} to ${targetState} aborted`,
+    );
+    err.code = 'TRANSITION_CONFLICT';
+    err.statusCode = 409;
+    throw err;
+  }
+
+  // Persist succeeded — emit audit trail for the winning transition only.
+  return executeTransition({
+    invoiceId,
+    currentState: invoice.status,
+    targetState,
+    actor,
+    reason,
+    ipAddress,
+    userAgent,
+    metadata,
+  });
 }
 
 // ---------------------------------------------------------------------------
