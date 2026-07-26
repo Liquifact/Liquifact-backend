@@ -289,6 +289,7 @@ jest.mock('../../src/middleware/rateLimit', () => {
     createConfigRateLimiter: jest.fn(() => noopMiddleware),
     createMetricsRateLimiter: jest.fn(() => noopMiddleware),
     invoiceStateLimiter: noopMiddleware,
+    indexerLimiter: noopMiddleware,
     createRateLimiter: jest.fn(() => noopMiddleware),
     adminConfigHandler: jest.fn(),
     adminConfigKeyGenerator: jest.fn((req) => req.ip || '127.0.0.1'),
