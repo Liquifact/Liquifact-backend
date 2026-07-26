@@ -268,14 +268,14 @@ describe('SME Invoice Upload - Security Hardening', () => {
         .send({ fileName: 'test.pdf' });
 
       expect(response.status).toBe(400);
-      expect(response.body.error).toBe('fileName, mimeType, and fileSize are required');
+      expect(response.body.code).toBe('PERSISTENCE_VALIDATION_FAILED');
+      expect(response.body.fieldErrors).toBeDefined();
+      expect(
+        response.body.fieldErrors.mimeType || response.body.fieldErrors.fileSize
+      ).toBeDefined();
     });
 
     it('should return 400 for invalid MIME type', async () => {
-      const error = new Error('Invalid MIME type: "text/html"');
-      error.code = 'INVALID_MIME_TYPE';
-      storageService.getPresignedUploadUrl.mockRejectedValue(error);
-
       const response = await request(app)
         .post('/api/sme/invoice/presigned-url')
         .set('X-Tenant-Id', 'test-tenant')
@@ -287,14 +287,12 @@ describe('SME Invoice Upload - Security Hardening', () => {
         });
 
       expect(response.status).toBe(400);
-      expect(response.body.error).toContain('Invalid MIME type');
+      expect(response.body.code).toBe('PERSISTENCE_VALIDATION_FAILED');
+      expect(response.body.fieldErrors.mimeType).toBeDefined();
+      expect(storageService.getPresignedUploadUrl).not.toHaveBeenCalled();
     });
 
     it('should return 400 for oversized file', async () => {
-      const error = new Error('File size 1048576 exceeds maximum');
-      error.code = 'FILE_TOO_LARGE';
-      storageService.getPresignedUploadUrl.mockRejectedValue(error);
-
       const response = await request(app)
         .post('/api/sme/invoice/presigned-url')
         .set('X-Tenant-Id', 'test-tenant')
@@ -306,7 +304,9 @@ describe('SME Invoice Upload - Security Hardening', () => {
         });
 
       expect(response.status).toBe(400);
-      expect(response.body.error).toContain('File size exceeds maximum');
+      expect(response.body.code).toBe('PERSISTENCE_VALIDATION_FAILED');
+      expect(response.body.fieldErrors.fileSize).toBeDefined();
+      expect(storageService.getPresignedUploadUrl).not.toHaveBeenCalled();
     });
 
     it('should never expose AWS credentials in response', async () => {
