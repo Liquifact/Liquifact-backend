@@ -273,6 +273,21 @@ try {
     }
   }
 
+  /**
+   * Histogram shim for test environments.
+   * @implements {import('prom-client').Histogram}
+   */
+  class HistogramShim {
+    /** @param {void} */
+    constructor() {}
+    /** @returns {void} */
+    observe() {}
+    /** @returns {Function} */
+    labels() { return this; }
+    /** @returns {void} */
+    inc() {}
+  }
+
   client = {
     Registry: RegistryShim,
     /**

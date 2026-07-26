@@ -25,6 +25,7 @@ const { authenticateToken } = require('../../middleware/auth');
 const invoiceService = require('../../services/invoiceService');
 const { resolveEscrowAddress } = require('../../config/escrowMap');
 const { readEscrowState } = require('../../services/escrowRead');
+const { recordEscrowRead } = require('../../services/escrowReadMetrics');
 const { computeEscrowDerivedFields } = require('../../services/escrowDerived');
 const AppError = require('../../errors/AppError');
 const { invoiceCreateSchema, invoiceUpdateSchema, parseValidationErrors } = require('../../schemas/invoice');
@@ -167,15 +168,18 @@ router.post('/invoices', extractTenant, async (req, res, next) => {
  * Returns escrow state with derived display fields.
  * Authentication is required for versioned escrow reads.
  */
-router.get('/escrow/:invoiceId', authenticateToken, extractTenant, async (req, res, next) => {
-  try {
-    const invoiceId = String(req.params.invoiceId || '').trim().replace(/\s+/g, '');
+router.get('/escrow/:invoiceId', authenticateToken, async (req, res, next) => {
+  const startTime = Date.now();
+  const invoiceId = String(req.params.invoiceId || '').trim().replace(/\s+/g, '');
 
+  try {
     const escrowAddress = resolveEscrowAddress(invoiceId);
     if (!escrowAddress) {
-      return res.status(404).json({
+      res.status(404).json({
         error: `No escrow contract mapping found for invoice ID '${invoiceId}'`,
       });
+      recordEscrowRead({ startTime, invoiceId, endpoint: 'v1', statusCode: 404 });
+      return;
     }
 
     const state = await readEscrowState(invoiceId);
@@ -190,13 +194,15 @@ router.get('/escrow/:invoiceId', authenticateToken, extractTenant, async (req, r
     };
 
     res.set('X-Escrow-Address', escrowAddress);
-    return res.json({
+    res.status(200).json({
       data,
       message: state.fromProjection
         ? 'Escrow state read from event projection.'
         : 'Escrow state read from live Soroban contract.',
     });
+    recordEscrowRead({ startTime, invoiceId, endpoint: 'v1', statusCode: 200 });
   } catch (err) {
+    recordEscrowRead({ startTime, invoiceId, endpoint: 'v1', statusCode: typeof err.status === 'number' && err.status >= 400 ? err.status : 500, err });
     return next(err);
   }
 });
