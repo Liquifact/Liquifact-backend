@@ -14,6 +14,10 @@ const {
 
 const router = express.Router();
 
+// Per-client (API key / IP) rate limit on the kyc-webhooks endpoints (#729).
+const { kycWebhookLimiter } = require('../middleware/rateLimit');
+router.use(kycWebhookLimiter);
+
 const MAX_LIMIT = 100;
 const DEFAULT_LIMIT = 20;
 const SORT_FIELD = 'updated_at';
