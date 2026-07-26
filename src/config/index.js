@@ -57,6 +57,8 @@ const ConfigSchema = z
     KYC_PROVIDER_VERIFY_RESPONSE_SIGNATURE: z.enum(['true', 'false']).default('false'),
     KYC_PROVIDER_CB_FAILURE_THRESHOLD: z.coerce.number().min(1).max(100).default(5),
     KYC_PROVIDER_CB_RECOVERY_TIMEOUT_MS: z.coerce.number().min(100).max(60000).default(10000),
+    // KYC webhook ingestion feature flag — safe default: disabled
+    KYC_WEBHOOK_ENABLED: z.enum(['true', 'false']).default('false'),
     // Public base URL for the API, used in the OpenAPI spec servers array.
     // Required in production and must use HTTPS. Falls back to localhost in development/test.
     PUBLIC_API_BASE_URL: z.string().url().optional(),

@@ -14,6 +14,20 @@ const {
 
 const router = express.Router();
 
+/**
+ * Returns true when the KYC webhook endpoint is enabled.
+ * Reads KYC_WEBHOOK_ENABLED at call-time so the flag can be toggled
+ * without a process restart.
+ *
+ * Safe default: disabled — any value other than the exact string "true"
+ * leaves the endpoint off.
+ *
+ * @returns {boolean}
+ */
+function isKycWebhookEnabled() {
+  return process.env.KYC_WEBHOOK_ENABLED === 'true';
+}
+
 const MAX_LIMIT = 100;
 const DEFAULT_LIMIT = 20;
 const SORT_FIELD = 'updated_at';
@@ -34,6 +48,12 @@ function parseJsonPayload(rawBody) {
  * (existing ingestion endpoint – unchanged)
  */
 router.post('/webhook', async (req, res) => {
+  // Feature flag — disabled by default, set KYC_WEBHOOK_ENABLED=true to activate
+  if (!isKycWebhookEnabled()) {
+    logger.info({ route: '/api/kyc/webhook' }, 'KYC webhook ingestion is disabled (KYC_WEBHOOK_ENABLED != true)');
+    return res.status(503).json({ error: 'KYC webhook ingestion is disabled' });
+  }
+
   const startTime = process.hrtime.bigint();
   let statusClass = '2xx';
   let cause = 'none';
@@ -246,3 +266,4 @@ router.get('/webhooks', async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.isKycWebhookEnabled = isKycWebhookEnabled;
