@@ -37,7 +37,6 @@ const { adminConfigLimiter } = require('../middleware/rateLimit');
 const idempotencyMiddleware = require('../middleware/idempotency');
 const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
 const logger = require('../logger');
-const idempotencyMiddleware = require('../middleware/idempotency');
 
 const router = express.Router();
 
@@ -58,16 +57,9 @@ router.use(...adminStack);
  * @param {object} res - Express response
  * @param {function} next - Express next callback
  * @returns {void}
- */
-const optionalIdempotency = (req, res, next) => {
-  if (req.header('Idempotency-Key')) {
-    return idempotencyMiddleware(req, res, next);
-  }
-  next();
-};
+*/
 
 // ── POST /api/admin/config ────────────────────────────────────────────────────
-
 /**
  * @swagger
  * /api/admin/config:

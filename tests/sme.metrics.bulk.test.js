@@ -15,11 +15,12 @@ jest.mock('../src/db/knex', () => {
 
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
-const app = require('../src/index');
+const { createApp } = require('../src/app');
 const db = require('../src/db/knex');
 const invoiceService = require('../src/services/invoiceService');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'test-secret-at-least-32-characters-long-string-for-jest';
+const app = createApp();
 
 describe('SME Bulk Metrics API', () => {
   const userId = 'test_sme_user';
@@ -315,11 +316,11 @@ describe('SME Bulk Metrics API', () => {
       const otherUserId = 'will_fail_user';
       const spy = jest
         .spyOn(invoiceService, 'getSmeInvoiceCounts')
-        .mockImplementationOnce(async (tid, uid) => {
+        .mockImplementation(async (tid, uid) => {
           if (uid === otherUserId) {
             throw new Error('Database connection lost');
           }
-          return invoiceService.getSmeInvoiceCounts.__original ? invoiceService.getSmeInvoiceCounts.__original(tid, uid) : { open: 1, funded: 0, settled: 0, defaulted: 0 };
+          return { open: 1, funded: 0, settled: 0, defaulted: 0 };
         });
 
       const res = await request(app)
