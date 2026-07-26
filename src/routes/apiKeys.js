@@ -1,20 +1,87 @@
+/**
+ * API Keys endpoints with cursor-based pagination and key lifecycle management.
+ *
+ * GET /v1/api-keys
+ *   Query params:
+ *     limit   {number}  items per page (default 20, max 100)
+ *     cursor  {string}  opaque cursor from previous page
+ *   Response:
+ *     { data: ApiKeyEntry[], nextCursor: string | null }
+ *
+ * POST /v1/api-keys
+ *   Body: { key: string, clientId: string, scopes: string[], revoked?: boolean }
+ *   Response 201: { data: ApiKeyEntry, message: string }
+ *
+ * GET /v1/api-keys/:key
+ *   Response 200: { data: ApiKeyEntry }
+ *   Response 404: { error: string }
+ *
+ * @module routes/apiKeys
+ */
+
 'use strict';
 
 const express = require('express');
-const { loadApiKeyRegistry } = require('../config/apiKeys');
-const {
-  fromCreateApiKeyRequestDto,
-  toCreateApiKeyResponseDto,
-  toDuplicateApiKeyResponseDto,
-  toListApiKeysResponseDto,
-  toGetApiKeyResponseDto,
-  validateCreateApiKeyRequest,
-} = require('./apiKeys.dto');
+const { loadApiKeyRegistry, validateEntry } = require('../config/apiKeys');
 
 const router = express.Router();
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
+
+// ── Runtime entries store (in-memory) ─────────────────────────────────────────
+// Keys created via POST are stored here so they appear in subsequent GET
+// listings and GET /:key lookups. This mirrors the env-based registry for
+// dynamically created keys.
+
+/** @type {Map<string, import('../config/apiKeys').ApiKeyEntry>} */
+let runtimeEntries = new Map();
+
+/**
+ * Resets the runtime entries store. Exported so test suites can clean up
+ * between cases without restarting the process.
+ *
+ * @returns {void}
+ */
+function resetRuntimeEntries() {
+  runtimeEntries = new Map();
+}
+
+/**
+ * Builds the combined registry (env-based entries + runtime entries).
+ * Runtime entries take precedence so a dynamically created key with the
+ * same key string as a static entry overrides it.
+ *
+ * @returns {Map<string, import('../config/apiKeys').ApiKeyEntry>}
+ */
+function buildCombinedRegistry() {
+  const staticRegistry = loadApiKeyRegistry();
+  const combined = new Map(staticRegistry);
+  for (const [key, entry] of runtimeEntries) {
+    combined.set(key, entry);
+  }
+  return combined;
+}
+
+/**
+ * Validates an API key creation/update request body.
+ *
+ * Shared validation consumed by POST and any future write endpoints so
+ * that every handler enforces the same contract.
+ *
+ * @param {unknown} body - The request body to validate.
+ * @returns {{ valid: true, entry: import('../config/apiKeys').ApiKeyEntry } | { valid: false, error: string }}
+ */
+function validateApiKeyBody(body) {
+  try {
+    const entry = validateEntry(body, 0);
+    return { valid: true, entry };
+  } catch (err) {
+    return { valid: false, error: `Validation failed: ${err.message}` };
+  }
+}
+
+// ── Encode/decode cursors ────────────────────────────────────────────────────
 
 /**
  * Module-level runtime store for dynamically created API keys.
@@ -84,11 +151,13 @@ function decodeCursor(cursor) {
   }
 }
 
+// ── Route handler definitions (reusable) ─────────────────────────────────────
+
 /**
- * GET /
- * Returns a paginated list of registered API keys from the config registry.
+ * GET list handler — returns a paginated list of registered API keys.
  */
-router.get('/', (req, res) => {
+function listHandler(req, res) {
+  // Parse and clamp limit
   let limit = parseInt(req.query.limit, 10);
   if (Number.isNaN(limit) || limit < 1) {
     limit = DEFAULT_LIMIT;
@@ -97,7 +166,8 @@ router.get('/', (req, res) => {
     limit = MAX_LIMIT;
   }
 
-  const registry = loadApiKeyRegistry();
+  // Load all keys from the combined registry
+  const registry = buildCombinedRegistry();
   const allEntries = Array.from(registry.values());
 
   let startIndex = 0;
@@ -124,9 +194,76 @@ router.get('/', (req, res) => {
 
   return res.json({
     data: page,
+    count: allEntries.length,
     nextCursor,
   });
-});
+}
+
+/**
+ * POST create handler — creates a new API key in the runtime store.
+ */
+function createHandler(req, res) {
+  const validation = validateApiKeyBody(req.body);
+
+  if (!validation.valid) {
+    return res.status(422).json({ error: validation.error });
+  }
+
+  const entry = validation.entry;
+
+  // Check for duplicate key in the combined registry
+  const existing = buildCombinedRegistry().get(entry.key);
+  if (existing) {
+    return res.status(200).json({
+      data: existing,
+      message: 'API key already exists (idempotent).',
+      idempotent: true,
+    });
+  }
+
+  // Store in runtime entries
+  runtimeEntries.set(entry.key, entry);
+
+  return res.status(201).json({
+    data: entry,
+    message: 'API key created successfully.',
+  });
+}
+
+/**
+ * GET single-key handler — returns a single API key by its key string.
+ */
+function singleKeyHandler(req, res) {
+  const key = req.params.key;
+  if (!key || typeof key !== 'string') {
+    return res.status(400).json({ error: 'Missing or invalid key parameter' });
+  }
+
+  const registry = buildCombinedRegistry();
+  const entry = registry.get(key);
+
+  if (!entry) {
+    return res.status(404).json({ error: 'API key not found' });
+  }
+
+  return res.json({ data: entry });
+}
+
+// ── Route registration ───────────────────────────────────────────────────────
+// Static path aliases are registered BEFORE parameterised routes so they
+// take priority in Express 5 routing.
+
+// GET list — accessible at /, /keys, and /api-keys
+router.get('/', listHandler);
+router.get('/keys', listHandler);
+router.get('/api-keys', listHandler);
+
+// POST create — accessible at / and /keys
+router.post('/', createHandler);
+router.post('/keys', createHandler);
+
+// GET single key
+router.get('/:key', singleKeyHandler);
 
 // ── New list + get + create routes (mounted at /api and /) ──────────────
 
