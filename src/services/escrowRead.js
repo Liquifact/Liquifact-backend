@@ -280,19 +280,33 @@ function _coerceFundedAmount(raw) {
  *  - Decimals that may appear on the projection are display-only. They are
  *    never copied into the base-state return value and must NEVER be used to
  *    scale on-chain principal math (see `src/services/tokenMeta.js`).
+ *  - Soft-deleted rows (`deleted_at` set, issue #31) are treated as absent so
+ *    every default read falls through to the neutral `not_found` state. The
+ *    filter is applied in JS rather than in the WHERE clause because the row
+ *    is fetched by primary key either way, and callers that need the tombstone
+ *    (the restore path) go through `services/escrowReadSoftDelete`.
  *
  * @param {string} safeId - Validated, trimmed invoice ID.
  * @param {import('knex').Knex} [dbClient=db] - Knex instance (injectable for tests).
+ * @param {object} [options={}]
+ * @param {boolean} [options.includeDeleted=false] - Include soft-deleted rows.
  * @returns {Promise<object|null>} Normalised base state, or null when no
- *   projection row exists for the invoice (or the DB read fails).
+ *   projection row exists for the invoice, the row is soft-deleted, or the DB
+ *   read fails.
  */
-async function _readBaseStateFromProjection(safeId, dbClient = db) {
+async function _readBaseStateFromProjection(safeId, dbClient = db, options = {}) {
   try {
     const projection = await dbClient("escrow_event_projection")
       .where("invoice_id", safeId)
       .first();
 
     if (!projection) {
+      return null;
+    }
+
+    // Issue #31 — soft-deleted escrow-read records are excluded from default
+    // reads; they remain restorable until the retention window elapses.
+    if (!options.includeDeleted && projection.deleted_at != null) {
       return null;
     }
 
@@ -359,6 +373,8 @@ async function _readBaseStateFromProjection(safeId, dbClient = db) {
  * @param {object} [options={}]
  * @param {import('knex').Knex} [options.dbClient=db] - Override the default
  *   Knex instance for tests.
+ * @param {boolean} [options.includeDeleted=false] - When true, soft-deleted
+ *   (issue #31) projection rows are read instead of being hidden.
  * @returns {Promise<object>} Base escrow state without `legal_hold`.
  */
 async function _fetchBaseEscrowState(invoiceId, adapter, options = {}) {
@@ -370,6 +386,7 @@ async function _fetchBaseEscrowState(invoiceId, adapter, options = {}) {
   const projectionState = await _readBaseStateFromProjection(
     invoiceId,
     options.dbClient,
+    { includeDeleted: options.includeDeleted === true },
   );
   if (projectionState) {
     return projectionState;

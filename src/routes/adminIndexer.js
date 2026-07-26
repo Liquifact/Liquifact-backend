@@ -16,117 +16,21 @@
 const express = require('express');
 
 const router = express.Router();
-const { listIndexerEvents, INDEXER_SORT_FIELDS } = require('../services/indexerService');
+const { listIndexerEvents } = require('../services/indexerService');
 const { CursorError } = require('../utils/cursorPagination');
 const { adminStack } = require('../middleware/stacks');
+const { indexerLimiter } = require('../middleware/rateLimit');
 const responseHelper = require('../utils/responseHelper');
 const logger = require('../logger');
+const { validateIndexerQuery } = require('../schemas/indexerQuery');
 
-/**
- * Maximum page size clamped by the service layer.
- * @constant {number}
- */
-const MAX_LIMIT = 100;
+// Apply a per-client rate limit before admin auth so bursts are contained
+// even when the caller is unauthenticated or misconfigured.
+router.use(indexerLimiter);
 
 // Apply admin auth (JWT or API key) + tenant extraction to every route in this
 // file.
 router.use(...adminStack);
-
-/**
- * Validates and normalises query parameters for the events listing endpoint.
- *
- * @param {object} query - Express `req.query` object.
- * @returns {{ isValid: boolean, fieldErrors: Record<string,string>, params: object }}
- */
-function _parseQuery(query) {
-  const fieldErrors = {};
-  const params = { filters: {}, sorting: {}, pagination: {} };
-
-  const ALLOWED_PARAMS = new Set(['invoiceId', 'eventType', 'contractId', 'sortBy', 'order', 'cursor', 'page', 'limit']);
-  const unknown = Object.keys(query).filter((k) => !ALLOWED_PARAMS.has(k));
-  if (unknown.length > 0) {
-    fieldErrors._unknown = `Unknown query parameters: ${unknown.join(', ')}`;
-  }
-
-  const { invoiceId, eventType, contractId, sortBy, order, cursor, page, limit } = query;
-
-  // ── Filters ───────────────────────────────────────────────────────────────
-  if (invoiceId !== undefined) {
-    if (typeof invoiceId === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(invoiceId.trim())) {
-      params.filters.invoiceId = invoiceId.trim();
-    } else {
-      fieldErrors.invoiceId = 'invoiceId must be 1–128 alphanumeric/underscore/hyphen characters';
-    }
-  }
-
-  if (eventType !== undefined) {
-    if (typeof eventType === 'string' && eventType.trim().length > 0 && eventType.trim().length <= 128) {
-      params.filters.eventType = eventType.trim();
-    } else {
-      fieldErrors.eventType = 'eventType must be a non-empty string (max 128 chars)';
-    }
-  }
-
-  if (contractId !== undefined) {
-    if (typeof contractId === 'string' && /^C[A-Z2-7]{55}$/.test(contractId.trim())) {
-      params.filters.contractId = contractId.trim();
-    } else {
-      fieldErrors.contractId = 'contractId must be a valid Stellar contract address (C… 56 chars)';
-    }
-  }
-
-  // ── Sorting ───────────────────────────────────────────────────────────────
-  if (sortBy !== undefined) {
-    if (INDEXER_SORT_FIELDS.includes(sortBy)) {
-      params.sorting.sortBy = sortBy;
-    } else {
-      fieldErrors.sortBy = `sortBy must be one of: ${INDEXER_SORT_FIELDS.join(', ')}`;
-    }
-  }
-
-  if (order !== undefined) {
-    const lowerOrder = String(order).toLowerCase();
-    if (lowerOrder === 'asc' || lowerOrder === 'desc') {
-      params.sorting.order = lowerOrder;
-    } else {
-      fieldErrors.order = 'order must be "asc" or "desc"';
-    }
-  }
-
-  // ── Pagination ────────────────────────────────────────────────────────────
-  if (cursor !== undefined) {
-    if (typeof cursor === 'string' && cursor.length > 0 && cursor.length <= 2048) {
-      params.pagination.cursor = cursor;
-    } else {
-      fieldErrors.cursor = 'cursor must be a non-empty string (max 2048 chars)';
-    }
-  }
-
-  // page is only relevant when no cursor is provided
-  if (cursor === undefined && page !== undefined) {
-    const val = parseInt(page, 10);
-    if (!isNaN(val) && val >= 1) {
-      params.pagination.page = val;
-    } else {
-      fieldErrors.page = 'page must be an integer >= 1';
-    }
-  }
-
-  if (limit !== undefined) {
-    const val = parseInt(limit, 10);
-    if (!isNaN(val) && val >= 1 && val <= MAX_LIMIT) {
-      params.pagination.limit = val;
-    } else {
-      fieldErrors.limit = `limit must be an integer between 1 and ${MAX_LIMIT}`;
-    }
-  }
-
-  return {
-    isValid: Object.keys(fieldErrors).length === 0,
-    fieldErrors,
-    params,
-  };
-}
 
 /**
  * @swagger
@@ -225,15 +129,15 @@ function _parseQuery(query) {
  *                   items:
  *                     type: object
  *                     properties:
- *                       event_id:       { type: string }
- *                       invoice_id:     { type: string }
- *                       event_type:     { type: string }
- *                       ledger_sequence: { type: integer }
- *                       paging_token:   { type: string, nullable: true }
- *                       contract_id:    { type: string, nullable: true }
- *                       tx_hash:        { type: string, nullable: true }
- *                       observed_at:    { type: string, format: date-time }
- *                       created_at:     { type: string, format: date-time }
+ *                       eventId:        { type: string }
+ *                       invoiceId:      { type: string }
+ *                       eventType:      { type: string }
+ *                       ledgerSequence: { type: integer }
+ *                       pagingToken:    { type: string, nullable: true }
+ *                       contractId:     { type: string, nullable: true }
+ *                       txHash:         { type: string, nullable: true }
+ *                       observedAt:     { type: string, format: date-time }
+ *                       createdAt:      { type: string, format: date-time }
  *                 meta:
  *                   type: object
  *                   properties:
@@ -250,10 +154,10 @@ function _parseQuery(query) {
  *       403:
  *         $ref: '#/components/responses/Problem403'
  */
-router.get('/events', async (req, res, next) => {
+router.get('/events', instrumentIndexer(async (req, res, next) => {
   try {
-    // ── 1. Parse and validate query parameters ──────────────────────────────
-    const { isValid, fieldErrors, params } = _parseQuery(req.query);
+    // ── 1. Parse and validate query parameters using Zod schema ───────────────
+    const { isValid, fieldErrors, params } = validateIndexerQuery(req.query);
 
     if (!isValid) {
       return res.status(400).json(
@@ -261,13 +165,15 @@ router.get('/events', async (req, res, next) => {
       );
     }
 
-    // ── 2. Call service ─────────────────────────────────────────────────────
+    // ── 2. Map validated params → request DTO → service options ────────────
+    const queryDTO = mapQueryToDTO(params);
+    const serviceParams = mapDTOToServiceParams(queryDTO);
+
+    // ── 3. Call service ─────────────────────────────────────────────────────
     let result;
     try {
       result = await listIndexerEvents({
-        filters: params.filters,
-        sorting: params.sorting,
-        pagination: params.pagination,
+        ...serviceParams,
         dbClient: req._dbClient, // injectable in tests
       });
     } catch (err) {
@@ -284,24 +190,89 @@ router.get('/events', async (req, res, next) => {
       throw err;
     }
 
-    // ── 3. Logging ──────────────────────────────────────────────────────────
+    // ── 4. Logging ──────────────────────────────────────────────────────────
     logger.info(
       {
         requestId: req.id,
         count: result.data.length,
         total: result.meta.total,
         hasMore: result.meta.hasMore,
-        usedCursor: Boolean(params.pagination.cursor),
+        usedCursor: Boolean(queryDTO.pagination.cursor),
       },
       'Indexer events retrieved',
     );
 
-    // ── 4. Respond ──────────────────────────────────────────────────────────
+    // ── 5. Respond ──────────────────────────────────────────────────────────
+    // result.data is already an EscrowEventRowDTO[] and result.meta is an
+    // IndexerEventsMetaDTO — both mapped by indexerService at the boundary.
     return res.status(200).json({
       ...responseHelper.success(result.data, result.meta),
       message: 'Indexer events retrieved successfully.',
     });
   } catch (error) {
+    return next(error);
+  }
+});
+
+/**
+ * @swagger
+ * /api/admin/indexer/events:
+ *   post:
+ *     operationId: writeIndexerEvent
+ *     summary: Write an indexed escrow event (idempotent)
+ *     description: |
+ *       Persists a single escrow event and updates the per-invoice projection.
+ *       This endpoint is idempotent; it requires an `Idempotency-Key` header
+ *       to prevent duplicate application of state changes on retry.
+ *     tags: [Indexer]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: header
+ *         name: Idempotency-Key
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Unique key for safe retries
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             description: The raw event payload to persist
+ *     responses:
+ *       201:
+ *         description: Event persisted successfully
+ *       400:
+ *         description: Validation error
+ *       409:
+ *         description: Idempotency conflict
+ */
+router.post('/events', express.json(), idempotencyMiddleware, async (req, res, next) => {
+  try {
+    const rawEvent = req.body;
+    const dbClient = req._dbClient || db;
+    const store = createKnexEscrowEventStore(dbClient);
+    
+    // We use a transaction runner to ensure event and projection are updated atomically
+    const transactionRunner = async (handler) => {
+      return dbClient.transaction(handler);
+    };
+
+    const event = await persistEscrowEvent({ store, transactionRunner }, rawEvent);
+
+    logger.info({ eventId: event.eventId, invoiceId: event.invoiceId }, 'Admin indexer event persisted');
+    return res.status(201).json({
+      message: 'Event persisted successfully.',
+      event,
+    });
+  } catch (error) {
+    if (error instanceof ValidationError || error.name === 'ValidationError') {
+      return res.status(400).json(
+        responseHelper.error(error.message, error.code, error.details)
+      );
+    }
     return next(error);
   }
 });

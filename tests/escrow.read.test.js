@@ -1,11 +1,43 @@
 'use strict';
 
 const request = require('supertest');
+const jwt = require('jsonwebtoken');
 const { createStandardizedApp } = require('../src/app');
 const db = require('../src/db/knex');
 const { createRedisEscrowSummaryCache } = require('../src/cache/redis');
 
-// Mock external dependencies
+// JWT secret used by the auth middleware in tests (set by tests/mocks/setup.js)
+const TEST_JWT_SECRET = process.env.JWT_SECRET || 'test-secret-at-least-32-characters-long-string-for-jest';
+
+/** Sign a JWT with the test secret. */
+function makeToken(payload = {}) {
+  return jwt.sign(
+    { sub: 'user_test', id: 'user_test', tenantId: 'tenant_test', ...payload },
+    TEST_JWT_SECRET,
+    { algorithm: 'HS256', expiresIn: '1h' },
+  );
+}
+
+/** Return the Authorization header value for a test token. */
+function authHeader(payload = {}) {
+  return `Bearer ${makeToken(payload)}`;
+}
+
+// Mock external dependencies — must precede any require of src/app to avoid
+// transitive resolution failures for optional / uninstalled packages.
+jest.mock('rate-limit-redis', () => ({ RedisStore: jest.fn() }), { virtual: true });
+jest.mock('redis', () => ({
+  createClient: jest.fn(() => ({
+    on: jest.fn(),
+    connect: jest.fn(() => Promise.resolve()),
+    get: jest.fn(() => Promise.resolve(null)),
+    set: jest.fn(() => Promise.resolve('OK')),
+    del: jest.fn(() => Promise.resolve(1)),
+    quit: jest.fn(() => Promise.resolve()),
+    sendCommand: jest.fn(() => Promise.resolve(null)),
+  })),
+}), { virtual: true });
+
 jest.mock('../src/config/escrowMap', () => ({
   resolveEscrowAddress: jest.fn((id) => {
     if (id === 'unknown-inv') return null;
@@ -285,5 +317,304 @@ describe('GET /api/escrow/:invoiceId', () => {
     const cacheResult = await cache.getSummary('inv-gap-1', 2000);
     expect(cacheResult.hit).toBe(false);
     expect(cacheResult.reason).toBe('ledger_gap');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// V1 escrow-read: Authorization & Tenant Scoping
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// The V1 escrow-read endpoint (GET /v1/escrow/:invoiceId) is protected by
+// authenticateToken + extractTenant middleware, unlike the legacy /api/escrow
+// endpoint which has no auth guards.
+//
+// NOTE (defect observed): While extractTenant ensures a tenant context exists,
+// the handler does NOT verify that the caller's tenant owns the invoice/escrow
+// contract. Full cross-tenant ownership enforcement is tracked separately.
+
+describe('GET /v1/escrow/:invoiceId — Authorization & Tenant Scoping', () => {
+  let app;
+
+  beforeAll(() => {
+    app = createStandardizedApp();
+  });
+
+  beforeEach(async () => {
+    await db('escrow_event_projection').del();
+  });
+
+  afterAll(async () => {
+    await db.destroy();
+  });
+
+  // ── Missing / invalid authentication ─────────────────────────────────────
+
+  describe('Authentication — missing or invalid', () => {
+    it('returns 401 when no Authorization header is present', async () => {
+      const res = await request(app).get('/v1/escrow/inv-auth-1');
+
+      expect(res.status).toBe(401);
+      expect(res.body.error).toBeDefined();
+      expect(res.body.error.message || res.body.error.detail).toMatch(/token/i);
+    });
+
+    it('returns 401 when Authorization header has wrong scheme', async () => {
+      const res = await request(app)
+        .get('/v1/escrow/inv-auth-1')
+        .set('Authorization', 'Basic dXNlcjpwYXNz');
+
+      expect(res.status).toBe(401);
+    });
+
+    it('returns 401 for a malformed Authorization header (no Bearer prefix)', async () => {
+      const res = await request(app)
+        .get('/v1/escrow/inv-auth-1')
+        .set('Authorization', makeToken());
+
+      expect(res.status).toBe(401);
+    });
+
+    it('returns 401 for a token signed with the wrong secret', async () => {
+      const badToken = jwt.sign(
+        { sub: 'user_test', tenantId: 'tenant_test' },
+        'wrong-secret-that-does-not-match',
+        { algorithm: 'HS256', expiresIn: '1h' },
+      );
+
+      const res = await request(app)
+        .get('/v1/escrow/inv-auth-1')
+        .set('Authorization', `Bearer ${badToken}`);
+
+      expect(res.status).toBe(401);
+    });
+
+    it('returns 401 for an expired token', async () => {
+      const expiredToken = jwt.sign(
+        { sub: 'user_test', tenantId: 'tenant_test' },
+        TEST_JWT_SECRET,
+        { algorithm: 'HS256', expiresIn: '0s' },
+      );
+
+      // Small sleep to ensure the token is actually expired
+      await new Promise((r) => setTimeout(r, 1100));
+
+      const res = await request(app)
+        .get('/v1/escrow/inv-auth-1')
+        .set('Authorization', `Bearer ${expiredToken}`);
+
+      expect(res.status).toBe(401);
+    }, 5000);
+
+    it('returns 401 for a token signed with a disallowed algorithm (not in allowlist)', async () => {
+      // Sign with HS384 — a valid algorithm but not in the HS256-only allowlist
+      const badAlgToken = jwt.sign(
+        { sub: 'user_test', tenantId: 'tenant_test' },
+        TEST_JWT_SECRET,
+        { algorithm: 'HS384', expiresIn: '1h' },
+      );
+
+      const res = await request(app)
+        .get('/v1/escrow/inv-auth-1')
+        .set('Authorization', `Bearer ${badAlgToken}`);
+
+      expect(res.status).toBe(401);
+    });
+  });
+
+  // ── Missing tenant context ───────────────────────────────────────────────
+
+  describe('Tenant context — missing', () => {
+    it('returns 400 when JWT has no tenantId claim and no x-tenant-id header', async () => {
+      const tokenNoTenant = jwt.sign(
+        { sub: 'user_notenant', id: 'user_notenant' },
+        TEST_JWT_SECRET,
+        { algorithm: 'HS256', expiresIn: '1h' },
+      );
+
+      const res = await request(app)
+        .get('/v1/escrow/inv-tenant-1')
+        .set('Authorization', `Bearer ${tokenNoTenant}`);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBeDefined();
+    });
+
+    it('returns 400 when JWT tenantId is an empty string', async () => {
+      const tokenEmptyTenant = jwt.sign(
+        { sub: 'user_empty', id: 'user_empty', tenantId: '' },
+        TEST_JWT_SECRET,
+        { algorithm: 'HS256', expiresIn: '1h' },
+      );
+
+      const res = await request(app)
+        .get('/v1/escrow/inv-tenant-1')
+        .set('Authorization', `Bearer ${tokenEmptyTenant}`);
+
+      expect(res.status).toBe(400);
+    });
+
+    it('returns 400 when JWT tenantId is only whitespace', async () => {
+      const tokenWsTenant = jwt.sign(
+        { sub: 'user_ws', id: 'user_ws', tenantId: '   ' },
+        TEST_JWT_SECRET,
+        { algorithm: 'HS256', expiresIn: '1h' },
+      );
+
+      const res = await request(app)
+        .get('/v1/escrow/inv-tenant-1')
+        .set('Authorization', `Bearer ${tokenWsTenant}`);
+
+      expect(res.status).toBe(400);
+    });
+  });
+
+  // ── Valid authentication + tenant context ────────────────────────────────
+
+  describe('Valid authentication with tenant context', () => {
+    it('returns 200 when JWT carries a valid tenantId claim', async () => {
+      const res = await request(app)
+        .get('/v1/escrow/inv-auth-ok')
+        .set('Authorization', authHeader({ tenantId: 'tenant_alpha' }));
+
+      expect(res.status).toBe(200);
+      expect(res.body.error).toBeNull();
+      expect(res.body.data).toBeDefined();
+      expect(res.body.data.status).toBeDefined();
+    });
+
+    it('returns 200 when tenant comes from x-tenant-id header (overrides JWT)', async () => {
+      const res = await request(app)
+        .get('/v1/escrow/inv-auth-ok')
+        .set('Authorization', authHeader({ tenantId: 'tenant_alpha' }))
+        .set('x-tenant-id', 'tenant_beta');
+
+      expect(res.status).toBe(200);
+      expect(res.body.error).toBeNull();
+    });
+
+    it('returns 200 when tenant comes ONLY from x-tenant-id header (no JWT claim)', async () => {
+      const tokenNoTenant = jwt.sign(
+        { sub: 'user_notenant', id: 'user_notenant' },
+        TEST_JWT_SECRET,
+        { algorithm: 'HS256', expiresIn: '1h' },
+      );
+
+      const res = await request(app)
+        .get('/v1/escrow/inv-auth-ok')
+        .set('Authorization', `Bearer ${tokenNoTenant}`)
+        .set('x-tenant-id', 'tenant_header_only');
+
+      expect(res.status).toBe(200);
+      expect(res.body.error).toBeNull();
+    });
+
+    it('returns 200 with projection data when seeded', async () => {
+      await db('escrow_event_projection').insert({
+        invoice_id: 'inv-v1-proj',
+        latest_event_id: 'evt_v1',
+        latest_event_type: 'funded',
+        latest_ledger_sequence: 99,
+        latest_event_body: JSON.stringify({ status: 'funded', fundedAmount: 7500 }),
+        latest_observed_at: new Date(),
+      });
+
+      const res = await request(app)
+        .get('/v1/escrow/inv-v1-proj')
+        .set('Authorization', authHeader());
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.status).toBe('funded');
+      expect(res.body.data.fundedAmount).toBe(7500);
+      expect(res.body.data.fromProjection).toBe(true);
+    });
+
+    it('includes X-Escrow-Address header on success', async () => {
+      const res = await request(app)
+        .get('/v1/escrow/inv-header-check')
+        .set('Authorization', authHeader());
+
+      expect(res.status).toBe(200);
+      expect(res.headers['x-escrow-address']).toBe('C_ESCROW_FOR_INV-HEADER-CHECK');
+    });
+  });
+
+  // ── Tenant scoping — cross-tenant access ─────────────────────────────────
+
+  describe('Tenant scoping — cross-tenant access', () => {
+    it('allows tenant A to read an escrow (no ownership gating at handler level)', async () => {
+      // NOTE: The V1 escrow-read handler does not currently verify that the
+      // authenticated tenant owns the invoice or escrow contract. The
+      // extractTenant middleware only ensures a tenant context exists; the
+      // handler reads escrow state regardless of which tenant makes the
+      // request. This is a known gap tracked for a future iteration.
+      const res = await request(app)
+        .get('/v1/escrow/inv-cross-tenant')
+        .set('Authorization', authHeader({ tenantId: 'tenant_alpha' }));
+
+      expect(res.status).toBe(200);
+      // Cross-tenant read succeeds because no ownership check is performed.
+    });
+
+    it('does not reject tenant B reading data that conceptually belongs to tenant A', async () => {
+      // Seed projection row — the data is accessible to any authenticated
+      // tenant because the handler does not gate on req.tenantId.
+      await db('escrow_event_projection').insert({
+        invoice_id: 'inv-shared',
+        latest_event_id: 'evt_shared',
+        latest_event_type: 'funded',
+        latest_ledger_sequence: 42,
+        latest_event_body: JSON.stringify({ status: 'funded', fundedAmount: 3000 }),
+        latest_observed_at: new Date(),
+      });
+
+      // Tenant A can read it
+      const resA = await request(app)
+        .get('/v1/escrow/inv-shared')
+        .set('Authorization', authHeader({ tenantId: 'tenant_a' }));
+      expect(resA.status).toBe(200);
+      expect(resA.body.data.fundedAmount).toBe(3000);
+
+      // Tenant B can ALSO read it — no cross-tenant rejection
+      const resB = await request(app)
+        .get('/v1/escrow/inv-shared')
+        .set('Authorization', authHeader({ tenantId: 'tenant_b' }));
+      expect(resB.status).toBe(200);
+      expect(resB.body.data.fundedAmount).toBe(3000);
+
+      // Both tenants see the same data — tenant isolation is NOT enforced at
+      // the escrow-read handler level (tracked as a defect).
+    });
+
+    it('rejects access when x-tenant-id header contains overly long value', async () => {
+      const res = await request(app)
+        .get('/v1/escrow/inv-long-tenant')
+        .set('Authorization', authHeader({ tenantId: 'a'.repeat(200) }));
+
+      // The sanitiseTenantId function caps at MAX_TENANT_ID_LENGTH (128).
+      // A value over the cap is treated as invalid → 400.
+      expect(res.status).toBe(400);
+    });
+  });
+
+  // ── Edge cases: 404 for unknown invoice ──────────────────────────────────
+
+  describe('Edge cases', () => {
+    it('returns 404 for unknown invoice (with valid auth)', async () => {
+      const res = await request(app)
+        .get('/v1/escrow/unknown-inv')
+        .set('Authorization', authHeader());
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBeDefined();
+    });
+
+    it('returns 404 even when auth and tenant are both valid', async () => {
+      const res = await request(app)
+        .get('/v1/escrow/unknown-inv')
+        .set('Authorization', authHeader({ tenantId: 'tenant_valid' }))
+        .set('x-tenant-id', 'tenant_valid');
+
+      expect(res.status).toBe(404);
+    });
   });
 });

@@ -27,6 +27,7 @@
  */
 
 const express = require('express');
+const compression = require('compression');
 const { adminStack } = require('../middleware/stacks');
 const {
   runtimeConfigSchema,
@@ -34,11 +35,13 @@ const {
   CONFIG_SECTIONS,
 } = require('../schemas/config');
 const { adminConfigLimiter } = require('../middleware/rateLimit');
-const idempotencyMiddleware = require('../middleware/idempotency');
 const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
 const logger = require('../logger');
 
 const router = express.Router();
+
+// Compress config responses above 500 bytes (issue #52)
+router.use(compression({ threshold: 500 }));
 
 // ── Apply per-client rate limit *before* admin auth + tenant extraction ─────
 // Mounting the limiter ahead of adminStack ensures failed authentication
@@ -96,11 +99,10 @@ router.use(...adminStack);
  *     parameters:
  *       - in: header
  *         name: Idempotency-Key
- *         required: true
  *         schema:
  *           type: string
- *           pattern: '^[A-Za-z0-9._:-]{8,128}$'
- *         description: Unique idempotency key for this config update. Safe to retry with the same key.
+ *         required: false
+ *         description: Optional 8-128 character URL-safe string to safely retry requests without double-applying.
  *     requestBody:
  *       required: true
  *       content:
@@ -131,7 +133,7 @@ router.use(...adminStack);
  *                 message:
  *                   type: string
  *       400:
- *         description: Validation error — body contains invalid or missing fields, or missing/malformed Idempotency-Key.
+ *         description: Validation error — body contains invalid or missing fields, or idempotency key is malformed.
  *         content:
  *           application/problem+json:
  *             schema:
@@ -150,17 +152,17 @@ router.use(...adminStack);
  *       403:
  *         $ref: '#/components/responses/Problem403'
  *       409:
- *         description: Idempotency key reused with a different request body.
+ *         description: Idempotency conflict — the key was reused with a different payload.
  *         content:
  *           application/problem+json:
  *             schema:
  *               type: object
  *               properties:
- *                 type:    { type: string }
- *                 title:   { type: string }
- *                 status:  { type: integer }
- *                 detail:  { type: string }
- *                 requestId: { type: string }
+ *                 type:  { type: string }
+ *                 title: { type: string }
+ *                 status: { type: integer }
+ *                 detail: { type: string }
+ *                 code:   { type: string }
  *       429:
  *         description: Rate limit exceeded (issue #754) — see Retry-After header.
  *         headers:
@@ -183,37 +185,45 @@ router.use(...adminStack);
  *                 error:   { type: string }
  *                 message: { type: string }
  */
-router.post('/', idempotencyMiddleware, validateBody(runtimeConfigSchema), (req, res) => {
+router.post('/', optionalIdempotency, validateBody(runtimeConfigSchema), (req, res) => {
   // validateBody attaches the parsed, coerced payload to req.validated
-  const { section, config: validatedConfig } = req.validated;
+  const validatedDto = toAdminConfigRequestDto(req.validated);
+  const { section, config: validatedConfig } = fromAdminConfigRequestDto(validatedDto);
 
   // Apply runtime configuration changes for supported sections.
-  if (section === 'cors') {
-    if (validatedConfig.origins) {
-      // Update the env var so reloadCorsOrigins can re-read it.
-      process.env.CORS_ALLOWED_ORIGINS = validatedConfig.origins.join(',');
-      reloadCorsOrigins();
-    }
-    if (validatedConfig.maxAge !== undefined) {
-      process.env.CORS_MAX_AGE = String(validatedConfig.maxAge);
-      reloadCorsMaxAge();
-    }
-  }
+  applyConfigSection(section, validatedConfig);
+
+  const adminClient = req.apiClient?.clientId || req.user?.sub || 'system';
 
   logger.info(
     {
       tenantId: req.tenantId,
       section,
-      adminClient: req.apiClient?.clientId || req.user?.sub,
+      adminClient,
     },
     'Admin runtime config update accepted',
   );
+
+  // Fire-and-forget outbound webhook emission for config update
+  emitConfigWebhook({
+    tenantId: req.tenantId,
+    section,
+    config: validatedConfig,
+    actor: adminClient,
+  }).catch((err) => {
+    logger.error(
+      { err: err.message, tenantId: req.tenantId, section },
+      'Failed to emit config event webhook',
+    );
+  });
 
   return res.status(200).json({
     section,
     config: validatedConfig,
     message: `Configuration section '${section}' validated and accepted.`,
   });
+
+  return res.status(200).json(responseDto);
 });
 
 // ── GET /api/admin/config/sections ───────────────────────────────────────────
@@ -247,7 +257,8 @@ router.post('/', idempotencyMiddleware, validateBody(runtimeConfigSchema), (req,
  *         $ref: '#/components/responses/Problem403'
  */
 router.get('/sections', (req, res) => {
-  return res.status(200).json({ sections: CONFIG_SECTIONS });
+  const sectionsDto = fromConfigSectionsResponseDto({ sections: CONFIG_SECTIONS });
+  return res.status(200).json(sectionsDto);
 });
 
 module.exports = router;
