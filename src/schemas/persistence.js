@@ -24,7 +24,7 @@ const {
   ALLOWED_MIME_TYPES,
   DEFAULT_MAX_FILE_SIZE,
 } = require('../services/storage');
-const { parseValidationErrors } = require('./invoice');
+const { parseValidationErrors } = require('./validationHelper');
 
 // ── Constants ────────────────────────────────────────────────────────────────
 

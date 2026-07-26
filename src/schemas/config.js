@@ -24,7 +24,13 @@
  */
 
 const { z } = require('zod');
-const { validateBody, parseValidationErrors } = require('./invoice');
+const {
+  createBodyValidator,
+  createQueryValidator,
+  parseValidationErrors,
+  DEFAULT_PROBLEM_TYPE,
+  DEFAULT_ERROR_CODE,
+} = require('./validationHelper');
 
 // -- Shared primitives --------------------------------------------------------
 
@@ -408,7 +414,24 @@ const runtimeConfigSchema = z
     }
   });
 
-// -- Exports ------------------------------------------------------------------
+// ── Backward-compatible helpers ───────────────────────────────────────────────
+
+/**
+ * Creates Express middleware that validates `req.body` against a Zod schema.
+ *
+ * This is a thin wrapper around `createBodyValidator` from the shared
+ * validation helper module, preserving the original API for backward
+ * compatibility with existing routes that import `validateBody` from
+ * `src/schemas/config.js`.
+ *
+ * @param {import('zod').ZodTypeAny} schema
+ * @returns {import('express').RequestHandler}
+ */
+function validateBody(schema) {
+  return createBodyValidator(schema);
+}
+
+// ── Exports ──────────────────────────────────────────────────────────────────
 
 module.exports = {
   // Section schemas (exported for direct use in tests and sub-route validation)
@@ -422,9 +445,17 @@ module.exports = {
   // Top-level schema consumed by the admin config route
   runtimeConfigSchema,
 
-  // Re-exported helpers
-  validateBody,
+  // Re-exported helpers from validation helper
+  createBodyValidator,
+  createQueryValidator,
   parseValidationErrors,
+
+  // Backward-compatible helper
+  validateBody,
+
+  // Re-exported constants
+  DEFAULT_PROBLEM_TYPE,
+  DEFAULT_ERROR_CODE,
 
   // Constants
   CONFIG_SECTIONS,

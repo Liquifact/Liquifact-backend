@@ -21,7 +21,6 @@ const { extractTenant } = require('../../middleware/tenant');
 const idempotencyMiddleware = require('../../middleware/idempotency');
 const logger = require('../../logger');
 const { instrumentPersistence } = require('../../middleware/persistenceMetrics');
-const { createPersistenceRateLimiter } = require('../../middleware/persistenceRateLimit');
 
 const upload = multer({
   storage: multer.memoryStorage(),
