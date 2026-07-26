@@ -32,6 +32,7 @@ const { recordEscrowRead } = require('./services/escrowReadMetrics');
 const { createCorsOptions, isCorsOriginRejectedError } = require('./config/cors');
 const { validateInvoiceQueryParams } = require('./utils/validators');
 const { computeEscrowDerivedFields } = require('./services/escrowDerived');
+const { validateEscrowReadParams, mapToEscrowReadResponseDto } = require('./schemas/escrowRead');
 const { invoiceCreateSchema, parseValidationErrors } = require('./schemas/invoice');
 const {
   invoiceBodyLimit,
@@ -46,6 +47,7 @@ const responseHelper = require('./utils/responseHelper');
 const logger = require('./logger');
 const { metricsAuth, metricsHandler } = require('./metrics');
 const { instrumentHealth } = require('./middleware/healthMetrics');
+const { metricsLimiter } = require('./middleware/rateLimit');
 const smeRoutes = require('./routes/sme');
 const invoiceFileRoutes = require('./routes/invoiceFile');
 const auditTrailRoutes = require('./routes/auditTrail');
@@ -306,20 +308,28 @@ function createApp() {
     });
   });
 
-  // Escrow — GET by invoiceId (proxied through Soroban retry wrapper with address mapping)
-  app.get('/api/escrow/:invoiceId', async (req, res) => {
-    const startTime = Date.now();
-    const invoiceId = String(req.params.invoiceId || '')
-      .trim()
-      .replace(/\s+/g, '');
+// Escrow — GET by invoiceId (proxied through Soroban retry wrapper with address mapping)
+  app.get('/api/escrow/:invoiceId', async (req, res, next) => {
+    // Validate path parameters
+    const { success, error, data: validatedParams } = validateEscrowReadParams.safeParse(req.params);
+    if (!success) {
+      return res.status(400).json({
+        error: 'Invalid invoiceId parameter',
+        code: 'BAD_REQUEST',
+        details: error.flatten().fieldErrors,
+      });
+    }
+
+    const invoiceId = validatedParams.invoiceId;
 
     try {
       // Resolve escrow contract address using the mapping system
       const escrowAddress = resolveEscrowAddress(invoiceId);
-      
+
       if (!escrowAddress) {
-        res.status(404).json({ 
-          error: `No escrow contract mapping found for invoice ID '${invoiceId}'` 
+        return res.status(404).json({
+          error: `No escrow contract mapping found for invoice ID '${invoiceId}'`,
+          code: 'NOT_FOUND',
         });
         recordEscrowRead({ startTime, invoiceId, endpoint: 'legacy', statusCode: 404 });
         return;
@@ -330,24 +340,18 @@ function createApp() {
 
       const derived = computeEscrowDerivedFields(state);
 
-      const data = {
-        ...state,
-        ...derived,
-        escrowAddress
-      };
+      const responseDto = mapToEscrowReadResponseDto({
+        state,
+        derived,
+        escrowAddress,
+        fromProjection: state.fromProjection,
+      });
 
       // Include escrow address in response headers
       res.set('X-Escrow-Address', escrowAddress);
-      res.status(200).json({
-        data,
-        message: state.fromProjection 
-          ? 'Escrow state read from event projection.'
-          : 'Escrow state read from live Soroban contract.',
-      });
-      recordEscrowRead({ startTime, invoiceId, endpoint: 'legacy', statusCode: 200 });
+      res.json(responseDto);
     } catch (error) {
-      res.status(500).json({ error: error.message || 'Error fetching escrow state' });
-      recordEscrowRead({ startTime, invoiceId, endpoint: 'legacy', statusCode: 500, err: error });
+      next(error);
     }
   });
 
