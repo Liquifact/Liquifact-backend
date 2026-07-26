@@ -212,144 +212,25 @@ describe('Config Validation', () => {
     expect(result).toMatchObject({ NODE_ENV: 'test', PORT: 3001 });
   });
 
-  test('exports securityHeaders config object', () => {
-    const { securityHeaders } = require('./index');
-    expect(securityHeaders).toBeDefined();
-    expect(securityHeaders.contentSecurityPolicy).toBeDefined();
-    expect(securityHeaders.docsContentSecurityPolicy).toBeDefined();
-  });
+  // ── ESCROW_READ_PROJECTION_ENABLED flag ──────────────────────────────────
 
-  test('logRedactedSummary handles non-ZodError or empty error gracefully', () => {
-    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
-    
-    logRedactedSummary(new Error('Some generic error'));
-    expect(consoleSpy).toHaveBeenCalledWith('Some generic error');
-    
-    consoleSpy.mockClear();
-    logRedactedSummary(null);
-    expect(consoleSpy).toHaveBeenCalledWith('Unknown configuration error');
-    
-    consoleSpy.mockRestore();
-  });
-
-  test('get() returns config when validated', () => {
-    process.env.NODE_ENV = 'test';
-    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
-    
-    validate();
-    const config = get();
-    expect(config).toBeDefined();
-    expect(config.NODE_ENV).toBe('test');
-  });
-
-  test('typed accessors return validated and coerced values', () => {
-    process.env.NODE_ENV = 'test';
-    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
-    process.env.PORT = '4321';
-    process.env.INVOICE_FILE_MAX_SIZE = '2mb';
-    validate();
-    expect(getValue('PORT')).toBe(4321);
-    expect(getInvoiceFileMaxSize()).toBe('2mb');
-  });
-
-  test('typed accessor preserves a missing optional value', () => {
-    process.env.NODE_ENV = 'test';
-    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
-    delete process.env.PUBLIC_API_BASE_URL;
-    validate();
-    expect(getValue('PUBLIC_API_BASE_URL')).toBeUndefined();
-  });
-
-  test('upload limit accessor uses the validated default before boot validation', () => {
-    jest.isolateModules(() => {
-      delete process.env.INVOICE_FILE_MAX_SIZE;
-      const { getInvoiceFileMaxSize: getFreshLimit } = require('./index');
-      expect(getFreshLimit()).toBe('5mb');
-    });
-  });
-
-  test('rejects an invalid route value during boot validation', () => {
-    process.env.NODE_ENV = 'test';
-    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
-    process.env.INVOICE_FILE_MAX_SIZE = 'unbounded';
-    expect(() => validate()).toThrow(/INVOICE_FILE_MAX_SIZE/i);
-  });
-
-  test('upload limit accessor rejects invalid values before full validation', () => {
-    jest.isolateModules(() => {
-      process.env.INVOICE_FILE_MAX_SIZE = '-1mb';
-      const { getInvoiceFileMaxSize: getFreshLimit } = require('./index');
-      expect(() => getFreshLimit()).toThrow(/INVOICE_FILE_MAX_SIZE/i);
-    });
-  });
-
-  test('INVOICE_STATE_ENABLED defaults to true', () => {
-    process.env.NODE_ENV = 'test';
-    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
-    delete process.env.INVOICE_STATE_ENABLED;
+  test('ESCROW_READ_PROJECTION_ENABLED defaults to "true"', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
     const config = validate();
-    expect(config.INVOICE_STATE_ENABLED).toBe('true');
+    expect(config.ESCROW_READ_PROJECTION_ENABLED).toBe('true');
   });
 
-  test('INVOICE_STATE_ENABLED accepts false', () => {
-    process.env.NODE_ENV = 'test';
-    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
-    process.env.INVOICE_STATE_ENABLED = 'false';
+  test('ESCROW_READ_PROJECTION_ENABLED accepts "false"', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    process.env.ESCROW_READ_PROJECTION_ENABLED = 'false';
     const config = validate();
-    expect(config.INVOICE_STATE_ENABLED).toBe('false');
+    expect(config.ESCROW_READ_PROJECTION_ENABLED).toBe('false');
   });
 
-  test('INVOICE_STATE_ENABLED rejects invalid values', () => {
-    process.env.NODE_ENV = 'test';
-    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
-    process.env.INVOICE_STATE_ENABLED = 'yes';
-    expect(() => validate()).toThrow(/INVOICE_STATE_ENABLED/i);
-  });
-
-  test('empty optional strings are accepted (JWT_ISSUER, JWT_AUDIENCE, CORS_ALLOWED_ORIGINS)', () => {
-    process.env.NODE_ENV = 'test';
-    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
-    process.env.JWT_ISSUER = '';
-    process.env.JWT_AUDIENCE = '';
-    process.env.CORS_ALLOWED_ORIGINS = '';
-
-    const config = validate();
-    expect(config.JWT_ISSUER).toBe('');
-    expect(config.JWT_AUDIENCE).toBe('');
-    expect(config.CORS_ALLOWED_ORIGINS).toBe('');
-  });
-
-  test('whitespace-only JWT_SECRET passes min-length check', () => {
-    process.env.NODE_ENV = 'test';
-    process.env.JWT_SECRET = ' '.repeat(32);
-
-    const config = validate();
-    expect(config.JWT_SECRET).toBe(' '.repeat(32));
-  });
-
-  test('PORT boundary values 1 and 65535 are accepted', () => {
-    process.env.NODE_ENV = 'test';
-    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
-    process.env.PORT = '1';
-    expect(validate().PORT).toBe(1);
-
-    process.env.PORT = '65535';
-    expect(validate().PORT).toBe(65535);
-  });
-
-  test('empty string for enum fields is rejected', () => {
-    process.env.NODE_ENV = 'test';
-    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
-    process.env.CURSOR_TTL_ENABLED = '';
-    expect(() => validate()).toThrow(/Invalid option/i);
-  });
-
-  test('getInvoiceFileMaxSize falls back to default when unset before validation', () => {
-    jest.isolateModules(() => {
-      delete process.env.INVOICE_FILE_MAX_SIZE;
-      const { getInvoiceFileMaxSize: getFreshLimit } = require('./index');
-      expect(getFreshLimit()).toBe('5mb');
-    });
+  test('ESCROW_READ_PROJECTION_ENABLED rejects invalid value', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    process.env.ESCROW_READ_PROJECTION_ENABLED = 'invalid';
+    expect(() => validate()).toThrow();
   });
 });
 

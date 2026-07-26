@@ -39,7 +39,7 @@ const logger = require("../logger");
 const { getTokenMetadata } = require("./tokenMeta");
 const db = require("../db/knex");
 const { createRedisEscrowSummaryCache } = require("../cache/redis");
-const { escrowReadCache } = require("./escrowReadCache");
+const { get: getConfig } = require("../config");
 
 const cache = createRedisEscrowSummaryCache();
 
@@ -677,34 +677,50 @@ async function readFundedAmount(invoiceId, options = {}) {
 }
 
 /**
- * Retrieves the escrow state from the cache or projection, falling back to a
- * live RPC read if neither has data.
+ * Resolves whether the projection/cache-based escrow read path is enabled.
+ * Checks the `ESCROW_READ_PROJECTION_ENABLED` environment flag.
+ * Defaults to `true` when config is not yet validated (e.g. in tests).
  *
- * Ordering (matches the docstring at the top of this module):
- *   1. Redis cache (when enabled) — short-circuit on hit.
- *   2. `escrow_event_projection` row (durable, written by the indexer).
- *      Reuses {@link _readBaseStateFromProjection} via
- *      {@link _fetchBaseEscrowState} so the projection shape and the
- *      reconciliation-friendly shape stay in lock-step.
- *   3. Live RPC stub — returns the neutral `not_found` envelope when neither
- *      cache nor projection know about the invoice.
+ * @returns {boolean} `true` when projection-based reads are enabled.
+ */
+function isProjectionEnabled() {
+  try {
+    const cfg = getConfig();
+    return cfg.ESCROW_READ_PROJECTION_ENABLED === 'true';
+  } catch (_e) {
+    // Config not validated yet — safe default is enabled
+    return true;
+  }
+}
+
+/**
+ * Retrieves the escrow state from the projection or cache,
+ * falling back to live read if necessary.
  *
- * @param {string} invoiceId - Invoice identifier.
- * @param {object} [options={}]
- * @param {import('knex').Knex} [options.dbClient=db] - Knex instance (tests).
- * @returns {Promise<Object>} The escrow state.
+ * When `ESCROW_READ_PROJECTION_ENABLED` is set to `false`, the
+ * projection/cache path is skipped entirely and the function falls
+ * through directly to a live Soroban contract read.
+ *
+ * @param {string} invoiceId - Invoice identifier
+ * @returns {Promise<Object>} The escrow state
  */
 async function getEscrowStateWithProjection(invoiceId, options = {}) {
   const safeId = invoiceId.trim();
   const { dbClient } = options;
 
-  // 1. The bounded local cache avoids DB/Redis work on the hottest reads.
-  const localCached = escrowReadCache.get(safeId);
-  if (localCached !== undefined) {
-    return localCached;
+  // Gate: if the projection feature flag is disabled, skip cache & DB
+  // and go directly to a live Soroban read.
+  if (!isProjectionEnabled()) {
+    const baseState = await _fetchBaseEscrowState(safeId);
+    const legalHold = await fetchLegalHold(safeId);
+    return {
+      ...baseState,
+      legal_hold: legalHold,
+      latest_event_type: 'live_read',
+    };
   }
 
-  // 2. Try the optional shared Redis cache. Cache wins on hit.
+  // Try cache first if enabled
   if (cache) {
     const cacheResult = await cache.getSummary(safeId);
     if (cacheResult.hit) {
@@ -792,10 +808,5 @@ module.exports = {
   fetchAttestationAppendLog,
   validateInvoiceId,
   getEscrowStateWithProjection,
-  invalidateEscrowReadCache,
-  LEGAL_HOLD_STATUS,
-  LEGAL_HOLD_UNKNOWN_REASONS,
-  // Exported so the gate can reuse the canonical rule instead of
-  // duplicating the inline coerce. Issue #424.
-  coerceLegalHoldStatus,
+  isProjectionEnabled,
 };
