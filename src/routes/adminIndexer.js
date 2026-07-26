@@ -21,9 +21,9 @@ const { CursorError } = require('../utils/cursorPagination');
 const { adminStack } = require('../middleware/stacks');
 const responseHelper = require('../utils/responseHelper');
 const logger = require('../logger');
-const { mapQueryToDTO, mapDTOToServiceParams } = require('../dto/indexer');
-// NOTE: indexerService already applies mapRowToEscrowEventDTO + mapMetaToDTO
-// internally, so the route consumes typed DTOs directly from `result`.
+const idempotencyMiddleware = require('../middleware/idempotency');
+const { persistEscrowEvent, createKnexEscrowEventStore, ValidationError } = require('../jobs/escrowIndexer');
+const db = require('../db/knex');
 
 /**
  * Maximum page size clamped by the service layer.
@@ -309,6 +309,69 @@ router.get('/events', instrumentIndexer(async (req, res, next) => {
       message: 'Indexer events retrieved successfully.',
     });
   } catch (error) {
+    return next(error);
+  }
+});
+
+/**
+ * @swagger
+ * /api/admin/indexer/events:
+ *   post:
+ *     operationId: writeIndexerEvent
+ *     summary: Write an indexed escrow event (idempotent)
+ *     description: |
+ *       Persists a single escrow event and updates the per-invoice projection.
+ *       This endpoint is idempotent; it requires an `Idempotency-Key` header
+ *       to prevent duplicate application of state changes on retry.
+ *     tags: [Indexer]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: header
+ *         name: Idempotency-Key
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Unique key for safe retries
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             description: The raw event payload to persist
+ *     responses:
+ *       201:
+ *         description: Event persisted successfully
+ *       400:
+ *         description: Validation error
+ *       409:
+ *         description: Idempotency conflict
+ */
+router.post('/events', express.json(), idempotencyMiddleware, async (req, res, next) => {
+  try {
+    const rawEvent = req.body;
+    const dbClient = req._dbClient || db;
+    const store = createKnexEscrowEventStore(dbClient);
+    
+    // We use a transaction runner to ensure event and projection are updated atomically
+    const transactionRunner = async (handler) => {
+      return dbClient.transaction(handler);
+    };
+
+    const event = await persistEscrowEvent({ store, transactionRunner }, rawEvent);
+
+    logger.info({ eventId: event.eventId, invoiceId: event.invoiceId }, 'Admin indexer event persisted');
+    return res.status(201).json({
+      message: 'Event persisted successfully.',
+      event,
+    });
+  } catch (error) {
+    if (error instanceof ValidationError || error.name === 'ValidationError') {
+      return res.status(400).json(
+        responseHelper.error(error.message, error.code, error.details)
+      );
+    }
     return next(error);
   }
 });
