@@ -4,18 +4,18 @@
  * @fileoverview Strict Zod schemas for runtime config write payloads.
  *
  * Exposes named schemas for every admin-writable configuration surface:
- *  - `webhookConfigSchema`     — webhook delivery and retry settings
- *  - `reconciliationConfigSchema` — reconciliation run scheduling
- *  - `kycConfigSchema`         — KYC provider connection settings
- *  - `retentionConfigSchema`   — data-retention and legal-hold rules
- *  - `fraudThresholdsSchema`   — per-tenant fraud & manual-review ceilings
- *  - `runtimeConfigSchema`     — top-level union accepted by POST /api/admin/config
+ *  - `webhookConfigSchema`     � webhook delivery and retry settings
+ *  - `reconciliationConfigSchema` � reconciliation run scheduling
+ *  - `kycConfigSchema`         � KYC provider connection settings
+ *  - `retentionConfigSchema`   � data-retention and legal-hold rules
+ *  - `fraudThresholdsSchema`   � per-tenant fraud & manual-review ceilings
+ *  - `runtimeConfigSchema`     � top-level union accepted by POST /api/admin/config
  *
  * Security guarantees applied to every schema:
- *  - `.strict()` — unknown keys are rejected (prevents prototype-pollution payloads).
- *  - String length bounds — prevents oversized inputs reaching the store.
- *  - Numeric range checks — ensures values are within safe operating boundaries.
- *  - Enum allowlists — rejects arbitrary strings for categorical fields.
+ *  - `.strict()` � unknown keys are rejected (prevents prototype-pollution payloads).
+ *  - String length bounds � prevents oversized inputs reaching the store.
+ *  - Numeric range checks � ensures values are within safe operating boundaries.
+ *  - Enum allowlists � rejects arbitrary strings for categorical fields.
  *
  * Re-exports the shared helpers from `src/schemas/invoice.js` so callers only
  * need one import for middleware + error formatting.
@@ -26,7 +26,7 @@
 const { z } = require('zod');
 const { validateBody, parseValidationErrors } = require('./invoice');
 
-// ── Shared primitives ────────────────────────────────────────────────────────
+// -- Shared primitives --------------------------------------------------------
 
 /**
  * A non-empty string bounded to `maxLen` characters, with whitespace trimmed.
@@ -89,19 +89,19 @@ function boundedNumber(min, max, label) {
     .max(max, { message: `${label} must be at most ${max}` });
 }
 
-// ── Webhook config schema ────────────────────────────────────────────────────
+// -- Webhook config schema ----------------------------------------------------
 
 /**
  * Schema for webhook delivery and retry configuration writes.
  *
  * Fields:
- *  - `url`            — Delivery endpoint (HTTPS URL, max 2048 chars).
- *  - `secret`         — HMAC signing secret (min 16 chars, max 256 chars).
- *  - `events`         — Non-empty array of event-name strings (max 50 items,
+ *  - `url`            � Delivery endpoint (HTTPS URL, max 2048 chars).
+ *  - `secret`         � HMAC signing secret (min 16 chars, max 256 chars).
+ *  - `events`         � Non-empty array of event-name strings (max 50 items,
  *                       each up to 100 chars).
- *  - `maxRetries`     — Max delivery attempts: integer in [0, 10].
- *  - `timeoutMs`      — Per-attempt timeout: integer in [500, 30000] ms.
- *  - `enabled`        — Boolean toggle (optional, defaults to true).
+ *  - `maxRetries`     � Max delivery attempts: integer in [0, 10].
+ *  - `timeoutMs`      � Per-attempt timeout: integer in [500, 30000] ms.
+ *  - `enabled`        � Boolean toggle (optional, defaults to true).
  *
  * @type {import('zod').ZodObject}
  */
@@ -133,16 +133,16 @@ const webhookConfigSchema = z
   })
   .strict(); // reject unknown keys
 
-// ── Reconciliation config schema ─────────────────────────────────────────────
+// -- Reconciliation config schema ---------------------------------------------
 
 /**
  * Schema for reconciliation run scheduling configuration writes.
  *
  * Fields:
- *  - `batchSize`          — Invoices per batch: integer in [1, 500].
- *  - `maxDriftSeconds`    — Acceptable ledger-to-DB drift: integer in [0, 3600].
- *  - `scheduleExpression` — Cron or rate expression (max 100 chars).
- *  - `enabled`            — Boolean toggle (optional).
+ *  - `batchSize`          � Invoices per batch: integer in [1, 500].
+ *  - `maxDriftSeconds`    � Acceptable ledger-to-DB drift: integer in [0, 3600].
+ *  - `scheduleExpression` � Cron or rate expression (max 100 chars).
+ *  - `enabled`            � Boolean toggle (optional).
  *
  * @type {import('zod').ZodObject}
  */
@@ -165,16 +165,16 @@ const reconciliationConfigSchema = z
     message: 'At least one reconciliation config field must be provided',
   });
 
-// ── KYC config schema ────────────────────────────────────────────────────────
+// -- KYC config schema --------------------------------------------------------
 
 /**
  * Schema for KYC provider connection configuration writes.
  *
  * Fields:
- *  - `providerUrl`  — Provider API base URL (HTTPS, max 2048 chars).
- *  - `apiKey`       — Provider API key (min 8 chars, max 256 chars).
- *  - `timeoutMs`    — HTTP timeout for provider calls: integer in [500, 30000] ms.
- *  - `retries`      — Max provider retries: integer in [0, 5].
+ *  - `providerUrl`  � Provider API base URL (HTTPS, max 2048 chars).
+ *  - `apiKey`       � Provider API key (min 8 chars, max 256 chars).
+ *  - `timeoutMs`    � HTTP timeout for provider calls: integer in [500, 30000] ms.
+ *  - `retries`      � Max provider retries: integer in [0, 5].
  *
  * Cross-field rule: `providerUrl` and `apiKey` must both be provided together
  * (or neither if the intent is to clear the configuration via separate logic).
@@ -196,17 +196,17 @@ const kycConfigSchema = z
   })
   .strict();
 
-// ── Retention config schema ──────────────────────────────────────────────────
+// -- Retention config schema --------------------------------------------------
 
 /**
  * Schema for data-retention and legal-hold configuration writes.
  *
  * Fields:
- *  - `retentionDays`      — Retention window: integer in [1, 3650] (≤ 10 years).
- *  - `purgeEnabled`       — Boolean toggle (optional).
- *  - `batchSize`          — Rows per purge batch: integer in [1, 1000].
- *  - `purgeCron`          — Cron expression for scheduled purges (max 100 chars).
- *  - `legalHoldReasons`   — Allowlisted reason codes (max 20 items,
+ *  - `retentionDays`      � Retention window: integer in [1, 3650] (= 10 years).
+ *  - `purgeEnabled`       � Boolean toggle (optional).
+ *  - `batchSize`          � Rows per purge batch: integer in [1, 1000].
+ *  - `purgeCron`          � Cron expression for scheduled purges (max 100 chars).
+ *  - `legalHoldReasons`   � Allowlisted reason codes (max 20 items,
  *                           each string up to 100 chars).
  *
  * @type {import('zod').ZodObject}
@@ -241,15 +241,15 @@ const retentionConfigSchema = z
     message: 'At least one retention config field must be provided',
   });
 
-// ── CORS config schema ──────────────────────────────────────────────────────
+// -- CORS config schema ------------------------------------------------------
 
 /**
  * Schema for CORS (Cross-Origin Resource Sharing) configuration writes.
  *
  * Fields:
- *  - `origins`  — Array of allowed origin URLs (max 20 items, each a valid
+ *  - `origins`  � Array of allowed origin URLs (max 20 items, each a valid
  *                 URL up to 2048 chars).
- *  - `maxAge`   — Preflight Access-Control-Max-Age in seconds: integer in
+ *  - `maxAge`   � Preflight Access-Control-Max-Age in seconds: integer in
  *                 [60, 86400] (min 1 minute, max 24 hours).
  *
  * At least one field must be provided.
@@ -285,18 +285,18 @@ const corsConfigSchema = z
     message: 'At least one CORS config field must be provided',
   });
 
-// ── Fraud thresholds schema ──────────────────────────────────────────────────
+// -- Fraud thresholds schema --------------------------------------------------
 
 /**
  * Schema for per-tenant fraud and manual-review threshold configuration writes.
  *
  * Fields:
- *  - `fraudCeiling`             — Amounts above this are auto-rejected:
+ *  - `fraudCeiling`             � Amounts above this are auto-rejected:
  *                                 finite positive number in [1, 1_000_000_000].
- *  - `manualReviewThreshold`    — Amounts at or above this need human review:
+ *  - `manualReviewThreshold`    � Amounts at or above this need human review:
  *                                 finite positive number in [1, 1_000_000_000].
  *
- * Cross-field rule: `manualReviewThreshold` must be ≤ `fraudCeiling` when
+ * Cross-field rule: `manualReviewThreshold` must be = `fraudCeiling` when
  * both fields are supplied, so the manual-review band remains reachable.
  *
  * @type {import('zod').ZodObject}
@@ -326,7 +326,7 @@ const fraudThresholdsSchema = z
     }
   });
 
-// ── Top-level runtime config schema ─────────────────────────────────────────
+// -- Top-level runtime config schema -----------------------------------------
 
 /**
  * Valid configuration section names accepted by POST /api/admin/config.
@@ -408,7 +408,7 @@ const runtimeConfigSchema = z
     }
   });
 
-// ── Exports ──────────────────────────────────────────────────────────────────
+// -- Exports ------------------------------------------------------------------
 
 module.exports = {
   // Section schemas (exported for direct use in tests and sub-route validation)
