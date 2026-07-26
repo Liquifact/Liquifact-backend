@@ -368,11 +368,77 @@ describe('Soroban Integration Wrapper', () => {
       expect(thrown.code).toBe('SOROBAN_RPC_ERR');
     });
 
+    it('handles budget shorter than backoff delay by aborting early on subsequent attempt', async () => {
+      // Simulate time: start=0, after first attempt failure=10, after sleep & second attempt failure=500
+      dateNowSpy.mockRestore();
+      const values = [0, 10, 500];
+      let idx = 0;
+      dateNowSpy = jest.spyOn(Date, 'now').mockImplementation(() => values[idx++]);
+
+      const err = new Error('503 Service Unavailable');
+      err.status = 503;
+      const operation = jest.fn().mockRejectedValue(err);
+
+      await expect(
+        withRetry(operation, { maxRetries: 5, baseDelay: 200, maxDelay: 1000, maxElapsedMs: 100 })
+      ).rejects.toThrow('503 Service Unavailable');
+
+      expect(operation).toHaveBeenCalledTimes(2);
+    });
+
+    it('falls back gracefully when maxElapsedMs or maxRetries is non-numeric or invalid', async () => {
+      const operation = jest.fn().mockResolvedValue('fallback-ok');
+
+      const result = await withRetry(operation, { maxElapsedMs: 'invalid', maxRetries: null });
+      expect(result).toBe('fallback-ok');
+      expect(operation).toHaveBeenCalledTimes(1);
+    });
+
+    it('records latency metric with outcome="error" and increments budget exhaustion counter when callSorobanContract exhausts budget', async () => {
+      const incSpy = jest.spyOn(metrics.sorobanRetryBudgetExhaustedTotal, 'inc');
+      const err = new Error('503 Service Unavailable');
+      err.status = 503;
+      const operation = jest.fn().mockRejectedValue(err);
+
+      await expect(
+        callSorobanContract(operation, {
+          maxRetries: 5,
+          baseDelay: 0,
+          maxDelay: 0,
+          maxElapsedMs: 0,
+          metricMethod: 'simulateTransaction',
+        })
+      ).rejects.toThrow('503 Service Unavailable');
+
+      expect(incSpy).toHaveBeenCalled();
+      const metricsText = await getMetricsText();
+      expect(metricsText).toMatch(
+        /soroban_rpc_call_duration_seconds_count\{method="simulate_transaction",outcome="error"\} 1/
+      );
+      incSpy.mockRestore();
+    });
+
     it('maps retry classifications to bounded retry-cause labels', () => {
       expect(getRetryCauseLabel({ retryable: true, category: 'rate-limit', reason: 'status:429' })).toBe('429');
       expect(getRetryCauseLabel({ retryable: true, category: 'rpc-5xx', reason: 'status:503' })).toBe('5xx');
       expect(getRetryCauseLabel({ retryable: true, category: 'network', reason: 'network-code:ETIMEDOUT' })).toBe('timeout');
       expect(getRetryCauseLabel({ retryable: true, category: 'network', reason: 'network-code:ECONNRESET' })).toBe('unknown');
+    });
+
+    it('classifies errors correctly and exports isRetryable boolean helper', () => {
+      const { classifySorobanError, isRetryable, getRetryCauseLabel } = require('./soroban');
+
+      expect(classifySorobanError(null)).toEqual({ retryable: false, category: 'permanent', reason: 'invalid-error-shape' });
+      expect(classifySorobanError('string error')).toEqual({ retryable: false, category: 'permanent', reason: 'invalid-error-shape' });
+      expect(isRetryable(null)).toBe(false);
+      expect(isRetryable(new Error('503 Service Unavailable'))).toBe(true);
+
+      expect(classifySorobanError(new Error('too many requests'))).toEqual({ retryable: true, category: 'rate-limit', reason: 'message:rate-limit' });
+      expect(classifySorobanError(new Error('connection timeout'))).toEqual({ retryable: true, category: 'network', reason: 'message:timeout' });
+      expect(classifySorobanError(new Error('bad gateway'))).toEqual({ retryable: true, category: 'rpc-5xx', reason: 'message:rpc-5xx' });
+      expect(classifySorobanError(new Error('gateway timeout'))).toEqual({ retryable: true, category: 'rpc-5xx', reason: 'message:rpc-5xx' });
+      expect(classifySorobanError(new Error('network error'))).toEqual({ retryable: true, category: 'network', reason: 'message:network' });
+      expect(getRetryCauseLabel({ retryable: false })).toBe('unknown');
     });
   });
 });
