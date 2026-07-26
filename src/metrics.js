@@ -1134,7 +1134,17 @@ const sorobanRpcRetryCausesTotal = new client.Counter({
 });
 
 /**
- * Bounded enum of allowed `status_class` label values.
+ * Bounded enum of allowed persistence endpoint label values.
+ * @readonly
+ */
+const PERSISTENCE_ENDPOINT_ENUM = Object.freeze([
+  'sme_invoice_upload',
+  'sme_invoice_presigned_url',
+  'unknown',
+]);
+
+/**
+ * Bounded enum of allowed `status_class` label values for persistence errors.
  * @readonly
  */
 const PERSISTENCE_STATUS_CLASS_ENUM = Object.freeze(['2xx', '4xx', '5xx']);
@@ -1175,8 +1185,7 @@ const PERSISTENCE_CAUSE_ENUM = Object.freeze([
  */
 function normalizePersistenceEndpoint(raw) {
   const str = typeof raw === 'string' ? raw.trim() : '';
-  if (str === 'invoices' || str === 'escrow') { return str; }
-  return 'unknown';
+  return PERSISTENCE_ENDPOINT_ENUM.includes(str) ? str : 'unknown';
 }
 
 /**
@@ -1206,15 +1215,12 @@ function normalizePersistenceStatusClass(status) {
  */
 function normalizePersistenceCause(err, status) {
   const code = Number(status);
-  if (code < 400) { return 'none'; }
-  if (!err) { return 'internal'; }
-  const msg = typeof err === 'string' ? err : (err.message || err.code || '');
-  if (msg.includes('INVALID_MIME_TYPE') || msg.includes('FILE_TOO_LARGE') || msg.includes('INVALID_TENANT_ID')) {
-    return 'validation';
-  }
-  if (msg.includes('storage') || msg.includes('upload') || msg.includes('S3')) {
-    return 'storage';
-  }
+  if (!err && code < 400) { return 'none'; }
+
+  const errCode = err && typeof err === 'object' && 'code' in err ? String(err.code) : '';
+
+  if (code >= 400 && code < 500) { return 'validation'; }
+  if (['STORAGE_WRITE_FAILED', 'ENOENT', 'EACCES'].includes(errCode)) { return 'storage'; }
   return 'internal';
 }
 
@@ -1226,7 +1232,7 @@ const persistenceRequestDurationSeconds = new client.Histogram({
   name: 'persistence_request_duration_seconds',
   help: 'Duration of persistence endpoint requests in seconds',
   labelNames: ['endpoint', 'status_class'],
-  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5],
+  buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
   registers: [registry],
 });
 
@@ -1411,81 +1417,47 @@ const metricsRequestDurationSeconds = new client.Histogram({
   registers: [registry],
 });
 
-// ── Persistence endpoint metrics ────────────────────────────────────────────
+const metricsRequestsTotal = new client.Counter({
+  name: 'metrics_requests_total',
+  help: 'Total number of metrics endpoint requests',
+  labelNames: ['status_class'],
+  registers: [registry],
+});
 
-/**
- * Bounded enum of allowed `endpoint` label values for persistence metrics.
- * @readonly
- */
-const PERSISTENCE_ENDPOINT_ENUM = Object.freeze([
-  'sme_invoice_upload',
-  'sme_invoice_update',
-  'sme_invoice_delete',
-  'sme_invoice_list',
-  'sme_invoice_detail',
-  'unknown',
-]);
+const metricsRequestErrorsTotal = new client.Counter({
+  name: 'metrics_request_errors_total',
+  help: 'Total number of metrics endpoint request errors by cause',
+  labelNames: ['cause'],
+  registers: [registry],
+});
 
-/**
- * Bounded enum of allowed `status_class` label values for persistence metrics.
- * @readonly
- */
-const PERSISTENCE_STATUS_CLASS_ENUM = Object.freeze(['2xx', '4xx', '5xx']);
+function recordMetricsEndpointOutcome({ statusCode, durationSeconds, error, req }) {
+  const statusClass = normalizeMetricsEndpointStatusClass(statusCode);
+  metricsRequestDurationSeconds.labels(statusClass).observe(durationSeconds);
+  metricsRequestsTotal.labels(statusClass).inc();
 
-/**
- * Bounded enum of allowed `cause` label values for persistence error metrics.
- * @readonly
- */
-const PERSISTENCE_CAUSE_ENUM = Object.freeze(['validation', 'storage', 'internal', 'none']);
-
-/**
- * Maps a raw persistence endpoint hint to a bounded metric label value.
- *
- * @param {unknown} raw - Raw endpoint identifier.
- * @returns {string} Bounded value from {@link PERSISTENCE_ENDPOINT_ENUM}.
- */
-function normalizePersistenceEndpoint(raw) {
-  const str = String(raw || '');
-  return PERSISTENCE_ENDPOINT_ENUM.includes(str) ? str : 'unknown';
-}
-
-/**
- * Maps an HTTP status code to a bounded `status_class` label value.
- *
- * @param {unknown} status - HTTP status code.
- * @returns {string} Bounded value from {@link PERSISTENCE_STATUS_CLASS_ENUM}.
- */
-function normalizePersistenceStatusClass(status) {
-  const code = Number(status);
-  if (code >= 500) { return '5xx'; }
-  if (code >= 400) { return '4xx'; }
-  return '2xx';
-}
-
-/**
- * Maps a raw persistence failure to a bounded `cause` label value.
- *
- * Recognises the storage-service error codes surfaced by the SME routes
- * (INVALID_MIME_TYPE, FILE_TOO_LARGE, INVALID_TENANT_ID) as client-side
- * `validation`, storage-layer failures as `storage`, and everything else as
- * `internal`. A 2xx outcome maps to `none`.
- *
- * @param {unknown} err - Raw error object or code (null/undefined for success).
- * @param {number} [status] - HTTP status code, used to disambiguate.
- * @returns {string} Bounded value from {@link PERSISTENCE_CAUSE_ENUM}.
- */
-function normalizePersistenceCause(err, status) {
-  const code = Number(status);
-  if (!err && code < 400) { return 'none'; }
-  if (code >= 400 && code < 500) { return 'validation'; }
-  if (code >= 500) {
-    const errCode = err?.code;
-    if (errCode === 'STORAGE_WRITE_FAILED' || errCode === 'ENOENT' || errCode === 'EACCES') {
-      return 'storage';
-    }
-    return 'internal';
+  const cause = normalizeMetricsEndpointCause(error, statusCode);
+  if (cause !== 'none') {
+    metricsRequestErrorsTotal.labels(cause).inc();
   }
-  return 'internal';
+
+  const log = (req && typeof logger.createRequestLogger === 'function')
+    ? logger.createRequestLogger(req)
+    : logger;
+  const fields = {
+    statusClass,
+    statusCode,
+    durationSeconds: Number(durationSeconds.toFixed(6)),
+    cause,
+  };
+
+  if (statusClass === '5xx') {
+    log.error(fields, 'metrics endpoint request failed');
+  } else if (statusClass === '4xx') {
+    log.warn(fields, 'metrics endpoint request rejected');
+  } else {
+    log.info(fields, 'metrics endpoint request completed');
+  }
 }
 
 // ── KYC webhook metrics (issue #731) ────────────────────────────────────────

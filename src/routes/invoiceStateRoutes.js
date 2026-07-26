@@ -10,7 +10,15 @@ const {
   getTransitionHistory,
 } = require('../services/invoiceStateMachine');
 const { getAuditLogs } = require('../services/auditLog');
-const { buildInvoiceStateError, resolveInvoiceStateContext } = require('./invoiceStateValidation');
+const { requireKycForFunding, auditKycAccess } = require('../middleware/kycGating');
+const { authenticatedTenantStack } = require('../middleware/stacks');
+const responseHelper = require('../utils/responseHelper');
+
+router.use(...authenticatedTenantStack);
+
+// Per-client (API key / IP) rate limit on the invoice-state endpoints (#739).
+const { invoiceStateLimiter } = require('../middleware/rateLimit');
+router.use(invoiceStateLimiter);
 
 /**
  * Sends a structured error response using a validation error object.
