@@ -1,5 +1,5 @@
 const DEFAULT_ESCROW_TTL_SECONDS = 30;
-const DEFAULT_ESCROW_MAX_ENTRIES = 500;
+const DEFAULT_ESCROW_MAX_ENTRIES = 100;
 
 /**
  * Parses the escrow cache TTL from environment variables.
@@ -14,14 +14,15 @@ function parseCacheConfig(env = process.env) {
   const seconds = Number.isFinite(parsed) && parsed > 0
     ? parsed
     : DEFAULT_ESCROW_TTL_SECONDS;
-  const rawMaxEntries = Number.parseInt(env.ESCROW_CACHE_MAX_ENTRIES, 10);
-  const maxEntries = Number.isFinite(rawMaxEntries) && rawMaxEntries > 0
-    ? rawMaxEntries
+  const rawMaxEntries = env.ESCROW_CACHE_MAX_ENTRIES;
+  const parsedMaxEntries = parseInt(rawMaxEntries, 10);
+  const maxEntries = Number.isFinite(parsedMaxEntries) && parsedMaxEntries > 0
+    ? parsedMaxEntries
     : DEFAULT_ESCROW_MAX_ENTRIES;
 
   return {
     escrowTtl: seconds * 1000,
-    escrowMaxEntries: maxEntries,
+    escrowCacheMaxEntries: maxEntries,
   };
 }
 
@@ -30,4 +31,5 @@ const cacheConfig = parseCacheConfig();
 module.exports = {
   cacheConfig,
   parseCacheConfig,
+  DEFAULT_ESCROW_MAX_ENTRIES,
 };
