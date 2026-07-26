@@ -9,12 +9,12 @@
  *   listInvoices(tenantId, opts)          — list with soft-delete filter
  *   getInvoices(queryParams | tenantId)   — legacy dual-arity shim kept for
  *                                           backward-compat with existing routes
- *   getInvoiceById(id, tenantId)          — single record, tenant-scoped
- *   createInvoice(data, tenantId)         — insert with generated invoice_id
- *   updateInvoice(id, updates, tenantId)  — tenant-scoped UPDATE
- *   deleteInvoice(id, tenantId)           — soft-delete
- *   resolveInvoiceForTenant(id, tenantId) — tenant-scoped lookup for state routes
- *   transitionInvoice(id, target, tenantId, opts) — execute + persist transition
+ *   getInvoiceById(id, tenantId)          â€” single record, tenant-scoped
+ *   createInvoice(data, tenantId)          â€” insert with generated invoice_id
+ *   updateInvoice(id, updates, tenantId)  â€” tenant-scoped UPDATE
+ *   deleteInvoice(id, tenantId)           â€” soft-delete
+ *   resolveInvoiceForTenant(id, tenantId) â€” tenant-scoped lookup for state routes
+ *   transitionInvoice(id, target, tenantId, opts) â€” execute + persist transition
  *
  * KYC helpers (in-memory mockInvoices — retained for test compatibility):
  *   getInvoicesByKycStatus(userId, kycStatus)
@@ -24,7 +24,7 @@
  */
 
 'use strict';
-
+const { getMetricsCacheStore } = require('./metricsCacheStore');
 const db = require('../db/knex');
 const { applyQueryOptions } = require('../utils/queryBuilder');
 const { encodeCursor, decodeCursor, CursorError } = require('../utils/cursorPagination');
@@ -374,7 +374,7 @@ async function createInvoice(invoiceData, tenantId) {
   // SQLite returns an array of primary-key integers from insert(); PostgreSQL
   // returns full rows when `.returning('*')` is chained. We normalise both.
   const result = await db('invoices').insert(row).returning('*');
-
+  getMetricsCacheStore().invalidatePrefix('marketplace:'); 
   if (Array.isArray(result) && result.length > 0 && typeof result[0] === 'object') {
     // PostgreSQL path — full row returned
     return result[0];
@@ -420,6 +420,8 @@ async function updateInvoice(id, updates = {}, tenantId) {
     .update({ ...updates, updated_at: nowValue() })
     .returning('*');
 
+  getMetricsCacheStore().invalidatePrefix('marketplace:');
+
   if (Array.isArray(result) && result.length > 0 && typeof result[0] === 'object') {
     return result[0];
   }
@@ -464,6 +466,8 @@ async function deleteInvoice(id, tenantId) {
     .where({ invoice_id: id, tenant_id: tenantId })
     .update({ deleted_at: ts })
     .returning('*');
+
+  getMetricsCacheStore().invalidatePrefix('marketplace:');
 
   if (Array.isArray(result) && result.length > 0 && typeof result[0] === 'object') {
     return result[0];
@@ -711,7 +715,7 @@ async function getSmeInvoiceCounts(tenantId, userId) {
  * @param {string} [options.cursor] - Opaque cursor from a prior page.
  * @param {number} [options.limit=20] - Max rows per page (clamped to 1–100).
  * @returns {Promise<{invoices: object[], meta: {total: number, limit: number, hasMore: boolean, nextCursor: string|null}}>}
- * @throws {TypeError}  When tenantId or userId is missing.
+ * @throws {TypeError}   When tenantId or userId is missing.
  * @throws {CursorError} When the cursor is malformed, tampered, or expired.
  */
 async function getSmeInvoiceList(tenantId, userId, { cursor, limit = 20 } = {}) {
