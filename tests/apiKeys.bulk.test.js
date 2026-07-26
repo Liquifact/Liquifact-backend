@@ -1,12 +1,15 @@
 'use strict';
 
-const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const request = require('supertest');
 
 const testDbPath = path.join(__dirname, 'test_api_keys_bulk.db');
 process.env.API_KEYS_DB_PATH = testDbPath;
+process.env.API_KEYS = [
+  JSON.stringify({ key: 'lf_test_read_write', clientId: 'svc-read-write', scopes: ['invoices:write'] }),
+  JSON.stringify({ key: 'lf_test_read_only', clientId: 'svc-read-only', scopes: ['invoices:read'] }),
+].join(';');
 
 const { router } = require('../src/routes/apiKeys');
 const { hashApiKey, initDb } = require('../src/middleware/apiKey');
@@ -25,17 +28,21 @@ function createTestApp() {
   return app;
 }
 
+function bulkRequest(app, key, tenantId) {
+  return request(app)
+    .post('/api/api-keys/bulk')
+    .set('X-API-KEY', key)
+    .set('X-Tenant-Id', tenantId);
+}
+
 describe('API key bulk operations', () => {
   beforeEach(async () => {
-    if (fs.existsSync(testDbPath)) {
-      fs.unlinkSync(testDbPath);
-    }
-
     const db = initDb();
     await new Promise((resolve, reject) => {
       db.run(`
         CREATE TABLE IF NOT EXISTS api_keys (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
+          tenant_id TEXT,
           key_hash TEXT NOT NULL UNIQUE,
           name TEXT NOT NULL,
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -46,11 +53,27 @@ describe('API key bulk operations', () => {
       `, (err) => (err ? reject(err) : resolve()));
     });
 
+    await new Promise((resolve) => {
+      db.run('ALTER TABLE api_keys ADD COLUMN tenant_id TEXT', () => resolve());
+    });
+
+    await new Promise((resolve, reject) => {
+      db.run('DELETE FROM api_keys', (err) => (err ? reject(err) : resolve()));
+    });
+
+    global.__apiKeySeedId = null;
     await new Promise((resolve, reject) => {
       db.run(
-        'INSERT INTO api_keys (key_hash, name, is_active) VALUES (?, ?, ?)',
-        [hashApiKey('existing-key'), 'existing-service', 1],
-        (err) => (err ? reject(err) : resolve())
+        'INSERT INTO api_keys (tenant_id, key_hash, name, is_active) VALUES (?, ?, ?, ?)',
+        ['tenant-a', hashApiKey('existing-key'), 'existing-service', 1],
+        function onInsert(err) {
+          if (err) {
+            reject(err);
+            return;
+          }
+          global.__apiKeySeedId = this.lastID;
+          resolve();
+        }
       );
     });
 
@@ -58,14 +81,12 @@ describe('API key bulk operations', () => {
   });
 
   afterAll(() => {
-    if (fs.existsSync(testDbPath)) {
-      fs.unlinkSync(testDbPath);
-    }
+    // best-effort cleanup handled by the route test teardown on Windows
   });
 
   test('rejects empty batch', async () => {
     const app = createTestApp();
-    const response = await request(app).post('/api/api-keys/bulk').send([]);
+    const response = await bulkRequest(app, 'lf_test_read_write', 'tenant-a').send([]);
 
     expect(response.status).toBe(400);
     expect(response.body.error.message).toBe('Batch must contain at least one api-key operation');
@@ -79,7 +100,7 @@ describe('API key bulk operations', () => {
       apiKey: `key-${index}-12345`,
     }));
 
-    const response = await request(app).post('/api/api-keys/bulk').send(payload);
+    const response = await bulkRequest(app, 'lf_test_read_write', 'tenant-a').send(payload);
 
     expect(response.status).toBe(400);
     expect(response.body.error.message).toBe('Batch size exceeds maximum of 25');
@@ -87,8 +108,7 @@ describe('API key bulk operations', () => {
 
   test('returns per-item success and failure without failing the batch', async () => {
     const app = createTestApp();
-    const response = await request(app)
-      .post('/api/api-keys/bulk')
+    const response = await bulkRequest(app, 'lf_test_read_write', 'tenant-a')
       .send([
         {
           action: 'create',
@@ -102,7 +122,7 @@ describe('API key bulk operations', () => {
         },
         {
           action: 'deactivate',
-          id: 1,
+          id: global.__apiKeySeedId,
         },
       ]);
 
@@ -128,7 +148,7 @@ describe('API key bulk operations', () => {
       success: true,
       action: 'deactivate',
       result: {
-        id: 1,
+        id: global.__apiKeySeedId,
         name: 'existing-service',
         isActive: false,
       },
@@ -137,8 +157,7 @@ describe('API key bulk operations', () => {
 
   test('validates individual items', async () => {
     const app = createTestApp();
-    const response = await request(app)
-      .post('/api/api-keys/bulk')
+    const response = await bulkRequest(app, 'lf_test_read_write', 'tenant-a')
       .send([
         {
           action: 'create',
@@ -155,5 +174,42 @@ describe('API key bulk operations', () => {
     });
     expect(response.body.data[0].success).toBe(false);
     expect(response.body.data[0].error).toMatch(/Too small|String must contain at least 1 character/);
+  });
+
+  test('rejects missing auth', async () => {
+    const app = createTestApp();
+    const response = await request(app).post('/api/api-keys/bulk').send([]);
+
+    expect(response.status).toBe(401);
+    expect(response.body.error).toBe('API key is required. Provide it via the X-API-Key header.');
+  });
+
+  test('rejects wrong scope', async () => {
+    const app = createTestApp();
+    const response = await bulkRequest(app, 'lf_test_read_only', 'tenant-a').send([]);
+
+    expect(response.status).toBe(403);
+    expect(response.body.error).toBe('Insufficient permissions. Required scope: "invoices:write".');
+  });
+
+  test('denies cross-tenant access', async () => {
+    const app = createTestApp();
+    const response = await bulkRequest(app, 'lf_test_read_write', 'tenant-b')
+      .send([
+        {
+          action: 'rename',
+          id: global.__apiKeySeedId,
+          name: 'cross-tenant',
+        },
+      ]);
+
+    expect(response.status).toBe(200);
+    expect(response.body.summary).toEqual({
+      total: 1,
+      succeeded: 0,
+      failed: 1,
+    });
+    expect(response.body.data[0].success).toBe(false);
+    expect(response.body.data[0].error).toMatch(/API Key Not Found|API key 1 was not found/);
   });
 });

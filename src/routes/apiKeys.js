@@ -4,6 +4,8 @@ const express = require('express');
 const { z } = require('zod');
 const { hashApiKey, initDb } = require('../middleware/apiKey');
 const AppError = require('../errors/AppError');
+const { authenticateApiKey } = require('../middleware/apiKeyAuth');
+const { extractTenant } = require('../middleware/tenant');
 
 const router = express.Router();
 
@@ -83,6 +85,26 @@ function get(db, sql, params = []) {
 }
 
 /**
+ * Fetches all rows from the provided database handle.
+ *
+ * @param {object} db - SQLite database handle.
+ * @param {string} sql - SQL statement to execute.
+ * @param {unknown[]} [params=[]] - Statement parameters.
+ * @returns {Promise<object[]>} Query result rows.
+ */
+function all(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve(rows);
+    });
+  });
+}
+
+/**
  * Ensures the api_keys table exists before processing a bulk request.
  *
  * @param {object} db - SQLite database handle.
@@ -100,6 +122,12 @@ async function ensureApiKeyTable(db) {
       audit_log TEXT
     )
   `);
+
+  const columns = await all(db, 'PRAGMA table_info(api_keys)');
+  const hasTenantId = columns.some((column) => column.name === 'tenant_id');
+  if (!hasTenantId) {
+    await run(db, 'ALTER TABLE api_keys ADD COLUMN tenant_id TEXT');
+  }
 }
 
 /**
@@ -111,11 +139,12 @@ async function ensureApiKeyTable(db) {
  */
 async function createKey(db, item) {
   const keyHash = hashApiKey(item.apiKey);
-  await run(db, 'INSERT INTO api_keys (key_hash, name, is_active) VALUES (?, ?, 1)', [
+  await run(db, 'INSERT INTO api_keys (tenant_id, key_hash, name, is_active) VALUES (?, ?, ?, 1)', [
+    item.tenantId,
     keyHash,
     item.name,
   ]);
-  const row = await get(db, 'SELECT id, name, is_active FROM api_keys WHERE key_hash = ?', [keyHash]);
+  const row = await get(db, 'SELECT id, name, is_active FROM api_keys WHERE key_hash = ? AND tenant_id = ?', [keyHash, item.tenantId]);
   return {
     id: row.id,
     name: row.name,
@@ -131,7 +160,7 @@ async function createKey(db, item) {
  * @returns {Promise<object>} Updated key summary.
  */
 async function updateKey(db, item) {
-  const existing = await get(db, 'SELECT id, name, is_active FROM api_keys WHERE id = ?', [item.id]);
+  const existing = await get(db, 'SELECT id, name, is_active FROM api_keys WHERE id = ? AND tenant_id = ?', [item.id, item.tenantId]);
   if (!existing) {
     throw new AppError({
       type: 'https://liquifact.com/probs/not-found',
@@ -142,12 +171,12 @@ async function updateKey(db, item) {
   }
 
   if (item.action === 'rename') {
-    await run(db, 'UPDATE api_keys SET name = ? WHERE id = ?', [item.name, item.id]);
+    await run(db, 'UPDATE api_keys SET name = ? WHERE id = ? AND tenant_id = ?', [item.name, item.id, item.tenantId]);
   } else {
-    await run(db, 'UPDATE api_keys SET is_active = ? WHERE id = ?', [item.action === 'activate' ? 1 : 0, item.id]);
+    await run(db, 'UPDATE api_keys SET is_active = ? WHERE id = ? AND tenant_id = ?', [item.action === 'activate' ? 1 : 0, item.id, item.tenantId]);
   }
 
-  const updated = await get(db, 'SELECT id, name, is_active FROM api_keys WHERE id = ?', [item.id]);
+  const updated = await get(db, 'SELECT id, name, is_active FROM api_keys WHERE id = ? AND tenant_id = ?', [item.id, item.tenantId]);
   return {
     id: updated.id,
     name: updated.name,
@@ -179,7 +208,7 @@ function normalizeError(err) {
  * @param {import('express').NextFunction} next - Express next callback.
  * @returns {Promise<import('express').Response|void>}
  */
-router.post('/bulk', async (req, res, next) => {
+router.post('/bulk', authenticateApiKey({ requiredScope: 'invoices:write' }), extractTenant, async (req, res, next) => {
   const items = req.body;
 
   if (!Array.isArray(items)) {
@@ -223,6 +252,7 @@ router.post('/bulk', async (req, res, next) => {
     for (const [index, rawItem] of items.entries()) {
       try {
         const item = bulkItemSchema.parse(rawItem);
+        item.tenantId = req.tenantId;
         let result;
 
         if (item.action === 'create') {
