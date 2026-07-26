@@ -27,6 +27,7 @@
  */
 
 const express = require('express');
+const compression = require('compression');
 const { adminStack } = require('../middleware/stacks');
 const {
   runtimeConfigSchema,
@@ -39,6 +40,8 @@ const logger = require('../logger');
 
 const router = express.Router();
 
+// Compress config responses above 500 bytes (issue #52)
+router.use(compression({ threshold: 500 }));
 
 // ── Apply per-client rate limit *before* admin auth + tenant extraction ─────
 // Mounting the limiter ahead of adminStack ensures failed authentication
