@@ -36,6 +36,12 @@ const {
 const { adminConfigLimiter } = require('../middleware/rateLimit');
 const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
 const logger = require('../logger');
+const {
+  toAdminConfigRequestDto,
+  fromAdminConfigRequestDto,
+  toAdminConfigResponseDto,
+  fromConfigSectionsResponseDto,
+} = require('../dto/config');
 
 const router = express.Router();
 
@@ -174,7 +180,8 @@ router.use(...adminStack);
  */
 router.post('/', validateBody(runtimeConfigSchema), optionalIdempotency, (req, res) => {
   // validateBody attaches the parsed, coerced payload to req.validated
-  const { section, config: validatedConfig } = req.validated;
+  const validatedDto = toAdminConfigRequestDto(req.validated);
+  const { section, config: validatedConfig } = fromAdminConfigRequestDto(validatedDto);
 
   // Apply runtime configuration changes for supported sections.
   applyConfigSection(section, validatedConfig);
@@ -188,11 +195,13 @@ router.post('/', validateBody(runtimeConfigSchema), optionalIdempotency, (req, r
     'Admin runtime config update accepted',
   );
 
-  return res.status(200).json({
+  const responseDto = toAdminConfigResponseDto({
     section,
     config: validatedConfig,
     message: `Configuration section '${section}' validated and accepted.`,
   });
+
+  return res.status(200).json(responseDto);
 });
 
 // ── GET /api/admin/config/sections ───────────────────────────────────────────
@@ -226,7 +235,8 @@ router.post('/', validateBody(runtimeConfigSchema), optionalIdempotency, (req, r
  *         $ref: '#/components/responses/Problem403'
  */
 router.get('/sections', (req, res) => {
-  return res.status(200).json({ sections: CONFIG_SECTIONS });
+  const sectionsDto = fromConfigSectionsResponseDto({ sections: CONFIG_SECTIONS });
+  return res.status(200).json(sectionsDto);
 });
 
 module.exports = router;
