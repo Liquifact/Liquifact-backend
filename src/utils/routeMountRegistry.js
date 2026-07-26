@@ -7,23 +7,42 @@
  * `/api/invoices`), but mounting the **same router instance** twice at the same
  * base path adds redundant middleware passes and makes route order ambiguous.
  *
+ * Mount state is scoped to each Express app instance so independently-built
+ * applications do not share registry state.
+ *
  * @module utils/routeMountRegistry
  */
 
-/** @type {Array<{ basePath: string, router: import('express').Router }>} */
-const featureRouterMounts = [];
+/** @type {WeakMap<import('express').Express, Array<{ basePath: string, router: import('express').Router }>>} */
+let featureRouterMountsByApp = new WeakMap();
 
 /**
- * Mounts a feature router at `basePath` and records the pairing.
+ * Resolves the mutable mount registry for an Express app.
+ *
+ * @param {import('express').Express} app - Express application.
+ * @returns {Array<{ basePath: string, router: import('express').Router }>} Mount registry.
+ */
+function getMountsForApp(app) {
+  let mounts = featureRouterMountsByApp.get(app);
+  if (!mounts) {
+    mounts = [];
+    featureRouterMountsByApp.set(app, mounts);
+  }
+  return mounts;
+}
+
+/**
+ * Mounts a feature router at `basePath` and records the pairing for `app`.
  *
  * @param {import('express').Express} app - Express application.
  * @param {string} basePath - Mount prefix (e.g. `/api/investor`).
  * @param {import('express').Router} router - Router instance to mount.
  * @returns {void}
- * @throws {Error} When the same router instance is already mounted at `basePath`.
+ * @throws {Error} When the same router instance is already mounted at `basePath` on `app`.
  */
 function mountFeatureRouter(app, basePath, router) {
-  const duplicate = featureRouterMounts.some(
+  const mounts = getMountsForApp(app);
+  const duplicate = mounts.some(
     (entry) => entry.basePath === basePath && entry.router === router
   );
 
@@ -33,21 +52,24 @@ function mountFeatureRouter(app, basePath, router) {
     );
   }
 
-  featureRouterMounts.push({ basePath, router });
+  mounts.push({ basePath, router });
   app.use(basePath, router);
 }
 
 /**
- * Startup guard: fails fast if duplicate (basePath, router) mounts were recorded.
+ * Startup guard: fails fast if duplicate (basePath, router) mounts were recorded
+ * for an app.
  *
+ * @param {import('express').Express} app - Express application.
  * @returns {void}
  * @throws {Error} When duplicate mounts are detected.
  */
-function assertNoDuplicateRouterMounts() {
-  for (let i = 0; i < featureRouterMounts.length; i += 1) {
-    for (let j = i + 1; j < featureRouterMounts.length; j += 1) {
-      const left = featureRouterMounts[i];
-      const right = featureRouterMounts[j];
+function assertNoDuplicateRouterMounts(app) {
+  const mounts = getMountsForApp(app);
+  for (let i = 0; i < mounts.length; i += 1) {
+    for (let j = i + 1; j < mounts.length; j += 1) {
+      const left = mounts[i];
+      const right = mounts[j];
       if (left.basePath === right.basePath && left.router === right.router) {
         throw new Error(`Duplicate route mount detected at ${left.basePath}`);
       }
@@ -56,26 +78,57 @@ function assertNoDuplicateRouterMounts() {
 }
 
 /**
- * Returns a snapshot of recorded feature-router mounts (for tests and audits).
+ * Returns an immutable snapshot of feature-router mounts for an app.
  *
- * @returns {ReadonlyArray<{ basePath: string, router: import('express').Router }>}
+ * @param {import('express').Express} app - Express application.
+ * @returns {ReadonlyArray<{ basePath: string, router: import('express').Router }>} Mount snapshot.
  */
-function getFeatureRouterMounts() {
-  return featureRouterMounts.map((entry) => ({ ...entry }));
+function listRouteMounts(app) {
+  return Object.freeze(
+    getMountsForApp(app).map((entry) => Object.freeze({ ...entry }))
+  );
 }
 
 /**
- * Clears recorded mounts. Call at the start of each `createApp()` invocation.
+ * Backwards-compatible alias for `listRouteMounts`.
  *
+ * @param {import('express').Express} app - Express application.
+ * @returns {ReadonlyArray<{ basePath: string, router: import('express').Router }>} Mount snapshot.
+ */
+function getFeatureRouterMounts(app) {
+  return listRouteMounts(app);
+}
+
+/**
+ * Clears mounts for one app, or replaces the registry entirely when no app is
+ * provided. The no-argument form is intended for test setup.
+ *
+ * @param {import('express').Express} [app] - Optional Express application.
  * @returns {void}
  */
-function resetFeatureRouterMounts() {
-  featureRouterMounts.length = 0;
+function resetRouteMounts(app) {
+  if (app) {
+    featureRouterMountsByApp.delete(app);
+    return;
+  }
+  featureRouterMountsByApp = new WeakMap();
+}
+
+/**
+ * Backwards-compatible alias for `resetRouteMounts`.
+ *
+ * @param {import('express').Express} [app] - Optional Express application.
+ * @returns {void}
+ */
+function resetFeatureRouterMounts(app) {
+  resetRouteMounts(app);
 }
 
 module.exports = {
   mountFeatureRouter,
   assertNoDuplicateRouterMounts,
+  listRouteMounts,
+  resetRouteMounts,
   getFeatureRouterMounts,
   resetFeatureRouterMounts,
 };
@@ -84,11 +137,12 @@ if (process.env.NODE_ENV === 'test') {
   /**
    * Records a mount without mounting on the app (test-only helper).
    *
-   * @param {string} basePath
-   * @param {import('express').Router} router
+   * @param {import('express').Express} app - Express application.
+   * @param {string} basePath - Mount prefix.
+   * @param {import('express').Router} router - Router instance.
    * @returns {void}
    */
-  module.exports.recordFeatureRouterMountForTesting = (basePath, router) => {
-    featureRouterMounts.push({ basePath, router });
+  module.exports.recordFeatureRouterMountForTesting = (app, basePath, router) => {
+    getMountsForApp(app).push({ basePath, router });
   };
 }
