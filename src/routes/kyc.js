@@ -8,6 +8,20 @@ const logger = require('../logger');
 const router = express.Router();
 
 /**
+ * Returns true when the KYC webhook endpoint is enabled.
+ * Reads KYC_WEBHOOK_ENABLED at call-time so the flag can be toggled
+ * without a process restart.
+ *
+ * Safe default: disabled — any value other than the exact string "true"
+ * leaves the endpoint off.
+ *
+ * @returns {boolean}
+ */
+function isKycWebhookEnabled() {
+  return process.env.KYC_WEBHOOK_ENABLED === 'true';
+}
+
+/**
  * Parse JSON from a raw request body.
  *
  * @param {string} rawBody
@@ -28,8 +42,17 @@ function parseJsonPayload(rawBody) {
  * Verifies the webhook signature using the configured provider secret,
  * maps provider-specific statuses to internal KYC statuses, and persists
  * the result to the KYC record store.
+ *
+ * Disabled by default. Set KYC_WEBHOOK_ENABLED=true to activate.
+ * Returns HTTP 503 when disabled so callers can distinguish "not configured"
+ * from a transient error.
  */
 router.post('/webhook', async (req, res) => {
+  if (!isKycWebhookEnabled()) {
+    logger.info({ route: '/api/kyc/webhook' }, 'KYC webhook ingestion is disabled (KYC_WEBHOOK_ENABLED != true)');
+    return res.status(503).json({ error: 'KYC webhook ingestion is disabled' });
+  }
+
   const config = kycService.getKycProviderConfig();
   const secret = config.apiSecret;
   const signatureHeader = req.header('X-Signature');
@@ -95,3 +118,4 @@ router.post('/webhook', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.isKycWebhookEnabled = isKycWebhookEnabled;

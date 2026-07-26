@@ -28,6 +28,8 @@ const ConfigSchema = z
     KYC_PROVIDER_URL: z.string().url().optional(),
     KYC_PROVIDER_API_KEY: z.string().min(1).optional(),
     KYC_PROVIDER_SECRET: z.string().min(1).optional(),
+    // KYC webhook ingestion feature flag — safe default: disabled
+    KYC_WEBHOOK_ENABLED: z.enum(['true', 'false']).default('false'),
   })
   .superRefine((data, ctx) => {
     if (data.NODE_ENV === 'test') { return; }
