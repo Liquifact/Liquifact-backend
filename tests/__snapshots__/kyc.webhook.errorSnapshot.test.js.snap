@@ -1,0 +1,79 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`kyc-webhook 404 / 409 response shape locks 404 Not Found — unknown sub-route forwards to problemJson notFoundHandler 1`] = `
+{
+  "detail": "The requested resource GET /api/kyc/no-such-hook was not found.",
+  "instance": "/api/kyc/no-such-hook",
+  "status": 404,
+  "title": "Not Found",
+  "type": "https://liquifact.com/probs/not-found",
+}
+`;
+
+exports[`kyc-webhook POST /api/kyc/webhook — error response body snapshots 200 OK — happy path (locks the success response shape) valid signed payload is persisted 1`] = `
+{
+  "smeId": "sme-001",
+  "status": "verified",
+  "success": true,
+}
+`;
+
+exports[`kyc-webhook POST /api/kyc/webhook — error response body snapshots 400 Bad Request invalid JSON payload (route wraps the SyntaxError as a stable message) 1`] = `
+{
+  "error": "Invalid JSON payload",
+}
+`;
+
+exports[`kyc-webhook POST /api/kyc/webhook — error response body snapshots 400 Bad Request missing or invalid smeId 1`] = `
+{
+  "error": "Missing or invalid smeId",
+}
+`;
+
+exports[`kyc-webhook POST /api/kyc/webhook — error response body snapshots 400 Bad Request missing or invalid status 1`] = `
+{
+  "error": "Missing or invalid status",
+}
+`;
+
+exports[`kyc-webhook POST /api/kyc/webhook — error response body snapshots 400 Bad Request missing tenant context when payload carries tenantId 1`] = `
+{
+  "error": "Missing tenant context.",
+}
+`;
+
+exports[`kyc-webhook POST /api/kyc/webhook — error response body snapshots 400 Bad Request unknown provider status — fail-closed (#592) 1`] = `
+{
+  "error": "Unknown provider status: mystery_status",
+}
+`;
+
+exports[`kyc-webhook POST /api/kyc/webhook — error response body snapshots 401 Unauthorized invalid webhook signature 1`] = `
+{
+  "error": "Invalid webhook signature",
+}
+`;
+
+exports[`kyc-webhook POST /api/kyc/webhook — error response body snapshots 401 Unauthorized missing X-Signature header 1`] = `
+{
+  "error": "Missing X-Signature header",
+}
+`;
+
+exports[`kyc-webhook POST /api/kyc/webhook — error response body snapshots 403 Forbidden tenant scope mismatch 1`] = `
+{
+  "error": "Tenant scope mismatch.",
+}
+`;
+
+exports[`kyc-webhook POST /api/kyc/webhook — error response body snapshots 500 Internal Server Error persistence_error — persistKycRecord throws 1`] = `
+{
+  "error": "Simulated DB write failure",
+}
+`;
+
+exports[`kyc-webhook POST /api/kyc/webhook — error response body snapshots 503 Service Unavailable missing_secret — apiSecret not configured 1`] = `
+{
+  "error": "KYC webhook ingestion is not configured",
+}
+`;

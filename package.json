@@ -83,6 +83,12 @@
         "functions": 80,
         "lines": 85,
         "statements": 85
+      },
+      "src/routes/kyc.js": {
+        "branches": 60,
+        "functions": 45,
+        "lines": 60,
+        "statements": 60
       }
     }
   },
