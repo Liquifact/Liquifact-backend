@@ -27,6 +27,7 @@ const { getAuditLogs } = require('../services/auditLog');
 const { requireKycForFunding, auditKycAccess } = require('../middleware/kycGating');
 const { extractTenant } = require('../middleware/tenant');
 const responseHelper = require('../utils/responseHelper');
+const optionalIdempotency = require('../middleware/optionalIdempotency');
 
 router.use(extractTenant);
 
@@ -111,7 +112,7 @@ router.get('/:id/state', async (req, res, next) => {
  *
  * Request body: { "targetState": "approved", "reason": "..." }
  */
-router.post('/:id/transition', async (req, res, next) => {
+router.post('/:id/transition', optionalIdempotency, async (req, res, next) => {
   const { id } = req.params;
   const { targetState, reason } = req.body || {};
 
@@ -161,7 +162,7 @@ router.post('/:id/transition', async (req, res, next) => {
  * POST /api/invoices/:id/approve
  * Convenience endpoint to approve a pending invoice.
  */
-router.post('/:id/approve', async (req, res, next) => {
+router.post('/:id/approve', optionalIdempotency, async (req, res, next) => {
   const { id } = req.params;
   const { reason } = req.body || {};
 
@@ -206,7 +207,7 @@ router.post('/:id/approve', async (req, res, next) => {
  * Links an approved invoice to escrow. This is a capital-movement endpoint
  * gated on the caller's SME holding a verified/exempted KYC status.
  */
-router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, async (req, res, next) => {
+router.post('/:id/link-escrow', optionalIdempotency, requireKycForFunding, auditKycAccess, async (req, res, next) => {
   const { id } = req.params;
   const { escrowId, reason } = req.body || {};
 
@@ -266,7 +267,7 @@ router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, async (req
  * POST /api/invoices/:id/reject
  * Convenience endpoint to reject an invoice. Requires a non-empty reason.
  */
-router.post('/:id/reject', async (req, res, next) => {
+router.post('/:id/reject', optionalIdempotency, async (req, res, next) => {
   const { id } = req.params;
   const { reason } = req.body || {};
 
