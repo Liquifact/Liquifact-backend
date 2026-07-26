@@ -195,3 +195,4 @@ The KYC circuit breaker is implemented in [src/utils/circuitBreaker.js](../src/u
 - [src/services/webhooks.js](../src/services/webhooks.js) — signature creation and verification helpers.
 - [src/utils/circuitBreaker.js](../src/utils/circuitBreaker.js) — breaker state machine and recovery semantics.
 - [docs/configuration.md](./configuration.md) — full environment-variable reference.
+- [docs/changelog-kyc-webhooks.md](./changelog-kyc-webhooks.md) — notable, consumer-facing API changes to this subsystem over time.
