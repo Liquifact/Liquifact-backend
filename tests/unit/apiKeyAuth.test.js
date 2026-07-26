@@ -393,6 +393,7 @@ describe('api-keys endpoint integration', () => {
   beforeEach(() => {
     apiKeysRouter.resetRuntimeEntries();
     app = express();
+    app.use(express.json());
     app.locals.env = { API_KEYS: '' };
     app.use(apiKeysRouter);
   });

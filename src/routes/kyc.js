@@ -1,9 +1,11 @@
 'use strict';
 
 const express = require('express');
-const { verifySignature } = require('../services/webhooks');
 const kycService = require('../services/kycService');
 const logger = require('../logger');
+const db = require('../db/knex');
+const responseHelper = require('../utils/responseHelper');
+const { encodeCursor, decodeCursor, CursorError } = require('../utils/cursorPagination');
 const {
   kycWebhookRequestDurationSeconds,
   kycWebhookRequestsTotal,
@@ -11,29 +13,43 @@ const {
   normalizeKycWebhookStatusClass,
   normalizeKycWebhookCause,
 } = require('../metrics');
+const {
+  kycWebhookSchema,
+  kycWebhookListResponseSchema,
+  parseValidationErrors,
+} = require('../schemas/kycWebhook');
 
 const router = express.Router();
+
+/**
+ * Returns true when the KYC webhook endpoint is enabled.
+ * Reads KYC_WEBHOOK_ENABLED at call-time so the flag can be toggled
+ * without a process restart.
+ *
+ * Safe default: disabled — any value other than the exact string "true"
+ * leaves the endpoint off.
+ *
+ * @returns {boolean}
+ */
+function isKycWebhookEnabled() {
+  return process.env.KYC_WEBHOOK_ENABLED === 'true';
+}
 
 const MAX_LIMIT = 100;
 const DEFAULT_LIMIT = 20;
 const SORT_FIELD = 'updated_at';
 
 /**
- * Parse JSON from a raw request body.
- */
-function parseJsonPayload(rawBody) {
-  try {
-    return JSON.parse(rawBody);
-  } catch (_e) {
-    throw new Error('Invalid JSON payload');
-  }
-}
-
-/**
  * POST /api/kyc/webhook
- * (existing ingestion endpoint – unchanged)
+ * (existing ingestion endpoint – unchanged behaviour)
  */
 router.post('/webhook', async (req, res) => {
+  // Feature flag — disabled by default, set KYC_WEBHOOK_ENABLED=true to activate
+  if (!isKycWebhookEnabled()) {
+    logger.info({ route: '/api/kyc/webhook' }, 'KYC webhook ingestion is disabled (KYC_WEBHOOK_ENABLED != true)');
+    return res.status(503).json({ error: 'KYC webhook ingestion is disabled' });
+  }
+
   const startTime = process.hrtime.bigint();
   let statusClass = '2xx';
   let cause = 'none';
@@ -51,7 +67,7 @@ router.post('/webhook', async (req, res) => {
 
   const config = kycService.getKycProviderConfig();
   const secret = config.apiSecret;
-  const signatureHeader = req.header('X-Signature');
+  const signatureHeader = req.header('X-Signature') || '';
   const rawBody = req.body instanceof Buffer ? req.body.toString('utf8') : String(req.body || '');
 
   if (!secret) {
@@ -80,30 +96,69 @@ router.post('/webhook', async (req, res) => {
     return res.status(400).json({ error: error.message });
   }
 
-  const smeId = payload.smeId || payload.sme_id;
-  const status = payload.status || payload.kycStatus || payload.kyc_status;
-  const providerRecordId = payload.recordId || payload.providerRecordId || payload.provider_record_id || null;
-  const verifiedAt = payload.verifiedAt || payload.verified_at || null;
   const payloadTenantId = payload.tenantId || payload.tenant_id || null;
   const requestTenantId = req.tenantId;
 
-  if (payloadTenantId && requestTenantId && payloadTenantId !== requestTenantId) {
-    return res.status(403).json({ error: 'Tenant scope mismatch.' });
+  // Delegate all pre-ingestion validation to the shared helper
+  const validation = validateKycWebhookRequest(rawBody, signatureHeader, secret, requestTenantId, kycService);
+
+  if (!validation.valid) {
+    const { status: errStatus, body: errBody, errorCode } = validation.error;
+
+    // Emit warning logs for validation failures that produce them upstream
+    if (errorCode === 'missing_secret') {
+      logger.warn({ route: '/api/kyc/webhook' }, 'KYC webhook secret is not configured');
+    } else if (errorCode === 'invalid_signature') {
+      logger.warn({ error: validation.error.verificationError || 'invalid_signature' }, 'Invalid KYC webhook signature');
+    } else if (errorCode === 'unknown_status') {
+      logger.warn(
+        { smeId: validation.error.smeId || '(unknown)', status: validation.error.status || '(unknown)' },
+        'KYC webhook received status outside PROVIDER_STATUS_MAP; rejecting (fail-closed)',
+      );
+    }
+
+    finish(errStatus, errorCode);
+    return res.status(errStatus).json(errBody);
   }
 
   if (payloadTenantId && !requestTenantId) {
     return res.status(400).json({ error: 'Missing tenant context.' });
   }
 
-  if (!smeId || typeof smeId !== 'string') {
-    finish(400, 'missing_sme_id');
-    return res.status(400).json({ error: 'Missing or invalid smeId' });
+  // Normalise provider aliases (snake_case / legacy field names) into the
+  // canonical shape, then validate declaratively against kycWebhookSchema
+  // instead of ad hoc typeof checks (issue #905).
+  const normalizedPayload = {
+    smeId: payload.smeId ?? payload.sme_id,
+    status: payload.status ?? payload.kycStatus ?? payload.kyc_status,
+    recordId: payload.recordId ?? payload.providerRecordId ?? payload.provider_record_id ?? undefined,
+    verifiedAt: payload.verifiedAt ?? payload.verified_at ?? undefined,
+  };
+
+  const parsedPayload = kycWebhookSchema.safeParse(normalizedPayload);
+  if (!parsedPayload.success) {
+    const fieldErrors = parseValidationErrors(parsedPayload.error);
+
+    // Preserve the pre-existing smeId/status error contract (message + bounded
+    // metrics cause) that other tests/consumers already depend on, while still
+    // gaining schema-driven validation of length, format, and unknown fields.
+    if (fieldErrors.smeId) {
+      finish(400, 'missing_sme_id');
+      return res.status(400).json({ error: 'Missing or invalid smeId', details: fieldErrors });
+    }
+    if (fieldErrors.status) {
+      finish(400, 'missing_status');
+      return res.status(400).json({ error: 'Missing or invalid status', details: fieldErrors });
+    }
+
+    finish(400, 'invalid_payload');
+    return res.status(400).json({ error: 'Invalid KYC webhook payload', details: fieldErrors });
   }
 
-  if (!status || typeof status !== 'string') {
-    finish(400, 'missing_status');
-    return res.status(400).json({ error: 'Missing or invalid status' });
-  }
+  const smeId = parsedPayload.data.smeId;
+  const status = parsedPayload.data.status;
+  const providerRecordId = parsedPayload.data.recordId || null;
+  const verifiedAt = parsedPayload.data.verifiedAt || null;
 
   // Reject unsigned payloads that include a status we don't recognise. The
   // signed webhook is the provider's authoritative signal — if it sends a
@@ -231,14 +286,30 @@ router.get('/webhooks', async (req, res, next) => {
       });
     }
 
-    return res.status(200).json({
+    const responseBody = {
       data: pageRows,
       meta: {
         limit,
         hasMore,
         nextCursor,
       },
-    });
+    };
+
+    // Validate the outgoing shape at the boundary (issue #905) — a shape
+    // drift here reflects a bug in the query projection above, not a client
+    // error, so it is logged and surfaced as a 500 rather than shipped as-is.
+    const parsedResponse = kycWebhookListResponseSchema.safeParse(responseBody);
+    if (!parsedResponse.success) {
+      logger.error(
+        { errors: parseValidationErrors(parsedResponse.error) },
+        'KYC webhooks list response failed schema validation',
+      );
+      return res.status(500).json(
+        responseHelper.error('Failed to build KYC webhooks response', 'INTERNAL_ERROR')
+      );
+    }
+
+    return res.status(200).json(parsedResponse.data);
   } catch (error) {
     logger.error({ err: error.message }, 'Failed to list KYC webhooks');
     return next(error);
@@ -246,3 +317,4 @@ router.get('/webhooks', async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.isKycWebhookEnabled = isKycWebhookEnabled;

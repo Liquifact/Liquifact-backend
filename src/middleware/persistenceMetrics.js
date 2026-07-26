@@ -24,6 +24,7 @@ const {
   normalizePersistenceCause,
 } = require('../metrics');
 const logger = require('../logger');
+const { toPersistenceRecordParams } = require('../dto/metrics');
 
 /**
  * Records metrics and a structured log for one completed persistence request.
@@ -31,37 +32,42 @@ const logger = require('../logger');
  * Kept separate from {@link instrumentPersistence} so it can be unit-tested in
  * isolation against each status class without driving a full HTTP request.
  *
- * @param {object} params
- * @param {string} params.endpoint - Raw endpoint hint (bounded on use).
- * @param {number} params.statusCode - Final HTTP status code.
- * @param {number} params.durationSeconds - Wall-clock duration in seconds.
- * @param {unknown} [params.error] - Error thrown by the handler, if any.
- * @param {import('express').Request} [params.req] - Request, for a scoped logger.
+ * @param {PersistenceRecordParams} params - Already-normalised outcome data.
+ *   Fields should be run through {@link toPersistenceRecordParams} before
+ *   calling this function, or passed as raw values that will be coerced via
+ *   the mapping function internally.
  * @returns {void}
  */
 function recordPersistenceOutcome({ endpoint, statusCode, durationSeconds, error, req }) {
-  const ep = normalizePersistenceEndpoint(endpoint);
-  const statusClass = normalizePersistenceStatusClass(statusCode);
+  // Map raw params through the typed DTO layer for safe field access.
+  const params = toPersistenceRecordParams({
+    endpoint: normalizePersistenceEndpoint(endpoint),
+    statusCode,
+    durationSeconds,
+    cause: normalizePersistenceCause(error, statusCode),
+    req,
+  });
 
-  persistenceRequestDurationSeconds.labels(ep, statusClass).observe(durationSeconds);
-  persistenceRequestsTotal.labels(ep, statusClass).inc();
+  const statusClass = normalizePersistenceStatusClass(params.statusCode);
 
-  const cause = normalizePersistenceCause(error, statusCode);
-  if (cause !== 'none') {
-    persistenceRequestErrorsTotal.labels(ep, cause).inc();
+  persistenceRequestDurationSeconds.labels(params.endpoint, statusClass).observe(params.durationSeconds);
+  persistenceRequestsTotal.labels(params.endpoint, statusClass).inc();
+
+  if (params.cause !== 'none') {
+    persistenceRequestErrorsTotal.labels(params.endpoint, params.cause).inc();
   }
 
-  // Structured log â€” safe fields only. Never log file contents, file names,
+  // Structured log — safe fields only. Never log file contents, file names,
   // buffers, or raw error messages that could contain user data.
-  const log = (req && typeof logger.createRequestLogger === 'function')
-    ? logger.createRequestLogger(req)
+  const log = (params.req && typeof logger.createRequestLogger === 'function')
+    ? logger.createRequestLogger(params.req)
     : logger;
   const fields = {
-    endpoint: ep,
+    endpoint: params.endpoint,
     statusClass,
-    statusCode,
-    durationSeconds: Number(durationSeconds.toFixed(6)),
-    cause,
+    statusCode: params.statusCode,
+    durationSeconds: Number(params.durationSeconds.toFixed(6)),
+    cause: params.cause,
   };
 
   if (statusClass === '5xx') {

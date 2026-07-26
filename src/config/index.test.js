@@ -282,5 +282,74 @@ describe('Config Validation', () => {
       expect(() => getFreshLimit()).toThrow(/INVOICE_FILE_MAX_SIZE/i);
     });
   });
+
+  test('INVOICE_STATE_ENABLED defaults to true', () => {
+    process.env.NODE_ENV = 'test';
+    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
+    delete process.env.INVOICE_STATE_ENABLED;
+    const config = validate();
+    expect(config.INVOICE_STATE_ENABLED).toBe('true');
+  });
+
+  test('INVOICE_STATE_ENABLED accepts false', () => {
+    process.env.NODE_ENV = 'test';
+    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
+    process.env.INVOICE_STATE_ENABLED = 'false';
+    const config = validate();
+    expect(config.INVOICE_STATE_ENABLED).toBe('false');
+  });
+
+  test('INVOICE_STATE_ENABLED rejects invalid values', () => {
+    process.env.NODE_ENV = 'test';
+    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
+    process.env.INVOICE_STATE_ENABLED = 'yes';
+    expect(() => validate()).toThrow(/INVOICE_STATE_ENABLED/i);
+  });
+
+  test('empty optional strings are accepted (JWT_ISSUER, JWT_AUDIENCE, CORS_ALLOWED_ORIGINS)', () => {
+    process.env.NODE_ENV = 'test';
+    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
+    process.env.JWT_ISSUER = '';
+    process.env.JWT_AUDIENCE = '';
+    process.env.CORS_ALLOWED_ORIGINS = '';
+
+    const config = validate();
+    expect(config.JWT_ISSUER).toBe('');
+    expect(config.JWT_AUDIENCE).toBe('');
+    expect(config.CORS_ALLOWED_ORIGINS).toBe('');
+  });
+
+  test('whitespace-only JWT_SECRET passes min-length check', () => {
+    process.env.NODE_ENV = 'test';
+    process.env.JWT_SECRET = ' '.repeat(32);
+
+    const config = validate();
+    expect(config.JWT_SECRET).toBe(' '.repeat(32));
+  });
+
+  test('PORT boundary values 1 and 65535 are accepted', () => {
+    process.env.NODE_ENV = 'test';
+    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
+    process.env.PORT = '1';
+    expect(validate().PORT).toBe(1);
+
+    process.env.PORT = '65535';
+    expect(validate().PORT).toBe(65535);
+  });
+
+  test('empty string for enum fields is rejected', () => {
+    process.env.NODE_ENV = 'test';
+    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
+    process.env.CURSOR_TTL_ENABLED = '';
+    expect(() => validate()).toThrow(/Invalid option/i);
+  });
+
+  test('getInvoiceFileMaxSize falls back to default when unset before validation', () => {
+    jest.isolateModules(() => {
+      delete process.env.INVOICE_FILE_MAX_SIZE;
+      const { getInvoiceFileMaxSize: getFreshLimit } = require('./index');
+      expect(getFreshLimit()).toBe('5mb');
+    });
+  });
 });
 

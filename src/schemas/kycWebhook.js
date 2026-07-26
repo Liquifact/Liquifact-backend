@@ -82,8 +82,47 @@ function parseValidationErrors(zodError) {
   return fieldErrors;
 }
 
+/**
+ * Zod schema for a single row returned by `GET /api/kyc/webhooks`.
+ *
+ * Mirrors the shape produced by the route's `db('kyc_records').select(...)`
+ * projection (aliased to camelCase). `recordId`/`verifiedAt`/`updatedAt` may
+ * be null since not every persisted record has a provider record id or a
+ * verification timestamp yet.
+ *
+ * @type {import('zod').ZodObject}
+ */
+const kycWebhookRecordSchema = z.object({
+  smeId: z.string(),
+  status: z.string(),
+  recordId: z.string().nullable(),
+  verifiedAt: z.union([z.string(), z.date()]).nullable(),
+  updatedAt: z.union([z.string(), z.date()]).nullable(),
+});
+
+/**
+ * Zod schema for the full `GET /api/kyc/webhooks` response envelope:
+ * a page of {@link kycWebhookRecordSchema} rows plus cursor-pagination meta.
+ *
+ * Used defensively at the response boundary so a shape drift in the
+ * underlying query is caught as a 500 instead of silently shipping malformed
+ * data to clients.
+ *
+ * @type {import('zod').ZodObject}
+ */
+const kycWebhookListResponseSchema = z.object({
+  data: z.array(kycWebhookRecordSchema),
+  meta: z.object({
+    limit: z.number().int().positive(),
+    hasMore: z.boolean(),
+    nextCursor: z.string().nullable(),
+  }),
+});
+
 module.exports = {
   kycWebhookSchema,
+  kycWebhookRecordSchema,
+  kycWebhookListResponseSchema,
   parseValidationErrors,
   SME_ID_REGEX,
 };
