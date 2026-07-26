@@ -27,7 +27,7 @@ const { resolveEscrowAddress } = require('../../config/escrowMap');
 const { readEscrowState } = require('../../services/escrowRead');
 const { recordEscrowRead } = require('../../services/escrowReadMetrics');
 const { computeEscrowDerivedFields } = require('../../services/escrowDerived');
-const { validateEscrowReadParams, mapToEscrowReadResponseDto } = require('../../schemas/escrowRead');
+const { escrowReadLimiter } = require('../../middleware/rateLimit');
 const AppError = require('../../errors/AppError');
 const { invoiceCreateSchema, invoiceUpdateSchema, parseValidationErrors } = require('../../schemas/invoice');
 const { validatePatchFields, detectLockedFieldChange } = require('../../middleware/patchInvoice');
@@ -169,7 +169,9 @@ router.post('/invoices', extractTenant, async (req, res, next) => {
  * Returns escrow state with derived display fields.
  * Authentication is required for versioned escrow reads.
  */
-router.get('/escrow/:invoiceId', authenticateToken, async (req, res, next) => {
+// Rate limiter runs BEFORE authenticateToken so that abuse is stopped
+// before any auth processing (IP-based limiting for this endpoint).
+router.get('/escrow/:invoiceId', escrowReadLimiter, authenticateToken, async (req, res, next) => {
   try {
     // Validate path parameters
     const { success, error, data: validatedParams } = validateEscrowReadParams.safeParse(req.params);

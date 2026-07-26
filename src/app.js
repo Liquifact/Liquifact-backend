@@ -45,6 +45,7 @@ const { performHealthChecks, performReadinessChecks } = require('./services/heal
 const { validateHealthQuery, rejectBodyOnGet } = require('./schemas/health');
 const responseHelper = require('./utils/responseHelper');
 const logger = require('./logger');
+const { escrowReadLimiter } = require('./middleware/rateLimit');
 const { metricsAuth, metricsHandler } = require('./metrics');
 const { instrumentHealth } = require('./middleware/healthMetrics');
 const { metricsLimiter } = require('./middleware/rateLimit');
@@ -308,19 +309,11 @@ function createApp() {
     });
   });
 
-// Escrow — GET by invoiceId (proxied through Soroban retry wrapper with address mapping)
-  app.get('/api/escrow/:invoiceId', async (req, res, next) => {
-    // Validate path parameters
-    const { success, error, data: validatedParams } = validateEscrowReadParams.safeParse(req.params);
-    if (!success) {
-      return res.status(400).json({
-        error: 'Invalid invoiceId parameter',
-        code: 'BAD_REQUEST',
-        details: error.flatten().fieldErrors,
-      });
-    }
-
-    const invoiceId = validatedParams.invoiceId;
+  // Escrow — GET by invoiceId (rate-limited, proxied through Soroban retry wrapper with address mapping)
+  app.get('/api/escrow/:invoiceId', escrowReadLimiter, async (req, res) => {
+    const invoiceId = String(req.params.invoiceId || '')
+      .trim()
+      .replace(/\s+/g, '');
 
     try {
       // Resolve escrow contract address using the mapping system

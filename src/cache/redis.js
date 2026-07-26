@@ -14,8 +14,6 @@ let redis;
 try {
   redis = require('redis');
 } catch (_e) {
-  // redis package is optional; tests and environments without Redis
-  // installed can still load this module.
   redis = null;
 }
 

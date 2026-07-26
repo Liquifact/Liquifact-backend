@@ -162,6 +162,35 @@ const SENSITIVE_WINDOW_MS = parseRateLimitEnv('RATE_LIMIT_SENSITIVE_WINDOW_MS', 
 const SENSITIVE_MAX = parseRateLimitEnv('RATE_LIMIT_SENSITIVE_MAX', 40);
 const API_KEY_WINDOW_MS = parseRateLimitEnv('RATE_LIMIT_API_KEY_WINDOW_MS', 15 * 60 * 1000);
 const API_KEY_MAX = parseRateLimitEnv('RATE_LIMIT_API_KEY_MAX', 1000);
+const ESCROW_READ_WINDOW_MS = parseRateLimitEnv('RATE_LIMIT_ESCROW_READ_WINDOW_MS', 60 * 1000);
+const ESCROW_READ_MAX = parseRateLimitEnv('RATE_LIMIT_ESCROW_READ_MAX', 30);
+
+/**
+ * Escrow-read rate limiter.
+ *
+ * Protects GET /api/escrow/:invoiceId and GET /v1/escrow/:invoiceId from
+ * abuse.  Per-client (API key or IP) limiting with a short window (default
+ * 60 s, 30 requests) suitable for a read-heavy endpoint.
+ *
+ * Environment overrides:
+ *   RATE_LIMIT_ESCROW_READ_WINDOW_MS  - window in ms (default 60 000)
+ *   RATE_LIMIT_ESCROW_READ_MAX        - max requests per window (default 30)
+ *
+ * @returns {Function} Express rate limiting middleware.
+ */
+const escrowReadLimiter = rateLimit({
+  windowMs: ESCROW_READ_WINDOW_MS,
+  limit: ESCROW_READ_MAX,
+  message: {
+    error: 'Too many escrow-read requests. Please try again shortly.',
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator,
+  validate: {
+    xForwardedForHeader: false,
+  },
+});
 
 // Issue #754 â€” config-endpoint rate limiter. Defaults target the admin-only
 // reality of /api/admin/config: a 60 s window with 20 requests per client is
