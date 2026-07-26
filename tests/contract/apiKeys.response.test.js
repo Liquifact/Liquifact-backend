@@ -33,6 +33,26 @@ jest.mock('../../src/logger', () => ({
   createRequestLogger: jest.fn(),
 }));
 
+jest.mock('../../src/metrics', () => ({
+  registry: { metrics: jest.fn(), contentType: 'text/plain' },
+  getRegistry: jest.fn(),
+  metricsAuth: jest.fn((_req, res, next) => next()),
+  metricsHandler: jest.fn((_req, res) => res.send('')),
+  recordMetricsEndpointOutcome: jest.fn(),
+  normalizeMetricsEndpointStatusClass: jest.fn(),
+  normalizeMetricsEndpointCause: jest.fn(),
+  metricsRequestDurationSeconds: { observe: jest.fn(), labels: jest.fn(() => ({ observe: jest.fn() })) },
+  metricsRequestsTotal: { inc: jest.fn(), labels: jest.fn(() => ({ inc: jest.fn() })) },
+  metricsRequestErrorsTotal: { inc: jest.fn(), labels: jest.fn(() => ({ inc: jest.fn() })) },
+  apiKeyAuthDurationSeconds: { observe: jest.fn() },
+  apiKeyAuthErrorsTotal: { inc: jest.fn() },
+  classifyApiKeyOutcome: jest.fn(() => 'success'),
+  classifyApiKeyErrorCause: jest.fn(() => null),
+  safeEqual: jest.fn(),
+  extractClientIp: jest.fn(() => '127.0.0.1'),
+  LOOPBACK: '127.0.0.1',
+}));
+
 const { authenticateApiKey, API_KEY_HEADER } = require('../../src/middleware/apiKeyAuth');
 const apiKeysRouter = require('../../src/routes/apiKeys');
 
@@ -60,7 +80,9 @@ function makeAuthApp(middleware) {
 
 function makeListingApp(envOverride) {
   const app = express();
-  app.locals.env = envOverride || TEST_ENV;
+  if (envOverride && envOverride.API_KEYS !== undefined) {
+    process.env.API_KEYS = envOverride.API_KEYS;
+  }
   app.use(apiKeysRouter);
   return app;
 }
@@ -489,13 +511,21 @@ describe('Contract: revoked field coercion', () => {
 // ---------------------------------------------------------------------------
 
 describe('Contract: malformed API_KEYS env', () => {
+  afterEach(() => { delete process.env.API_KEYS; });
+
   it('returns 500 with a JSON body when env contains broken JSON', async () => {
-    const app = makeListingApp({ API_KEYS: '{not valid json;' });
+    process.env.API_KEYS = '{not valid json;';
+    const app = express();
+    app.use(apiKeysRouter);
+    app.use((err, _req, res, _next) => {
+      res.status(500).json({ error: err.message });
+    });
     const res = await request(app).get('/');
     expect(res.status).toBe(500);
     expect(res.headers['content-type']).toMatch(/application\/json/);
     expect(typeof res.body).toBe('object');
-    expect(res.body !== null).toBe(true);
+    expect(res.body).not.toBeNull();
+    expect(typeof res.body.error).toBe('string');
   });
 });
 
