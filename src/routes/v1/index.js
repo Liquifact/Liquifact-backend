@@ -23,11 +23,13 @@ const apiKeysRoutes = require('../apiKeys'); // ← Added
 const { extractTenant } = require('../../middleware/tenant');
 const { authenticateToken } = require('../../middleware/auth');
 const invoiceService = require('../../services/invoiceService');
-const { resolveEscrowAddress } = require('../../config/escrowMap');
+const { resolveEscrowAddress, EscrowNotFoundError } = require('../../config/escrowMap');
 const { readEscrowState } = require('../../services/escrowRead');
+const { batchReadEscrowStates } = require('../../services/escrowBatchRead');
 const { computeEscrowDerivedFields } = require('../../services/escrowDerived');
 const AppError = require('../../errors/AppError');
 const { invoiceCreateSchema, invoiceUpdateSchema, parseValidationErrors } = require('../../schemas/invoice');
+const { escrowBatchReadSchema } = require('../../schemas/escrowBatchRead');
 const { validatePatchFields, detectLockedFieldChange } = require('../../middleware/patchInvoice');
 const { validateHealthQuery, rejectBodyOnGet } = require('../../schemas/health');
 
@@ -56,6 +58,7 @@ router.get('/', (req, res) => {
       health: 'GET /v1/health',
       invoices: 'GET/POST /v1/invoices',
       escrow: 'GET/POST /v1/escrow',
+      'escrow-batch': 'POST /v1/escrow/batch',
       sme: 'POST /v1/sme/invoice',
       'api-keys': 'GET /v1/api-keys',
     },
@@ -195,6 +198,98 @@ router.get('/escrow/:invoiceId', authenticateToken, async (req, res, next) => {
       message: state.fromProjection
         ? 'Escrow state read from event projection.'
         : 'Escrow state read from live Soroban contract.',
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * POST /v1/escrow/batch
+ *
+ * Reads escrow state for a bounded batch of invoice IDs in a single request.
+ * Each ID is resolved and read independently: an unmapped invoice ID or a
+ * failed on-chain read is reported per-item in `errors` rather than failing
+ * the whole batch (mirrors the failure-isolation semantics already used by
+ * {@link module:services/escrowBatchRead}).
+ *
+ * Body:
+ *   invoiceIds  {string[]}  1–100 invoice identifiers (required)
+ *
+ * Response 200:
+ *   { data: { results: object[], errors: object[] }, message: string }
+ */
+router.post('/escrow/batch', authenticateToken, async (req, res, next) => {
+  try {
+    const parsed = escrowBatchReadSchema.safeParse(req.body);
+    if (!parsed.success) {
+      const fieldErrors = parseValidationErrors(parsed.error);
+      return next(
+        new AppError({
+          type: 'https://liquifact.com/probs/validation-error',
+          title: 'Validation Error',
+          status: 422,
+          detail: 'Request body contains invalid or missing fields.',
+          instance: req.originalUrl,
+          code: 'VALIDATION_ERROR',
+          retryable: false,
+          retryHint: 'Correct the highlighted fields and retry.',
+          fieldErrors,
+        }),
+      );
+    }
+
+    const { invoiceIds } = parsed.data;
+
+    // Resolve escrow addresses up front so an unmapped invoice ID is reported
+    // per-item instead of aborting the whole batch.
+    const addressByInvoiceId = new Map();
+    const errors = [];
+
+    const markUnmapped = (invoiceId) => {
+      errors.push({
+        invoiceId,
+        error: `No escrow contract mapping found for invoice ID '${invoiceId}'`,
+        code: 'NOT_FOUND',
+      });
+    };
+
+    for (const rawId of invoiceIds) {
+      const invoiceId = String(rawId || '').trim().replace(/\s+/g, '');
+      try {
+        const escrowAddress = resolveEscrowAddress(invoiceId);
+        if (!escrowAddress) {
+          markUnmapped(invoiceId);
+          continue;
+        }
+        addressByInvoiceId.set(invoiceId, escrowAddress);
+      } catch (err) {
+        if (err instanceof EscrowNotFoundError) {
+          markUnmapped(invoiceId);
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    const mappedIds = [...addressByInvoiceId.keys()];
+    const { results: readResults, errors: readErrors } = mappedIds.length
+      ? await batchReadEscrowStates(mappedIds)
+      : { results: [], errors: [] };
+
+    const results = readResults.map((state) => {
+      const escrowAddress = addressByInvoiceId.get(state.invoiceId);
+      const derived = computeEscrowDerivedFields(state, {
+        ledgerCloseTime: state.ledgerCloseTime,
+      });
+      return { ...state, ...derived, escrowAddress };
+    });
+
+    errors.push(...readErrors);
+
+    return res.json({
+      data: { results, errors },
+      message: `Processed ${invoiceIds.length} invoice ID(s): ${results.length} succeeded, ${errors.length} failed.`,
     });
   } catch (err) {
     return next(err);
