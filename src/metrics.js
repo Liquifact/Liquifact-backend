@@ -313,7 +313,6 @@ const registeredJobQueues = new Set();
 const registeredWorkers = new Set();
 let refreshTimer = null;
 
-/** Shared registry — declared before gauges that reference it. */
 const registry = new client.Registry();
 
 if (typeof client.collectDefaultMetrics === 'function') {
