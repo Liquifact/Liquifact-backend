@@ -29,6 +29,7 @@ const { CursorError } = require('./utils/cursorPagination');
 const { resolveEscrowAddress } = require('./config/escrowMap');
 const { getEscrowStateWithProjection } = require('./services/escrowRead');
 const { createCorsOptions, isCorsOriginRejectedError } = require('./config/cors');
+const { get: getConfig } = require('./config');
 const { validateInvoiceQueryParams } = require('./utils/validators');
 const { computeEscrowDerivedFields } = require('./services/escrowDerived');
 const { invoiceCreateSchema, parseValidationErrors } = require('./schemas/invoice');
@@ -362,7 +363,9 @@ function createApp() {
    */
   mountFeatureRouter(app, '/api/sme', smeRoutes);
   mountFeatureRouter(app, '/api/invoices', invoiceFileRoutes);
-  mountFeatureRouter(app, '/api/invoices', invoiceStateRoutes);
+  if (getConfig().INVOICE_STATE_ENABLED === 'true') {
+    mountFeatureRouter(app, '/api/invoices', invoiceStateRoutes);
+  }
   mountFeatureRouter(app, '/api/invest', investRoutes);
   mountFeatureRouter(app, '/api/investor', investorRoutes);
   mountFeatureRouter(app, '/api/kyc', kycRoutes);

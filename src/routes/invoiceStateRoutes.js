@@ -14,11 +14,29 @@ const {
   canLinkToEscrow,
 } = require('../services/invoiceStateMachine');
 const { getAuditLogs } = require('../services/auditLog');
-const logger = require('../logger');
-const {
-  invoiceStateRequestDurationMs,
-  invoiceStateRequestCount,
-} = require('../metrics');
+const { requireKycForFunding, auditKycAccess } = require('../middleware/kycGating');
+const { extractTenant } = require('../middleware/tenant');
+const responseHelper = require('../utils/responseHelper');
+const config = require('../config');
+
+router.use(extractTenant);
+
+function rejectWhenDisabled(req, res, next) {
+  try {
+    if (config.get().INVOICE_STATE_ENABLED !== 'true') {
+      return res.status(404).json({ error: 'Not found' });
+    }
+  } catch {
+    // Config not yet validated (e.g. isolated unit tests) — allow through.
+  }
+  next();
+}
+
+router.use(rejectWhenDisabled);
+
+// Per-client (API key / IP) rate limit on the invoice-state endpoints (#739).
+const { invoiceStateLimiter } = require('../middleware/rateLimit');
+router.use(invoiceStateLimiter);
 
 /**
  * Sends a structured error response using a validation error object.

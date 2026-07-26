@@ -250,6 +250,20 @@ describe('Mounted feature routers', () => {
     expect(res.status).not.toBe(404);
   });
 
+  it('does not mount invoice state routes when INVOICE_STATE_ENABLED is false', async () => {
+    const config = require('../src/config');
+    const originalGet = config.get;
+    config.get = jest.fn(() => ({ INVOICE_STATE_ENABLED: 'false' }));
+
+    try {
+      const disabledApp = createApp();
+      const res = await request(disabledApp).get('/api/invoices/inv-001/state');
+      expect(res.status).toBe(404);
+    } finally {
+      config.get = originalGet;
+    }
+  });
+
   it('mounts admin escrow routes under /api/admin/escrow', async () => {
     const res = await request(app)
       .get('/api/admin/escrow/version')
