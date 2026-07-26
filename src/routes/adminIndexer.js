@@ -16,7 +16,7 @@
 const express = require('express');
 
 const router = express.Router();
-const { listIndexerEvents } = require('../services/indexerService');
+const { listIndexerEvents, bulkIndexerEvents, validateBulkPayload, INDEXER_SORT_FIELDS, MAX_BULK_BATCH_SIZE } = require('../services/indexerService');
 const { CursorError } = require('../utils/cursorPagination');
 const { adminStack } = require('../middleware/stacks');
 const { indexerLimiter } = require('../middleware/rateLimit');
@@ -216,63 +216,70 @@ router.get('/events', instrumentIndexer(async (req, res, next) => {
 
 /**
  * @swagger
- * /api/admin/indexer/events:
+ * /api/admin/indexer/events/bulk:
  *   post:
- *     operationId: writeIndexerEvent
- *     summary: Write an indexed escrow event (idempotent)
+ *     operationId: bulkIndexerEvents
+ *     summary: Bulk-ingest indexer events
  *     description: |
- *       Persists a single escrow event and updates the per-invoice projection.
- *       This endpoint is idempotent; it requires an `Idempotency-Key` header
- *       to prevent duplicate application of state changes on retry.
+ *       Accepts a bounded JSON array of raw event objects, validates each
+ *       independently, and persists valid entries.  Invalid items produce an
+ *       error entry in the response without aborting the rest of the batch.
+ *
+ *       **Access**: Admin-only (JWT bearer or API key).
+ *
+ *       **Limits**: Maximum **50** items per request (HTTP 413 when exceeded).
  *     tags: [Indexer]
  *     security:
  *       - bearerAuth: []
- *     parameters:
- *       - in: header
- *         name: Idempotency-Key
- *         required: true
- *         schema:
- *           type: string
- *         description: Unique key for safe retries
  *     requestBody:
  *       required: true
  *       content:
  *         application/json:
  *           schema:
- *             type: object
- *             description: The raw event payload to persist
+ *             type: array
+ *             maxItems: 50
+ *             items:
+ *               $ref: '#/components/schemas/IndexerEvent'
  *     responses:
- *       201:
- *         description: Event persisted successfully
+ *       200:
+ *         description: Per-item results (partial failure is reported, not thrown)
  *       400:
- *         description: Validation error
- *       409:
- *         description: Idempotency conflict
+ *         description: Request body is not an array, is empty, or contains a non-object item
+ *         $ref: '#/components/responses/Problem400'
+ *       401:
+ *         $ref: '#/components/responses/Problem401'
+ *       403:
+ *         $ref: '#/components/responses/Problem403'
+ *       413:
+ *         description: Batch exceeds maximum allowed size
  */
-router.post('/events', express.json(), idempotencyMiddleware, async (req, res, next) => {
+router.post('/events/bulk', async (req, res, next) => {
   try {
-    const rawEvent = req.body;
-    const dbClient = req._dbClient || db;
-    const store = createKnexEscrowEventStore(dbClient);
-    
-    // We use a transaction runner to ensure event and projection are updated atomically
-    const transactionRunner = async (handler) => {
-      return dbClient.transaction(handler);
-    };
+    const validation = validateBulkPayload(req.body);
 
-    const event = await persistEscrowEvent({ store, transactionRunner }, rawEvent);
-
-    logger.info({ eventId: event.eventId, invoiceId: event.invoiceId }, 'Admin indexer event persisted');
-    return res.status(201).json({
-      message: 'Event persisted successfully.',
-      event,
-    });
-  } catch (error) {
-    if (error instanceof ValidationError || error.name === 'ValidationError') {
-      return res.status(400).json(
-        responseHelper.error(error.message, error.code, error.details)
+    if (!validation.ok) {
+      return res.status(validation.error.status).json(
+        responseHelper.error(validation.error.message, validation.error.code, validation.error.details),
       );
     }
+
+    const result = await bulkIndexerEvents({
+      events: validation.events,
+      dbClient: req._dbClient,
+    });
+
+    const statusCode = result.meta.failed > 0 ? 207 : 200;
+
+    logger.info(
+      { requestId: req.id, succeeded: result.meta.succeeded, failed: result.meta.failed, total: result.meta.total },
+      'Bulk indexer events processed',
+    );
+
+    return res.status(statusCode).json({
+      ...responseHelper.success(result.data, result.meta),
+      message: 'Bulk indexer events processed.',
+    });
+  } catch (error) {
     return next(error);
   }
 });

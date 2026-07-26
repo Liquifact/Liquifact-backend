@@ -41,7 +41,8 @@ const {
 } = require('../schemas/config');
 const { adminConfigLimiter } = require('../middleware/rateLimit');
 const idempotencyMiddleware = require('../middleware/idempotency');
-const { applyConfig, getConfigSections } = require('../services/configService');
+const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
+const logger = require('../logger');
 
 const router = express.Router();
 
