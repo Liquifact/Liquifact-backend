@@ -61,6 +61,7 @@ const ConfigSchema = z
     // Required in production and must use HTTPS. Falls back to localhost in development/test.
     PUBLIC_API_BASE_URL: z.string().url().optional(),
     INVOICE_FILE_MAX_SIZE: InvoiceFileMaxSizeSchema,
+    INVOICE_STATE_ENABLED: z.enum(['true', 'false']).default('true'),
   })
   .superRefine((data, ctx) => {
     if (data.NODE_ENV === 'test') { return; }

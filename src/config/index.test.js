@@ -282,5 +282,28 @@ describe('Config Validation', () => {
       expect(() => getFreshLimit()).toThrow(/INVOICE_FILE_MAX_SIZE/i);
     });
   });
+
+  test('INVOICE_STATE_ENABLED defaults to true', () => {
+    process.env.NODE_ENV = 'test';
+    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
+    delete process.env.INVOICE_STATE_ENABLED;
+    const config = validate();
+    expect(config.INVOICE_STATE_ENABLED).toBe('true');
+  });
+
+  test('INVOICE_STATE_ENABLED accepts false', () => {
+    process.env.NODE_ENV = 'test';
+    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
+    process.env.INVOICE_STATE_ENABLED = 'false';
+    const config = validate();
+    expect(config.INVOICE_STATE_ENABLED).toBe('false');
+  });
+
+  test('INVOICE_STATE_ENABLED rejects invalid values', () => {
+    process.env.NODE_ENV = 'test';
+    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
+    process.env.INVOICE_STATE_ENABLED = 'yes';
+    expect(() => validate()).toThrow(/INVOICE_STATE_ENABLED/i);
+  });
 });
 

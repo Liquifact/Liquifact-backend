@@ -1303,4 +1303,72 @@ describe('Invoice State API Routes', () => {
       invoiceService.transitionInvoice.mockRestore();
     });
   });
+
+  describe('INVOICE_STATE_ENABLED feature flag', () => {
+    let originalGet;
+
+    beforeEach(() => {
+      const config = require('../src/config');
+      originalGet = config.get;
+      config.get = jest.fn(() => ({ INVOICE_STATE_ENABLED: 'false' }));
+    });
+
+    afterEach(() => {
+      const config = require('../src/config');
+      config.get = originalGet;
+      jest.restoreAllMocks();
+    });
+
+    it('should return 404 for GET /state when disabled', async () => {
+      const res = await request(app)
+        .get('/api/invoices/inv-001/state')
+        .set('x-tenant-id', TENANT_A);
+
+      expect(res.status).toBe(404);
+    });
+
+    it('should return 404 for POST /transition when disabled', async () => {
+      const res = await request(app)
+        .post('/api/invoices/inv-001/transition')
+        .set('x-tenant-id', TENANT_A)
+        .send({ targetState: 'approved' });
+
+      expect(res.status).toBe(404);
+    });
+
+    it('should return 404 for POST /approve when disabled', async () => {
+      const res = await request(app)
+        .post('/api/invoices/inv-001/approve')
+        .set('x-tenant-id', TENANT_A)
+        .send({ reason: 'Test' });
+
+      expect(res.status).toBe(404);
+    });
+
+    it('should return 404 for POST /link-escrow when disabled', async () => {
+      const res = await request(app)
+        .post('/api/invoices/inv-002/link-escrow')
+        .set('x-tenant-id', TENANT_A)
+        .send({ escrowId: 'test' });
+
+      expect(res.status).toBe(404);
+    });
+
+    it('should return 404 for POST /reject when disabled', async () => {
+      const res = await request(app)
+        .post('/api/invoices/inv-001/reject')
+        .set('x-tenant-id', TENANT_A)
+        .send({ reason: 'Test rejection' });
+
+      expect(res.status).toBe(404);
+    });
+
+    it('should return 404 for GET /history when disabled', async () => {
+      const res = await request(app)
+        .get('/api/invoices/inv-001/history')
+        .set('x-tenant-id', TENANT_A);
+
+      expect(res.status).toBe(404);
+    });
+  });
 });
