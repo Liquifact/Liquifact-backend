@@ -80,6 +80,7 @@ Any violation causes a fast startup failure with a clear, redacted error message
 | `SOROBAN_MAX_RETRIES` | integer | `3` | No | No | [`src/services/soroban.js`](../src/services/soroban.js) |
 | `SOROBAN_BASE_DELAY` | integer milliseconds | `200` | No | No | [`src/services/soroban.js`](../src/services/soroban.js) |
 | `SOROBAN_MAX_DELAY` | integer milliseconds | `5000` | No | No | [`src/services/soroban.js`](../src/services/soroban.js) |
+| `SOROBAN_MAX_ELAPSED_MS` | integer milliseconds | `10000` | No | No | [`src/services/soroban.js`](../src/services/soroban.js) |
 | `DATABASE_URL` | database URL | Development/test local fallbacks; production requires deployment value | Required for production DB/migrations | **Secret** | [`knexfile.js`](../knexfile.js), [`migrator-config.js`](../migrator-config.js), [`src/services/health.js`](../src/services/health.js) |
 | `AUDIT_LOG_ENABLED` | boolean string | Feature default | No | No | [`.env.example`](../.env.example) |
 | `AUDIT_LOG_FAIL_CLOSED` | boolean string | `false` | No | No | [`.env.example`](../.env.example) |

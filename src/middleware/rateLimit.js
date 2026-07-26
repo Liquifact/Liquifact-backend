@@ -674,26 +674,47 @@ const invoiceStateLimiter = rateLimit({
   },
 });
 
-/**
- * Per-client (API key / IP) rate limiter for the admin indexer endpoint.
- * Config-driven via RATE_LIMIT_INDEXER_WINDOW_MS / RATE_LIMIT_INDEXER_MAX.
- * express-rate-limit sets Retry-After via standardHeaders on 429.
- *
- * @returns {Function} Express rate limiting middleware.
- */
-const indexerLimiter = rateLimit({
-  windowMs: INDEXER_RATE_LIMIT_WINDOW_MS,
-  limit: INDEXER_RATE_LIMIT_MAX,
-  message: {
-    error: `Too many indexer requests. Max ${INDEXER_RATE_LIMIT_MAX} per ${Math.round(INDEXER_RATE_LIMIT_WINDOW_MS / 60000)} minutes.`,
-  },
+function metricsRateLimitHandler(_req, res, _next, options) {
+  res.status(options.statusCode).json({
+    type: 'https://liquifact.com/probs/too-many-requests',
+    title: 'Too Many Requests',
+    status: options.statusCode,
+    code: 'RATE_LIMITED',
+    retryable: true,
+    retry_hint: 'Wait for the rate-limit window to reset before retrying.',
+    scope: 'metrics',
+    error: 'Too many requests.',
+    message: 'Rate limit threshold breached for /metrics. Please try again later.',
+  });
+}
+
+const metricsLimiter = rateLimit({
+  windowMs: METRICS_RATE_LIMIT_WINDOW_MS,
+  limit: METRICS_RATE_LIMIT_MAX,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: indexerKeyGenerator,
+  store: resolveRateLimitStore('metrics'),
+  keyGenerator: adminConfigKeyGenerator,
   validate: {
     xForwardedForHeader: false,
   },
+  handler: metricsRateLimitHandler,
 });
+
+function createMetricsRateLimiter() {
+  return rateLimit({
+    windowMs: METRICS_RATE_LIMIT_WINDOW_MS,
+    limit: METRICS_RATE_LIMIT_MAX,
+    standardHeaders: true,
+    legacyHeaders: false,
+    store: resolveRateLimitStore('metrics'),
+    keyGenerator: adminConfigKeyGenerator,
+    validate: {
+      xForwardedForHeader: false,
+    },
+    handler: metricsRateLimitHandler,
+  });
+}
 
 module.exports = {
   createRateLimiter,
