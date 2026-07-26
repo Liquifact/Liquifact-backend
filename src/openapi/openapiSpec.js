@@ -274,6 +274,25 @@ const baseDefinition = {
         additionalProperties: false,
       },
       /**
+       * CORS origin rejection error. Returned when a request Origin header
+       * is not in the configured allowlist.
+       */
+      CorsRejection: {
+        type: 'object',
+        required: ['error', 'code'],
+        properties: {
+          error: {
+            type: 'string',
+            enum: ['CORS policy: origin is not allowed.'],
+          },
+          code: {
+            type: 'string',
+            enum: ['CORS_ORIGIN_REJECTED'],
+          },
+        },
+        additionalProperties: false,
+      },
+      /**
        * Summary row from the `reconciliation_runs` table.
        * Intentionally excludes the per-invoice `results` column so that
        * raw on-chain funding values are not surfaced in bulk list responses.
@@ -343,6 +362,14 @@ const baseDefinition = {
         content: {
           'application/problem+json': {
             schema: { $ref: '#/components/schemas/Problem' },
+          },
+        },
+      },
+      CorsRejection403: {
+        description: 'CORS origin rejection',
+        content: {
+          'application/json': {
+            schema: { $ref: '#/components/schemas/CorsRejection' },
           },
         },
       },

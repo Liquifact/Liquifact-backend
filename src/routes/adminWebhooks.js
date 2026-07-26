@@ -71,6 +71,7 @@ function adminAuth(req, res, next) {
  * @swagger
  * /api/admin/webhooks/dead-letters:
  *   get:
+ *     operationId: listDeadLetterWebhooks
  *     summary: List dead-letter webhook deliveries (filterable, cursor-paginated)
  *     description: |
  *       Returns a cursor-paginated list of rows from `webhook_dead_letters`
