@@ -17,11 +17,23 @@
 
 const express = require('express');
 const { loadApiKeyRegistry } = require('../config/apiKeys');
+const { getApiKeysCache } = require('../cache/apiKeysCache');
 
 const router = express.Router();
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
+
+/**
+ * Get the API key registry, using the bounded in-memory cache when available.
+ * Falls through to a fresh parse on cache miss or expired entry.
+ * @returns {Map<string, Object>} The API key registry.
+ */
+function getRegistry() {
+  const cache = getApiKeysCache();
+  return cache.getOrLoad();
+}
+
 
 /**
  * Encode a simple opaque cursor from the last key string.
@@ -59,8 +71,8 @@ router.get('/', (req, res) => {
     limit = MAX_LIMIT;
   }
 
-  // Load all keys from the registry
-  const registry = loadApiKeyRegistry();
+  // Load all keys from the cached registry
+  const registry = getRegistry();
   const allEntries = Array.from(registry.values());
 
   // Apply cursor if provided

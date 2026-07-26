@@ -1055,6 +1055,26 @@ const footprintCacheEvictionsTotal = new client.Counter({
 });
 
 /**
+ * Counter: API keys cache hits.
+ * Incremented when a cached API key registry is served without re-parsing.
+ */
+const apiKeysCacheHitsTotal = new client.Counter({
+  name: 'api_keys_cache_hits_total',
+  help: 'Total number of API keys cache hits',
+  registers: [registry],
+});
+
+/**
+ * Counter: API keys cache misses.
+ * Incremented when the cache does not contain the registry and a fresh parse is required.
+ */
+const apiKeysCacheMissesTotal = new client.Counter({
+  name: 'api_keys_cache_misses_total',
+  help: 'Total number of API keys cache misses',
+  registers: [registry],
+});
+
+/**
  * Counter: Soroban circuit breaker state transitions.
  * @type {import('prom-client').Counter}
  */
@@ -1519,6 +1539,8 @@ module.exports = {
   idempotencyStorageFailureTotal,
   cacheStoreErrorsTotal,
   redisCacheFailOpenTotal,
+  apiKeysCacheHitsTotal,
+  apiKeysCacheMissesTotal,
   escrowReadCacheHitsTotal,
   escrowReadCacheMissesTotal,
   escrowReadCacheEvictionsTotal,
