@@ -45,7 +45,30 @@ const { validateHealthQuery, rejectBodyOnGet } = require('./schemas/health');
 const responseHelper = require('./utils/responseHelper');
 const logger = require('./logger');
 const { metricsAuth, metricsHandler } = require('./metrics');
-const apiKeysRoutes = require('./routes/apiKeys').router;
+const { metricsLimiter } = require('./middleware/rateLimit');
+
+const { instrumentHealth } = require('./middleware/healthMetrics');
+const smeRoutes = require('./routes/sme');
+const invoiceFileRoutes = require('./routes/invoiceFile');
+const auditTrailRoutes = require('./routes/auditTrail');
+const investRoutes = require('./routes/invest');
+const investorRoutes = require('./routes/investor');
+const marketplaceRoutes = require('./routes/marketplace');
+const retentionRoutes = require('./routes/retention');
+const invoiceStateRoutes = require('./routes/invoiceStateRoutes');
+const adminEscrowRoutes = require('./routes/adminEscrow');
+const adminWebhooksRoutes = require('./routes/adminWebhooks');
+const adminConfigRoutes = require('./routes/adminConfig');
+const kycRoutes = require('./routes/kyc');
+const reconciliationRoutes = require('./routes/reconciliation');
+const adminIndexerRoutes = require('./routes/adminIndexer');
+const v1Routes = require('./routes/v1');
+const apiKeysRoutes = require('./routes/apiKeys');
+const {
+  mountFeatureRouter,
+  assertNoDuplicateRouterMounts,
+  resetFeatureRouterMounts,
+} = require('./utils/routeMountRegistry');
 
 /**
  * Returns a 403 JSON response only for the dedicated blocked-origin CORS error.

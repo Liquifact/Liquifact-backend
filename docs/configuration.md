@@ -172,8 +172,18 @@ Every non-approval decision carries a stable, machine-readable `reasonCode` (in 
 
 These codes are part of the service contract: existing values must not be renamed or repurposed.
 
+## Outbound Config Event Webhooks (Issue #975)
+
+Whenever runtime configuration sections are updated via `POST /api/admin/config`, LiquiFact emits an outbound signed `config.updated` webhook event to tenant subscribers.
+
+- **Signature Format**: `X-Signature: t=<timestamp>,v1=<hmac_sha256_hex>`
+- **Payload Bounding**: Config payload size is bounded by `MAX_CONFIG_WEBHOOK_PAYLOAD_BYTES` (32 KB / 32,768 bytes). If a section configuration exceeds 32 KB, the payload `config` object is truncated with `_summary` and `keys` arrays, and `truncated: true` is set.
+- **Retry & Backoff**: Retries on transient HTTP 5xx or network errors using exponential backoff.
+- **Dead-Letter Queue (DLQ)**: Persists failed attempts to `webhook_dead_letters` upon retry exhaustion.
+
 ## Sync Notes
 
 - The reference table above is tested against `.env.example` by [`tests/config.envReference.test.js`](../tests/config.envReference.test.js). Add a row here whenever `.env.example` gains a key.
 - The scoped code consumers from issue #288 are covered: [`src/config/index.js`](../src/config/index.js), [`src/services/escrowSubmit.js`](../src/services/escrowSubmit.js), [`src/middleware/rateLimit.js`](../src/middleware/rateLimit.js), and [`src/metrics.js`](../src/metrics.js).
 - Drift found while documenting: `.env.example` had duplicate `SOROBAN_RPC_URL`, `ESCROW_ADDR_BY_INVOICE`, `JWT_SECRET`, and `API_KEYS` entries. Those duplicates were removed. It also lacked `NETWORK_PASSPHRASE`, `ESCROW_PLATFORM_ADDRESS`, and `ESCROW_PLATFORM_SECRET`, which are consumed by the scoped configuration code; those keys were added without real secret values.
+

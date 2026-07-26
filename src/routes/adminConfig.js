@@ -37,6 +37,8 @@ const {
 const { adminConfigLimiter } = require('../middleware/rateLimit');
 const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
 const logger = require('../logger');
+const { emitConfigWebhook } = require('../services/webhooks');
+
 
 const router = express.Router();
 
@@ -176,7 +178,7 @@ router.use(...adminStack);
  *                 error:   { type: string }
  *                 message: { type: string }
  */
-router.post('/', validateBody(runtimeConfigSchema), optionalIdempotency, (req, res) => {
+router.post('/', optionalIdempotency, validateBody(runtimeConfigSchema), (req, res) => {
   // validateBody attaches the parsed, coerced payload to req.validated
   const validatedDto = toAdminConfigRequestDto(req.validated);
   const { section, config: validatedConfig } = fromAdminConfigRequestDto(validatedDto);
@@ -184,16 +186,31 @@ router.post('/', validateBody(runtimeConfigSchema), optionalIdempotency, (req, r
   // Apply runtime configuration changes for supported sections.
   applyConfigSection(section, validatedConfig);
 
+  const adminClient = req.apiClient?.clientId || req.user?.sub || 'system';
+
   logger.info(
     {
       tenantId: req.tenantId,
       section,
-      adminClient: req.apiClient?.clientId || req.user?.sub,
+      adminClient,
     },
     'Admin runtime config update accepted',
   );
 
-  const responseDto = toAdminConfigResponseDto({
+  // Fire-and-forget outbound webhook emission for config update
+  emitConfigWebhook({
+    tenantId: req.tenantId,
+    section,
+    config: validatedConfig,
+    actor: adminClient,
+  }).catch((err) => {
+    logger.error(
+      { err: err.message, tenantId: req.tenantId, section },
+      'Failed to emit config event webhook',
+    );
+  });
+
+  return res.status(200).json({
     section,
     config: validatedConfig,
     message: `Configuration section '${section}' validated and accepted.`,
