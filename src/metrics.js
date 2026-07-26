@@ -1112,7 +1112,11 @@ const sorobanRpcRetryCausesTotal = new client.Counter({
   registers: [registry],
 });
 
-// ── Persistence endpoint metrics (issue #774) ──────────────────────────────
+/**
+ * Bounded enum of allowed `status_class` label values.
+ * @readonly
+ */
+const PERSISTENCE_STATUS_CLASS_ENUM = Object.freeze(['2xx', '4xx', '5xx']);
 
 /**
  * Bounded enum of allowed `endpoint` label values for persistence metrics.
@@ -1146,11 +1150,12 @@ const PERSISTENCE_CAUSE_ENUM = Object.freeze([
  * Maps a raw persistence endpoint hint to a bounded metric label value.
  *
  * @param {unknown} raw - Raw endpoint identifier.
- * @returns {string} Bounded value from {@link PERSISTENCE_ENDPOINT_ENUM}.
+ * @returns {string} Bounded value from {'invoices'|'escrow'|'unknown'}.
  */
 function normalizePersistenceEndpoint(raw) {
   const str = typeof raw === 'string' ? raw.trim() : '';
-  return PERSISTENCE_ENDPOINT_ENUM.includes(str) ? str : 'unknown';
+  if (str === 'invoices' || str === 'escrow') { return str; }
+  return 'unknown';
 }
 
 /**
@@ -1180,32 +1185,15 @@ function normalizePersistenceStatusClass(status) {
  */
 function normalizePersistenceCause(err, status) {
   const code = Number(status);
-  if (!err && code < 400) { return 'none'; }
-
-  if (code >= 400 && code < 500) {
-    // Recognize storage-service validation error codes
-    if (err && typeof err === 'object' && 'code' in err) {
-      const errCode = String(err.code);
-      if (errCode === 'INVALID_MIME_TYPE' || errCode === 'FILE_TOO_LARGE' || errCode === 'INVALID_TENANT_ID') {
-        return 'validation';
-      }
-    }
+  if (code < 400) { return 'none'; }
+  if (!err) { return 'internal'; }
+  const msg = typeof err === 'string' ? err : (err.message || err.code || '');
+  if (msg.includes('INVALID_MIME_TYPE') || msg.includes('FILE_TOO_LARGE') || msg.includes('INVALID_TENANT_ID')) {
     return 'validation';
   }
-
-  if (err && typeof err === 'object' && 'code' in err) {
-    const errCode = String(err.code);
-    // Recognize storage-layer error codes
-    if (
-      errCode === 'STORAGE_WRITE_FAILED' ||
-      errCode === 'ENOENT' ||
-      errCode === 'EACCES' ||
-      errCode.startsWith('ERR_')
-    ) {
-      return 'storage';
-    }
+  if (msg.includes('storage') || msg.includes('upload') || msg.includes('S3')) {
+    return 'storage';
   }
-
   return 'internal';
 }
 
@@ -1242,95 +1230,6 @@ const persistenceRequestErrorsTotal = new client.Counter({
   labelNames: ['endpoint', 'cause'],
   registers: [registry],
 });
-
-// ── Indexer endpoint metrics (issue #761) ──────────────────────────────────
-
-/**
- * Bounded enum of allowed `status_class` label values for indexer metrics.
- * @readonly
- */
-const INDEXER_STATUS_CLASS_ENUM = Object.freeze(['2xx', '4xx', '5xx']);
-
-/**
- * Bounded enum of allowed `cause` label values for indexer error metrics.
- * Raw error messages are NEVER used as labels.
- * @readonly
- */
-const INDEXER_CAUSE_ENUM = Object.freeze([
-  'validation',
-  'authorization',
-  'internal',
-  'none',
-]);
-
-/**
- * Maps an HTTP status code to a bounded `status_class` label value.
- *
- * @param {unknown} status - HTTP status code.
- * @returns {string} Bounded value from {'2xx'|'4xx'|'5xx'}.
- */
-function normalizeIndexerStatusClass(status) {
-  const code = Number(status);
-  if (code >= 500) { return '5xx'; }
-  if (code >= 400) { return '4xx'; }
-  return '2xx';
-}
-
-/**
- * Maps a raw indexer failure to a bounded `cause` label value.
- *
- * A 2xx outcome maps to `none`. 4xx responses are treated as validation errors
- * unless they're 401/403 which indicate authorization failures. 5xx errors
- * are treated as internal errors.
- *
- * @param {unknown} err - Raw error object or code (null/undefined for success).
- * @param {number} [status] - HTTP status code, used to disambiguate.
- * @returns {string} Bounded value from {'validation'|'authorization'|'internal'|'none'}.
- */
-function normalizeIndexerCause(err, status) {
-  const code = Number(status);
-  if (!err && code < 400) { return 'none'; }
-
-  if (code === 401 || code === 403) { return 'authorization'; }
-  if (code >= 400 && code < 500) { return 'validation'; }
-
-  return 'internal';
-}
-
-/**
- * Histogram: Wall-clock duration of indexer endpoint requests in seconds.
- * @type {import('prom-client').Histogram}
- */
-const indexerRequestDurationSeconds = new client.Histogram({
-  name: 'indexer_request_duration_seconds',
-  help: 'Duration of indexer endpoint requests in seconds',
-  labelNames: ['status_class'],
-  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5],
-  registers: [registry],
-});
-
-/**
- * Counter: Total indexer endpoint requests.
- * @type {import('prom-client').Counter}
- */
-const indexerRequestsTotal = new client.Counter({
-  name: 'indexer_requests_total',
-  help: 'Total number of indexer endpoint requests',
-  labelNames: ['status_class'],
-  registers: [registry],
-});
-
-/**
- * Counter: Indexer endpoint request errors by cause.
- * @type {import('prom-client').Counter}
- */
-const indexerRequestErrorsTotal = new client.Counter({
-  name: 'indexer_request_errors_total',
-  help: 'Total number of indexer endpoint request errors by cause',
-  labelNames: ['cause'],
-  registers: [registry],
-});
-
 
 /**
  * Bounded enum of allowed `status_class` label values for metrics endpoint.
@@ -1424,6 +1323,47 @@ function normalizeMetricsEndpointCause(err, status) {
 }
 
 /**
+ * Records the outcome of a metrics endpoint request: emits duration histogram,
+ * request counter, error counter (if applicable), and a structured log line.
+ *
+ * @param {object} params
+ * @param {number} params.statusCode - HTTP status code.
+ * @param {number} params.durationSeconds - Wall-clock duration in seconds.
+ * @param {unknown} [params.error] - Error thrown by the handler, if any.
+ * @param {import('express').Request} [params.req] - Request, for a scoped logger.
+ * @returns {void}
+ */
+function recordMetricsEndpointOutcome({ statusCode, durationSeconds, error, req }) {
+  const statusClass = normalizeMetricsEndpointStatusClass(statusCode);
+  const cause = normalizeMetricsEndpointCause(error, statusCode);
+
+  metricsRequestDurationSeconds.labels(statusClass).observe(durationSeconds);
+  metricsRequestsTotal.labels(statusClass).inc();
+
+  if (cause !== 'none') {
+    metricsRequestErrorsTotal.labels(cause).inc();
+  }
+
+  const log = (req && typeof logger.createRequestLogger === 'function')
+    ? logger.createRequestLogger(req)
+    : logger;
+  const fields = {
+    statusClass,
+    statusCode,
+    durationSeconds: Number(durationSeconds.toFixed(6)),
+    cause,
+  };
+
+  if (statusClass === '5xx') {
+    log.error(fields, 'metrics request failed');
+  } else if (statusClass === '4xx') {
+    log.warn(fields, 'metrics request rejected');
+  } else {
+    log.info(fields, 'metrics request completed');
+  }
+}
+
+/**
  * Histogram: Wall-clock duration of metrics endpoint scrapes in seconds.
  * @type {import('prom-client').Histogram}
  */
@@ -1432,6 +1372,28 @@ const metricsRequestDurationSeconds = new client.Histogram({
   help: 'Duration of metrics endpoint requests in seconds',
   labelNames: ['status_class'],
   buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5],
+  registers: [registry],
+});
+
+/**
+ * Counter: Total metrics endpoint requests.
+ * @type {import('prom-client').Counter}
+ */
+const metricsRequestsTotal = new client.Counter({
+  name: 'metrics_requests_total',
+  help: 'Total number of metrics endpoint requests',
+  labelNames: ['status_class'],
+  registers: [registry],
+});
+
+/**
+ * Counter: Metrics endpoint request errors by cause.
+ * @type {import('prom-client').Counter}
+ */
+const metricsRequestErrorsTotal = new client.Counter({
+  name: 'metrics_request_errors_total',
+  help: 'Total number of metrics endpoint request errors by cause',
+  labelNames: ['cause'],
   registers: [registry],
 });
 
@@ -1704,6 +1666,10 @@ module.exports = {
   getRegistry,
   metricsAuth,
   metricsHandler,
+  apiKeyAuthDurationSeconds,
+  apiKeyAuthErrorsTotal,
+  classifyApiKeyOutcome,
+  classifyApiKeyErrorCause,
   recordMetricsEndpointOutcome,
   normalizeMetricsEndpointStatusClass,
   normalizeMetricsEndpointCause,
