@@ -305,5 +305,13 @@ jest.mock('../../src/middleware/rateLimit', () => {
     HEALTH_RATE_LIMIT_MAX: 60,
     METRICS_RATE_LIMIT_WINDOW_MS: 60000,
     METRICS_RATE_LIMIT_MAX: 30,
+    metricsLimiter: noopMiddleware,
+    metricsRateLimitHandler: jest.fn(),
+    createMetricsRateLimiter: jest.fn(() => noopMiddleware),
+    KYC_WEBHOOK_RATE_LIMIT_WINDOW_MS: 60000,
+    KYC_WEBHOOK_RATE_LIMIT_MAX: 30,
+    kycWebhookLimiter: noopMiddleware,
+    kycWebhookRateLimitHandler: jest.fn(),
+    createKycWebhookRateLimiter: jest.fn(() => noopMiddleware),
   };
 }, { virtual: true });
