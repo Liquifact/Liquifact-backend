@@ -10,13 +10,20 @@ const MAX_TTL_SECONDS = 300;
 const DEFAULT_LEDGER_GAP_THRESHOLD = 3;
 const MAX_LEDGER_GAP_THRESHOLD = 1000;
 
-const redis = require('redis');
+let redis;
+try {
+  redis = require('redis');
+} catch (_e) {
+  // redis package is optional; tests and environments without Redis
+  // installed can still load this module.
+  redis = null;
+}
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 let redisClient = null;
 let isRedisConnected = false;
 
-if (process.env.NODE_ENV !== 'test' || process.env.USE_REDIS_TEST === 'true') {
+if (redis && (process.env.NODE_ENV !== 'test' || process.env.USE_REDIS_TEST === 'true')) {
   redisClient = redis.createClient({ url: REDIS_URL });
 
   redisClient.on('connect', () => {

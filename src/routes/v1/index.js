@@ -167,7 +167,7 @@ router.post('/invoices', extractTenant, async (req, res, next) => {
  * Returns escrow state with derived display fields.
  * Authentication is required for versioned escrow reads.
  */
-router.get('/escrow/:invoiceId', authenticateToken, async (req, res, next) => {
+router.get('/escrow/:invoiceId', authenticateToken, extractTenant, async (req, res, next) => {
   try {
     const invoiceId = String(req.params.invoiceId || '').trim().replace(/\s+/g, '');
 
