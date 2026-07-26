@@ -408,6 +408,81 @@ const runtimeConfigSchema = z
     }
   });
 
+// ── Bulk config schema ──────────────────────────────────────────────────────
+
+/**
+ * Maximum number of operations allowed in a single bulk config request.
+ * Configurable via BULK_CONFIG_MAX_ITEMS env var; defaults to 10.
+ * @type {number}
+ */
+const BULK_CONFIG_MAX_ITEMS = (() => {
+  const raw = parseInt(process.env.BULK_CONFIG_MAX_ITEMS || '', 10);
+  return Number.isFinite(raw) && raw >= 1 ? raw : 10;
+})();
+
+/**
+ * Schema for the individual operation item within a bulk config request.
+ * Shape: `{ section: string, config: object }`
+ *
+ * Unlike `runtimeConfigSchema`, this schema does NOT run section-specific
+ * validation via `.superRefine()`. Per-item validation is performed in the
+ * route handler so that individual failures do not reject the entire batch.
+ *
+ * @type {import('zod').ZodObject}
+ */
+const bulkConfigItemSchema = z
+  .object({
+    section: z.enum(
+      /** @type {[string, ...string[]]} */ (CONFIG_SECTIONS),
+      {
+        invalid_type_error: 'section must be a string',
+        required_error: 'section is required',
+        errorMap: () => ({
+          message: `section must be one of: ${CONFIG_SECTIONS.join(', ')}`,
+        }),
+      },
+    ),
+    config: z
+      .record(z.unknown(), { invalid_type_error: 'config must be an object' })
+      .refine((v) => v !== null && typeof v === 'object' && !Array.isArray(v), {
+        message: 'config must be a plain object',
+      }),
+  })
+  .strict();
+
+/**
+ * Schema for the POST /api/admin/config/bulk request body.
+ *
+ * Shape:
+ * ```json
+ * {
+ *   "operations": [
+ *     { "section": "webhook", "config": { ... } },
+ *     { "section": "cors",    "config": { ... } }
+ *   ]
+ * }
+ * ```
+ *
+ * - `operations` must contain 1–BULK_CONFIG_MAX_ITEMS items.
+ * - Each item must have a valid `section` enum and a `config` object.
+ * - Unknown top-level keys are rejected.
+ *
+ * @type {import('zod').ZodObject}
+ */
+const bulkConfigSchema = z
+  .object({
+    operations: z
+      .array(bulkConfigItemSchema, {
+        invalid_type_error: 'operations must be an array',
+        required_error: 'operations is required',
+      })
+      .min(1, { message: 'operations must contain at least one item' })
+      .max(BULK_CONFIG_MAX_ITEMS, {
+        message: `operations must not exceed ${BULK_CONFIG_MAX_ITEMS} items`,
+      }),
+  })
+  .strict();
+
 // ── Exports ──────────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -421,6 +496,11 @@ module.exports = {
 
   // Top-level schema consumed by the admin config route
   runtimeConfigSchema,
+
+  // Bulk config schema and constants
+  bulkConfigSchema,
+  bulkConfigItemSchema,
+  BULK_CONFIG_MAX_ITEMS,
 
   // Re-exported helpers
   validateBody,

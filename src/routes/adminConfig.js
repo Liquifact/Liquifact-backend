@@ -12,6 +12,12 @@
  *   `application/problem+json` 400 response containing machine-readable
  *   `fieldErrors` so clients can map errors back to specific form fields.
  *
+ * POST /api/admin/config/bulk
+ *   Accepts `{ operations: [{ section, config }, ...] }`, validates each item
+ *   independently, and returns per-item success/error results. The batch is
+ *   capped at BULK_CONFIG_MAX_ITEMS (default 10). Individual item failures do
+ *   not reject the entire batch.
+ *
  * GET /api/admin/config/sections
  *   Returns the list of valid section names accepted by the POST endpoint.
  *
@@ -32,12 +38,13 @@ const {
   runtimeConfigSchema,
   validateBody,
   CONFIG_SECTIONS,
+  bulkConfigSchema,
+  parseValidationErrors,
 } = require('../schemas/config');
 const { adminConfigLimiter } = require('../middleware/rateLimit');
 const idempotencyMiddleware = require('../middleware/idempotency');
 const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
 const logger = require('../logger');
-const idempotencyMiddleware = require('../middleware/idempotency');
 
 const router = express.Router();
 
@@ -50,21 +57,7 @@ router.use(adminConfigLimiter);
 // ── Apply admin auth + tenant extraction to every route ──────────────────────
 router.use(...adminStack);
 
-/**
- * Conditionally applies idempotency logic if the client provides the header.
- * Allows gradual rollout without breaking existing API clients.
- *
- * @param {object} req - Express request
- * @param {object} res - Express response
- * @param {function} next - Express next callback
- * @returns {void}
- */
-const optionalIdempotency = (req, res, next) => {
-  if (req.header('Idempotency-Key')) {
-    return idempotencyMiddleware(req, res, next);
-  }
-  next();
-};
+
 
 // ── POST /api/admin/config ────────────────────────────────────────────────────
 
@@ -224,6 +217,179 @@ router.post('/', idempotencyMiddleware, validateBody(runtimeConfigSchema), (req,
   });
 });
 
+// ── POST /api/admin/config/bulk ─────────────────────────────────────────────
+
+/**
+ * Applies runtime CORS side-effects for a validated CORS config item.
+ * Extracted as a helper so both the single and bulk handlers share the same
+ * logic without duplication.
+ *
+ * @param {object} validatedConfig - Validated CORS configuration object.
+ * @returns {void}
+ */
+function applyCorsEffects(validatedConfig) {
+  if (validatedConfig.origins) {
+    process.env.CORS_ALLOWED_ORIGINS = validatedConfig.origins.join(',');
+    reloadCorsOrigins();
+  }
+  if (validatedConfig.maxAge !== undefined) {
+    process.env.CORS_MAX_AGE = String(validatedConfig.maxAge);
+    reloadCorsMaxAge();
+  }
+}
+
+/**
+ * @swagger
+ * /api/admin/config/bulk:
+ *   post:
+ *     operationId: bulkUpdateRuntimeConfig
+ *     summary: Bulk-write runtime configuration sections
+ *     description: |
+ *       Accepts an array of configuration operations and processes each
+ *       independently. Individual item failures do not reject the entire
+ *       batch — the response always contains per-item results.
+ *
+ *       **Batch cap**: at most `BULK_CONFIG_MAX_ITEMS` operations (default 10).
+ *       Exceeding the cap rejects the entire request with 400.
+ *
+ *       **Access**: Admin-only (JWT bearer or API key). Tenant-scoped.
+ *       **Rate limit**: shares the per-client budget with the single config
+ *       endpoint (issue #754).
+ *
+ *     tags: [AdminConfig]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [operations]
+ *             properties:
+ *               operations:
+ *                 type: array
+ *                 minItems: 1
+ *                 maxItems: 10
+ *                 items:
+ *                   type: object
+ *                   required: [section, config]
+ *                   properties:
+ *                     section:
+ *                       type: string
+ *                       enum: [webhook, reconciliation, kyc, retention, fraudThresholds, cors]
+ *                     config:
+ *                       type: object
+ *     responses:
+ *       200:
+ *         description: Batch processed. Per-item results are in the `results` array.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 results:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       index:
+ *                         type: integer
+ *                       section:
+ *                         type: string
+ *                       status:
+ *                         type: string
+ *                         enum: [success, error]
+ *                       config:
+ *                         type: object
+ *                       errors:
+ *                         type: object
+ *                         additionalProperties: { type: string }
+ *                 summary:
+ *                   type: object
+ *                   properties:
+ *                     total: { type: integer }
+ *                     succeeded: { type: integer }
+ *                     failed: { type: integer }
+ *       400:
+ *         description: Envelope validation error (e.g. over-cap, empty batch, missing operations).
+ *         content:
+ *           application/problem+json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 type:  { type: string }
+ *                 title: { type: string }
+ *                 status: { type: integer }
+ *                 detail: { type: string }
+ *                 fieldErrors:
+ *                   type: object
+ *                   additionalProperties: { type: string }
+ *       401:
+ *         $ref: '#/components/responses/Problem401'
+ *       403:
+ *         $ref: '#/components/responses/Problem403'
+ *       429:
+ *         description: Rate limit exceeded — see Retry-After header.
+ */
+router.post('/bulk', validateBody(bulkConfigSchema), (req, res) => {
+  const { operations } = req.validated;
+  const results = [];
+  let succeeded = 0;
+  let failed = 0;
+
+  for (let i = 0; i < operations.length; i++) {
+    const op = operations[i];
+    const itemResult = runtimeConfigSchema.safeParse(op);
+
+    if (itemResult.success) {
+      const { section, config: validatedConfig } = itemResult.data;
+
+      // Apply CORS side-effects inline (same behaviour as single endpoint)
+      if (section === 'cors') {
+        applyCorsEffects(validatedConfig);
+      }
+
+      results.push({
+        index: i,
+        section,
+        status: 'success',
+        config: validatedConfig,
+      });
+      succeeded++;
+    } else {
+      const errors = parseValidationErrors(itemResult.error);
+      results.push({
+        index: i,
+        section: op.section || null,
+        status: 'error',
+        errors,
+      });
+      failed++;
+    }
+  }
+
+  logger.info(
+    {
+      tenantId: req.tenantId,
+      total: operations.length,
+      succeeded,
+      failed,
+      adminClient: req.apiClient?.clientId || req.user?.sub,
+    },
+    'Admin bulk config update processed',
+  );
+
+  return res.status(200).json({
+    results,
+    summary: {
+      total: operations.length,
+      succeeded,
+      failed,
+    },
+  });
+});
+
 // ── GET /api/admin/config/sections ───────────────────────────────────────────
 
 /**
@@ -259,3 +425,4 @@ router.get('/sections', (req, res) => {
 });
 
 module.exports = router;
+
