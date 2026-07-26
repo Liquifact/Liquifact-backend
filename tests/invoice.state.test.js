@@ -830,6 +830,40 @@ describe('Invoice State API Routes', () => {
     jest.restoreAllMocks();
   });
 
+  function expectSuccessEnvelope(body, message, expectedData) {
+    expect(body).toEqual(expect.objectContaining({
+      data: expect.any(Object),
+      meta: expect.objectContaining({
+        timestamp: expect.any(String),
+        version: '0.1.0',
+      }),
+      error: null,
+      message,
+    }));
+    expect(Object.keys(body).sort()).toEqual(['data', 'error', 'message', 'meta']);
+    expect(body.data).toEqual(expectedData);
+  }
+
+  function expectErrorEnvelope(body, expectedCode, expectedMessageMatcher, expectedDetails = undefined) {
+    expect(body).toEqual(expect.objectContaining({
+      data: null,
+      meta: expect.objectContaining({
+        timestamp: expect.any(String),
+        version: '0.1.0',
+      }),
+      error: expect.objectContaining({
+        code: expectedCode,
+        message: expectedMessageMatcher,
+      }),
+    }));
+    expect(Object.keys(body).sort()).toEqual(['data', 'error', 'meta']);
+    if (expectedDetails === undefined) {
+      expect(body.error.details).toBeNull();
+    } else {
+      expect(body.error.details).toEqual(expectedDetails);
+    }
+  }
+
   describe('GET /api/invoices/:id/state', () => {
     it('should return current state and allowed transitions', async () => {
       const res = await request(app)
@@ -837,11 +871,12 @@ describe('Invoice State API Routes', () => {
         .set('x-tenant-id', TENANT_A);
 
       expect(res.status).toBe(200);
-      expect(res.body.data.invoiceId).toBe('inv-001');
-      expect(res.body.data.currentState).toBe('pending');
-      expect(res.body.data.allowedTransitions).toContain('approved');
-      expect(res.body.data.allowedTransitions).toContain('rejected');
-      expect(res.body.data.isTerminal).toBe(false);
+      expectSuccessEnvelope(res.body, 'Invoice state retrieved successfully', {
+        invoiceId: 'inv-001',
+        currentState: 'pending',
+        allowedTransitions: ['approved', 'rejected', 'cancelled'],
+        isTerminal: false,
+      });
     });
 
     it('should return terminal state info', async () => {
@@ -850,9 +885,12 @@ describe('Invoice State API Routes', () => {
         .set('x-tenant-id', TENANT_A);
 
       expect(res.status).toBe(200);
-      expect(res.body.data.currentState).toBe('linked_escrow');
-      expect(res.body.data.allowedTransitions).toEqual([]);
-      expect(res.body.data.isTerminal).toBe(true);
+      expectSuccessEnvelope(res.body, 'Invoice state retrieved successfully', {
+        invoiceId: 'inv-003',
+        currentState: 'linked_escrow',
+        allowedTransitions: [],
+        isTerminal: true,
+      });
     });
 
     it('should return 404 for non-existent invoice', async () => {
@@ -861,7 +899,7 @@ describe('Invoice State API Routes', () => {
         .set('x-tenant-id', TENANT_A);
 
       expect(res.status).toBe(404);
-      expect(res.body.error.code).toBe('INVOICE_NOT_FOUND');
+      expectErrorEnvelope(res.body, 'INVOICE_NOT_FOUND', 'Invoice not found');
     });
 
     it('should return 404 for cross-tenant invoice access', async () => {
@@ -870,7 +908,7 @@ describe('Invoice State API Routes', () => {
         .set('x-tenant-id', TENANT_B);
 
       expect(res.status).toBe(404);
-      expect(res.body.error.code).toBe('INVOICE_NOT_FOUND');
+      expectErrorEnvelope(res.body, 'INVOICE_NOT_FOUND', 'Invoice not found');
     });
 
     it('should handle unexpected errors when reading state', async () => {
@@ -892,11 +930,15 @@ describe('Invoice State API Routes', () => {
         .send({ targetState: 'approved', reason: 'Invoice verified by finance team' });
 
       expect(res.status).toBe(200);
-      expect(res.body.data.previousState).toBe('pending');
-      expect(res.body.data.currentState).toBe('approved');
-      expect(res.body.data.transitionedBy).toBe('test-user-123');
-      expect(res.body.data.reason).toBe('Invoice verified by finance team');
-      expect(res.body.data.auditLogId).toBeDefined();
+      expectSuccessEnvelope(res.body, 'Invoice transitioned from pending to approved', {
+        invoiceId: 'inv-001',
+        previousState: 'pending',
+        currentState: 'approved',
+        transitionedAt: expect.any(String),
+        transitionedBy: 'test-user-123',
+        reason: 'Invoice verified by finance team',
+        auditLogId: expect.any(String),
+      });
 
       const persisted = invoiceStore.get(storeKey(TENANT_A, 'inv-001'));
       expect(persisted.status).toBe('approved');
@@ -912,8 +954,9 @@ describe('Invoice State API Routes', () => {
         .send({ targetState: 'linked_escrow', reason: 'Trying to skip approval' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error.code).toBe('INVALID_TRANSITION');
-      expect(res.body.error.details.allowedTransitions).toContain('approved');
+      expectErrorEnvelope(res.body, 'INVALID_TRANSITION', expect.stringContaining('Invalid state transition'), {
+        allowedTransitions: ['approved', 'rejected', 'cancelled'],
+      });
 
       const persisted = invoiceStore.get(storeKey(TENANT_A, 'inv-001'));
       expect(persisted.status).toBe('pending');
@@ -926,7 +969,7 @@ describe('Invoice State API Routes', () => {
         .send({ targetState: 'approved' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error.code).toBe('TERMINAL_STATE');
+      expectErrorEnvelope(res.body, 'TERMINAL_STATE', 'Cannot transition from terminal state: linked_escrow');
     });
 
     it('should require reason for terminal rejected transition', async () => {
@@ -936,8 +979,7 @@ describe('Invoice State API Routes', () => {
         .send({ targetState: 'rejected' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error.code).toBe('MISSING_TRANSITION_REASON');
-      expect(res.body.error.message).toContain('Reason is required');
+      expectErrorEnvelope(res.body, 'MISSING_TRANSITION_REASON', expect.stringContaining('Reason is required'));
     });
 
     it('should reject missing target state', async () => {
@@ -947,7 +989,7 @@ describe('Invoice State API Routes', () => {
         .send({ reason: 'Missing target state' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error.code).toBe('MISSING_TARGET_STATE');
+      expectErrorEnvelope(res.body, 'MISSING_TARGET_STATE', 'Target state is required');
     });
 
     it('should return 404 for non-existent invoice', async () => {
@@ -957,7 +999,7 @@ describe('Invoice State API Routes', () => {
         .send({ targetState: 'approved' });
 
       expect(res.status).toBe(404);
-      expect(res.body.error.code).toBe('INVOICE_NOT_FOUND');
+      expectErrorEnvelope(res.body, 'INVOICE_NOT_FOUND', 'Invoice not found');
     });
 
     it('should return 404 for cross-tenant transition attempt', async () => {
@@ -967,7 +1009,7 @@ describe('Invoice State API Routes', () => {
         .send({ targetState: 'approved', reason: 'Cross-tenant attempt' });
 
       expect(res.status).toBe(404);
-      expect(res.body.error.code).toBe('INVOICE_NOT_FOUND');
+      expectErrorEnvelope(res.body, 'INVOICE_NOT_FOUND', 'Invoice not found');
     });
   });
 
@@ -979,9 +1021,14 @@ describe('Invoice State API Routes', () => {
         .send({ reason: 'All checks passed' });
 
       expect(res.status).toBe(200);
-      expect(res.body.data.previousState).toBe('pending');
-      expect(res.body.data.currentState).toBe('approved');
-      expect(res.body.message).toBe('Invoice approved successfully');
+      expectSuccessEnvelope(res.body, 'Invoice approved successfully', {
+        invoiceId: 'inv-001',
+        previousState: 'pending',
+        currentState: 'approved',
+        transitionedAt: expect.any(String),
+        transitionedBy: 'test-user-123',
+        auditLogId: expect.any(String),
+      });
 
       const persisted = invoiceStore.get(storeKey(TENANT_A, 'inv-001'));
       expect(persisted.status).toBe('approved');
@@ -994,7 +1041,7 @@ describe('Invoice State API Routes', () => {
         .send({ reason: 'Already approved' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error.code).toBe('ALREADY_IN_TARGET_STATE');
+      expectErrorEnvelope(res.body, 'ALREADY_IN_TARGET_STATE', 'Invoice is already in state: approved');
     });
   });
 
@@ -1006,10 +1053,15 @@ describe('Invoice State API Routes', () => {
         .send({ escrowId: 'escrow-123', reason: 'Escrow contract created' });
 
       expect(res.status).toBe(200);
-      expect(res.body.data.previousState).toBe('approved');
-      expect(res.body.data.currentState).toBe('linked_escrow');
-      expect(res.body.data.escrowId).toBe('escrow-123');
-      expect(res.body.message).toBe('Invoice linked to escrow successfully');
+      expectSuccessEnvelope(res.body, 'Invoice linked to escrow successfully', {
+        invoiceId: 'inv-002',
+        previousState: 'approved',
+        currentState: 'linked_escrow',
+        escrowId: 'escrow-123',
+        transitionedAt: expect.any(String),
+        transitionedBy: 'test-user-123',
+        auditLogId: expect.any(String),
+      });
 
       const persisted = invoiceStore.get(storeKey(TENANT_A, 'inv-002'));
       expect(persisted.status).toBe('linked_escrow');
@@ -1022,7 +1074,7 @@ describe('Invoice State API Routes', () => {
         .send({ escrowId: 'escrow-456' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error.code).toBe('CANNOT_LINK_TO_ESCROW');
+      expectErrorEnvelope(res.body, 'CANNOT_LINK_TO_ESCROW', expect.stringContaining('approved state'));
     });
 
     it('should reject linking already linked invoice', async () => {
@@ -1032,7 +1084,7 @@ describe('Invoice State API Routes', () => {
         .send({ escrowId: 'escrow-789' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error.code).toBe('CANNOT_LINK_TO_ESCROW');
+      expectErrorEnvelope(res.body, 'CANNOT_LINK_TO_ESCROW', expect.stringContaining('approved state'));
     });
 
     it('should return 404 for non-existent invoice', async () => {
@@ -1042,7 +1094,7 @@ describe('Invoice State API Routes', () => {
         .send({ escrowId: 'escrow-000' });
 
       expect(res.status).toBe(404);
-      expect(res.body.error.code).toBe('INVOICE_NOT_FOUND');
+      expectErrorEnvelope(res.body, 'INVOICE_NOT_FOUND', 'Invoice not found');
     });
 
     it('should return 404 for cross-tenant link-escrow attempt', async () => {
@@ -1052,7 +1104,7 @@ describe('Invoice State API Routes', () => {
         .send({ escrowId: 'escrow-000' });
 
       expect(res.status).toBe(404);
-      expect(res.body.error.code).toBe('INVOICE_NOT_FOUND');
+      expectErrorEnvelope(res.body, 'INVOICE_NOT_FOUND', 'Invoice not found');
     });
 
     it('should surface coded transition errors from the state machine', async () => {
@@ -1068,7 +1120,7 @@ describe('Invoice State API Routes', () => {
         .send({ escrowId: 'escrow-123' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error.code).toBe('ALREADY_IN_TARGET_STATE');
+      expectErrorEnvelope(res.body, 'ALREADY_IN_TARGET_STATE', 'Invoice is already in state: linked_escrow');
 
       invoiceService.transitionInvoice.mockRestore();
     });
@@ -1082,9 +1134,15 @@ describe('Invoice State API Routes', () => {
         .send({ reason: 'Invalid documentation' });
 
       expect(res.status).toBe(200);
-      expect(res.body.data.previousState).toBe('pending');
-      expect(res.body.data.currentState).toBe('rejected');
-      expect(res.body.data.reason).toBe('Invalid documentation');
+      expectSuccessEnvelope(res.body, 'Invoice rejected successfully', {
+        invoiceId: 'inv-001',
+        previousState: 'pending',
+        currentState: 'rejected',
+        reason: 'Invalid documentation',
+        transitionedAt: expect.any(String),
+        transitionedBy: 'test-user-123',
+        auditLogId: expect.any(String),
+      });
 
       const persisted = invoiceStore.get(storeKey(TENANT_A, 'inv-001'));
       expect(persisted.status).toBe('rejected');
@@ -1097,7 +1155,7 @@ describe('Invoice State API Routes', () => {
         .send({});
 
       expect(res.status).toBe(400);
-      expect(res.body.error.code).toBe('MISSING_TRANSITION_REASON');
+      expectErrorEnvelope(res.body, 'MISSING_TRANSITION_REASON', expect.stringContaining('Reason is required'));
     });
 
     it('should not allow rejecting approved invoice', async () => {
@@ -1107,7 +1165,9 @@ describe('Invoice State API Routes', () => {
         .send({ reason: 'Cannot reject approved invoice' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error.code).toBe('INVALID_TRANSITION');
+      expectErrorEnvelope(res.body, 'INVALID_TRANSITION', expect.stringContaining('Invalid state transition'), {
+        allowedTransitions: ['linked_escrow', 'cancelled'],
+      });
     });
   });
 
@@ -1128,10 +1188,13 @@ describe('Invoice State API Routes', () => {
         .set('x-tenant-id', TENANT_A);
 
       expect(res.status).toBe(200);
-      expect(res.body.data.invoiceId).toBe('inv-001');
-      expect(res.body.data.currentState).toBe('linked_escrow');
+      expectSuccessEnvelope(res.body, 'Invoice transition history retrieved successfully', {
+        invoiceId: 'inv-001',
+        currentState: 'linked_escrow',
+        transitions: expect.any(Array),
+        totalTransitions: 2,
+      });
       expect(res.body.data.transitions).toHaveLength(2);
-      expect(res.body.data.totalTransitions).toBe(2);
     });
 
     it('should return empty history for invoice with no transitions', async () => {
@@ -1140,8 +1203,12 @@ describe('Invoice State API Routes', () => {
         .set('x-tenant-id', TENANT_A);
 
       expect(res.status).toBe(200);
-      expect(res.body.data.transitions).toEqual([]);
-      expect(res.body.data.totalTransitions).toBe(0);
+      expectSuccessEnvelope(res.body, 'Invoice transition history retrieved successfully', {
+        invoiceId: 'inv-001',
+        currentState: 'pending',
+        transitions: [],
+        totalTransitions: 0,
+      });
     });
 
     it('should return 404 for non-existent invoice', async () => {
@@ -1150,7 +1217,7 @@ describe('Invoice State API Routes', () => {
         .set('x-tenant-id', TENANT_A);
 
       expect(res.status).toBe(404);
-      expect(res.body.error.code).toBe('INVOICE_NOT_FOUND');
+      expectErrorEnvelope(res.body, 'INVOICE_NOT_FOUND', 'Invoice not found');
     });
 
     it('should handle unexpected errors when reading history', async () => {
