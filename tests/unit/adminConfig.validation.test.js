@@ -23,19 +23,25 @@ jest.mock('../../src/logger', () => ({
   error: jest.fn(),
   info: jest.fn(),
 }));
-jest.mock('../../src/metrics', () => ({
-  webhookReplayTotal: { inc: jest.fn() },
-  registry: { contentType: 'text/plain', metrics: jest.fn().mockResolvedValue('') },
-}));
+jest.mock('../../src/metrics', () => {
+  const actual = jest.requireActual('../../src/metrics');
+  return {
+    ...actual,
+    webhookReplayTotal: { inc: jest.fn() },
+  };
+});
+
 jest.mock('prom-client', () => ({
-  Counter:  class { constructor() {} inc() {} },
-  Gauge:    class { constructor() {} set() {} },
+  Counter:  class { constructor() {} inc() {} labels() { return this; } },
+  Gauge:    class { constructor() {} set() {} labels() { return this; } },
+  Histogram: class { constructor() {} observe() {} labels() { return this; } },
   Registry: class {
     constructor() { this.contentType = 'text/plain'; }
     metrics() { return ''; }
   },
   collectDefaultMetrics: () => {},
 }), { virtual: true });
+
 
 // ── Imports ───────────────────────────────────────────────────────────────────
 
@@ -549,10 +555,11 @@ describe('runtimeConfigSchema', () => {
   });
 
   it('lists all expected sections in CONFIG_SECTIONS', () => {
-    const expected = ['webhook', 'reconciliation', 'kyc', 'retention', 'fraudThresholds'];
+    const expected = ['webhook', 'reconciliation', 'kyc', 'retention', 'fraudThresholds', 'cors'];
     expect(CONFIG_SECTIONS).toEqual(expect.arrayContaining(expected));
     expect(CONFIG_SECTIONS).toHaveLength(expected.length);
   });
+
 });
 
 

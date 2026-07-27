@@ -355,3 +355,37 @@ describe('validateMetricsRequest — no side effects on success', () => {
     expect(res.status).not.toHaveBeenCalled();
   });
 });
+
+describe('Issue #875 - Metrics API Changelog Telemetry Protection Tests', () => {
+  const { verifyTelemetryMetricsPayload } = require('../../src/utils/metricsValidation.js');
+
+  it('should pass with 100% accuracy when all required numerical tracking metrics exist', () => {
+    const validData = { uptime: 7200, requestsCount: 450, errorsCount: 2 };
+    const result = verifyTelemetryMetricsPayload(validData);
+    if (result !== true) throw new Error('Expected validation to pass successfully');
+  });
+
+  it('should return false if a critical metric field is completely absent from the payload', () => {
+    const missingFieldsData = { uptime: 7200, requestsCount: 450 }; // missing errorsCount
+    const result = verifyTelemetryMetricsPayload(missingFieldsData);
+    if (result !== false) throw new Error('Expected validation to fail gracefully due to missing fields');
+  });
+
+  it('should return false if a critical tracking parameter is not provided as a numeric value', () => {
+    const badTypeData = { uptime: 7200, requestsCount: "450", errorsCount: 0 }; // string value instead of number
+    const result = verifyTelemetryMetricsPayload(badTypeData);
+    if (result !== false) throw new Error('Expected validation to fail due to string parameter mismatch');
+  });
+
+  it('should immediately throw an informative schema validation error if input payload is completely empty or null', () => {
+    let didThrow = false;
+    try {
+      verifyTelemetryMetricsPayload(null);
+    } catch (err) {
+      if (err.message.includes('Input must be a valid non-null object.')) {
+        didThrow = true;
+      }
+    }
+    if (!didThrow) throw new Error('Expected function to throw structural error for null input payloads');
+  });
+});

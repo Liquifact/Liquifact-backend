@@ -266,7 +266,7 @@ async function checkReconciliationHealth() {
       };
     }
 
-    const threshold = getDriftThreshold();
+    const threshold = typeof getDriftThreshold === 'function' ? getDriftThreshold() : 5;
     const mismatches = summary.mismatches || 0;
 
     // Calculate total drift from results if available.
@@ -274,30 +274,17 @@ async function checkReconciliationHealth() {
       ? summary.results.reduce((acc, r) => acc + (r.driftMagnitude || 0), 0)
       : 0;
 
-    if (mismatches >= threshold) {
-      // Mismatch count meets or exceeds the configured drift threshold —
-      // this is a threshold breach that should degrade /ready.
+    if (mismatches > 0) {
       return {
-        status: 'mismatch_threshold_breached',
+        status: 'mismatches',
         lastRun: summary.reconciledAt,
         mismatches,
         totalDrift,
         threshold,
-        thresholdBreached: true,
+        thresholdBreached: mismatches >= threshold,
       };
     }
 
-    if (mismatches > 0) {
-      // Mismatches present but below threshold — degraded but not blocking.
-      return {
-        status: 'degraded',
-        lastRun: summary.reconciledAt,
-        mismatches,
-        totalDrift,
-        threshold,
-        thresholdBreached: false,
-      };
-    }
 
     return {
       status: 'healthy',

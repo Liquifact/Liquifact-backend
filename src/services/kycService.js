@@ -10,18 +10,10 @@
 
 const db = require('../db/knex');
 const logger = require('../logger');
-const { MemoryCacheStore } = require('./cacheStore');
+const { emitKycWebhookForSme } = require('./kycWebhookEmitter');
 const { CircuitBreaker } = require('../utils/circuitBreaker');
-const { withRetry } = require('../utils/retry');
-const { createSignatureHeader, verifySignature } = require('./webhooks');
-
-const KYC_STATUSES = {
-  PENDING: 'pending',
-  VERIFIED: 'verified',
-  REJECTED: 'rejected',
-  EXEMPTED: 'exempted',
-  UNKNOWN: 'unknown', // Fallback for unmapped provider statuses
-};
+const { MemoryCacheStore } = require('./cacheStore');
+const { KYC_STATUSES } = require('../constants/kycWebhooks');
 
 const PROVIDER_STATUS_MAP = {
   pending: KYC_STATUSES.PENDING,
@@ -479,13 +471,30 @@ async function persistKycRecord({ smeId, status, providerRecordId = null, verifi
     await db('kyc_records').insert(record);
   }
 
-  return {
+  const result = {
     smeId,
     status: normalizedStatus,
     recordId: providerRecordId || null,
     verifiedAt: verifiedAt || null,
     updatedAt: updatedAt.toISOString(),
   };
+
+  // Fire-and-forget: emit outbound webhook for the KYC status change.
+  // Errors are suppressed inside emitKycWebhookForSme so they can never
+  // prevent the KYC record from being persisted.
+  emitKycWebhookForSme({
+    smeId,
+    status: normalizedStatus,
+    recordId: providerRecordId || null,
+    verifiedAt: verifiedAt || null,
+  }).catch((err) => {
+    logger.error(
+      { smeId, error: err && err.message ? err.message : String(err) },
+      'persistKycRecord: unexpected error from webhook emitter (suppressed)'
+    );
+  });
+
+  return result;
 }
 
 /**
