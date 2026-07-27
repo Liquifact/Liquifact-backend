@@ -1469,6 +1469,46 @@ const healthRequestErrorsTotal = new client.Counter({
   registers: [registry],
 });
 
+/**
+ * Counter: CORS origin-validation cache hits.
+ * @type {import('prom-client').Counter}
+ */
+const corsCacheHitsTotal = new client.Counter({
+  name: 'cors_cache_hits_total',
+  help: 'Total number of CORS origin-validation cache hits',
+  registers: [registry],
+});
+
+/**
+ * Counter: CORS origin-validation cache misses.
+ * @type {import('prom-client').Counter}
+ */
+const corsCacheMissesTotal = new client.Counter({
+  name: 'cors_cache_misses_total',
+  help: 'Total number of CORS origin-validation cache misses',
+  registers: [registry],
+});
+
+/**
+ * Counter: CORS origin-validation cache evictions.
+ * @type {import('prom-client').Counter}
+ */
+const corsCacheEvictionsTotal = new client.Counter({
+  name: 'cors_cache_evictions_total',
+  help: 'Total number of CORS origin-validation cache evictions',
+  registers: [registry],
+});
+
+/**
+ * Counter: CORS cache invalidations (full clear on allowlist change).
+ * @type {import('prom-client').Counter}
+ */
+const corsCacheInvalidationsTotal = new client.Counter({
+  name: 'cors_cache_invalidations_total',
+  help: 'Total number of CORS cache invalidations',
+  registers: [registry],
+});
+
 const escrowReadCacheHitsTotal = new client.Counter({
   name: 'escrow_read_cache_hits_total',
   help: 'Total escrow read cache hits',
@@ -1525,6 +1565,10 @@ module.exports = {
   escrowReconciliationDriftAlertsTotal,
   sorobanRpcCallDurationSeconds,
   sorobanRpcRetryCausesTotal,
+  corsCacheHitsTotal,
+  corsCacheMissesTotal,
+  corsCacheEvictionsTotal,
+  corsCacheInvalidationsTotal,
   footprintCacheHitsTotal,
   footprintCacheMissesTotal,
   footprintCacheEvictionsTotal,
