@@ -62,6 +62,7 @@ const adminConfigRoutes = require('./routes/adminConfig');
 const kycRoutes = require('./routes/kyc');
 const reconciliationRoutes = require('./routes/reconciliation');
 const adminIndexerRoutes = require('./routes/adminIndexer');
+const adminMetricsRoutes = require('./routes/adminMetrics');
 const v1Routes = require('./routes/v1');
 const apiKeysRoutes = require('./routes/apiKeys');
 const {
@@ -414,6 +415,7 @@ function createApp() {
   mountFeatureRouter(app, '/api/admin/config', adminConfigRoutes);
   mountFeatureRouter(app, '/api/admin/reconciliation', reconciliationRoutes);
   mountFeatureRouter(app, '/api/admin/indexer', adminIndexerRoutes);
+  mountFeatureRouter(app, '/api/admin/metrics', adminMetricsRoutes);
   mountFeatureRouter(app, '/v1', v1Routes);
   mountFeatureRouter(app, '/api', apiKeysRoutes);
 
