@@ -57,9 +57,11 @@ const marketplaceRoutes = require('./routes/marketplace');
 const retentionRoutes = require('./routes/retention');
 const invoiceStateRoutes = require('./routes/invoiceStateRoutes');
 const adminEscrowRoutes = require('./routes/adminEscrow');
+const adminInvoiceStateRoutes = require('./routes/adminInvoiceState');
 const adminWebhooksRoutes = require('./routes/adminWebhooks');
 const adminConfigRoutes = require('./routes/adminConfig');
 const kycRoutes = require('./routes/kyc');
+const adminKycRoutes = require('./routes/adminKyc');
 const reconciliationRoutes = require('./routes/reconciliation');
 const adminIndexerRoutes = require('./routes/adminIndexer');
 const adminMetricsRoutes = require('./routes/adminMetrics');
@@ -313,14 +315,10 @@ function createApp() {
   });
 
   // Escrow — GET by invoiceId (proxied through Soroban retry wrapper with address mapping)
-<<<<<<< HEAD
   // Compression middleware: gzip/deflate for large escrow-read responses (issue #961).
   // Threshold: 1 KB (DEFAULT_THRESHOLD). Respects Accept-Encoding; small responses
   // pass through uncompressed. Vary: Accept-Encoding is always set.
-  app.get('/api/escrow/:invoiceId', createCompressionMiddleware(), async (req, res) => {
-=======
-  app.get('/api/escrow/:invoiceId', async (req, res, next) => {
->>>>>>> pr-1067
+  app.get('/api/escrow/:invoiceId', createCompressionMiddleware(), async (req, res, next) => {
     const invoiceId = String(req.params.invoiceId || '')
       .trim()
       .replace(/\s+/g, '');
@@ -328,7 +326,7 @@ function createApp() {
     try {
       // Resolve escrow contract address using the mapping system
       const escrowAddress = resolveEscrowAddress(invoiceId);
-      
+
       if (!escrowAddress) {
         return next(new AppError({
           type: 'https://liquifact.com/probs/not-found',
@@ -411,11 +409,13 @@ function createApp() {
   mountFeatureRouter(app, '/api/retention', retentionRoutes);
   mountFeatureRouter(app, '/api/admin/audit', auditTrailRoutes);
   mountFeatureRouter(app, '/api/admin/escrow', adminEscrowRoutes);
+  mountFeatureRouter(app, '/api/admin/invoices', adminInvoiceStateRoutes);
   mountFeatureRouter(app, '/api/admin/webhooks', adminWebhooksRoutes);
   mountFeatureRouter(app, '/api/admin/config', adminConfigRoutes);
   mountFeatureRouter(app, '/api/admin/reconciliation', reconciliationRoutes);
   mountFeatureRouter(app, '/api/admin/indexer', adminIndexerRoutes);
   mountFeatureRouter(app, '/api/admin/metrics', adminMetricsRoutes);
+  mountFeatureRouter(app, '/api/admin/kyc', adminKycRoutes);
   mountFeatureRouter(app, '/v1', v1Routes);
   mountFeatureRouter(app, '/api', apiKeysRoutes);
 

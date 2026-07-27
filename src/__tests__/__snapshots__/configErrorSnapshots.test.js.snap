@@ -1,0 +1,155 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`Config error-response snapshots 400 — validation errors rejects empty body 1`] = `
+{
+  "code": "VALIDATION_ERROR",
+  "detail": "Request body contains invalid or missing fields.",
+  "fieldErrors": {
+    "config": "Invalid input: expected record, received undefined",
+    "section": "Invalid option: expected one of "webhook"|"reconciliation"|"kyc"|"retention"|"fraudThresholds"|"cors"",
+  },
+  "status": 400,
+  "title": "Validation Error",
+  "type": "https://liquifact.io/problems/validation-error",
+}
+`;
+
+exports[`Config error-response snapshots 400 — validation errors rejects invalid fraudThresholds cross-field rule 1`] = `
+{
+  "code": "VALIDATION_ERROR",
+  "detail": "Request body contains invalid or missing fields.",
+  "fieldErrors": {
+    "config.manualReviewThreshold": "manualReviewThreshold must not exceed fraudCeiling",
+  },
+  "status": 400,
+  "title": "Validation Error",
+  "type": "https://liquifact.io/problems/validation-error",
+}
+`;
+
+exports[`Config error-response snapshots 400 — validation errors rejects invalid section enum 1`] = `
+{
+  "code": "VALIDATION_ERROR",
+  "detail": "Request body contains invalid or missing fields.",
+  "fieldErrors": {
+    "section": "Invalid option: expected one of "webhook"|"reconciliation"|"kyc"|"retention"|"fraudThresholds"|"cors"",
+  },
+  "status": 400,
+  "title": "Validation Error",
+  "type": "https://liquifact.io/problems/validation-error",
+}
+`;
+
+exports[`Config error-response snapshots 400 — validation errors rejects invalid webhook config fields 1`] = `
+{
+  "code": "VALIDATION_ERROR",
+  "detail": "Request body contains invalid or missing fields.",
+  "fieldErrors": {
+    "config.events": "events must contain at least one entry",
+    "config.secret": "secret must be at least 16 characters",
+    "config.url": "url must be a valid URL",
+  },
+  "status": 400,
+  "title": "Validation Error",
+  "type": "https://liquifact.io/problems/validation-error",
+}
+`;
+
+exports[`Config error-response snapshots 400 — validation errors rejects missing section field 1`] = `
+{
+  "code": "VALIDATION_ERROR",
+  "detail": "Request body contains invalid or missing fields.",
+  "fieldErrors": {
+    "section": "Invalid option: expected one of "webhook"|"reconciliation"|"kyc"|"retention"|"fraudThresholds"|"cors"",
+  },
+  "status": 400,
+  "title": "Validation Error",
+  "type": "https://liquifact.io/problems/validation-error",
+}
+`;
+
+exports[`Config error-response snapshots 400 — validation errors rejects non-object body 1`] = `
+{
+  "code": "VALIDATION_ERROR",
+  "detail": "Request body contains invalid or missing fields.",
+  "fieldErrors": {
+    "_root": "Invalid input: expected object, received string",
+  },
+  "status": 400,
+  "title": "Validation Error",
+  "type": "https://liquifact.io/problems/validation-error",
+}
+`;
+
+exports[`Config error-response snapshots 400 — validation errors rejects unknown top-level keys 1`] = `
+{
+  "code": "VALIDATION_ERROR",
+  "detail": "Request body contains invalid or missing fields.",
+  "fieldErrors": {
+    "_root": "Unrecognized key: "extra"",
+  },
+  "status": 400,
+  "title": "Validation Error",
+  "type": "https://liquifact.io/problems/validation-error",
+}
+`;
+
+exports[`Config error-response snapshots 404 — not found returns RFC 7807 shape for unknown route 1`] = `
+{
+  "detail": "The requested resource GET /api/admin/config/nonexistent was not found.",
+  "instance": "urn:uuid:test-request-id",
+  "status": 404,
+  "title": "Not Found",
+  "type": "https://liquifact.com/probs/not-found",
+}
+`;
+
+exports[`Config error-response snapshots 409 — idempotency conflict maps AppError(409) to RFC 7807 shape 1`] = `
+{
+  "code": "IDEMPOTENCY_CONFLICT",
+  "message": "Idempotency key reused with a different payload.",
+  "retryHint": "",
+  "retryable": false,
+  "status": 409,
+}
+`;
+
+exports[`Config error-response snapshots 500 — internal server error maps AppError(500) to RFC 7807 shape 1`] = `
+{
+  "code": "DB_CONNECTION_LOST",
+  "message": "Database connection lost",
+  "retryHint": "Retry the request in a few moments.",
+  "retryable": true,
+  "status": 500,
+}
+`;
+
+exports[`Config error-response snapshots 500 — internal server error maps CORS rejection to 403 1`] = `
+{
+  "code": "FORBIDDEN",
+  "message": "CORS policy: origin is not allowed.",
+  "retryHint": "",
+  "retryable": false,
+  "status": 403,
+}
+`;
+
+exports[`Config error-response snapshots 500 — internal server error maps ECONNREFUSED to 503 1`] = `
+{
+  "code": "UPSTREAM_ERROR",
+  "message": "A dependent service is temporarily unavailable.",
+  "retryHint": "Retry the request in a few moments.",
+  "retryable": true,
+  "status": 503,
+}
+`;
+
+exports[`Config error-response snapshots 500 — internal server error maps generic Error to 500 problem+json 1`] = `
+{
+  "code": "INTERNAL_SERVER_ERROR",
+  "message": "An internal server error occurred.",
+  "retryHint": "Do not retry until the issue is resolved or support is contacted.",
+  "retryable": false,
+  "status": 500,
+}
+`;
