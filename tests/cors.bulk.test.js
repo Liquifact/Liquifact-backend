@@ -27,6 +27,10 @@ jest.mock('../src/logger', () => ({
 
 jest.mock('../src/metrics', () => ({
   webhookReplayTotal: { inc: jest.fn() },
+  corsCacheHitsTotal: { inc: jest.fn(), reset: jest.fn(), hashMap: {} },
+  corsCacheMissesTotal: { inc: jest.fn(), reset: jest.fn(), hashMap: {} },
+  corsCacheEvictionsTotal: { inc: jest.fn(), reset: jest.fn(), hashMap: {} },
+  corsCacheInvalidationsTotal: { inc: jest.fn(), reset: jest.fn(), hashMap: {} },
   registry: {
     contentType: 'text/plain',
     metrics: jest.fn().mockResolvedValue(''),
