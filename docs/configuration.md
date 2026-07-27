@@ -4,7 +4,7 @@ This reference is aligned with [`.env.example`](../.env.example). It lists every
 
 Secret values are marked **Secret** and must come from local `.env` files, deployment secret stores, or a KMS. Do not commit real secret values.
 
-For operations guidance and incident response on the configuration subsystem, see [runbook-config.md](./runbook-config.md).
+For operations guidance and incident response on the configuration subsystem, see [runbook-config.md](./runbook-config.md). For notable consumer-facing changes to the admin config HTTP API, see [changelog-config.md](./changelog-config.md).
 
 ## Boot-Time Validation
 
