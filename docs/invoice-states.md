@@ -190,6 +190,3 @@ additional metadata.
 | KYC Gating Middleware | `src/middleware/kycGating.js` | Middleware enforcing KYC on capital-moving transitions |
 
 ---
-
-*Generated from `src/services/invoiceStateMachine.js` as of the current HEAD.
-Verify accuracy by running `npm test tests/invoice.state.test.js`.*
