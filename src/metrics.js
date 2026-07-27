@@ -28,6 +28,12 @@
  * value, but this middleware **already** ignores `req.ip` for loopback checks
  * and reads the socket directly, making it resilient to such config changes.
  *
+ * ## Response Compression
+ *
+ * Large metrics responses are compressed with gzip or deflate when the client
+ * advertises support via `Accept-Encoding` and the response exceeds the
+ * compression threshold (see {@link module:middleware/compression}).
+ *
  * @module metrics
  */
 
@@ -286,6 +292,12 @@ try {
 
 /** Shared registry — exported so tests can reset it between runs. */
 const registry = new client.Registry();
+
+const {
+  negotiateEncoding,
+  compress,
+  DEFAULT_THRESHOLD,
+} = require('./middleware/compression');
 
 if (typeof client.collectDefaultMetrics === 'function') {
   client.collectDefaultMetrics({ register: registry });
@@ -720,13 +732,30 @@ function metricsAuth(req, res, next) {
  */
 async function metricsHandler(_req, res) {
   res.set('Content-Type', registry.contentType);
+  res.vary('Accept-Encoding');
   // Use the real prom-client registry.metrics() when available (production),
   // which returns the full Prometheus exposition including ALL registered
   // counters and gauges. Fall back to cachedMetrics for the shim (tests).
   const metricsText = typeof client.Gauge !== 'function' || client.Gauge.name === 'GaugeShim'
     ? cachedMetrics
     : await registry.metrics();
-  res.end(metricsText);
+
+  const buffer = Buffer.from(metricsText, 'utf8');
+
+  // Only compress responses above the threshold when the client
+  // advertises supported encodings via Accept-Encoding.
+  if (buffer.length > DEFAULT_THRESHOLD) {
+    const encoding = negotiateEncoding(_req.headers['accept-encoding']);
+
+    if (encoding !== 'identity') {
+      const compressed = await compress(buffer, encoding);
+      res.setHeader('Content-Encoding', encoding);
+      res.removeHeader('Content-Length');
+      return res.end(compressed);
+    }
+  }
+
+  res.end(buffer);
 }
 
 /**
