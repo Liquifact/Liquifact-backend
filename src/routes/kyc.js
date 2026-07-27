@@ -242,7 +242,7 @@ router.get('/webhooks', async (req, res, next) => {
       }
     }
 
-    // Build query
+    // Build query — exclude soft-deleted records
     let query = db('kyc_records')
       .select(
         'sme_id as smeId',
@@ -251,6 +251,7 @@ router.get('/webhooks', async (req, res, next) => {
         'verified_at as verifiedAt',
         'updated_at as updatedAt'
       )
+      .whereNull('deleted_at')
       .orderBy('updated_at', 'desc')
       .orderBy('sme_id', 'desc')
       .limit(limit + 1);
