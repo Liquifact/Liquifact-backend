@@ -32,6 +32,7 @@ const { createCorsOptions, isCorsOriginRejectedError } = require('./config/cors'
 const { get: getConfig } = require('./config');
 const { validateInvoiceQueryParams } = require('./utils/validators');
 const { computeEscrowDerivedFields } = require('./services/escrowDerived');
+const AppError = require('./errors/AppError');
 const { invoiceCreateSchema, parseValidationErrors } = require('./schemas/invoice');
 const {
   invoiceBodyLimit,
@@ -311,10 +312,14 @@ function createApp() {
   });
 
   // Escrow — GET by invoiceId (proxied through Soroban retry wrapper with address mapping)
+<<<<<<< HEAD
   // Compression middleware: gzip/deflate for large escrow-read responses (issue #961).
   // Threshold: 1 KB (DEFAULT_THRESHOLD). Respects Accept-Encoding; small responses
   // pass through uncompressed. Vary: Accept-Encoding is always set.
   app.get('/api/escrow/:invoiceId', createCompressionMiddleware(), async (req, res) => {
+=======
+  app.get('/api/escrow/:invoiceId', async (req, res, next) => {
+>>>>>>> pr-1067
     const invoiceId = String(req.params.invoiceId || '')
       .trim()
       .replace(/\s+/g, '');
@@ -324,9 +329,14 @@ function createApp() {
       const escrowAddress = resolveEscrowAddress(invoiceId);
       
       if (!escrowAddress) {
-        return res.status(404).json({ 
-          error: `No escrow contract mapping found for invoice ID '${invoiceId}'` 
-        });
+        return next(new AppError({
+          type: 'https://liquifact.com/probs/not-found',
+          title: 'Not Found',
+          status: 404,
+          detail: `No escrow contract mapping found for invoice ID '${invoiceId}'`,
+          code: 'NOT_FOUND',
+          retryable: false,
+        }));
       }
 
       // Read from projection, cache, or live read fallback
@@ -349,7 +359,7 @@ function createApp() {
           : 'Escrow state read from live Soroban contract.',
       });
     } catch (error) {
-      res.status(500).json({ error: error.message || 'Error fetching escrow state' });
+      return next(error);
     }
   });
 
