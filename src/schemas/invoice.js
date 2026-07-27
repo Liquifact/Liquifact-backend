@@ -191,6 +191,11 @@ const invoiceUpdateSchema = z
 
     currency: currencySchema.optional(),
 
+    notes: z
+      .string({ invalid_type_error: 'notes must be a string' })
+      .max(2000, { message: 'notes must not exceed 2000 characters' })
+      .optional(),
+
     description: z
       .string()
       .max(1000, { message: 'description must not exceed 1000 characters' })
