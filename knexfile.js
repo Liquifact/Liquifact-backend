@@ -42,7 +42,7 @@ module.exports = {
   //   file that requires its own DB state should use the manual mock at
   //   `src/db/__mocks__/knex.js` instead of this real connection.
   test: {
-    client: 'sqlite3',
+    client: 'better-sqlite3',
     connection: {
       filename: ':memory:',
     },
