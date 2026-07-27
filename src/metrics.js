@@ -276,21 +276,6 @@ try {
     }
   }
 
-  /**
-   * Histogram shim for test environments.
-   * @implements {import('prom-client').Histogram}
-   */
-  class HistogramShim {
-    /** @param {void} */
-    constructor() {}
-    /** @returns {void} */
-    observe() {}
-    /** @returns {Function} */
-    labels() { return this; }
-    /** @returns {void} */
-    inc() {}
-  }
-
   client = {
     Registry: RegistryShim,
     /**
@@ -317,12 +302,6 @@ const METRIC_REFRESH_INTERVAL_MS = 5000;
 const registeredJobQueues = new Set();
 const registeredWorkers = new Set();
 let refreshTimer = null;
-
-const registry = new client.Registry();
-
-if (typeof client.collectDefaultMetrics === 'function') {
-  client.collectDefaultMetrics({ register: registry });
-}
 
 const queueDepthGauge = new client.Gauge({
   name: 'liquifact_job_queue_depth',
@@ -1015,7 +994,7 @@ const idempotencyStorageFailureTotal = new client.Counter({
  * `status` (HTTP status code string), `outcome` (success | client_error | server_error).
  * @type {import('prom-client').Histogram}
  */
-const _apiKeyAuthDurationSeconds = new client.Histogram({
+const apiKeyAuthDurationSeconds = new client.Histogram({
   name: 'api_key_auth_duration_seconds',
   help: 'Duration of API key authenticated requests in seconds',
   labelNames: ['endpoint', 'method', 'status', 'outcome'],
@@ -1031,7 +1010,7 @@ const _apiKeyAuthDurationSeconds = new client.Histogram({
  * are never used as labels.
  * @type {import('prom-client').Counter}
  */
-const _apiKeyAuthErrorsTotal = new client.Counter({
+const apiKeyAuthErrorsTotal = new client.Counter({
   name: 'api_key_auth_errors_total',
   help: 'Total number of API key authentication errors by cause',
   labelNames: ['cause'],
@@ -1066,7 +1045,7 @@ const _API_KEY_OUTCOME_ENUM = Object.freeze([
  * @param {number} statusCode - HTTP response status code.
  * @returns {string} Bounded outcome from {@link API_KEY_OUTCOME_ENUM}.
  */
-function _classifyApiKeyOutcome(statusCode) {
+function classifyApiKeyOutcome(statusCode) {
   if (statusCode < 400) { return 'success'; }
   if (statusCode < 500) { return 'client_error'; }
   return 'server_error';
@@ -1079,7 +1058,7 @@ function _classifyApiKeyOutcome(statusCode) {
  * @returns {string|null} Bounded cause from {@link API_KEY_ERROR_CAUSE_ENUM},
  *   or `null` when the status does not represent a known error cause.
  */
-function _classifyApiKeyErrorCause(statusCode) {
+function classifyApiKeyErrorCause(statusCode) {
   if (statusCode === 400) { return 'validation_error'; }
   if (statusCode === 401) { return 'unauthorized'; }
   if (statusCode === 403) { return 'forbidden'; }
@@ -1363,28 +1342,6 @@ function normalizeMetricsEndpointCause(err, status) {
 }
 
 /**
- * Records metrics endpoint outcome (duration, status, errors).
- *
- * @param {object} params - Recording parameters.
- * @param {number} params.statusCode - HTTP status code.
- * @param {number} params.durationSeconds - Request duration in seconds.
- * @param {Error|null} [params.error] - Error if any occurred.
- * @param {import('express').Request} [params.req] - Express request (for IP logging).
- * @returns {void}
- */
-function recordMetricsEndpointOutcome({ statusCode, durationSeconds, error, req }) {
-  const statusClass = normalizeMetricsEndpointStatusClass(statusCode);
-  const cause = normalizeMetricsEndpointCause(error, statusCode);
-
-  metricsRequestDurationSeconds.observe({ status_class: statusClass }, durationSeconds);
-  metricsRequestsTotal.inc({ status_class: statusClass });
-
-  if (error) {
-    metricsRequestErrorsTotal.inc({ cause });
-  }
-}
-
-/**
  * Histogram: Wall-clock duration of metrics endpoint scrapes in seconds.
  * @type {import('prom-client').Histogram}
  */
@@ -1396,67 +1353,7 @@ const metricsRequestDurationSeconds = new client.Histogram({
   registers: [registry],
 });
 
-/**
- * Counter: Total metrics endpoint requests.
- * @type {import('prom-client').Counter}
- */
-const metricsRequestsTotal = new client.Counter({
-  name: 'metrics_requests_total',
-  help: 'Total number of metrics endpoint requests',
-  labelNames: ['status_class'],
-  registers: [registry],
-});
 
-/**
- * Counter: Metrics endpoint request errors by cause.
- * @type {import('prom-client').Counter}
- */
-const metricsRequestErrorsTotal = new client.Counter({
-  name: 'metrics_request_errors_total',
-  help: 'Total number of metrics endpoint request errors',
-  labelNames: ['cause'],
-  registers: [registry],
-});
-
-/**
- * Records the outcome of a metrics endpoint request.
- *
- * @param {object} params
- * @param {number} params.statusCode - HTTP status code.
- * @param {number} params.durationSeconds - Request duration in seconds.
- * @param {Error}  [params.error] - Error that caused the failure, if any.
- * @param {import('express').Request} [params.req] - Express request object.
- * @returns {void}
- */
-function recordMetricsEndpointOutcome({ statusCode, durationSeconds, error, req }) {
-  const statusClass = normalizeMetricsEndpointStatusClass(statusCode);
-
-  metricsRequestDurationSeconds.labels(statusClass).observe(durationSeconds);
-  metricsRequestsTotal.labels(statusClass).inc();
-
-  const cause = normalizeMetricsEndpointCause(error, statusCode);
-  if (cause !== 'none') {
-    metricsRequestErrorsTotal.labels(cause).inc();
-  }
-
-  const log = (req && typeof logger.createRequestLogger === 'function')
-    ? logger.createRequestLogger(req)
-    : logger;
-  const fields = {
-    statusClass,
-    statusCode,
-    durationSeconds: Number(durationSeconds.toFixed(6)),
-    cause,
-  };
-
-  if (statusClass === '5xx') {
-    log.error(fields, 'metrics endpoint request failed');
-  } else if (statusClass === '4xx') {
-    log.warn(fields, 'metrics endpoint request rejected');
-  } else {
-    log.info(fields, 'metrics endpoint request completed');
-  }
-}
 
 // ── KYC webhook metrics (issue #731) ────────────────────────────────────────
 
@@ -1703,108 +1600,6 @@ const PERSISTENCE_ENDPOINT_ENUM = Object.freeze([
   'unknown',
 ]);
 
-/**
- * Bounded enum of allowed `status_class` label values.
- * @readonly
- */
-const PERSISTENCE_STATUS_CLASS_ENUM = Object.freeze(['2xx', '4xx', '5xx']);
-
-/**
- * Bounded enum of allowed `cause` label values for persistence errors.
- * Raw error messages are NEVER used as labels.
- * @readonly
- */
-const PERSISTENCE_CAUSE_ENUM = Object.freeze([
-  'validation',
-  'storage',
-  'internal',
-  'none',
-]);
-
-/**
- * Maps a raw persistence endpoint hint to a bounded metric label value.
- *
- * @param {unknown} raw - Raw endpoint identifier.
- * @returns {string} Bounded value from {@link PERSISTENCE_ENDPOINT_ENUM}.
- */
-function normalizePersistenceEndpoint(raw) {
-  const str = typeof raw === 'string' ? raw.trim() : '';
-  return PERSISTENCE_ENDPOINT_ENUM.includes(str) ? str : 'unknown';
-}
-
-/**
- * Maps an HTTP status code to a bounded `status_class` label value.
- *
- * @param {unknown} status - HTTP status code.
- * @returns {string} Bounded value from {@link PERSISTENCE_STATUS_CLASS_ENUM}.
- */
-function normalizePersistenceStatusClass(status) {
-  const code = Number(status);
-  if (code >= 500) { return '5xx'; }
-  if (code >= 400) { return '4xx'; }
-  return '2xx';
-}
-
-/**
- * Maps a raw persistence failure to a bounded `cause` label value.
- *
- * Recognises the storage-service error codes surfaced by the SME routes
- * (INVALID_MIME_TYPE, FILE_TOO_LARGE, INVALID_TENANT_ID) as client-side
- * `validation`, storage-layer failures as `storage`, and everything else as
- * `internal`. A 2xx outcome maps to `none`.
- *
- * @param {unknown} err - Raw error object or code (null/undefined for success).
- * @param {number} [status] - HTTP status code, used to disambiguate.
- * @returns {string} Bounded value from {@link PERSISTENCE_CAUSE_ENUM}.
- */
-function normalizePersistenceCause(err, status) {
-  const code = Number(status);
-  if (!err && code < 400) { return 'none'; }
-
-  const errCode = err && typeof err === 'object' && 'code' in err ? String(err.code) : '';
-  if (['INVALID_MIME_TYPE', 'FILE_TOO_LARGE', 'INVALID_TENANT_ID'].includes(errCode)) {
-    return 'validation';
-  }
-  if (code >= 400 && code < 500) { return 'validation'; }
-  if (errCode.startsWith('STORAGE') || errCode === 'ENOENT' || errCode === 'EACCES') {
-    return 'storage';
-  }
-  return 'internal';
-}
-
-/**
- * Histogram: Wall-clock duration of persistence-endpoint requests in seconds.
- * @type {import('prom-client').Histogram}
- */
-const persistenceRequestDurationSeconds = new client.Histogram({
-  name: 'persistence_request_duration_seconds',
-  help: 'Duration of persistence endpoint requests in seconds',
-  labelNames: ['endpoint', 'status_class'],
-  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5],
-  registers: [registry],
-});
-
-/**
- * Counter: Total persistence-endpoint requests.
- * @type {import('prom-client').Counter}
- */
-const persistenceRequestsTotal = new client.Counter({
-  name: 'persistence_requests_total',
-  help: 'Total number of persistence endpoint requests',
-  labelNames: ['endpoint', 'status_class'],
-  registers: [registry],
-});
-
-/**
- * Counter: Persistence-endpoint request errors by cause.
- * @type {import('prom-client').Counter}
- */
-const persistenceRequestErrorsTotal = new client.Counter({
-  name: 'persistence_request_errors_total',
-  help: 'Total number of persistence endpoint request errors by cause',
-  labelNames: ['endpoint', 'cause'],
-  registers: [registry],
-});
 
 
 const escrowReadCacheHitsTotal = new client.Counter({

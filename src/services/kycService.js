@@ -467,14 +467,10 @@ async function persistKycRecord({ smeId, status, providerRecordId = null, verifi
   // a stale cached "verified" from outliving a subsequent revocation write.
   invalidateKycStatusCache(smeId);
 
-  const existing = await db('kyc_records').where({ sme_id: smeId }).first();
-  if (existing) {
-    await db('kyc_records')
-      .where({ sme_id: smeId })
-      .update(record);
-  } else {
-    await db('kyc_records').insert(record);
-  }
+  await db('kyc_records')
+    .insert(record)
+    .onConflict('sme_id')
+    .merge();
 
   const result = {
     smeId,

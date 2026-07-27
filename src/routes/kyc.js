@@ -13,6 +13,8 @@ const {
   normalizeKycWebhookStatusClass,
   normalizeKycWebhookCause,
 } = require('../metrics');
+const { verifySignature } = require('../services/webhooks');
+const { parseJsonPayload, validateKycWebhookRequest } = require('../middleware/kycWebhookValidation');
 const {
   kycWebhookSchema,
   kycWebhookListResponseSchema,
