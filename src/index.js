@@ -67,7 +67,7 @@ function startServer() {
 }
 
 /**
- * Resets in-memory state (clears the shared cache store for test isolation).
+ * Resets in-memory state (clears shared cache stores for test isolation).
  *
  * @returns {void}
  */
@@ -77,6 +77,13 @@ function resetStore() {
     getSharedStore().clear();
   } catch (_) {
     // intentional no-op in environments where cacheStore is unavailable
+  }
+
+  try {
+    const { getMetricsCacheStore } = require('./services/metricsCacheStore');
+    getMetricsCacheStore().clear();
+  } catch (_) {
+    // intentional no-op in environments where metricsCacheStore is unavailable
   }
 }
 
@@ -90,7 +97,6 @@ const originalCreateApp = app.createApp;
 function createApp() {
   return typeof originalCreateApp === 'function' ? originalCreateApp() : app;
 }
-
 
 // Start background workers when running as main module (not in tests)
 if (process.env.NODE_ENV !== 'test' && require.main === module) {

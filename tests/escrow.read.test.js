@@ -1,11 +1,43 @@
 'use strict';
 
 const request = require('supertest');
+const jwt = require('jsonwebtoken');
 const { createStandardizedApp } = require('../src/app');
 const db = require('../src/db/knex');
 const { createRedisEscrowSummaryCache } = require('../src/cache/redis');
 
-// Mock external dependencies
+// JWT secret used by the auth middleware in tests (set by tests/mocks/setup.js)
+const TEST_JWT_SECRET = process.env.JWT_SECRET || 'test-secret-at-least-32-characters-long-string-for-jest';
+
+/** Sign a JWT with the test secret. */
+function makeToken(payload = {}) {
+  return jwt.sign(
+    { sub: 'user_test', id: 'user_test', tenantId: 'tenant_test', ...payload },
+    TEST_JWT_SECRET,
+    { algorithm: 'HS256', expiresIn: '1h' },
+  );
+}
+
+/** Return the Authorization header value for a test token. */
+function authHeader(payload = {}) {
+  return `Bearer ${makeToken(payload)}`;
+}
+
+// Mock external dependencies — must precede any require of src/app to avoid
+// transitive resolution failures for optional / uninstalled packages.
+jest.mock('rate-limit-redis', () => ({ RedisStore: jest.fn() }), { virtual: true });
+jest.mock('redis', () => ({
+  createClient: jest.fn(() => ({
+    on: jest.fn(),
+    connect: jest.fn(() => Promise.resolve()),
+    get: jest.fn(() => Promise.resolve(null)),
+    set: jest.fn(() => Promise.resolve('OK')),
+    del: jest.fn(() => Promise.resolve(1)),
+    quit: jest.fn(() => Promise.resolve()),
+    sendCommand: jest.fn(() => Promise.resolve(null)),
+  })),
+}), { virtual: true });
+
 jest.mock('../src/config/escrowMap', () => ({
   resolveEscrowAddress: jest.fn((id) => {
     if (id === 'unknown-inv') return null;
@@ -285,5 +317,93 @@ describe('GET /api/escrow/:invoiceId', () => {
     const cacheResult = await cache.getSummary('inv-gap-1', 2000);
     expect(cacheResult.hit).toBe(false);
     expect(cacheResult.reason).toBe('ledger_gap');
+  });
+});
+
+describe('ESCROW_READ_PROJECTION_ENABLED feature flag', () => {
+  let app;
+  let testCache;
+
+  beforeAll(() => {
+    app = createStandardizedApp();
+    testCache = createRedisEscrowSummaryCache();
+  });
+
+  beforeEach(async () => {
+    await db('escrow_event_projection').del();
+    if (testCache && testCache.client) {
+      await testCache.client.flushall();
+    }
+  });
+
+  it('reads from projection when flag is enabled (default)', async () => {
+    // Seed projection
+    await db('escrow_event_projection').insert({
+      invoice_id: 'inv-flag-on-1',
+      latest_event_id: 'evt_flag_1',
+      latest_event_type: 'funded',
+      latest_ledger_sequence: 55555,
+      latest_event_body: JSON.stringify({ status: 'funded', fundedAmount: 3000 }),
+      latest_observed_at: new Date()
+    });
+
+    // Default: ESCROW_READ_PROJECTION_ENABLED is 'true' (no env override needed)
+    const res = await request(app).get('/api/escrow/inv-flag-on-1');
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('funded');
+    expect(res.body.data.fundedAmount).toBe(3000);
+    expect(res.body.data.fromProjection).toBe(true);
+    expect(res.body.message).toMatch(/from event projection/);
+  });
+
+  it('skips projection and goes to live read when flag is disabled', async () => {
+    // Temporarily set env to disable the feature
+    const origEnv = process.env.ESCROW_READ_PROJECTION_ENABLED;
+    process.env.ESCROW_READ_PROJECTION_ENABLED = 'false';
+
+    // Re-import modules with fresh config
+    jest.resetModules();
+
+    // Seed projection data (should be ignored when flag is off)
+    await db('escrow_event_projection').insert({
+      invoice_id: 'inv-flag-off-1',
+      latest_event_id: 'evt_flag_off',
+      latest_event_type: 'funded',
+      latest_ledger_sequence: 66666,
+      latest_event_body: JSON.stringify({ status: 'funded', fundedAmount: 5000 }),
+      latest_observed_at: new Date()
+    });
+
+    // Create fresh app with updated env
+    const { createStandardizedApp: createAppFresh } = require('../src/app');
+    const freshApp = createAppFresh();
+
+    const res = await request(freshApp).get('/api/escrow/inv-flag-off-1');
+    // Should fall through to live read, which returns not_found with 0 amount
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('not_found');
+    expect(res.body.data.fundedAmount).toBe(0);
+    expect(res.body.data.latest_event_type).toBe('live_read');
+    // The projection fields should NOT be present
+    expect(res.body.data.fromProjection).toBeUndefined();
+
+    process.env.ESCROW_READ_PROJECTION_ENABLED = origEnv;
+  });
+
+  it('returns live read data when flag is off even with no projection data', async () => {
+    const origEnv = process.env.ESCROW_READ_PROJECTION_ENABLED;
+    process.env.ESCROW_READ_PROJECTION_ENABLED = 'false';
+    jest.resetModules();
+
+    const { createStandardizedApp: createAppFresh } = require('../src/app');
+    const freshApp = createAppFresh();
+
+    const res = await request(freshApp).get('/api/escrow/inv-flag-off-none');
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('not_found');
+    expect(res.body.data.latest_event_type).toBe('live_read');
+    expect(res.body.data.fromProjection).toBeUndefined();
+
+    process.env.ESCROW_READ_PROJECTION_ENABLED = origEnv;
   });
 });
