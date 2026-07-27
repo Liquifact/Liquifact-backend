@@ -2,7 +2,7 @@
  * @fileoverview SME Dashboard Metrics endpoints.
  *
  * Provides:
- *  - `GET /metrics`  — aggregated invoice counts for the authenticated user
+ *  - `GET /metrics`       — aggregated invoice counts for the authenticated user
  *  - `POST /metrics/bulk` — batch endpoint accepting an array of
  *    (tenantId, userId) pairs with per-item success/error results
  *
@@ -18,7 +18,16 @@ const { extractTenant } = require('../../middleware/tenant');
 const { CursorError } = require('../../utils/cursorPagination');
 const invoiceService = require('../../services/invoiceService');
 const { validateMetricsRequest } = require('../../utils/metricsValidation');
-const { validateBulkMetricsBody } = require('../../schemas/metrics');
+const {
+  validateBulkMetricsBody,
+  validateGetMetricsQuery,
+} = require('../../schemas/metrics');
+const {
+  toSmeMetricsResponse,
+  toSmeMetricsMeta,
+  toSmeMetricsApiResponse,
+} = require('../../dto/metrics');
+const { metricsErrorHandler } = require('../../middleware/metricsErrorHandler');
 
 
 /**
@@ -116,57 +125,74 @@ const { validateBulkMetricsBody } = require('../../schemas/metrics');
  *                   type: string
  *                   format: date-time
  *       400:
- *         description: Bad Request - Missing tenant context or invalid cursor
+ *         description: Bad Request — missing tenant context, invalid cursor, or invalid query params
  *       401:
  *         description: Unauthorized
  */
-router.get('/metrics', authenticateToken, extractTenant, async (req, res, next) => {
-  try {
-    const ctx = validateMetricsRequest(req, res);
-    if (!ctx) { return; }
+router.get(
+  '/metrics',
+  authenticateToken,
+  extractTenant,
+  validateGetMetricsQuery,
+  async (req, res, next) => {
+    try {
+      const ctx = validateMetricsRequest(req, res);
+      if (!ctx) { return; }
 
-    const { userId, tenantId } = ctx;
+      const { userId, tenantId } = ctx;
 
-    const rawMetrics = await invoiceService.getSmeInvoiceCounts(tenantId, userId);
-    const data = toSmeMetricsResponse(rawMetrics);
+      const rawMetrics = await invoiceService.getSmeInvoiceCounts(tenantId, userId);
+      const data = toSmeMetricsResponse(rawMetrics);
 
-    const { cursor, limit } = req.query;
-    const usePagination = cursor !== undefined || limit !== undefined;
+      // Prefer schema-validated (and coerced) query values; fall back to raw
+      // query strings to preserve backward compatibility.
+      const validatedQuery = req.validatedQuery || {};
+      const cursor =
+        validatedQuery.cursor !== undefined
+          ? validatedQuery.cursor
+          : req.query.cursor;
+      const limit =
+        validatedQuery.limit !== undefined
+          ? String(validatedQuery.limit)
+          : req.query.limit;
 
-    if (!usePagination) {
+      const usePagination = cursor !== undefined || limit !== undefined;
+
+      if (!usePagination) {
+        const meta = toSmeMetricsMeta({
+          timestamp: new Date().toISOString(),
+          version: '0.1.0',
+        });
+        return res.json(toSmeMetricsApiResponse(data, meta));
+      }
+
+      let result;
+      try {
+        result = await invoiceService.getSmeInvoiceList(tenantId, userId, { cursor, limit });
+      } catch (err) {
+        if (err.name === 'CursorError' || err instanceof CursorError) {
+          return res.status(400).json({
+            error: { message: err.message },
+          });
+        }
+        throw err;
+      }
+
       const meta = toSmeMetricsMeta({
+        invoices: result.invoices,
+        total: result.meta.total,
+        limit: result.meta.limit,
+        hasMore: result.meta.hasMore,
+        nextCursor: result.meta.nextCursor,
         timestamp: new Date().toISOString(),
-        version: '0.1.0'
+        version: '0.1.0',
       });
       return res.json(toSmeMetricsApiResponse(data, meta));
-    }
-
-    let result;
-    try {
-      result = await invoiceService.getSmeInvoiceList(tenantId, userId, { cursor, limit });
     } catch (err) {
-      if (err.name === 'CursorError' || err instanceof CursorError) {
-        return res.status(400).json({
-          error: { message: err.message },
-        });
-      }
-      throw err;
+      return next(err);
     }
-
-    const meta = toSmeMetricsMeta({
-      invoices: result.invoices,
-      total: result.meta.total,
-      limit: result.meta.limit,
-      hasMore: result.meta.hasMore,
-      nextCursor: result.meta.nextCursor,
-      timestamp: new Date().toISOString(),
-      version: '0.1.0'
-    });
-    return res.json(toSmeMetricsApiResponse(data, meta));
-  } catch (err) {
-    return next(err);
   }
-});
+);
 
 /**
  * @swagger
@@ -250,69 +276,80 @@ router.get('/metrics', authenticateToken, extractTenant, async (req, res, next) 
  *       401:
  *         description: Unauthorized
  */
-router.post('/metrics/bulk', authenticateToken, extractTenant, express.json({ limit: '100kb' }), validateBulkMetricsBody, async (req, res, next) => {
-  try {
-    const callerCtx = validateMetricsRequest(req, res);
-    if (!callerCtx) {
-      return;
-    }
-
-    const { tenantId: callerTenantId } = callerCtx;
-    const { operations } = req.validated;
-
-    const results = [];
-    let succeeded = 0;
-    let failed = 0;
-
-    for (const op of operations) {
-      const { tenantId, userId } = op;
-
-      if (tenantId !== callerTenantId) {
-        results.push({
-          tenantId,
-          userId,
-          status: 'error',
-          data: null,
-          error: 'Cross-tenant access denied',
-        });
-        failed++;
-        continue;
+router.post(
+  '/metrics/bulk',
+  authenticateToken,
+  extractTenant,
+  express.json({ limit: '100kb' }),
+  validateBulkMetricsBody,
+  async (req, res, next) => {
+    try {
+      const callerCtx = validateMetricsRequest(req, res);
+      if (!callerCtx) {
+        return;
       }
 
-      try {
-        const data = await invoiceService.getSmeInvoiceCounts(tenantId, userId);
-        results.push({
-          tenantId,
-          userId,
-          status: 'success',
-          data,
-          error: null,
-        });
-        succeeded++;
-      } catch (err) {
-        results.push({
-          tenantId,
-          userId,
-          status: 'error',
-          data: null,
-          error: err.message || 'Internal error',
-        });
-        failed++;
-      }
-    }
+      const { tenantId: callerTenantId } = callerCtx;
+      const { operations } = req.validated;
 
-    return res.json({
-      results,
-      meta: {
-        total: operations.length,
-        succeeded,
-        failed,
-        timestamp: new Date().toISOString(),
-      },
-    });
-  } catch (err) {
-    return next(err);
+      const results = [];
+      let succeeded = 0;
+      let failed = 0;
+
+      for (const op of operations) {
+        const { tenantId, userId } = op;
+
+        if (tenantId !== callerTenantId) {
+          results.push({
+            tenantId,
+            userId,
+            status: 'error',
+            data: null,
+            error: 'Cross-tenant access denied',
+          });
+          failed++;
+          continue;
+        }
+
+        try {
+          const data = await invoiceService.getSmeInvoiceCounts(tenantId, userId);
+          results.push({
+            tenantId,
+            userId,
+            status: 'success',
+            data,
+            error: null,
+          });
+          succeeded++;
+        } catch (err) {
+          results.push({
+            tenantId,
+            userId,
+            status: 'error',
+            data: null,
+            error: err.message || 'Internal error',
+          });
+          failed++;
+        }
+      }
+
+      return res.json({
+        results,
+        meta: {
+          total: operations.length,
+          succeeded,
+          failed,
+          timestamp: new Date().toISOString(),
+        },
+      });
+    } catch (err) {
+      return next(err);
+    }
   }
-});
+);
+
+// Centralised metrics error handler — converts any next(err) into a consistent
+// structured response (issue #973).
+router.use(metricsErrorHandler);
 
 module.exports = router;

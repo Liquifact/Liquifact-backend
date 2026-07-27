@@ -7,13 +7,10 @@ const { withRetry } = require('../utils/retry');
 const { appendAuditEvent } = require('./auditLogStore');
 
 // Lazily-resolved shared worker to avoid circular dependency at module load time.
-// Set via setSharedWorker() by the application bootstrap or tests.
 let _sharedWorker = null;
 
 /**
  * Injects the BackgroundWorker instance used by enqueueWebhookDelivery.
- * Call this once at application startup (src/index.js) after the worker has
- * been created and the 'webhook_delivery' handler has been registered.
  *
  * @param {import('../workers/worker')} worker - Configured BackgroundWorker.
  * @returns {void}
@@ -26,12 +23,9 @@ let client;
 try {
   client = require('prom-client');
 } catch (_e) {
-  // In test environments where prom-client may not be installed, provide a noop shim
   client = {
     Counter: class {
-      /** No-op constructor for the prom-client shim. @returns {void} */
       constructor() { }
-      /** No-op increment for the prom-client shim. @returns {void} */
       inc() { }
     },
   };
@@ -41,10 +35,12 @@ const { registry } = require('../metrics');
 const SIGNATURE_VERSION = 'v1';
 const TOLERANCE_MS = 5 * 60 * 1000;
 
-// Signature header guards — a well-formed header is "t=<10 digits>,v1=<64 hex chars>"
-// (~80 chars). These limits are generous but still block header-flooding abuse.
+// Signature header guards
 const MAX_SIGNATURE_HEADER_LENGTH = 256;
 const MAX_SIGNATURE_HEADER_PARTS = 10;
+
+// Maximum outgoing payload size limit (Default: 128 KB)
+const MAX_PAYLOAD_BYTES = Number(process.env.WEBHOOK_MAX_PAYLOAD_BYTES || 128 * 1024);
 
 /**
  * Recursively sorts keys of an object to ensure deterministic JSON serialization.
@@ -94,9 +90,24 @@ function createSignatureHeader(secret, rawBody) {
 }
 
 /**
+ * Validates and enforces payload size bounds.
+ *
+ * @param {string} body - JSON payload string.
+ * @throws {Error} If body size exceeds MAX_PAYLOAD_BYTES.
+ */
+function validatePayloadBounds(body) {
+  const payloadBytes = Buffer.byteLength(body, 'utf8');
+  if (payloadBytes > MAX_PAYLOAD_BYTES) {
+    const err = new Error(`Webhook payload size (${payloadBytes} bytes) exceeds limit of ${MAX_PAYLOAD_BYTES} bytes`);
+    err.code = 'PAYLOAD_TOO_LARGE';
+    throw err;
+  }
+}
+
+/**
  * Emits a webhook for escrow events.
  *
- * @param {string} event - The event type ('escrow_funded' or 'escrow_settled').
+ * @param {string} event - The event type ('escrow_funded', 'escrow_settled', etc.).
  * @param {string} invoiceId - The invoice ID.
  * @param {Object} [additionalData={}] - Additional data to include in the payload.
  * @returns {Promise<void>}
@@ -130,11 +141,13 @@ async function emitWebhook(event, invoiceId, additionalData = {}) {
       ...additionalData,
     });
 
-    // Sign payload and create signature header
     const body = JSON.stringify(payload);
+
+    // Enforce payload bounding guard
+    validatePayloadBounds(body);
+
     const signatureHeader = createSignatureHeader(webhook_secret, body);
 
-    // Metric: ensure counter exists on first require
     if (!emitWebhook._failureCounter) {
       emitWebhook._failureCounter = new client.Counter({
         name: 'webhook_delivery_failures_total',
@@ -147,10 +160,9 @@ async function emitWebhook(event, invoiceId, additionalData = {}) {
     const baseDelay = Number(process.env.WEBHOOK_BASE_DELAY || 500);
     const maxDelay = Number(process.env.WEBHOOK_MAX_DELAY || 10000);
 
-    // shouldRetry: only on network/timeouts or 5xx
     const shouldRetry = (err) => {
       if (!err) { return false; }
-      // network/socket errors often have a code
+      if (err.code === 'PAYLOAD_TOO_LARGE') { return false; }
       if (err.code) {
         return ['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN'].includes(err.code) || err.name === 'AbortError';
       }
@@ -161,7 +173,6 @@ async function emitWebhook(event, invoiceId, additionalData = {}) {
       return false;
     };
 
-    // Operation to perform
     const operation = async () => {
       const controller = new AbortController();
       const timeoutMs = Number(process.env.WEBHOOK_TIMEOUT_MS || 5000);
@@ -189,7 +200,6 @@ async function emitWebhook(event, invoiceId, additionalData = {}) {
       }
     };
 
-    // Record attempts via auditLogStore on each failed try
     const onRetry = async ({ attempt, error }) => {
       try {
         await appendAuditEvent({
@@ -208,16 +218,13 @@ async function emitWebhook(event, invoiceId, additionalData = {}) {
           },
         });
       } catch (e) {
-        // don't let audit failures stop retries
         logger.warn({ err: e.message }, 'Failed to append audit event for webhook attempt');
       }
     };
 
-    // Execute with retry
     try {
       const result = await withRetry(operation, { maxRetries, baseDelay, maxDelay, shouldRetry, onRetry });
 
-      // record successful delivery
       try {
         await appendAuditEvent({
           eventType: 'webhook_delivery',
@@ -235,22 +242,20 @@ async function emitWebhook(event, invoiceId, additionalData = {}) {
 
       logger.info({ event, invoiceId, tenant_id }, 'Webhook emitted successfully');
     } catch (error) {
-      // exhausted retries -> dead-letter
       try {
-        await db('webhook_dead_letters').insert({
-          tenant_id,
-          invoice_id: invoiceId,
+        await writeDeadLetter({
+          tenantId: tenant_id,
+          invoiceId,
           event,
-          payload: JSON.stringify(payload),
-          last_error: error && error.message ? error.message : String(error),
+          payload,
+          webhookUrl: webhook_url,
           attempts: maxRetries + 1,
-          created_at: new Date(),
+          lastError: error && error.message ? error.message : String(error),
         });
       } catch (e) {
         logger.warn({ err: e.message }, 'Failed to persist webhook dead-letter');
       }
 
-      // emit delivery-failure metric
       try {
         emitWebhook._failureCounter.inc();
       } catch (_e) {
@@ -265,6 +270,19 @@ async function emitWebhook(event, invoiceId, additionalData = {}) {
 }
 
 /**
+ * Emits an escrow read webhook notification asynchronously.
+ *
+ * @param {Object} params
+ * @param {string} params.eventType - Specific read event type (e.g. 'escrow.read').
+ * @param {string} params.invoiceId - Invoice identifier.
+ * @param {Object} params.state - Escrow state payload.
+ * @returns {Promise<void>}
+ */
+async function emitEscrowReadWebhook({ eventType, invoiceId, state }) {
+  return emitWebhook(eventType || 'escrow.read', invoiceId, { state });
+}
+
+/**
  * Verifies a webhook signature with timestamp tolerance.
  *
  * @param {string} secret - The webhook secret.
@@ -274,17 +292,12 @@ async function emitWebhook(event, invoiceId, additionalData = {}) {
  * @returns {Object} Result object with valid boolean and optional error message.
  */
 function verifySignature(secret, rawBody, signatureHeader, toleranceMs = TOLERANCE_MS) {
-  // ── Max-length guard ────────────────────────────────────────────────────────
-  // Reject oversized headers before any splitting or allocation work.
   if (typeof signatureHeader !== 'string' || signatureHeader.length > MAX_SIGNATURE_HEADER_LENGTH) {
     return { valid: false, error: 'Invalid signature header format' };
   }
 
   const parts = signatureHeader.split(',');
 
-  // ── Part-count guard ────────────────────────────────────────────────────────
-  // A well-formed header has exactly 2 parts: "t=<ts>" and "v1=<sig>".
-  // Cap well above that to allow future versioning while blocking floods.
   if (parts.length > MAX_SIGNATURE_HEADER_PARTS) {
     return { valid: false, error: 'Invalid signature header format' };
   }
@@ -321,16 +334,6 @@ function verifySignature(secret, rawBody, signatureHeader, toleranceMs = TOLERAN
 
 /**
  * Writes a failed webhook delivery to the dead-letter table.
- *
- * @param {Object} params
- * @param {string} params.tenantId
- * @param {string} params.invoiceId
- * @param {string} params.event
- * @param {Object} params.payload
- * @param {string} params.webhookUrl
- * @param {number} params.attempts
- * @param {string} params.lastError
- * @returns {Promise<string>} The new dead-letter row id.
  */
 async function writeDeadLetter({ tenantId, invoiceId, event, payload, webhookUrl, attempts, lastError }) {
   const [row] = await db('webhook_dead_letters')
@@ -349,10 +352,6 @@ async function writeDeadLetter({ tenantId, invoiceId, event, payload, webhookUrl
 
 /**
  * Replays a dead-letter row by re-signing and re-sending the stored payload.
- * On success the row is marked resolved. Throws on delivery failure.
- *
- * @param {string} deadLetterId - The `webhook_dead_letters.id` to replay.
- * @returns {Promise<void>}
  */
 async function replayWebhook(deadLetterId) {
   const row = await db('webhook_dead_letters').where('id', deadLetterId).first();
@@ -370,6 +369,10 @@ async function replayWebhook(deadLetterId) {
   }
 
   const body = typeof row.payload === 'string' ? row.payload : JSON.stringify(row.payload);
+
+  // Enforce payload bounding guard on replay
+  validatePayloadBounds(body);
+
   const signatureHeader = createSignatureHeader(secret, body);
 
   const controller = new AbortController();
@@ -659,13 +662,344 @@ async function emitConfigWebhook({ tenantId, section, config, actor = 'system', 
 
 
 /**
- * Marks a dead-letter row as resolved without re-sending.
+ * Maximum payload bytes for metrics and indexer webhook events.
+ * Default: 64 KB — metrics snapshots can be large; bound them tightly.
+ * @type {number}
+ */
+const MAX_METRICS_WEBHOOK_PAYLOAD_BYTES = Number(
+  process.env.METRICS_WEBHOOK_MAX_PAYLOAD_BYTES || 64 * 1024,
+);
+
+/**
+ * Emits a signed webhook to all subscribed tenants when a notable metrics
+ * event fires (issue #970).
  *
- * @param {string} deadLetterId
+ * Tenants are opted in by setting `webhook_events` to include `'metrics.*'`
+ * or the specific event string (e.g. `'metrics.snapshot'`).  When
+ * `webhook_events` is absent or `['*']`, every event is delivered.
+ *
+ * The payload is bounded by {@link MAX_METRICS_WEBHOOK_PAYLOAD_BYTES}.
+ * If the metrics snapshot exceeds the limit the `metrics` field is replaced
+ * with a `_summary` stub and `truncated: true` is set so receivers can act
+ * on the truncation rather than silently losing data.
+ *
+ * Delivery follows the standard retry/backoff path via
+ * {@link enqueueWebhookDelivery} when a shared worker is available, or
+ * falls back to direct HTTP POST with exponential backoff.
+ *
+ * @param {Object}  params
+ * @param {string}  params.tenantId  - Tenant receiving the webhook.
+ * @param {string}  [params.event='metrics.snapshot'] - Specific event label.
+ * @param {Object}  [params.metrics={}] - Metrics snapshot or partial payload.
+ * @param {string}  [params.actor='system'] - Actor that triggered the event.
  * @returns {Promise<void>}
  */
-async function resolveDeadLetter(deadLetterId) {
-  await db('webhook_dead_letters').where('id', deadLetterId).update({
+async function emitMetricsWebhook({ tenantId, event = 'metrics.snapshot', metrics: metricsPayload = {}, actor = 'system' }) {
+  try {
+    if (!tenantId) {
+      logger.warn({ event }, 'Tenant ID missing for metrics webhook emission');
+      return;
+    }
+
+    const tenant = await db('tenants').select('settings').where('id', tenantId).first();
+    if (!tenant || !tenant.settings) {
+      logger.info({ tenantId, event }, 'Tenant settings not found for metrics webhook');
+      return;
+    }
+
+    const { webhook_url, webhook_secret, webhook_events } = tenant.settings;
+    if (!webhook_url || !webhook_secret) {
+      logger.info({ tenantId, event }, 'Webhook URL or secret not configured for metrics event');
+      return;
+    }
+
+    // Event filter: respect tenant-level subscription allowlist
+    if (Array.isArray(webhook_events) && webhook_events.length > 0) {
+      const allowed =
+        webhook_events.includes('*') ||
+        webhook_events.includes(event) ||
+        webhook_events.includes('metrics.*');
+      if (!allowed) {
+        logger.info({ tenantId, event }, 'Metrics webhook event filtered out by tenant settings');
+        return;
+      }
+    }
+
+    // Bound payload size
+    let boundedMetrics = metricsPayload;
+    let truncated = false;
+    const rawMetricsString = JSON.stringify(metricsPayload || {});
+    if (rawMetricsString.length > MAX_METRICS_WEBHOOK_PAYLOAD_BYTES) {
+      truncated = true;
+      boundedMetrics = {
+        _summary: 'Metrics payload exceeded maximum size limit',
+        keys: Object.keys(metricsPayload || {}),
+      };
+    }
+
+    const payload = sortKeys({
+      event,
+      timestamp: new Date().toISOString(),
+      tenantId,
+      metrics: boundedMetrics,
+      actor,
+      truncated,
+    });
+
+    const body = JSON.stringify(payload);
+    validatePayloadBounds(body);
+    const signatureHeader = createSignatureHeader(webhook_secret, body);
+
+    // Prefer queued delivery via shared worker
+    if (_sharedWorker) {
+      try {
+        _sharedWorker.enqueue('webhook_delivery', {
+          tenantId,
+          webhookUrl: webhook_url,
+          webhookSecret: webhook_secret,
+          event,
+          metrics: boundedMetrics,
+          actor,
+          truncated,
+          rawBody: body,
+        });
+        logger.info({ tenantId, event }, 'Metrics webhook enqueued via shared worker');
+        return;
+      } catch (err) {
+        logger.warn({ err: err.message }, 'Failed to enqueue metrics webhook, falling back to direct delivery');
+      }
+    }
+
+    const maxRetries = Number(process.env.WEBHOOK_MAX_RETRIES || 3);
+    const baseDelay = Number(process.env.WEBHOOK_BASE_DELAY || 500);
+    const maxDelay = Number(process.env.WEBHOOK_MAX_DELAY || 10000);
+
+    const shouldRetry = (err) => {
+      if (!err) return false;
+      if (err.code) {
+        return (
+          ['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN'].includes(err.code) ||
+          err.name === 'AbortError'
+        );
+      }
+      if (err.status) {
+        const s = Number(err.status);
+        return s >= 500 && s < 600;
+      }
+      return false;
+    };
+
+    const operation = async () => {
+      const controller = new AbortController();
+      const timeoutMs = Number(process.env.WEBHOOK_TIMEOUT_MS || 5000);
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(webhook_url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Signature': signatureHeader },
+          body,
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          const err = new Error(`Webhook responded with ${response.status}`);
+          err.status = response.status;
+          throw err;
+        }
+        return { ok: true, status: response.status };
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    };
+
+    try {
+      await withRetry(operation, { maxRetries, baseDelay, maxDelay, shouldRetry });
+      logger.info({ event, tenantId }, 'Metrics webhook emitted successfully');
+    } catch (error) {
+      try {
+        await db('webhook_dead_letters').insert({
+          tenant_id: tenantId,
+          invoice_id: null,
+          event,
+          payload: JSON.stringify(payload),
+          webhook_url,
+          last_error: error && error.message ? error.message : String(error),
+          attempts: maxRetries + 1,
+          created_at: new Date(),
+        });
+      } catch (e) {
+        logger.warn({ err: e.message }, 'Failed to persist metrics webhook dead-letter');
+      }
+      logger.error({ event, tenantId, error: error.message }, 'Failed to emit metrics webhook');
+    }
+  } catch (error) {
+    logger.error({ event, tenantId, error: error.message }, 'Failed to emit metrics webhook');
+  }
+}
+
+/**
+ * Emits a signed webhook to all subscribed tenants when a notable indexer
+ * event fires (issue #980).
+ *
+ * Tenants are opted in by setting `webhook_events` to include `'indexer.*'`
+ * or the specific event string (e.g. `'indexer.event_ingested'`).
+ *
+ * The payload is bounded by {@link MAX_METRICS_WEBHOOK_PAYLOAD_BYTES}.
+ * Oversized `eventData` is replaced with a `_summary` stub and
+ * `truncated: true` to signal receivers.
+ *
+ * @param {Object}  params
+ * @param {string}  params.tenantId  - Tenant receiving the webhook.
+ * @param {string}  [params.event='indexer.event_ingested'] - Specific event label.
+ * @param {Object}  [params.eventData={}] - Indexer event data payload.
+ * @param {string}  [params.actor='system'] - Actor that triggered the event.
+ * @returns {Promise<void>}
+ */
+async function emitIndexerWebhook({ tenantId, event = 'indexer.event_ingested', eventData = {}, actor = 'system' }) {
+  try {
+    if (!tenantId) {
+      logger.warn({ event }, 'Tenant ID missing for indexer webhook emission');
+      return;
+    }
+
+    const tenant = await db('tenants').select('settings').where('id', tenantId).first();
+    if (!tenant || !tenant.settings) {
+      logger.info({ tenantId, event }, 'Tenant settings not found for indexer webhook');
+      return;
+    }
+
+    const { webhook_url, webhook_secret, webhook_events } = tenant.settings;
+    if (!webhook_url || !webhook_secret) {
+      logger.info({ tenantId, event }, 'Webhook URL or secret not configured for indexer event');
+      return;
+    }
+
+    // Event filter: respect tenant-level subscription allowlist
+    if (Array.isArray(webhook_events) && webhook_events.length > 0) {
+      const allowed =
+        webhook_events.includes('*') ||
+        webhook_events.includes(event) ||
+        webhook_events.includes('indexer.*');
+      if (!allowed) {
+        logger.info({ tenantId, event }, 'Indexer webhook event filtered out by tenant settings');
+        return;
+      }
+    }
+
+    // Bound payload size
+    let boundedEventData = eventData;
+    let truncated = false;
+    const rawEventDataString = JSON.stringify(eventData || {});
+    if (rawEventDataString.length > MAX_METRICS_WEBHOOK_PAYLOAD_BYTES) {
+      truncated = true;
+      boundedEventData = {
+        _summary: 'Indexer event data payload exceeded maximum size limit',
+        keys: Object.keys(eventData || {}),
+      };
+    }
+
+    const payload = sortKeys({
+      event,
+      timestamp: new Date().toISOString(),
+      tenantId,
+      eventData: boundedEventData,
+      actor,
+      truncated,
+    });
+
+    const body = JSON.stringify(payload);
+    validatePayloadBounds(body);
+    const signatureHeader = createSignatureHeader(webhook_secret, body);
+
+    // Prefer queued delivery via shared worker
+    if (_sharedWorker) {
+      try {
+        _sharedWorker.enqueue('webhook_delivery', {
+          tenantId,
+          webhookUrl: webhook_url,
+          webhookSecret: webhook_secret,
+          event,
+          eventData: boundedEventData,
+          actor,
+          truncated,
+          rawBody: body,
+        });
+        logger.info({ tenantId, event }, 'Indexer webhook enqueued via shared worker');
+        return;
+      } catch (err) {
+        logger.warn({ err: err.message }, 'Failed to enqueue indexer webhook, falling back to direct delivery');
+      }
+    }
+
+    const maxRetries = Number(process.env.WEBHOOK_MAX_RETRIES || 3);
+    const baseDelay = Number(process.env.WEBHOOK_BASE_DELAY || 500);
+    const maxDelay = Number(process.env.WEBHOOK_MAX_DELAY || 10000);
+
+    const shouldRetry = (err) => {
+      if (!err) return false;
+      if (err.code) {
+        return (
+          ['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN'].includes(err.code) ||
+          err.name === 'AbortError'
+        );
+      }
+      if (err.status) {
+        const s = Number(err.status);
+        return s >= 500 && s < 600;
+      }
+      return false;
+    };
+
+    const operation = async () => {
+      const controller = new AbortController();
+      const timeoutMs = Number(process.env.WEBHOOK_TIMEOUT_MS || 5000);
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(webhook_url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Signature': signatureHeader },
+          body,
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          const err = new Error(`Webhook responded with ${response.status}`);
+          err.status = response.status;
+          throw err;
+        }
+        return { ok: true, status: response.status };
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    };
+
+    try {
+      await withRetry(operation, { maxRetries, baseDelay, maxDelay, shouldRetry });
+      logger.info({ event, tenantId }, 'Indexer webhook emitted successfully');
+    } catch (error) {
+      try {
+        await db('webhook_dead_letters').insert({
+          tenant_id: tenantId,
+          invoice_id: null,
+          event,
+          payload: JSON.stringify(payload),
+          webhook_url,
+          last_error: error && error.message ? error.message : String(error),
+          attempts: maxRetries + 1,
+          created_at: new Date(),
+        });
+      } catch (e) {
+        logger.warn({ err: e.message }, 'Failed to persist indexer webhook dead-letter');
+      }
+      logger.error({ event, tenantId, error: error.message }, 'Failed to emit indexer webhook');
+    }
+  } catch (error) {
+    logger.error({ event, tenantId, error: error.message }, 'Failed to emit indexer webhook');
+  }
+}
+
+/**
+ * Marks a dead-letter row as resolved without re-sending.
+ */
+async function resolveDeadLetter(deadLetterId) {  await db('webhook_dead_letters').where('id', deadLetterId).update({
     resolved: true,
     resolved_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
@@ -673,8 +1007,16 @@ async function resolveDeadLetter(deadLetterId) {
 }
 
 module.exports = {
+  createSignatureHeader,
+  verifySignature,
+  sortKeys,
+  enqueueWebhookDelivery,
+  setSharedWorker,
   emitWebhook,
   emitConfigWebhook,
+  emitEscrowReadWebhook,
+  emitMetricsWebhook,
+  emitIndexerWebhook,
   enqueueWebhookDelivery,
   setSharedWorker,
   verifySignature,
@@ -684,6 +1026,7 @@ module.exports = {
   replayWebhook,
   resolveDeadLetter,
   sortKeys,
+  setSharedWorker,
   SIGNATURE_VERSION,
   TOLERANCE_MS,
   MAX_CONFIG_WEBHOOK_PAYLOAD_BYTES,

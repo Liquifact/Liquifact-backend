@@ -1,8 +1,10 @@
 'use strict';
 
+const { z } = require('zod');
 const express = require('express');
 const { loadApiKeyRegistry } = require('../config/apiKeys');
-const { getApiKeysCache } = require('../cache/apiKeysCache');
+const { authenticateApiKey } = require('../middleware/apiKeyAuth');
+const { extractTenant } = require('../middleware/tenant');
 
 const router = express.Router();
 
@@ -109,7 +111,7 @@ router.get('/', (req, res) => {
     data: page,
     nextCursor,
   });
-}
+});
 
 /**
  * Runs an SQL statement on the provided database handle.
@@ -355,7 +357,6 @@ router.post('/bulk', authenticateApiKey({ requiredScope: 'invoices:write' }), ex
   }
 });
 
-module.exports = {
-  router,
-  MAX_BULK_ITEMS,
-};
+module.exports = router;
+module.exports.router = router;
+module.exports.MAX_BULK_ITEMS = MAX_BULK_ITEMS;

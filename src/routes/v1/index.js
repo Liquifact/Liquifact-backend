@@ -25,11 +25,17 @@ const { authenticateToken } = require('../../middleware/auth');
 const invoiceService = require('../../services/invoiceService');
 const { getEscrowRead, getEscrowReadBatch } = require('../../services/escrowReadService');
 const { escrowReadLimiter } = require('../../middleware/rateLimit');
+const { recordEscrowRead } = require('../../services/escrowReadMetrics');
 const AppError = require('../../errors/AppError');
 const { invoiceCreateSchema, invoiceUpdateSchema, parseValidationErrors } = require('../../schemas/invoice');
 const { escrowBatchReadSchema } = require('../../schemas/escrowBatchRead');
 const { validatePatchFields, detectLockedFieldChange } = require('../../middleware/patchInvoice');
 const { validateHealthQuery, rejectBodyOnGet } = require('../../schemas/health');
+const { z } = require('zod');
+
+const validateEscrowReadParams = z.object({
+  invoiceId: z.string().min(1).max(64),
+});
 
 // ── Sub-router mounts ────────────────────────────────────────────────────────
 router.use('/invest', investRoutes);
