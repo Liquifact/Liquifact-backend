@@ -2,10 +2,20 @@
 
 /**
  * @fileoverview Admin route for escrow-read configurations/overrides and their audit trails.
+ *
+ * Write endpoints (POST, PUT, DELETE) support optional idempotency via the
+ * `Idempotency-Key` header.  When the header is present the request is handled
+ * by the shared idempotency middleware (replay / conflict detection).  When the
+ * header is absent the request passes through unchanged, preserving backward
+ * compatibility for callers that do not need idempotency guarantees.
+ *
+ * @see src/middleware/optionalIdempotency.js
+ * @see src/middleware/idempotency.js
  */
 
 const express = require('express');
 const { adminStack } = require('../middleware/stacks');
+const optionalIdempotency = require('../middleware/optionalIdempotency');
 const { getAuditLogs } = require('../services/auditLog');
 const AppError = require('../errors/AppError');
 const { validateBody, validateQuery } = require('../schemas/invoice');
@@ -44,8 +54,11 @@ router.get('/', (req, res, next) => {
 /**
  * POST /api/admin/escrow-read
  * Creates a new escrow-read configuration and logs an audit entry.
+ *
+ * Supports optional idempotency: include an `Idempotency-Key` header to
+ * guarantee at-most-once creation even on retried requests.
  */
-router.post('/', validateBody(escrowReadPostSchema), async (req, res, next) => {
+router.post('/', optionalIdempotency, validateBody(escrowReadPostSchema), async (req, res, next) => {
   try {
     const { id, config, secretKey } = req.validated;
     if (escrowReadStore.has(id)) {
@@ -95,8 +108,11 @@ router.get('/audit', validateQuery(escrowReadAuditQuerySchema), async (req, res,
 /**
  * PUT /api/admin/escrow-read/:id
  * Updates an existing escrow-read configuration and logs an audit entry.
+ *
+ * Supports optional idempotency: include an `Idempotency-Key` header to
+ * guarantee at-most-once update even on retried requests.
  */
-router.put('/:id', validateBody(escrowReadPutSchema), async (req, res, next) => {
+router.put('/:id', optionalIdempotency, validateBody(escrowReadPutSchema), async (req, res, next) => {
   try {
     const { id } = req.params;
     const { config, secretKey } = req.validated;
@@ -130,8 +146,11 @@ router.put('/:id', validateBody(escrowReadPutSchema), async (req, res, next) => 
 /**
  * DELETE /api/admin/escrow-read/:id
  * Deletes an existing escrow-read configuration and logs an audit entry.
+ *
+ * Supports optional idempotency: include an `Idempotency-Key` header to
+ * guarantee at-most-once deletion even on retried requests.
  */
-router.delete('/:id', async (req, res, next) => {
+router.delete('/:id', optionalIdempotency, async (req, res, next) => {
   try {
     const { id } = req.params;
     if (!escrowReadStore.has(id)) {

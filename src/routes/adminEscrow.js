@@ -4,12 +4,19 @@
  * @fileoverview Admin routes for LiquifactEscrow wasm version management.
  * All routes require admin authentication (JWT or API key).
  *
+ * The soft-delete (DELETE /reads/:invoiceId) and restore
+ * (POST /reads/:invoiceId/restore) write endpoints support optional
+ * idempotency via the `Idempotency-Key` header.  When the header is present
+ * repeats return the original response instead of double-applying the
+ * mutation.  When absent the request passes through unchanged.
+ *
  * @module routes/adminEscrow
  */
 
 const express = require('express');
 const router = express.Router();
 const { adminStack } = require('../middleware/stacks');
+const optionalIdempotency = require('../middleware/optionalIdempotency');
 const { runContractListRefresh } = require('../jobs/contractListRefresh');
 const { getOnChainSchemaVersion, compareVersions } = require('../config/escrowVersions');
 const {
@@ -182,7 +189,7 @@ function _mapSoftDeleteError(err, req) {
  *       409:
  *         description: Record is already soft-deleted
  */
-router.delete('/reads/:invoiceId', async (req, res, next) => {
+router.delete('/reads/:invoiceId', optionalIdempotency, async (req, res, next) => {
   const parsedReason = _parseDeleteReason(req.body && req.body.reason);
   if (!parsedReason.ok) {
     return next(new AppError({
@@ -249,7 +256,7 @@ router.delete('/reads/:invoiceId', async (req, res, next) => {
  *       410:
  *         description: Retention window expired; record can no longer be restored
  */
-router.post('/reads/:invoiceId/restore', async (req, res, next) => {
+router.post('/reads/:invoiceId/restore', optionalIdempotency, async (req, res, next) => {
   try {
     const actor = _resolveActor(req);
     const result = await restoreEscrowRead(req.params.invoiceId, { actor });
