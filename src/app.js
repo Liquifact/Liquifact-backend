@@ -66,6 +66,7 @@ const {
   assertNoDuplicateRouterMounts,
   resetFeatureRouterMounts,
 } = require('./utils/routeMountRegistry');
+const { createCompressionMiddleware } = require('./middleware/compression');
 
 /**
  * Returns a 403 JSON response only for the dedicated blocked-origin CORS error.
@@ -314,6 +315,50 @@ function createApp() {
 
     if (error) {
       return res.status(statusCode).json({ error, code });
+  // Compression middleware: gzip/deflate for large escrow-read responses (issue #961).
+  // Threshold: 1 KB (DEFAULT_THRESHOLD). Respects Accept-Encoding; small responses
+  // pass through uncompressed. Vary: Accept-Encoding is always set.
+  app.get('/api/escrow/:invoiceId', createCompressionMiddleware(), async (req, res) => {
+    const invoiceId = String(req.params.invoiceId || '')
+      .trim()
+      .replace(/\s+/g, '');
+
+    try {
+      // Resolve escrow contract address using the mapping system
+      const escrowAddress = resolveEscrowAddress(invoiceId);
+      
+      if (!escrowAddress) {
+        return next(new AppError({
+          type: 'https://liquifact.com/probs/not-found',
+          title: 'Not Found',
+          status: 404,
+          detail: `No escrow contract mapping found for invoice ID '${invoiceId}'`,
+          code: 'NOT_FOUND',
+          retryable: false,
+        }));
+      }
+
+      // Read from projection, cache, or live read fallback
+      const state = await getEscrowStateWithProjection(invoiceId);
+
+      const derived = computeEscrowDerivedFields(state);
+
+      const data = {
+        ...state,
+        ...derived,
+        escrowAddress
+      };
+
+      // Include escrow address in response headers
+      res.set('X-Escrow-Address', escrowAddress);
+      res.json({
+        data,
+        message: state.fromProjection 
+          ? 'Escrow state read from event projection.'
+          : 'Escrow state read from live Soroban contract.',
+      });
+    } catch (error) {
+      return next(error);
     }
 
     res.set('X-Escrow-Address', escrowAddress);

@@ -39,6 +39,11 @@ const { sortKeys } = require('../services/webhooks');
 const { sendWebhookRequest } = require('./webhookDelivery');
 const { withRetry } = require('../utils/retry');
 const db = require('../db/knex');
+const {
+  KYC_WEBHOOK_DB,
+  KYC_WEBHOOK_ERROR_CODES,
+  KYC_WEBHOOK_METRICS,
+} = require('../constants/kycWebhooks');
 
 let promClient;
 try {
@@ -79,7 +84,7 @@ let _kycDeadLetterTotal;
 function kycDeliveryAttemptsCounter() {
   if (!_kycDeliveryAttemptsTotal) {
     _kycDeliveryAttemptsTotal = new promClient.Counter({
-      name: 'kyc_webhook_delivery_attempts_total',
+      name: KYC_WEBHOOK_METRICS.NAME_DELIVERY_ATTEMPTS,
       help: 'Total KYC webhook delivery attempts (each try counts)',
       registers: [registry],
     });
@@ -95,7 +100,7 @@ function kycDeliveryAttemptsCounter() {
 function kycDeliverySuccessCounter() {
   if (!_kycDeliverySuccessTotal) {
     _kycDeliverySuccessTotal = new promClient.Counter({
-      name: 'kyc_webhook_delivery_success_total',
+      name: KYC_WEBHOOK_METRICS.NAME_DELIVERY_SUCCESS,
       help: 'Total KYC webhook deliveries that completed successfully',
       registers: [registry],
     });
@@ -111,7 +116,7 @@ function kycDeliverySuccessCounter() {
 function kycDeadLetterCounter() {
   if (!_kycDeadLetterTotal) {
     _kycDeadLetterTotal = new promClient.Counter({
-      name: 'kyc_webhook_delivery_dead_letter_total',
+      name: KYC_WEBHOOK_METRICS.NAME_DEAD_LETTER,
       help: 'Total KYC webhook deliveries that exhausted retries and were dead-lettered',
       registers: [registry],
     });
@@ -161,7 +166,7 @@ function shouldRetry(err) {
  */
 async function writeKycDeadLetter({ tenantId, smeId, event, payload, lastError, attempts }) {
   try {
-    await db('kyc_webhook_dead_letters').insert({
+    await db(KYC_WEBHOOK_DB.TABLE_DEAD_LETTERS).insert({
       tenant_id: tenantId,
       sme_id: smeId,
       event,
@@ -270,7 +275,7 @@ function createKycWebhookDeliveryHandler(deps = {}) {
       const sizeError = new Error(
         `KYC webhook payload exceeds size limit: ${payloadBytes} > ${maxPayloadBytes} bytes`
       );
-      sizeError.code = 'PAYLOAD_TOO_LARGE';
+      sizeError.code = KYC_WEBHOOK_ERROR_CODES.PAYLOAD_TOO_LARGE;
       logger.error(
         { smeId, tenantId, event, payloadBytes, maxPayloadBytes },
         'kyc_webhook_delivery: payload too large, dead-lettering without retry'
