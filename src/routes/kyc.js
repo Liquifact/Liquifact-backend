@@ -4,8 +4,12 @@ const express = require('express');
 const db = require('../db/knex');
 const kycService = require('../services/kycService');
 const logger = require('../logger');
-const responseHelper = require('../utils/responseHelper');
+const { verifySignature, parseJsonPayload } = require('../middleware/kycWebhookValidation');
+const { kycWebhookSchema, parseValidationErrors, kycWebhookListResponseSchema } = require('../schemas/kycWebhook');
 const { decodeCursor, encodeCursor, CursorError } = require('../utils/cursorPagination');
+const asyncHandler = require('../utils/asyncHandler');
+const KycWebhookError = require('../errors/KycWebhookError');
+const kycWebhookErrorHandler = require('../middleware/kycWebhookErrorHandler');
 const {
   kycWebhookRequestDurationSeconds,
   kycWebhookRequestsTotal,
@@ -48,7 +52,7 @@ const SORT_FIELD = KYC_WEBHOOK_PAGINATION.SORT_FIELD;
  * POST /api/kyc/webhook
  * Inbound KYC webhook ingestion endpoint.
  */
-router.post(KYC_WEBHOOK_ROUTES.WEBHOOK, async (req, res) => {
+router.post(KYC_WEBHOOK_ROUTES.WEBHOOK, asyncHandler(async (req, res) => {
   const startTime = process.hrtime.bigint();
   let statusClass = KYC_WEBHOOK_METRICS.STATUS_CLASS_2XX;
   let cause = KYC_WEBHOOK_METRICS.CAUSE_NONE;
@@ -64,6 +68,10 @@ router.post(KYC_WEBHOOK_ROUTES.WEBHOOK, async (req, res) => {
     }
   };
 
+  res.on('finish', () => {
+    finish(res.statusCode, req._kycErrorCode || null);
+  });
+
   const config = kycService.getKycProviderConfig();
   const secret = config.apiSecret;
   const signatureHeader = req.header(HTTP_HEADERS.X_SIGNATURE) || '';
@@ -71,28 +79,24 @@ router.post(KYC_WEBHOOK_ROUTES.WEBHOOK, async (req, res) => {
 
   if (!secret) {
     logger.warn({ route: '/api/kyc/webhook' }, 'KYC webhook secret is not configured');
-    finish(503, 'missing_secret');
-    return res.status(503).json({ error: 'KYC webhook ingestion is not configured' });
+    throw new KycWebhookError(KYC_WEBHOOK_MESSAGES.MISSING_SECRET, 503, KYC_WEBHOOK_ERROR_CODES.MISSING_SECRET);
   }
 
   if (!signatureHeader) {
-    finish(401, 'missing_signature');
-    return res.status(401).json({ error: 'Missing X-Signature header' });
+    throw new KycWebhookError(KYC_WEBHOOK_MESSAGES.MISSING_SIGNATURE, 401, KYC_WEBHOOK_ERROR_CODES.MISSING_SIGNATURE);
   }
 
   const verification = verifySignature(secret, rawBody, signatureHeader);
   if (!verification.valid) {
     logger.warn({ error: verification.error }, 'Invalid KYC webhook signature');
-    finish(401, 'invalid_signature');
-    return res.status(401).json({ error: 'Invalid webhook signature' });
+    throw new KycWebhookError(KYC_WEBHOOK_MESSAGES.INVALID_SIGNATURE, 401, KYC_WEBHOOK_ERROR_CODES.INVALID_SIGNATURE);
   }
 
   let payload;
   try {
     payload = parseJsonPayload(rawBody);
   } catch (error) {
-    finish(400, 'invalid_payload');
-    return res.status(400).json({ error: error.message });
+    throw new KycWebhookError(error.message, 400, KYC_WEBHOOK_ERROR_CODES.INVALID_PAYLOAD);
   }
 
   const payloadTenantId = payload.tenantId || payload.tenant_id || null;
@@ -119,12 +123,11 @@ router.post(KYC_WEBHOOK_ROUTES.WEBHOOK, async (req, res) => {
       );
     }
 
-    finish(errStatus, errorCode);
-    return res.status(errStatus).json(errBody);
+    throw new KycWebhookError(errBody.error || 'Validation failed', errStatus, errorCode);
   }
 
   if (payloadTenantId && !requestTenantId) {
-    return res.status(400).json({ error: 'Missing tenant context.' });
+    throw new KycWebhookError(KYC_WEBHOOK_MESSAGES.MISSING_TENANT_CONTEXT, 400, KYC_WEBHOOK_ERROR_CODES.MISSING_TENANT_CONTEXT);
   }
 
   // Normalise provider aliases (snake_case / legacy field names) into the
@@ -145,16 +148,13 @@ router.post(KYC_WEBHOOK_ROUTES.WEBHOOK, async (req, res) => {
     // metrics cause) that other tests/consumers already depend on, while still
     // gaining schema-driven validation of length, format, and unknown fields.
     if (fieldErrors.smeId) {
-      finish(400, 'missing_sme_id');
-      return res.status(400).json({ error: 'Missing or invalid smeId', details: fieldErrors });
+      throw new KycWebhookError('Missing or invalid smeId', 400, KYC_WEBHOOK_ERROR_CODES.MISSING_SME_ID);
     }
     if (fieldErrors.status) {
-      finish(400, 'missing_status');
-      return res.status(400).json({ error: 'Missing or invalid status', details: fieldErrors });
+      throw new KycWebhookError('Missing or invalid status', 400, KYC_WEBHOOK_ERROR_CODES.MISSING_STATUS);
     }
 
-    finish(400, 'invalid_payload');
-    return res.status(400).json({ error: 'Invalid KYC webhook payload', details: fieldErrors });
+    throw new KycWebhookError('Invalid KYC webhook payload', 400, KYC_WEBHOOK_ERROR_CODES.INVALID_PAYLOAD);
   }
 
   const smeId = parsedPayload.data.smeId;
@@ -172,8 +172,7 @@ router.post(KYC_WEBHOOK_ROUTES.WEBHOOK, async (req, res) => {
       { smeId, status },
       'KYC webhook received status outside PROVIDER_STATUS_MAP; rejecting (fail-closed)',
     );
-    finish(400, 'unknown_status');
-    return res.status(400).json({ error: `Unknown provider status: ${status}` });
+    throw new KycWebhookError(`Unknown provider status: ${status}`, 400, KYC_WEBHOOK_ERROR_CODES.UNKNOWN_STATUS);
   }
 
   try {
@@ -193,130 +192,120 @@ router.post(KYC_WEBHOOK_ROUTES.WEBHOOK, async (req, res) => {
       KYC_WEBHOOK_MESSAGES.SUCCESS_INGESTION
     );
 
-    finish(200);
     return res.status(200).json({ success: true, smeId: record.smeId, status: record.status });
   } catch (error) {
     logger.error({ smeId, error: error.message }, KYC_WEBHOOK_MESSAGES.FAILED_INGESTION);
-    finish(500, KYC_WEBHOOK_ERROR_CODES.PERSISTENCE_ERROR);
-    return res.status(500).json({ error: error.message });
+    throw new KycWebhookError(error.message, 500, KYC_WEBHOOK_ERROR_CODES.PERSISTENCE_ERROR);
   }
-});
+}));
 
 /**
  * GET /api/kyc/webhooks
  *
  * Cursor-paginated listing of KYC records (the kyc-webhooks listing endpoint).
  */
-router.get(KYC_WEBHOOK_ROUTES.WEBHOOKS, async (req, res, next) => {
-  try {
-    const { cursor, status } = req.query;
-    const rawLimit = req.query.limit;
+router.get(KYC_WEBHOOK_ROUTES.WEBHOOKS, asyncHandler(async (req, res) => {
+  const { cursor, status } = req.query;
+  const rawLimit = req.query.limit;
 
-    // Validate limit
-    if (rawLimit !== undefined) {
-      const v = parseInt(rawLimit, 10);
-      if (isNaN(v) || v < 1 || v > MAX_LIMIT) {
-        return res.status(400).json(
-          responseHelper.error(
-            `limit must be an integer between 1 and ${MAX_LIMIT}`,
-            KYC_WEBHOOK_ERROR_CODES.INVALID_PAGINATION
-          )
-        );
-      }
-    }
-
-    const limit = rawLimit !== undefined
-      ? Math.min(parseInt(rawLimit, 10), MAX_LIMIT)
-      : DEFAULT_LIMIT;
-
-    // Decode cursor
-    let cursorData = null;
-    if (cursor) {
-      try {
-        cursorData = decodeCursor(cursor, SORT_FIELD);
-      } catch (err) {
-        if (err instanceof CursorError) {
-          return res.status(400).json(
-            responseHelper.error(err.message, KYC_WEBHOOK_ERROR_CODES.INVALID_CURSOR)
-          );
-        }
-        return next(err);
-      }
-    }
-
-    // Build query
-    let query = db(KYC_WEBHOOK_DB.TABLE_KYC_RECORDS)
-      .select(
-        'sme_id as smeId',
-        'status',
-        'provider_record_id as recordId',
-        'verified_at as verifiedAt',
-        'updated_at as updatedAt'
-      )
-      .orderBy('updated_at', KYC_WEBHOOK_PAGINATION.DEFAULT_ORDER)
-      .orderBy('sme_id', KYC_WEBHOOK_PAGINATION.DEFAULT_ORDER)
-      .limit(limit + 1);
-
-    if (status) {
-      query = query.where('status', status);
-    }
-
-    if (cursorData) {
-      query = query.where(function () {
-        this.where('updated_at', '<', cursorData.sortValue)
-          .orWhere(function () {
-            this.where('updated_at', cursorData.sortValue)
-              .andWhere('sme_id', '<', cursorData.id);
-          });
-      });
-    }
-
-    const rows = await query;
-
-    const hasMore = rows.length > limit;
-    const pageRows = hasMore ? rows.slice(0, limit) : rows;
-
-    let nextCursor = null;
-    if (hasMore) {
-      const last = pageRows[pageRows.length - 1];
-      nextCursor = encodeCursor({
-        sortField: SORT_FIELD,
-        sortValue: last.updatedAt instanceof Date
-          ? last.updatedAt.toISOString()
-          : last.updatedAt,
-        id: String(last.smeId),
-      });
-    }
-
-    const responseBody = {
-      data: pageRows,
-      meta: {
-        limit,
-        hasMore,
-        nextCursor,
-      },
-    };
-
-    // Validate the outgoing shape at the boundary (issue #905) — a shape
-    // drift here reflects a bug in the query projection above, not a client
-    // error, so it is logged and surfaced as a 500 rather than shipped as-is.
-    const parsedResponse = kycWebhookListResponseSchema.safeParse(responseBody);
-    if (!parsedResponse.success) {
-      logger.error(
-        { errors: parseValidationErrors(parsedResponse.error) },
-        'KYC webhooks list response failed schema validation',
-      );
-      return res.status(500).json(
-        responseHelper.error('Failed to build KYC webhooks response', 'INTERNAL_ERROR')
+  // Validate limit
+  if (rawLimit !== undefined) {
+    const v = parseInt(rawLimit, 10);
+    if (isNaN(v) || v < 1 || v > MAX_LIMIT) {
+      throw new KycWebhookError(
+        `limit must be an integer between 1 and ${MAX_LIMIT}`,
+        400,
+        KYC_WEBHOOK_ERROR_CODES.INVALID_PAGINATION,
       );
     }
-
-    return res.status(200).json(parsedResponse.data);
-  } catch (error) {
-    logger.error({ err: error.message }, 'Failed to list KYC webhooks');
-    return next(error);
   }
-});
+
+  const limit = rawLimit !== undefined
+    ? Math.min(parseInt(rawLimit, 10), MAX_LIMIT)
+    : DEFAULT_LIMIT;
+
+  // Decode cursor
+  let cursorData = null;
+  if (cursor) {
+    try {
+      cursorData = decodeCursor(cursor, SORT_FIELD);
+    } catch (err) {
+      if (err instanceof CursorError) {
+        throw new KycWebhookError(err.message, 400, KYC_WEBHOOK_ERROR_CODES.INVALID_CURSOR);
+      }
+      throw err;
+    }
+  }
+
+  // Build query
+  let query = db(KYC_WEBHOOK_DB.TABLE_KYC_RECORDS)
+    .select(
+      'sme_id as smeId',
+      'status',
+      'provider_record_id as recordId',
+      'verified_at as verifiedAt',
+      'updated_at as updatedAt'
+    )
+    .orderBy('updated_at', KYC_WEBHOOK_PAGINATION.DEFAULT_ORDER)
+    .orderBy('sme_id', KYC_WEBHOOK_PAGINATION.DEFAULT_ORDER)
+    .limit(limit + 1);
+
+  if (status) {
+    query = query.where('status', status);
+  }
+
+  if (cursorData) {
+    query = query.where(function () {
+      this.where('updated_at', '<', cursorData.sortValue)
+        .orWhere(function () {
+          this.where('updated_at', cursorData.sortValue)
+            .andWhere('sme_id', '<', cursorData.id);
+        });
+    });
+  }
+
+  const rows = await query;
+
+  const hasMore = rows.length > limit;
+  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+
+  let nextCursor = null;
+  if (hasMore) {
+    const last = pageRows[pageRows.length - 1];
+    nextCursor = encodeCursor({
+      sortField: SORT_FIELD,
+      sortValue: last.updatedAt instanceof Date
+        ? last.updatedAt.toISOString()
+        : last.updatedAt,
+      id: String(last.smeId),
+    });
+  }
+
+  const responseBody = {
+    data: pageRows,
+    meta: {
+      limit,
+      hasMore,
+      nextCursor,
+    },
+  };
+
+  // Validate the outgoing shape at the boundary (issue #905) — a shape
+  // drift here reflects a bug in the query projection above, not a client
+  // error, so it is logged and surfaced as a 500 rather than shipped as-is.
+  const parsedResponse = kycWebhookListResponseSchema.safeParse(responseBody);
+  if (!parsedResponse.success) {
+    logger.error(
+      { errors: parseValidationErrors(parsedResponse.error) },
+      'KYC webhooks list response failed schema validation',
+    );
+    throw new KycWebhookError('Failed to build KYC webhooks response', 500, 'INTERNAL_ERROR');
+  }
+
+  return res.status(200).json(parsedResponse.data);
+}));
+
+router.use(kycWebhookErrorHandler);
 
 module.exports = router;
 module.exports.isKycWebhookEnabled = isKycWebhookEnabled;
