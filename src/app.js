@@ -29,6 +29,7 @@ const { CursorError } = require('./utils/cursorPagination');
 const { resolveEscrowAddress } = require('./config/escrowMap');
 const { getEscrowStateWithProjection } = require('./services/escrowRead');
 const { createCorsOptions, isCorsOriginRejectedError } = require('./config/cors');
+const { corsObservability } = require('./middleware/corsObservability');
 const { get: getConfig } = require('./config');
 const { validateInvoiceQueryParams } = require('./utils/validators');
 const { computeEscrowDerivedFields } = require('./services/escrowDerived');
@@ -82,6 +83,7 @@ const { createCompressionMiddleware } = require('./middleware/compression');
  */
 function handleCorsError(err, req, res, next) {
   if (isCorsOriginRejectedError(err)) {
+    if (res.locals) res.locals.isCorsOriginRejected = true;
     res.status(403).json({ error: err.message, code: err.code });
     return;
   }
@@ -144,6 +146,7 @@ function createApp() {
   const app = express();
 
   // ── 1. CORS ──────────────────────────────────────────────────────────────
+  app.use(corsObservability);
   app.use(cors(createCorsOptions()));
 
   // ── 1.a. KYC webhook raw body parser ──────────────────────────────────────
@@ -312,14 +315,10 @@ function createApp() {
   });
 
   // Escrow — GET by invoiceId (proxied through Soroban retry wrapper with address mapping)
-<<<<<<< HEAD
   // Compression middleware: gzip/deflate for large escrow-read responses (issue #961).
   // Threshold: 1 KB (DEFAULT_THRESHOLD). Respects Accept-Encoding; small responses
   // pass through uncompressed. Vary: Accept-Encoding is always set.
-  app.get('/api/escrow/:invoiceId', createCompressionMiddleware(), async (req, res) => {
-=======
-  app.get('/api/escrow/:invoiceId', async (req, res, next) => {
->>>>>>> pr-1067
+  app.get('/api/escrow/:invoiceId', createCompressionMiddleware(), async (req, res, next) => {
     const invoiceId = String(req.params.invoiceId || '')
       .trim()
       .replace(/\s+/g, '');
