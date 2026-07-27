@@ -10,7 +10,7 @@ const router = express.Router();
 const { authenticateToken } = require('../../middleware/auth');
 const { extractTenant } = require('../../middleware/tenant');
 const { CursorError } = require('../../utils/cursorPagination');
-const invoiceService = require('../../services/invoiceService');
+const metricsService = require('../../services/metricsService');
 const { validateMetricsRequest } = require('../../utils/metricsValidation');
 
 
@@ -119,27 +119,11 @@ router.get('/metrics', authenticateToken, extractTenant, async (req, res, next) 
     if (!ctx) { return; }
 
     const { userId, tenantId } = ctx;
-
-    const metrics = await invoiceService.getSmeInvoiceCounts(tenantId, userId);
-
     const { cursor, limit } = req.query;
-    const usePagination = cursor !== undefined || limit !== undefined;
-
-    if (!usePagination) {
-      return res.json({
-        data: metrics,
-        meta: {
-          timestamp: new Date().toISOString(),
-          version: '0.1.0'
-        },
-        error: null,
-        timestamp: new Date().toISOString()
-      });
-    }
 
     let result;
     try {
-      result = await invoiceService.getSmeInvoiceList(tenantId, userId, { cursor, limit });
+      result = await metricsService.getSmeMetrics(tenantId, userId, { cursor, limit });
     } catch (err) {
       if (err.name === 'CursorError' || err instanceof CursorError) {
         return res.status(400).json({
@@ -150,16 +134,8 @@ router.get('/metrics', authenticateToken, extractTenant, async (req, res, next) 
     }
 
     return res.json({
-      data: metrics,
-      meta: {
-        invoices: result.invoices,
-        total: result.meta.total,
-        limit: result.meta.limit,
-        hasMore: result.meta.hasMore,
-        nextCursor: result.meta.nextCursor,
-        timestamp: new Date().toISOString(),
-        version: '0.1.0'
-      },
+      data: result.data,
+      meta: result.meta,
       error: null,
       timestamp: new Date().toISOString()
     });
