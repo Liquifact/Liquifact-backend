@@ -3,6 +3,8 @@
 This document provides runnable `curl` and raw HTTP request/response examples for
 every admin config endpoint. All examples assume a local development server.
 
+For notable consumer-facing API changes over time, see [changelog-config.md](./changelog-config.md).
+
 ---
 
 ## Setup
