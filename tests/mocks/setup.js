@@ -290,10 +290,15 @@ jest.mock('../../src/middleware/rateLimit', () => {
     createConfigRateLimiter: jest.fn(() => noopMiddleware),
     createMetricsRateLimiter: jest.fn(() => noopMiddleware),
     invoiceStateLimiter: noopMiddleware,
+    escrowReadLimiter: noopMiddleware,
     indexerLimiter: noopMiddleware,
+    createPersistenceRateLimiter: jest.fn(() => noopMiddleware),
     createRateLimiter: jest.fn(() => noopMiddleware),
     adminConfigHandler: jest.fn(),
     metricsRateLimitHandler: jest.fn(),
+    kycWebhookLimiter: noopMiddleware,
+    createKycWebhookRateLimiter: jest.fn(() => noopMiddleware),
+    kycWebhookRateLimitHandler: jest.fn(),
     adminConfigKeyGenerator: jest.fn((req) => req.ip || '127.0.0.1'),
     healthHandler: jest.fn(),
     metricsRateLimitHandler: jest.fn(),
@@ -312,5 +317,7 @@ jest.mock('../../src/middleware/rateLimit', () => {
     HEALTH_RATE_LIMIT_MAX: 60,
     METRICS_RATE_LIMIT_WINDOW_MS: 60000,
     METRICS_RATE_LIMIT_MAX: 30,
+    KYC_WEBHOOK_RATE_LIMIT_WINDOW_MS: 60000,
+    KYC_WEBHOOK_RATE_LIMIT_MAX: 100,
   };
 }, { virtual: true });

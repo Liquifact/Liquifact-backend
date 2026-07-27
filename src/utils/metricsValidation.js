@@ -83,3 +83,27 @@ function validateMetricsRequest(req, res) {
 }
 
 module.exports = { validateMetricsRequest };
+
+/**
+ * Validates baseline telemetry metrics payload structure against the core schema.
+ * Part of Issue #875 - Changelog Drift Prevention Check.
+ * Ensures critical infrastructure metrics are always parsed cleanly.
+ */
+function verifyTelemetryMetricsPayload(payload) {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('Invalid telemetry metrics payload: Input must be a valid non-null object.');
+  }
+  
+  const structurallyRequiredFields = ['uptime', 'requestsCount', 'errorsCount'];
+  for (const field of structurallyRequiredFields) {
+    if (!(field in payload) || typeof payload[field] !== 'number') {
+      return false;
+    }
+  }
+  return true;
+}
+
+module.exports = {
+  ...module.exports,
+  verifyTelemetryMetricsPayload
+};

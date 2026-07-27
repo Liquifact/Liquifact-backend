@@ -25,7 +25,7 @@
 const path = require('path');
 const swaggerJsdoc = require('swagger-jsdoc');
 
-const ROUTES_GLOB = path.join(__dirname, '..', 'routes', '**', '*.js');
+const ROUTES_GLOB = path.join(__dirname, '..', 'routes', '**', '*.js').replace(/\\/g, '/');
 
 /**
  * The hostname pattern for loopback addresses (localhost, 127.x.x.x, ::1).
@@ -335,6 +335,214 @@ const baseDefinition = {
             type: 'string',
             format: 'date-time',
             description: 'ISO 8601 timestamp when the row was inserted.',
+          },
+        },
+        additionalProperties: false,
+      },
+      /**
+       * Successful response from `POST /api/invoices/:id/approve`.
+       */
+      InvoiceStateApproveResponse: {
+        type: 'object',
+        required: ['data', 'meta', 'error', 'message'],
+        properties: {
+          data: {
+            type: 'object',
+            required: [
+              'invoiceId',
+              'previousState',
+              'currentState',
+              'transitionedAt',
+              'transitionedBy',
+              'auditLogId',
+            ],
+            properties: {
+              invoiceId: { type: 'string', minLength: 1 },
+              previousState: { type: 'string' },
+              currentState: { type: 'string' },
+              transitionedAt: { type: 'string' },
+              transitionedBy: { type: 'string' },
+              auditLogId: { type: 'string' },
+            },
+            additionalProperties: false,
+          },
+          meta: {
+            type: 'object',
+            required: ['timestamp', 'version'],
+            properties: {
+              timestamp: { type: 'string' },
+              version: { type: 'string' },
+            },
+            additionalProperties: false,
+          },
+          error: { type: 'null' },
+          message: { type: 'string' },
+        },
+        additionalProperties: false,
+      },
+      /**
+       * Successful response from `POST /api/invoices/:id/link-escrow`.
+       */
+      InvoiceStateLinkEscrowResponse: {
+        type: 'object',
+        required: ['data', 'meta', 'error', 'message'],
+        properties: {
+          data: {
+            type: 'object',
+            required: [
+              'invoiceId',
+              'previousState',
+              'currentState',
+              'escrowId',
+              'transitionedAt',
+              'transitionedBy',
+              'auditLogId',
+            ],
+            properties: {
+              invoiceId: { type: 'string', minLength: 1 },
+              previousState: { type: 'string' },
+              currentState: { type: 'string' },
+              escrowId: { type: ['string', 'null'] },
+              transitionedAt: { type: 'string' },
+              transitionedBy: { type: 'string' },
+              auditLogId: { type: 'string' },
+            },
+            additionalProperties: false,
+          },
+          meta: {
+            type: 'object',
+            required: ['timestamp', 'version'],
+            properties: {
+              timestamp: { type: 'string' },
+              version: { type: 'string' },
+            },
+            additionalProperties: false,
+          },
+          error: { type: 'null' },
+          message: { type: 'string' },
+        },
+        additionalProperties: false,
+      },
+      /**
+       * Successful response from `POST /api/invoices/:id/reject`.
+       */
+      InvoiceStateRejectResponse: {
+        type: 'object',
+        required: ['data', 'meta', 'error', 'message'],
+        properties: {
+          data: {
+            type: 'object',
+            required: [
+              'invoiceId',
+              'previousState',
+              'currentState',
+              'reason',
+              'transitionedAt',
+              'transitionedBy',
+              'auditLogId',
+            ],
+            properties: {
+              invoiceId: { type: 'string', minLength: 1 },
+              previousState: { type: 'string' },
+              currentState: { type: 'string' },
+              reason: { type: 'string' },
+              transitionedAt: { type: 'string' },
+              transitionedBy: { type: 'string' },
+              auditLogId: { type: 'string' },
+            },
+            additionalProperties: false,
+          },
+          meta: {
+            type: 'object',
+            required: ['timestamp', 'version'],
+            properties: {
+              timestamp: { type: 'string' },
+              version: { type: 'string' },
+            },
+            additionalProperties: false,
+          },
+          error: { type: 'null' },
+          message: { type: 'string' },
+        },
+        additionalProperties: false,
+      },
+      /**
+       * Successful response from `GET /api/invoices/:id/history`.
+       */
+      InvoiceStateHistoryResponse: {
+        type: 'object',
+        required: ['data', 'meta', 'error', 'message'],
+        properties: {
+          data: {
+            type: 'object',
+            required: ['invoiceId', 'currentState', 'transitions', 'totalTransitions'],
+            properties: {
+              invoiceId: { type: 'string', minLength: 1 },
+              currentState: { type: 'string' },
+              transitions: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  required: ['id', 'timestamp', 'actor'],
+                  properties: {
+                    id: { type: 'string' },
+                    timestamp: { type: 'string' },
+                    actor: { type: 'string' },
+                    fromState: { type: 'string' },
+                    toState: { type: 'string' },
+                    reason: { type: 'string' },
+                    ipAddress: { type: 'string' },
+                  },
+                  additionalProperties: false,
+                },
+              },
+              totalTransitions: { type: 'integer', minimum: 0 },
+            },
+            additionalProperties: false,
+          },
+          meta: {
+            type: 'object',
+            required: ['timestamp', 'version'],
+            properties: {
+              timestamp: { type: 'string' },
+              version: { type: 'string' },
+            },
+            additionalProperties: false,
+          },
+          error: { type: 'null' },
+          message: { type: 'string' },
+        },
+        additionalProperties: false,
+      },
+      /**
+       * Error response from invoice-state transition validation or execution failures.
+       */
+      InvoiceStateErrorResponse: {
+        type: 'object',
+        required: ['data', 'meta', 'error'],
+        properties: {
+          data: { type: 'null' },
+          meta: {
+            type: 'object',
+            required: ['timestamp', 'version'],
+            properties: {
+              timestamp: { type: 'string' },
+              version: { type: 'string' },
+            },
+            additionalProperties: false,
+          },
+          error: {
+            type: 'object',
+            required: ['message', 'code'],
+            properties: {
+              message: { type: 'string' },
+              code: { type: 'string' },
+              details: {
+                type: ['object', 'null'],
+                additionalProperties: true,
+              },
+            },
+            additionalProperties: false,
           },
         },
         additionalProperties: false,

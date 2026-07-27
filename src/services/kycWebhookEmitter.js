@@ -32,6 +32,11 @@
 const db = require('../db/knex');
 const logger = require('../logger');
 const { sortKeys } = require('./webhooks');
+const {
+  KYC_WEBHOOK_EVENTS,
+  KYC_STATUSES,
+  KYC_WEBHOOK_DB,
+} = require('../constants/kycWebhooks');
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -41,19 +46,6 @@ const { sortKeys } = require('./webhooks');
 const DEFAULT_MAX_PAYLOAD_BYTES = 64 * 1024;
 
 /**
- * Canonical KYC event names emitted on status transitions.
- *
- * @readonly
- * @enum {string}
- */
-const KYC_WEBHOOK_EVENTS = {
-  VERIFIED: 'kyc.verified',
-  REJECTED: 'kyc.rejected',
-  EXEMPTED: 'kyc.exempted',
-  PENDING: 'kyc.pending',
-};
-
-/**
  * Maps a normalised KYC status string to its corresponding webhook event name.
  *
  * @param {string} status - Normalised KYC status (e.g. `'verified'`).
@@ -61,10 +53,10 @@ const KYC_WEBHOOK_EVENTS = {
  */
 function statusToEvent(status) {
   const map = {
-    verified: KYC_WEBHOOK_EVENTS.VERIFIED,
-    rejected: KYC_WEBHOOK_EVENTS.REJECTED,
-    exempted: KYC_WEBHOOK_EVENTS.EXEMPTED,
-    pending: KYC_WEBHOOK_EVENTS.PENDING,
+    [KYC_STATUSES.VERIFIED]: KYC_WEBHOOK_EVENTS.VERIFIED,
+    [KYC_STATUSES.REJECTED]: KYC_WEBHOOK_EVENTS.REJECTED,
+    [KYC_STATUSES.EXEMPTED]: KYC_WEBHOOK_EVENTS.EXEMPTED,
+    [KYC_STATUSES.PENDING]: KYC_WEBHOOK_EVENTS.PENDING,
   };
   return map[status] || null;
 }
@@ -119,7 +111,7 @@ function getMaxPayloadBytes() {
 async function findTenantsForSme(smeId) {
   try {
     // Fetch distinct tenant IDs that have at least one invoice for this SME
-    const rows = await db('invoices')
+    const rows = await db(KYC_WEBHOOK_DB.TABLE_INVOICES)
       .select('tenant_id')
       .where('sme_id', smeId)
       .distinct('tenant_id');
@@ -131,7 +123,7 @@ async function findTenantsForSme(smeId) {
     const tenantIds = rows.map((r) => r.tenant_id);
 
     // Fetch webhook settings for those tenants
-    const tenants = await db('tenants')
+    const tenants = await db(KYC_WEBHOOK_DB.TABLE_TENANTS)
       .select('id', 'settings')
       .whereIn('id', tenantIds);
 
@@ -224,7 +216,7 @@ async function enqueueKycWebhookDelivery({ smeId, event, kycData = {} }) {
   const jobIds = [];
   for (const { tenantId, webhookUrl, webhookSecret } of tenants) {
     try {
-      const jobId = _sharedWorker.enqueue('kyc_webhook_delivery', {
+      const jobId = _sharedWorker.enqueue(KYC_WEBHOOK_DB.JOB_TYPE_DELIVERY, {
         smeId,
         tenantId,
         webhookUrl,

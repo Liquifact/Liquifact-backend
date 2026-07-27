@@ -23,6 +23,7 @@ const { indexerLimiter } = require('../middleware/rateLimit');
 const responseHelper = require('../utils/responseHelper');
 const logger = require('../logger');
 const { validateIndexerQuery } = require('../schemas/indexerQuery');
+const { instrumentIndexer } = require('../middleware/indexerMetrics');
 
 // Apply a per-client rate limit before admin auth so bursts are contained
 // even when the caller is unauthenticated or misconfigured.
@@ -212,7 +213,7 @@ router.get('/events', instrumentIndexer(async (req, res, next) => {
   } catch (error) {
     return next(error);
   }
-});
+}));
 
 /**
  * @swagger

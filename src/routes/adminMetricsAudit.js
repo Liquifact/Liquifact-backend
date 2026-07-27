@@ -27,6 +27,7 @@
 const express = require('express');
 const { adminStack } = require('../middleware/stacks');
 const metricsAudit = require('../metricsAudit');
+const { metricsErrorHandler, METRICS_ERROR_CODES } = require('../middleware/metricsErrorHandler');
 
 const router = express.Router();
 
@@ -66,37 +67,28 @@ function clampQueryInt(value, defaultValue, max) {
  *   - limit       1..1000  — page size (default 100, capped at 1000)
  *   - offset      int      — page offset (default 0, must be >= 0)
  */
-router.get('/', (req, res) => {
+router.get('/', (req, res, next) => {
   const { metricName, action, actorId } = req.query;
 
   if (metricName !== undefined && (typeof metricName !== 'string' || !METRIC_NAME_PATTERN.test(metricName))) {
-    return res.status(400).json({
-      type: 'https://liquifact.io/problems/validation-error',
-      title: 'Validation Error',
-      status: 400,
-      detail: 'Query parameter `metricName` must be a valid Prometheus metric name.',
-      fieldErrors: { metricName: 'must match /^[a-zA-Z][a-zA-Z0-9_:.-]{0,199}$/' },
-    });
+    const err = new Error('Query parameter `metricName` must be a valid Prometheus metric name.');
+    err.code = METRICS_ERROR_CODES.VALIDATION_ERROR;
+    err.fieldErrors = { metricName: 'must match /^[a-zA-Z][a-zA-Z0-9_:.-]{0,199}$/' };
+    return next(err);
   }
 
   if (action !== undefined && (typeof action !== 'string' || !VALID_ACTIONS.has(action))) {
-    return res.status(400).json({
-      type: 'https://liquifact.io/problems/validation-error',
-      title: 'Validation Error',
-      status: 400,
-      detail: 'Query parameter `action` must be one of CREATE, UPDATE, or DELETE.',
-      fieldErrors: { action: `must be one of: ${metricsAudit.METRIC_ACTIONS.join(', ')}` },
-    });
+    const err = new Error(`Query parameter \`action\` must be one of ${metricsAudit.METRIC_ACTIONS.join(', ')}.`);
+    err.code = METRICS_ERROR_CODES.VALIDATION_ERROR;
+    err.fieldErrors = { action: `must be one of: ${metricsAudit.METRIC_ACTIONS.join(', ')}` };
+    return next(err);
   }
 
   if (actorId !== undefined && (typeof actorId !== 'string' || !ACTOR_ID_PATTERN.test(actorId))) {
-    return res.status(400).json({
-      type: 'https://liquifact.io/problems/validation-error',
-      title: 'Validation Error',
-      status: 400,
-      detail: 'Query parameter `actorId` must be a short identifier string.',
-      fieldErrors: { actorId: 'must match /^[a-zA-Z0-9_\\-:@]{0,128}$/' },
-    });
+    const err = new Error('Query parameter `actorId` must be a short identifier string.');
+    err.code = METRICS_ERROR_CODES.VALIDATION_ERROR;
+    err.fieldErrors = { actorId: 'must match /^[a-zA-Z0-9_\\-:@]{0,128}$/' };
+    return next(err);
   }
 
   const limit = clampQueryInt(req.query.limit, DEFAULT_LIMIT, MAX_LIMIT);
@@ -117,15 +109,9 @@ router.get('/', (req, res) => {
     });
   } catch (error) {
     if (error && error.code === 'INVALID_ACTION_FILTER') {
-      return res.status(400).json({
-        type: 'https://liquifact.io/problems/validation-error',
-        title: 'Validation Error',
-        status: 400,
-        detail: error.message,
-        fieldErrors: { action: error.message },
-      });
+      error.code = METRICS_ERROR_CODES.VALIDATION_ERROR;
     }
-    throw error;
+    return next(error);
   }
 
   return res.status(200).json({
@@ -143,5 +129,9 @@ router.get('/', (req, res) => {
     },
   });
 });
+
+// Centralised metrics error handler — converts any next(err) call above
+// into a consistent structured response (issue #973).
+router.use(metricsErrorHandler);
 
 module.exports = router;
