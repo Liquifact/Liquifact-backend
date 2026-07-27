@@ -27,6 +27,7 @@ const {
   toSmeMetricsMeta,
   toSmeMetricsApiResponse,
 } = require('../../dto/metrics');
+const { metricsErrorHandler } = require('../../middleware/metricsErrorHandler');
 
 
 /**
@@ -346,5 +347,9 @@ router.post(
     }
   }
 );
+
+// Centralised metrics error handler — converts any next(err) into a consistent
+// structured response (issue #973).
+router.use(metricsErrorHandler);
 
 module.exports = router;
