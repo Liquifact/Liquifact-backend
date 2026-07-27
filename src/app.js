@@ -312,14 +312,10 @@ function createApp() {
   });
 
   // Escrow — GET by invoiceId (proxied through Soroban retry wrapper with address mapping)
-<<<<<<< HEAD
   // Compression middleware: gzip/deflate for large escrow-read responses (issue #961).
   // Threshold: 1 KB (DEFAULT_THRESHOLD). Respects Accept-Encoding; small responses
   // pass through uncompressed. Vary: Accept-Encoding is always set.
-  app.get('/api/escrow/:invoiceId', createCompressionMiddleware(), async (req, res) => {
-=======
-  app.get('/api/escrow/:invoiceId', async (req, res, next) => {
->>>>>>> pr-1067
+  app.get('/api/escrow/:invoiceId', createCompressionMiddleware(), async (req, res, next) => {
     const invoiceId = String(req.params.invoiceId || '')
       .trim()
       .replace(/\s+/g, '');

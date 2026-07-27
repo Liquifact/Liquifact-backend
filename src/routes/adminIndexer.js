@@ -17,6 +17,7 @@ const express = require('express');
 
 const router = express.Router();
 const { listIndexerEvents, bulkIndexerEvents, validateBulkPayload, INDEXER_SORT_FIELDS, MAX_BULK_BATCH_SIZE } = require('../services/indexerService');
+const { mapQueryToDTO, mapDTOToServiceParams } = require('../dto/indexer');
 const { CursorError } = require('../utils/cursorPagination');
 const { adminStack } = require('../middleware/stacks');
 const { indexerLimiter } = require('../middleware/rateLimit');
@@ -123,29 +124,7 @@ router.use(...adminStack);
  *         content:
  *           application/json:
  *             schema:
- *               type: object
- *               properties:
- *                 data:
- *                   type: array
- *                   items:
- *                     type: object
- *                     properties:
- *                       eventId:        { type: string }
- *                       invoiceId:      { type: string }
- *                       eventType:      { type: string }
- *                       ledgerSequence: { type: integer }
- *                       pagingToken:    { type: string, nullable: true }
- *                       contractId:     { type: string, nullable: true }
- *                       txHash:         { type: string, nullable: true }
- *                       observedAt:     { type: string, format: date-time }
- *                       createdAt:      { type: string, format: date-time }
- *                 meta:
- *                   type: object
- *                   properties:
- *                     total:      { type: integer }
- *                     limit:      { type: integer }
- *                     hasMore:    { type: boolean }
- *                     nextCursor: { type: string, nullable: true }
+ *               $ref: '#/components/schemas/IndexerListResponse'
  *       400:
  *         description: |
  *           Invalid query parameters or malformed/tampered cursor.
@@ -244,6 +223,16 @@ router.get('/events', instrumentIndexer(async (req, res, next) => {
  *     responses:
  *       200:
  *         description: Per-item results (partial failure is reported, not thrown)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/IndexerBulkResponse'
+ *       207:
+ *         description: Partial success - some items failed validation or persistence
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/IndexerBulkResponse'
  *       400:
  *         description: Request body is not an array, is empty, or contains a non-object item
  *         $ref: '#/components/responses/Problem400'
