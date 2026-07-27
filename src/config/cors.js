@@ -391,6 +391,8 @@ let allowedOrigins = getAllowedOriginsFromEnv();
  */
 function reloadCorsOrigins() {
   allowedOrigins = getAllowedOriginsFromEnv();
+  const { getCorsCache } = require('./corsCache');
+  getCorsCache().clear();
 }
 
 /**
@@ -417,7 +419,13 @@ function validateCorsOrigin(origin, allowlist) {
   if (origin === undefined) {
     return true;
   }
-  return allowlist.length > 0 && isAllowedOrigin(origin, allowlist);
+  const { getCorsCache } = require('./corsCache');
+  const cache = getCorsCache();
+  const cached = cache.get(origin);
+  if (cached !== undefined) return cached;
+  const allowed = allowlist.length > 0 && isAllowedOrigin(origin, allowlist);
+  cache.set(origin, allowed);
+  return allowed;
 }
 
 /**
@@ -711,6 +719,10 @@ function processBulkCorsOperations(operations) {
   // Persist the updated allowlist for live traffic
   allowedOrigins.length = 0;
   workingList.forEach((o) => allowedOrigins.push(o));
+
+  // Invalidate the origin-validation cache so stale lookups are not served.
+  const { getCorsCache } = require('./corsCache');
+  getCorsCache().clear();
 
   return { results, updatedOrigins: allowedOrigins.slice() };
 }

@@ -204,7 +204,7 @@ describe('kyc-webhook POST /api/kyc/webhook — error response body snapshots', 
       const rawBody = JSON.stringify(payload);
 
       // Simulate the service mapping an unknown provider status to UNKNOWN.
-      kycService.normalizeProviderStatus.mockReturnValue('unknown');
+      kycService.normalizeProviderStatus.mockImplementation(() => 'unknown');
 
       const res = await request(buildApp())
         .post('/api/kyc/webhook')

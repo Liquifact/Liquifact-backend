@@ -28,11 +28,18 @@ const { readEscrowState } = require('../../services/escrowRead');
 const { batchReadEscrowStates } = require('../../services/escrowBatchRead');
 const { computeEscrowDerivedFields } = require('../../services/escrowDerived');
 const { escrowReadLimiter } = require('../../middleware/rateLimit');
+const { recordEscrowRead } = require('../../services/escrowReadMetrics');
 const AppError = require('../../errors/AppError');
 const { invoiceCreateSchema, invoiceUpdateSchema, parseValidationErrors } = require('../../schemas/invoice');
 const { escrowBatchReadSchema } = require('../../schemas/escrowBatchRead');
 const { validatePatchFields, detectLockedFieldChange } = require('../../middleware/patchInvoice');
 const { validateHealthQuery, rejectBodyOnGet } = require('../../schemas/health');
+const { z } = require('zod');
+
+/** Zod schema for GET /v1/escrow/:invoiceId path parameters. */
+const escrowReadParamsSchema = z.object({
+  invoiceId: z.string().min(1, 'invoiceId is required').max(128, 'invoiceId too long'),
+});
 
 // ── Sub-router mounts ────────────────────────────────────────────────────────
 router.use('/invest', investRoutes);
@@ -174,28 +181,35 @@ router.post('/invoices', extractTenant, async (req, res, next) => {
 // Rate limiter runs BEFORE authenticateToken so that abuse is stopped
 // before any auth processing (IP-based limiting for this endpoint).
 router.get('/escrow/:invoiceId', escrowReadLimiter, authenticateToken, async (req, res, next) => {
+  const startTime = process.hrtime.bigint();
+
   try {
     // Validate path parameters
-    const { success, error, data: validatedParams } = validateEscrowReadParams.safeParse(req.params);
+    const { success, error, data: validatedParams } = escrowReadParamsSchema.safeParse(req.params);
     if (!success) {
-      return res.status(400).json({
-        error: 'Invalid invoiceId parameter',
+      throw new AppError({
+        type: 'https://liquifact.com/probs/bad-request',
+        title: 'Bad Request',
+        status: 400,
+        detail: 'Invalid invoiceId parameter.',
         code: 'BAD_REQUEST',
-        details: error.flatten().fieldErrors,
+        retryable: false,
+        fieldErrors: error.flatten().fieldErrors,
       });
     }
 
     const invoiceId = validatedParams.invoiceId;
 
-  try {
     const escrowAddress = resolveEscrowAddress(invoiceId);
     if (!escrowAddress) {
-      res.status(404).json({
-        error: `No escrow contract mapping found for invoice ID '${invoiceId}'`,
+      throw new AppError({
+        type: 'https://liquifact.com/probs/not-found',
+        title: 'Not Found',
+        status: 404,
+        detail: `No escrow contract mapping found for invoice ID '${invoiceId}'`,
         code: 'NOT_FOUND',
+        retryable: false,
       });
-      recordEscrowRead({ startTime, invoiceId, endpoint: 'v1', statusCode: 404 });
-      return;
     }
 
     const state = await readEscrowState(invoiceId);
@@ -203,17 +217,20 @@ router.get('/escrow/:invoiceId', escrowReadLimiter, authenticateToken, async (re
       ledgerCloseTime: state ? state.ledgerCloseTime : undefined,
     });
 
-    const responseDto = mapToEscrowReadResponseDto({
-      state,
-      derived,
-      escrowAddress,
-      fromProjection: state.fromProjection,
+    return res.json({
+      data: {
+        ...state,
+        ...derived,
+        escrowAddress,
+      },
+      message: state.fromProjection
+        ? 'Escrow state read from event projection.'
+        : 'Escrow state read from live Soroban contract.',
     });
-
-    res.set('X-Escrow-Address', escrowAddress);
-    return res.json(responseDto);
   } catch (err) {
-    recordEscrowRead({ startTime, invoiceId, endpoint: 'v1', statusCode: typeof err.status === 'number' && err.status >= 400 ? err.status : 500, err });
+    const statusCode = typeof err.status === 'number' && err.status >= 400 ? err.status : 500;
+    const invoiceId = req.params.invoiceId || 'unknown';
+    recordEscrowRead({ startTime, invoiceId, endpoint: 'v1', statusCode, err });
     return next(err);
   }
 });

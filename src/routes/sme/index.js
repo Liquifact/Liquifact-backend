@@ -19,8 +19,11 @@ const multer = require('multer');
 const storageService = require('../../services/storage');
 const { extractTenant } = require('../../middleware/tenant');
 const idempotencyMiddleware = require('../../middleware/idempotency');
+const { optionalMultipartIdempotency } = require('../../middleware/multipartIdempotency');
 const logger = require('../../logger');
 const { instrumentPersistence } = require('../../middleware/persistenceMetrics');
+const { MAX_FILE_SIZE_BYTES, validatePersistenceBody, presignedUploadBodySchema } = require('../../schemas/persistence');
+const { createPersistenceRateLimiter } = require('../../middleware/persistenceRateLimit');
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -70,18 +73,24 @@ router.post(
       res.status(500).json({ error: 'Failed to generate presigned upload URL' });
     }
   }
-}));
+);
 
 // POST /api/sme/invoice - Upload PDF invoice
-router.post('/invoice', persistenceRateLimiter, upload.single('invoice'), extractTenant, instrumentPersistence('sme_invoice_upload', async (req, res) => {
-  const requestLogger = logger.createRequestLogger(req);
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'Invoice file is required' });
-    }
+router.post(
+  '/invoice',
+  persistenceRateLimiter,
+  upload.single('invoice'),
+  extractTenant,
+  optionalMultipartIdempotency,
+  instrumentPersistence('sme_invoice_upload', async (req, res) => {
+    const requestLogger = logger.createRequestLogger(req);
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: 'Invoice file is required' });
+      }
 
       const tenantId = req.tenantId;
-      const invoiceId = req.validated.invoiceId || crypto.randomUUID();
+      const invoiceId = (req.validated && req.validated.invoiceId) || crypto.randomUUID();
 
       const key = await storageService.uploadFile(
         req.file.buffer,
@@ -106,7 +115,7 @@ router.post('/invoice', persistenceRateLimiter, upload.single('invoice'), extrac
       requestLogger.error({ err: error }, 'Upload error');
       res.status(500).json({ error: 'Failed to upload invoice' });
     }
-  }
+  })
 );
 
 module.exports = router;

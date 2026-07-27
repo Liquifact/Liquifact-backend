@@ -11,14 +11,9 @@
 const db = require('../db/knex');
 const logger = require('../logger');
 const { emitKycWebhookForSme } = require('./kycWebhookEmitter');
-
-const KYC_STATUSES = {
-  PENDING: 'pending',
-  VERIFIED: 'verified',
-  REJECTED: 'rejected',
-  EXEMPTED: 'exempted',
-  UNKNOWN: 'unknown', // Fallback for unmapped provider statuses
-};
+const { CircuitBreaker } = require('../utils/circuitBreaker');
+const { MemoryCacheStore } = require('./cacheStore');
+const { KYC_STATUSES } = require('../constants/kycWebhooks');
 
 const PROVIDER_STATUS_MAP = {
   pending: KYC_STATUSES.PENDING,

@@ -281,7 +281,7 @@ async function listIndexerEvents({
       totalPages: Math.ceil(total / limit),
       hasMore: pagedHasMore,
       nextCursor: pagedNextCursor,
-    }),
+    },
   };
 
   if (useCache) {
