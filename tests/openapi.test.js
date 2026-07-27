@@ -43,6 +43,11 @@ describe('OpenAPI document', () => {
     expect(schemas.Problem).toBeDefined();
     expect(schemas.Invoice).toBeDefined();
     expect(schemas.EscrowState).toBeDefined();
+    expect(schemas.InvoiceStateApproveResponse).toBeDefined();
+    expect(schemas.InvoiceStateLinkEscrowResponse).toBeDefined();
+    expect(schemas.InvoiceStateRejectResponse).toBeDefined();
+    expect(schemas.InvoiceStateHistoryResponse).toBeDefined();
+    expect(schemas.InvoiceStateErrorResponse).toBeDefined();
   });
 
   it('exposes reusable problem responses for 400/401/403', () => {
@@ -56,7 +61,7 @@ describe('OpenAPI document', () => {
     }
   });
 
-  it('documents the marketplace and invest endpoints from @swagger blocks', () => {
+  it('documents the marketplace, invest, and invoice-state endpoints from @swagger blocks', () => {
     expect(spec.paths['/api/marketplace']).toBeDefined();
     expect(spec.paths['/api/marketplace'].get).toBeDefined();
 
@@ -65,6 +70,18 @@ describe('OpenAPI document', () => {
 
     expect(spec.paths['/api/invest/fund-invoice']).toBeDefined();
     expect(spec.paths['/api/invest/fund-invoice'].post).toBeDefined();
+
+    expect(spec.paths['/api/invoices/{id}/approve']).toBeDefined();
+    expect(spec.paths['/api/invoices/{id}/approve'].post).toBeDefined();
+
+    expect(spec.paths['/api/invoices/{id}/link-escrow']).toBeDefined();
+    expect(spec.paths['/api/invoices/{id}/link-escrow'].post).toBeDefined();
+
+    expect(spec.paths['/api/invoices/{id}/reject']).toBeDefined();
+    expect(spec.paths['/api/invoices/{id}/reject'].post).toBeDefined();
+
+    expect(spec.paths['/api/invoices/{id}/history']).toBeDefined();
+    expect(spec.paths['/api/invoices/{id}/history'].get).toBeDefined();
   });
 
   it('binds marketplace 200 to the MarketplaceListResponse schema', () => {

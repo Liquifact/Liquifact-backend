@@ -95,7 +95,8 @@ function validateFundInvoiceBody(body) {
  * @param {import('express').Response} res - Express response.
  * @returns {Promise<void>} Responds with a JSON envelope containing `data`
  *   (array of {@link InvestmentOpportunity} DTOs) and pagination `meta`.
- *
+ */
+/**
  * @swagger
  * /api/invest/opportunities:
  *   get:

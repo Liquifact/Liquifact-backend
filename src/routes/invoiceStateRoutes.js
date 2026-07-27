@@ -6,12 +6,7 @@ const invoiceStateService = require('../services/invoiceStateService');
 const { requireKycForFunding, auditKycAccess } = require('../middleware/kycGating');
 const responseHelper = require('../utils/responseHelper');
 const { extractTenant } = require('../middleware/tenant');
-const config = require('../config');
-const logger = require('../logger');
-const {
-  invoiceStateRequestDurationMs,
-  invoiceStateRequestCount,
-} = require('../metrics');
+const { createCompressionMiddleware } = require('../middleware/compression');
 
 router.use(extractTenant);
 
@@ -79,7 +74,7 @@ function sendTransitionError(res, error) {
  * @param {number} statusCode - HTTP status code.
  * @returns {string} Status class label.
  */
-function classifyStatus(statusCode) {
+function _classifyStatus(statusCode) {
   if (statusCode >= 500) {
     return '5xx';
   }
@@ -95,7 +90,7 @@ function classifyStatus(statusCode) {
  * @param {Error|null|undefined} error - Error raised by a handler.
  * @returns {string} Error cause label.
  */
-function classifyErrorCause(error) {
+function _classifyErrorCause(error) {
   if (!error) {
     return 'none';
   }
@@ -114,6 +109,52 @@ function classifyErrorCause(error) {
 /**
  * POST /api/invoices/:id/approve
  * Convenience endpoint to approve a pending invoice.
+ */
+/**
+ * @swagger
+ * /api/invoices/{id}/approve:
+ *   post:
+ *     operationId: approveInvoiceState
+ *     summary: Approve a pending invoice
+ *     description: Transition a pending invoice to approved state.
+ *     tags: [InvoiceState]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Invoice ID
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               reason:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Invoice approved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/InvoiceStateApproveResponse'
+ *       400:
+ *         description: Transition error or validation error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
+ *       404:
+ *         description: Invoice not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
  */
 router.post('/:id/approve', async (req, res, next) => {
   const { reason } = req.body || {};
@@ -135,9 +176,52 @@ router.post('/:id/approve', async (req, res, next) => {
 });
 
 /**
- * POST /api/invoices/:id/link-escrow
- * Links an approved invoice to escrow. This is a capital-movement endpoint
- * gated on the caller's SME holding a verified/exempted KYC status.
+ * @swagger
+ * /api/invoices/{id}/link-escrow:
+ *   post:
+ *     operationId: linkInvoiceEscrow
+ *     summary: Link an approved invoice to escrow
+ *     description: Links an approved invoice to escrow state. Gated on verified/exempted KYC status.
+ *     tags: [InvoiceState]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Invoice ID
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               escrowId:
+ *                 type: string
+ *               reason:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Invoice linked to escrow successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/InvoiceStateLinkEscrowResponse'
+ *       400:
+ *         description: Transition error or validation error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
+ *       404:
+ *         description: Invoice not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
  */
 router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, async (req, res, next) => {
   const { escrowId, reason } = req.body || {};
@@ -162,8 +246,51 @@ router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, async (req
 });
 
 /**
- * POST /api/invoices/:id/reject
- * Convenience endpoint to reject an invoice. Requires a non-empty reason.
+ * @swagger
+ * /api/invoices/{id}/reject:
+ *   post:
+ *     operationId: rejectInvoiceState
+ *     summary: Reject an invoice
+ *     description: Rejects an invoice with a mandatory reason.
+ *     tags: [InvoiceState]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Invoice ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [reason]
+ *             properties:
+ *               reason:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Invoice rejected successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/InvoiceStateRejectResponse'
+ *       400:
+ *         description: Transition error or validation error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
+ *       404:
+ *         description: Invoice not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
  */
 router.post('/:id/reject', async (req, res, next) => {
   const { reason } = req.body || {};
@@ -185,8 +312,41 @@ router.post('/:id/reject', async (req, res, next) => {
 });
 
 /**
- * GET /api/invoices/:id/history
- * Returns the state-transition history for an invoice.
+ * @swagger
+ * /api/invoices/{id}/history:
+ *   get:
+ *     operationId: getInvoiceStateHistory
+ *     summary: Get invoice transition history
+ *     description: Returns the state transition history log for an invoice.
+ *     tags: [InvoiceState]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Invoice ID
+ *     responses:
+ *       200:
+ *         description: Invoice transition history retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/InvoiceStateHistoryResponse'
+ *       400:
+ *         description: Transition error or validation error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
+ *       404:
+ *         description: Invoice not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
  */
 router.get('/:id/history', async (req, res, next) => {
   try {
