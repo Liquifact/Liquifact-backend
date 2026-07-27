@@ -68,6 +68,7 @@ const {
   assertNoDuplicateRouterMounts,
   resetFeatureRouterMounts,
 } = require('./utils/routeMountRegistry');
+const { createCompressionMiddleware } = require('./middleware/compression');
 
 /**
  * Returns a 403 JSON response only for the dedicated blocked-origin CORS error.
@@ -310,7 +311,10 @@ function createApp() {
   });
 
   // Escrow — GET by invoiceId (proxied through Soroban retry wrapper with address mapping)
-  app.get('/api/escrow/:invoiceId', async (req, res) => {
+  // Compression middleware: gzip/deflate for large escrow-read responses (issue #961).
+  // Threshold: 1 KB (DEFAULT_THRESHOLD). Respects Accept-Encoding; small responses
+  // pass through uncompressed. Vary: Accept-Encoding is always set.
+  app.get('/api/escrow/:invoiceId', createCompressionMiddleware(), async (req, res) => {
     const invoiceId = String(req.params.invoiceId || '')
       .trim()
       .replace(/\s+/g, '');
