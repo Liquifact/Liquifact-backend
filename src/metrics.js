@@ -33,6 +33,132 @@
 
 const logger = require('./logger');
 
+/**
+ * Returns whether the METRICS_ENABLED feature flag is turned on.
+ * Reads directly from `process.env` so callers never depend on the
+ * validated config module (avoiding potential circular imports).
+ *
+ * @returns {boolean} `true` when metrics are enabled (default), `false` when
+ *   `METRICS_ENABLED=false` is set in the environment.
+ */
+function isEnabled() {
+  return process.env.METRICS_ENABLED !== 'false';
+}
+
+// ── No-op metric shims (used when METRICS_ENABLED=false) ────────────────────
+//
+// These implement the same surface as prom-client Counter / Gauge / Histogram
+// but silently discard every recording call.  Consumer code never needs to
+// guard individual `.inc()` / `.set()` / `.observe()` calls.
+
+/**
+ * No-op Prometheus counter.  All `.inc()` calls are silently discarded.
+ * @implements {import('prom-client').Counter}
+ */
+class NoopCounter {
+  /**
+   * @param {object} [config]
+   */
+  constructor(config = {}) {
+    this.name = config.name || 'noop_counter';
+    this.help = config.help || '';
+    this.labelNames = Array.isArray(config.labelNames) ? config.labelNames : [];
+    this.hashMap = {};
+  }
+  /** @returns {void} */
+  inc() {}
+  /**
+   * Returns a child facade whose `.inc()` is also a no-op.
+   * @param {...unknown} _args
+   * @returns {{ inc: () => void }}
+   */
+  labels(..._args) {
+    return { inc() {} };
+  }
+}
+
+/**
+ * No-op Prometheus gauge.  All `.set()` calls are silently discarded.
+ * @implements {import('prom-client').Gauge}
+ */
+class NoopGauge {
+  /**
+   * @param {object} [config]
+   */
+  constructor(config = {}) {
+    this.name = config.name || 'noop_gauge';
+    this.help = config.help || '';
+    this.labelNames = Array.isArray(config.labelNames) ? config.labelNames : [];
+    this.hashMap = {};
+  }
+  /** @returns {void} */
+  set() {}
+  /** @returns {void} */
+  setToCurrentTime() {}
+  /**
+   * Returns a child facade whose `.set()` is also a no-op.
+   * @param {...unknown} _args
+   * @returns {{ set: () => void }}
+   */
+  labels(..._args) {
+    return { set() {} };
+  }
+}
+
+/**
+ * No-op Prometheus histogram.  All `.observe()` / `.startTimer()` calls are
+ * silently discarded.
+ * @implements {import('prom-client').Histogram}
+ */
+class NoopHistogram {
+  /**
+   * @param {object} [config]
+   */
+  constructor(config = {}) {
+    this.name = config.name || 'noop_histogram';
+    this.help = config.help || '';
+    this.labelNames = Array.isArray(config.labelNames) ? config.labelNames : [];
+    this.buckets = Array.isArray(config.buckets) ? config.buckets : [];
+    this.hashMap = {};
+  }
+  /** @returns {void} */
+  observe() {}
+  /**
+   * Returns a no-op endTimer function.
+   * @returns {() => number}
+   */
+  startTimer() {
+    return () => 0;
+  }
+  /**
+   * Returns a child facade whose `.observe()` is also a no-op.
+   * @param {...unknown} _args
+   * @returns {{ observe: () => void, startTimer: () => () => number }}
+   */
+  labels(..._args) {
+    return { observe() {}, startTimer() { return () => 0; } };
+  }
+}
+
+/**
+ * No-op Prometheus registry.  All register/metrics calls are silently
+ * discarded so no prom-client state accumulates when metrics are disabled.
+ * @implements {import('prom-client').Registry}
+ */
+class NoopRegistry {
+  constructor() {
+    this.contentType = 'text/plain';
+  }
+  /** @returns {void} */
+  registerMetric() {}
+  /** @returns {undefined} */
+  getSingleMetric() { return undefined; }
+  /** @returns {void} */
+  resetMetrics() {}
+  /** @returns {string} */
+  metrics() { return ''; }
+}
+
 let client;
 try {
   client = require('prom-client');
@@ -1476,6 +1602,64 @@ const escrowReadCacheEvictionsTotal = new client.Counter({
  */
 function getRegistry() {
   return registry;
+}
+
+// ── Feature flag: METRICS_ENABLED ────────────────────────────────────────────
+//
+// When the flag is off we swap the real prom-client metric instances for
+// lightweight no-op shims so that every `.inc()` / `.set()` / `.observe()`
+// call across the codebase is silently discarded.  The metric variables
+// themselves remain exported (same shape, same names) so consumer
+// `require('../metrics').foo.inc(...)` calls never need to change.
+//
+// The flag is evaluated once at module load time.  Changing it at runtime
+// requires a restart (consistent with the other env-backed feature flags
+// in this codebase).
+
+if (!isEnabled()) {
+  const noopRegistry = new NoopRegistry();
+
+  queueDepthGauge = new NoopGauge({ name: 'liquifact_job_queue_depth', help: queueDepthGauge.help });
+  retryQueueSizeGauge = new NoopGauge({ name: 'liquifact_job_retry_queue_size', help: retryQueueSizeGauge.help });
+  workerInFlightGauge = new NoopGauge({ name: 'liquifact_worker_inflight_count', help: workerInFlightGauge.help });
+  escrowIndexerEventsProcessedTotal = new NoopCounter({ name: escrowIndexerEventsProcessedTotal.name, help: escrowIndexerEventsProcessedTotal.help });
+  escrowIndexerEventsSkippedTotal = new NoopCounter({ name: escrowIndexerEventsSkippedTotal.name, help: escrowIndexerEventsSkippedTotal.help });
+  escrowIndexerCycleFailuresTotal = new NoopCounter({ name: escrowIndexerCycleFailuresTotal.name, help: escrowIndexerCycleFailuresTotal.help });
+  escrowIndexerLastCursorAdvanceTimestampSeconds = new NoopGauge({ name: escrowIndexerLastCursorAdvanceTimestampSeconds.name, help: escrowIndexerLastCursorAdvanceTimestampSeconds.help });
+  escrowReconciliationMismatches = new NoopCounter({ name: escrowReconciliationMismatches.name, help: escrowReconciliationMismatches.help });
+  escrowReconciliationMismatchedInvoicesGauge = new NoopGauge({ name: escrowReconciliationMismatchedInvoicesGauge.name, help: escrowReconciliationMismatchedInvoicesGauge.help });
+  escrowReconciliationDriftMagnitudeGauge = new NoopGauge({ name: escrowReconciliationDriftMagnitudeGauge.name, help: escrowReconciliationDriftMagnitudeGauge.help });
+  escrowReconciliationDriftAlertsTotal = new NoopCounter({ name: escrowReconciliationDriftAlertsTotal.name, help: escrowReconciliationDriftAlertsTotal.help });
+  maturityReminderDeliveryAttemptsTotal = new NoopCounter({ name: maturityReminderDeliveryAttemptsTotal.name, help: maturityReminderDeliveryAttemptsTotal.help, labelNames: maturityReminderDeliveryAttemptsTotal.labelNames });
+  maturityReminderDeliverySuccessTotal = new NoopCounter({ name: maturityReminderDeliverySuccessTotal.name, help: maturityReminderDeliverySuccessTotal.help, labelNames: maturityReminderDeliverySuccessTotal.labelNames });
+  maturityReminderDeadLetterTotal = new NoopCounter({ name: maturityReminderDeadLetterTotal.name, help: maturityReminderDeadLetterTotal.help, labelNames: maturityReminderDeadLetterTotal.labelNames });
+  contractWasmVersionMismatchAlertsTotal = new NoopCounter({ name: contractWasmVersionMismatchAlertsTotal.name, help: contractWasmVersionMismatchAlertsTotal.help, labelNames: contractWasmVersionMismatchAlertsTotal.labelNames });
+  idempotencyStorageFailureTotal = new NoopCounter({ name: idempotencyStorageFailureTotal.name, help: idempotencyStorageFailureTotal.help, labelNames: idempotencyStorageFailureTotal.labelNames });
+  apiKeyAuthDurationSeconds = new NoopHistogram({ name: apiKeyAuthDurationSeconds.name, help: apiKeyAuthDurationSeconds.help, labelNames: apiKeyAuthDurationSeconds.labelNames, buckets: apiKeyAuthDurationSeconds.buckets });
+  apiKeyAuthErrorsTotal = new NoopCounter({ name: apiKeyAuthErrorsTotal.name, help: apiKeyAuthErrorsTotal.help, labelNames: apiKeyAuthErrorsTotal.labelNames });
+  bodySizeLimitRejectionsTotal = new NoopCounter({ name: bodySizeLimitRejectionsTotal.name, help: bodySizeLimitRejectionsTotal.help, labelNames: bodySizeLimitRejectionsTotal.labelNames });
+  cacheStoreErrorsTotal = new NoopCounter({ name: cacheStoreErrorsTotal.name, help: cacheStoreErrorsTotal.help });
+  redisCacheFailOpenTotal = new NoopCounter({ name: redisCacheFailOpenTotal.name, help: redisCacheFailOpenTotal.help });
+  footprintCacheHitsTotal = new NoopCounter({ name: footprintCacheHitsTotal.name, help: footprintCacheHitsTotal.help });
+  footprintCacheMissesTotal = new NoopCounter({ name: footprintCacheMissesTotal.name, help: footprintCacheMissesTotal.help });
+  footprintCacheEvictionsTotal = new NoopCounter({ name: footprintCacheEvictionsTotal.name, help: footprintCacheEvictionsTotal.help });
+  sorobanCircuitBreakerStateTransitionsTotal = new NoopCounter({ name: sorobanCircuitBreakerStateTransitionsTotal.name, help: sorobanCircuitBreakerStateTransitionsTotal.help, labelNames: sorobanCircuitBreakerStateTransitionsTotal.labelNames });
+  readinessGauge = new NoopGauge({ name: readinessGauge.name, help: readinessGauge.help });
+  webhookReplayTotal = new NoopCounter({ name: webhookReplayTotal.name, help: webhookReplayTotal.help, labelNames: webhookReplayTotal.labelNames });
+  sorobanRpcCallDurationSeconds = new NoopHistogram({ name: sorobanRpcCallDurationSeconds.name, help: sorobanRpcCallDurationSeconds.help, labelNames: sorobanRpcCallDurationSeconds.labelNames, buckets: sorobanRpcCallDurationSeconds.buckets });
+  sorobanRpcRetryCausesTotal = new NoopCounter({ name: sorobanRpcRetryCausesTotal.name, help: sorobanRpcRetryCausesTotal.help, labelNames: sorobanRpcRetryCausesTotal.labelNames });
+  metricsRequestDurationSeconds = new NoopHistogram({ name: metricsRequestDurationSeconds.name, help: metricsRequestDurationSeconds.help, labelNames: metricsRequestDurationSeconds.labelNames, buckets: metricsRequestDurationSeconds.buckets });
+  kycWebhookRequestDurationSeconds = new NoopHistogram({ name: kycWebhookRequestDurationSeconds.name, help: kycWebhookRequestDurationSeconds.help, labelNames: kycWebhookRequestDurationSeconds.labelNames, buckets: kycWebhookRequestDurationSeconds.buckets });
+  kycWebhookRequestsTotal = new NoopCounter({ name: kycWebhookRequestsTotal.name, help: kycWebhookRequestsTotal.help, labelNames: kycWebhookRequestsTotal.labelNames });
+  kycWebhookErrorsTotal = new NoopCounter({ name: kycWebhookErrorsTotal.name, help: kycWebhookErrorsTotal.help, labelNames: kycWebhookErrorsTotal.labelNames });
+  healthRequestDurationSeconds = new NoopHistogram({ name: healthRequestDurationSeconds.name, help: healthRequestDurationSeconds.help, labelNames: healthRequestDurationSeconds.labelNames, buckets: healthRequestDurationSeconds.buckets });
+  healthRequestsTotal = new NoopCounter({ name: healthRequestsTotal.name, help: healthRequestsTotal.help, labelNames: healthRequestsTotal.labelNames });
+  healthRequestErrorsTotal = new NoopCounter({ name: healthRequestErrorsTotal.name, help: healthRequestErrorsTotal.help, labelNames: healthRequestErrorsTotal.labelNames });
+  escrowReadCacheHitsTotal = new NoopCounter({ name: escrowReadCacheHitsTotal.name, help: escrowReadCacheHitsTotal.help });
+  escrowReadCacheMissesTotal = new NoopCounter({ name: escrowReadCacheMissesTotal.name, help: escrowReadCacheMissesTotal.help });
+  escrowReadCacheEvictionsTotal = new NoopCounter({ name: escrowReadCacheEvictionsTotal.name, help: escrowReadCacheEvictionsTotal.help, labelNames: escrowReadCacheEvictionsTotal.labelNames });
+
+  cachedMetrics = '';
 }
 
 module.exports = {
