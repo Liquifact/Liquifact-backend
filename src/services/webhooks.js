@@ -7,13 +7,10 @@ const { withRetry } = require('../utils/retry');
 const { appendAuditEvent } = require('./auditLogStore');
 
 // Lazily-resolved shared worker to avoid circular dependency at module load time.
-// Set via setSharedWorker() by the application bootstrap or tests.
 let _sharedWorker = null;
 
 /**
  * Injects the BackgroundWorker instance used by enqueueWebhookDelivery.
- * Call this once at application startup (src/index.js) after the worker has
- * been created and the 'webhook_delivery' handler has been registered.
  *
  * @param {import('../workers/worker')} worker - Configured BackgroundWorker.
  * @returns {void}
@@ -26,12 +23,9 @@ let client;
 try {
   client = require('prom-client');
 } catch (_e) {
-  // In test environments where prom-client may not be installed, provide a noop shim
   client = {
     Counter: class {
-      /** No-op constructor for the prom-client shim. @returns {void} */
       constructor() { }
-      /** No-op increment for the prom-client shim. @returns {void} */
       inc() { }
     },
   };
@@ -41,10 +35,12 @@ const { registry } = require('../metrics');
 const SIGNATURE_VERSION = 'v1';
 const TOLERANCE_MS = 5 * 60 * 1000;
 
-// Signature header guards — a well-formed header is "t=<10 digits>,v1=<64 hex chars>"
-// (~80 chars). These limits are generous but still block header-flooding abuse.
+// Signature header guards
 const MAX_SIGNATURE_HEADER_LENGTH = 256;
 const MAX_SIGNATURE_HEADER_PARTS = 10;
+
+// Maximum outgoing payload size limit (Default: 128 KB)
+const MAX_PAYLOAD_BYTES = Number(process.env.WEBHOOK_MAX_PAYLOAD_BYTES || 128 * 1024);
 
 /**
  * Recursively sorts keys of an object to ensure deterministic JSON serialization.
@@ -94,9 +90,24 @@ function createSignatureHeader(secret, rawBody) {
 }
 
 /**
+ * Validates and enforces payload size bounds.
+ *
+ * @param {string} body - JSON payload string.
+ * @throws {Error} If body size exceeds MAX_PAYLOAD_BYTES.
+ */
+function validatePayloadBounds(body) {
+  const payloadBytes = Buffer.byteLength(body, 'utf8');
+  if (payloadBytes > MAX_PAYLOAD_BYTES) {
+    const err = new Error(`Webhook payload size (${payloadBytes} bytes) exceeds limit of ${MAX_PAYLOAD_BYTES} bytes`);
+    err.code = 'PAYLOAD_TOO_LARGE';
+    throw err;
+  }
+}
+
+/**
  * Emits a webhook for escrow events.
  *
- * @param {string} event - The event type ('escrow_funded' or 'escrow_settled').
+ * @param {string} event - The event type ('escrow_funded', 'escrow_settled', etc.).
  * @param {string} invoiceId - The invoice ID.
  * @param {Object} [additionalData={}] - Additional data to include in the payload.
  * @returns {Promise<void>}
@@ -130,11 +141,13 @@ async function emitWebhook(event, invoiceId, additionalData = {}) {
       ...additionalData,
     });
 
-    // Sign payload and create signature header
     const body = JSON.stringify(payload);
+
+    // Enforce payload bounding guard
+    validatePayloadBounds(body);
+
     const signatureHeader = createSignatureHeader(webhook_secret, body);
 
-    // Metric: ensure counter exists on first require
     if (!emitWebhook._failureCounter) {
       emitWebhook._failureCounter = new client.Counter({
         name: 'webhook_delivery_failures_total',
@@ -147,10 +160,9 @@ async function emitWebhook(event, invoiceId, additionalData = {}) {
     const baseDelay = Number(process.env.WEBHOOK_BASE_DELAY || 500);
     const maxDelay = Number(process.env.WEBHOOK_MAX_DELAY || 10000);
 
-    // shouldRetry: only on network/timeouts or 5xx
     const shouldRetry = (err) => {
       if (!err) { return false; }
-      // network/socket errors often have a code
+      if (err.code === 'PAYLOAD_TOO_LARGE') { return false; }
       if (err.code) {
         return ['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN'].includes(err.code) || err.name === 'AbortError';
       }
@@ -161,7 +173,6 @@ async function emitWebhook(event, invoiceId, additionalData = {}) {
       return false;
     };
 
-    // Operation to perform
     const operation = async () => {
       const controller = new AbortController();
       const timeoutMs = Number(process.env.WEBHOOK_TIMEOUT_MS || 5000);
@@ -189,7 +200,6 @@ async function emitWebhook(event, invoiceId, additionalData = {}) {
       }
     };
 
-    // Record attempts via auditLogStore on each failed try
     const onRetry = async ({ attempt, error }) => {
       try {
         await appendAuditEvent({
@@ -208,16 +218,13 @@ async function emitWebhook(event, invoiceId, additionalData = {}) {
           },
         });
       } catch (e) {
-        // don't let audit failures stop retries
         logger.warn({ err: e.message }, 'Failed to append audit event for webhook attempt');
       }
     };
 
-    // Execute with retry
     try {
       const result = await withRetry(operation, { maxRetries, baseDelay, maxDelay, shouldRetry, onRetry });
 
-      // record successful delivery
       try {
         await appendAuditEvent({
           eventType: 'webhook_delivery',
@@ -235,22 +242,20 @@ async function emitWebhook(event, invoiceId, additionalData = {}) {
 
       logger.info({ event, invoiceId, tenant_id }, 'Webhook emitted successfully');
     } catch (error) {
-      // exhausted retries -> dead-letter
       try {
-        await db('webhook_dead_letters').insert({
-          tenant_id,
-          invoice_id: invoiceId,
+        await writeDeadLetter({
+          tenantId: tenant_id,
+          invoiceId,
           event,
-          payload: JSON.stringify(payload),
-          last_error: error && error.message ? error.message : String(error),
+          payload,
+          webhookUrl: webhook_url,
           attempts: maxRetries + 1,
-          created_at: new Date(),
+          lastError: error && error.message ? error.message : String(error),
         });
       } catch (e) {
         logger.warn({ err: e.message }, 'Failed to persist webhook dead-letter');
       }
 
-      // emit delivery-failure metric
       try {
         emitWebhook._failureCounter.inc();
       } catch (_e) {
@@ -265,6 +270,19 @@ async function emitWebhook(event, invoiceId, additionalData = {}) {
 }
 
 /**
+ * Emits an escrow read webhook notification asynchronously.
+ *
+ * @param {Object} params
+ * @param {string} params.eventType - Specific read event type (e.g. 'escrow.read').
+ * @param {string} params.invoiceId - Invoice identifier.
+ * @param {Object} params.state - Escrow state payload.
+ * @returns {Promise<void>}
+ */
+async function emitEscrowReadWebhook({ eventType, invoiceId, state }) {
+  return emitWebhook(eventType || 'escrow.read', invoiceId, { state });
+}
+
+/**
  * Verifies a webhook signature with timestamp tolerance.
  *
  * @param {string} secret - The webhook secret.
@@ -274,17 +292,12 @@ async function emitWebhook(event, invoiceId, additionalData = {}) {
  * @returns {Object} Result object with valid boolean and optional error message.
  */
 function verifySignature(secret, rawBody, signatureHeader, toleranceMs = TOLERANCE_MS) {
-  // ── Max-length guard ────────────────────────────────────────────────────────
-  // Reject oversized headers before any splitting or allocation work.
   if (typeof signatureHeader !== 'string' || signatureHeader.length > MAX_SIGNATURE_HEADER_LENGTH) {
     return { valid: false, error: 'Invalid signature header format' };
   }
 
   const parts = signatureHeader.split(',');
 
-  // ── Part-count guard ────────────────────────────────────────────────────────
-  // A well-formed header has exactly 2 parts: "t=<ts>" and "v1=<sig>".
-  // Cap well above that to allow future versioning while blocking floods.
   if (parts.length > MAX_SIGNATURE_HEADER_PARTS) {
     return { valid: false, error: 'Invalid signature header format' };
   }
@@ -321,16 +334,6 @@ function verifySignature(secret, rawBody, signatureHeader, toleranceMs = TOLERAN
 
 /**
  * Writes a failed webhook delivery to the dead-letter table.
- *
- * @param {Object} params
- * @param {string} params.tenantId
- * @param {string} params.invoiceId
- * @param {string} params.event
- * @param {Object} params.payload
- * @param {string} params.webhookUrl
- * @param {number} params.attempts
- * @param {string} params.lastError
- * @returns {Promise<string>} The new dead-letter row id.
  */
 async function writeDeadLetter({ tenantId, invoiceId, event, payload, webhookUrl, attempts, lastError }) {
   const [row] = await db('webhook_dead_letters')
@@ -349,10 +352,6 @@ async function writeDeadLetter({ tenantId, invoiceId, event, payload, webhookUrl
 
 /**
  * Replays a dead-letter row by re-signing and re-sending the stored payload.
- * On success the row is marked resolved. Throws on delivery failure.
- *
- * @param {string} deadLetterId - The `webhook_dead_letters.id` to replay.
- * @returns {Promise<void>}
  */
 async function replayWebhook(deadLetterId) {
   const row = await db('webhook_dead_letters').where('id', deadLetterId).first();
@@ -370,6 +369,10 @@ async function replayWebhook(deadLetterId) {
   }
 
   const body = typeof row.payload === 'string' ? row.payload : JSON.stringify(row.payload);
+
+  // Enforce payload bounding guard on replay
+  validatePayloadBounds(body);
+
   const signatureHeader = createSignatureHeader(secret, body);
 
   const controller = new AbortController();
@@ -660,9 +663,6 @@ async function emitConfigWebhook({ tenantId, section, config, actor = 'system', 
 
 /**
  * Marks a dead-letter row as resolved without re-sending.
- *
- * @param {string} deadLetterId
- * @returns {Promise<void>}
  */
 async function resolveDeadLetter(deadLetterId) {
   await db('webhook_dead_letters').where('id', deadLetterId).update({
@@ -673,6 +673,11 @@ async function resolveDeadLetter(deadLetterId) {
 }
 
 module.exports = {
+  createSignatureHeader,
+  verifySignature,
+  sortKeys,
+  enqueueWebhookDelivery,
+  setSharedWorker,
   emitWebhook,
   emitConfigWebhook,
   enqueueWebhookDelivery,
