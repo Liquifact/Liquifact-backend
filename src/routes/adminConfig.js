@@ -34,7 +34,6 @@ const {
   CONFIG_SECTIONS,
 } = require('../schemas/config');
 const { adminConfigLimiter } = require('../middleware/rateLimit');
-const idempotencyMiddleware = require('../middleware/idempotency');
 const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
 const logger = require('../logger');
 const idempotencyMiddleware = require('../middleware/idempotency');
@@ -85,18 +84,16 @@ const optionalIdempotency = (req, res, next) => {
  *       A machine-readable `fieldErrors` map is returned on any validation
  *       failure so that clients can highlight the offending fields.
  *
- *       **Idempotency**: Requires an `Idempotency-Key` header. Retried
- *       requests with the same key and body return the original cached
- *       response; reusing a key with a different body returns 409.
+ *       **Idempotency (optional, issue #755)**: send an `Idempotency-Key`
+ *       header (8-128 URL-safe characters) to safely retry requests. Retries
+ *       with the same key and body return the original cached response;
+ *       reusing a key with a different body returns 409. Omitting the header
+ *       skips idempotency handling entirely (gradual-rollout behaviour).
  *
  *       **Access**: Admin-only (JWT bearer or API key). Tenant-scoped.
  *       **Rate limit (issue #754)**: per client (API key / IP); default 20
  *       requests per 60 s window. Returns `429` with a `Retry-After` header
  *       when the budget is exhausted.
- *
- *       **Idempotency (issue #755)**: send an `Idempotency-Key` header (8-128
- *       URL-safe characters) to safely retry requests. Retries with the same
- *       key and payload will return the cached response.
  *
  *     tags: [AdminConfig]
  *     security:
@@ -104,11 +101,11 @@ const optionalIdempotency = (req, res, next) => {
  *     parameters:
  *       - in: header
  *         name: Idempotency-Key
- *         required: true
+ *         required: false
  *         schema:
  *           type: string
  *           pattern: '^[A-Za-z0-9._:-]{8,128}$'
- *         description: Unique idempotency key for this config update. Safe to retry with the same key.
+ *         description: Optional idempotency key for this config update. Safe to retry with the same key.
  *     requestBody:
  *       required: true
  *       content:
@@ -131,28 +128,32 @@ const optionalIdempotency = (req, res, next) => {
  *           application/json:
  *             schema:
  *               type: object
+ *               required: [section, config, message]
  *               properties:
  *                 section:
  *                   type: string
+ *                   enum: [webhook, reconciliation, kyc, retention, fraudThresholds, cors]
  *                 config:
  *                   type: object
  *                 message:
  *                   type: string
+ *               additionalProperties: false
  *       400:
- *         description: Validation error — body contains invalid or missing fields, or missing/malformed Idempotency-Key.
+ *         description: Validation error — body contains invalid or missing fields.
  *         content:
  *           application/problem+json:
  *             schema:
  *               type: object
+ *               required: [type, title, status, detail, fieldErrors]
  *               properties:
  *                 type:  { type: string }
  *                 title: { type: string }
  *                 status: { type: integer }
  *                 detail: { type: string }
- *                 code:   { type: string }
  *                 fieldErrors:
  *                   type: object
  *                   additionalProperties: { type: string }
+ *               additionalProperties: false
  *       401:
  *         $ref: '#/components/responses/Problem401'
  *       403:
@@ -163,12 +164,14 @@ const optionalIdempotency = (req, res, next) => {
  *           application/problem+json:
  *             schema:
  *               type: object
+ *               required: [type, title, status, detail, instance]
  *               properties:
  *                 type:    { type: string }
  *                 title:   { type: string }
  *                 status:  { type: integer }
  *                 detail:  { type: string }
- *                 requestId: { type: string }
+ *                 instance: { type: string }
+ *               additionalProperties: false
  *       429:
  *         description: Rate limit exceeded (issue #754) — see Retry-After header.
  *         headers:
@@ -180,6 +183,7 @@ const optionalIdempotency = (req, res, next) => {
  *           application/json:
  *             schema:
  *               type: object
+ *               required: [type, title, status, code, retryable, retry_hint, scope, error, message]
  *               properties:
  *                 type:    { type: string }
  *                 title:   { type: string }
@@ -190,8 +194,9 @@ const optionalIdempotency = (req, res, next) => {
  *                 scope:   { type: string }
  *                 error:   { type: string }
  *                 message: { type: string }
+ *               additionalProperties: false
  */
-router.post('/', idempotencyMiddleware, validateBody(runtimeConfigSchema), (req, res) => {
+router.post('/', optionalIdempotency, validateBody(runtimeConfigSchema), (req, res) => {
   // validateBody attaches the parsed, coerced payload to req.validated
   const { section, config: validatedConfig } = req.validated;
 
@@ -245,10 +250,14 @@ router.post('/', idempotencyMiddleware, validateBody(runtimeConfigSchema), (req,
  *           application/json:
  *             schema:
  *               type: object
+ *               required: [sections]
  *               properties:
  *                 sections:
  *                   type: array
- *                   items: { type: string }
+ *                   items:
+ *                     type: string
+ *                     enum: [webhook, reconciliation, kyc, retention, fraudThresholds, cors]
+ *               additionalProperties: false
  *       401:
  *         $ref: '#/components/responses/Problem401'
  *       403:

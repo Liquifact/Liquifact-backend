@@ -328,6 +328,72 @@ function createConfigRateLimiter() {
   });
 }
 
+/**
+ * 429 response body for {@link metricsLimiter} (issue #744).
+ *
+ * @param {import('express').Request} _req - Express request (unused).
+ * @param {import('express').Response} res - Express response.
+ * @param {import('express').NextFunction} _next - Express next (unused).
+ * @param {{ statusCode: number, windowMs: number }} options - RateLimit options.
+ * @returns {void}
+ */
+function metricsRateLimitHandler(_req, res, _next, options) {
+  res.status(options.statusCode).json({
+    type: 'https://liquifact.com/probs/too-many-requests',
+    title: 'Too Many Requests',
+    status: options.statusCode,
+    code: 'RATE_LIMITED',
+    retryable: true,
+    retry_hint: 'Wait for the rate-limit window to reset before retrying.',
+    scope: 'metrics',
+    error: 'Too many requests.',
+    message: 'Rate limit threshold breached for /metrics. Please try again later.',
+  });
+}
+
+/**
+ * Per-client rate limiter for /metrics (issue #744).
+ *
+ * Env vars:
+ *   - `METRICS_RATE_LIMIT_WINDOW_MS` (default 60 000)
+ *   - `METRICS_RATE_LIMIT_MAX`       (default 30)
+ *
+ * @type {import('express').RequestHandler}
+ */
+const metricsLimiter = rateLimit({
+  windowMs: METRICS_RATE_LIMIT_WINDOW_MS,
+  limit: METRICS_RATE_LIMIT_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: resolveRateLimitStore('metrics'),
+  keyGenerator: adminConfigKeyGenerator,
+  validate: {
+    xForwardedForHeader: false,
+  },
+  handler: metricsRateLimitHandler,
+});
+
+/**
+ * Factory variant of {@link metricsLimiter} for callers (mostly tests) that
+ * need to construct a fresh limiter with different bounds.
+ *
+ * @returns {import('express').RequestHandler}
+ */
+function createMetricsRateLimiter() {
+  return rateLimit({
+    windowMs: METRICS_RATE_LIMIT_WINDOW_MS,
+    limit: METRICS_RATE_LIMIT_MAX,
+    standardHeaders: true,
+    legacyHeaders: false,
+    store: resolveRateLimitStore('metrics'),
+    keyGenerator: adminConfigKeyGenerator,
+    validate: {
+      xForwardedForHeader: false,
+    },
+    handler: metricsRateLimitHandler,
+  });
+}
+
 const INVOICE_STATE_WINDOW_MS = parseRateLimitEnv('RATE_LIMIT_INVOICE_STATE_WINDOW_MS', 15 * 60 * 1000);
 const INVOICE_STATE_MAX = parseRateLimitEnv('RATE_LIMIT_INVOICE_STATE_MAX', 60);
 
