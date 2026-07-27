@@ -33,6 +33,11 @@ const { invoiceCreateSchema, invoiceUpdateSchema, parseValidationErrors } = requ
 const { escrowBatchReadSchema } = require('../../schemas/escrowBatchRead');
 const { validatePatchFields, detectLockedFieldChange } = require('../../middleware/patchInvoice');
 const { validateHealthQuery, rejectBodyOnGet } = require('../../schemas/health');
+const { z } = require('zod');
+
+const validateEscrowReadParams = z.object({
+  invoiceId: z.string().min(1).max(64),
+});
 
 // ── Sub-router mounts ────────────────────────────────────────────────────────
 router.use('/invest', investRoutes);

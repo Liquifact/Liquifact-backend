@@ -23,6 +23,9 @@ let featureRouterMountsByApp = new WeakMap();
  * @returns {Array<{ basePath: string, router: import('express').Router }>} Mount registry.
  */
 function getMountsForApp(app) {
+  if (!app || (typeof app !== 'object' && typeof app !== 'function')) {
+    return [];
+  }
   let mounts = featureRouterMountsByApp.get(app);
   if (!mounts) {
     mounts = [];

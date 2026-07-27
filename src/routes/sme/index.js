@@ -22,7 +22,7 @@ const idempotencyMiddleware = require('../../middleware/idempotency');
 const logger = require('../../logger');
 const { instrumentPersistence } = require('../../middleware/persistenceMetrics');
 const { MAX_FILE_SIZE_BYTES, validatePersistenceBody, presignedUploadBodySchema } = require('../../schemas/persistence');
-const { createPersistenceRateLimiter } = require('../../middleware/rateLimit');
+const { createPersistenceRateLimiter } = require('../../middleware/persistenceRateLimit');
 
 const upload = multer({
   storage: multer.memoryStorage(),

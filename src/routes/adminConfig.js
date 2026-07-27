@@ -33,21 +33,21 @@
  */
 
 const express = require('express');
-const compression = require('compression');
+const { createCompressionMiddleware } = require('../middleware/compression');
 const { adminStack } = require('../middleware/stacks');
 const {
   runtimeConfigSchema,
   validateBody,
 } = require('../schemas/config');
 const { adminConfigLimiter } = require('../middleware/rateLimit');
-const idempotencyMiddleware = require('../middleware/idempotency');
+const optionalIdempotency = require('../middleware/optionalIdempotency');
 const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
 const logger = require('../logger');
 
 const router = express.Router();
 
 // Compress config responses above 500 bytes (issue #52)
-router.use(compression({ threshold: 500 }));
+router.use(createCompressionMiddleware({ threshold: 500 }));
 
 // ── Apply per-client rate limit *before* admin auth + tenant extraction ─────
 // Mounting the limiter ahead of adminStack ensures failed authentication
