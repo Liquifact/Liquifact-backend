@@ -19,6 +19,7 @@ const multer = require('multer');
 const storageService = require('../../services/storage');
 const { extractTenant } = require('../../middleware/tenant');
 const idempotencyMiddleware = require('../../middleware/idempotency');
+const { optionalMultipartIdempotency } = require('../../middleware/multipartIdempotency');
 const logger = require('../../logger');
 const { instrumentPersistence } = require('../../middleware/persistenceMetrics');
 const { MAX_FILE_SIZE_BYTES, validatePersistenceBody, presignedUploadBodySchema } = require('../../schemas/persistence');
@@ -80,6 +81,7 @@ router.post(
   persistenceRateLimiter,
   upload.single('invoice'),
   extractTenant,
+  optionalMultipartIdempotency,
   instrumentPersistence('sme_invoice_upload', async (req, res) => {
     const requestLogger = logger.createRequestLogger(req);
     try {
