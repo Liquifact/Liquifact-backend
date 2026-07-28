@@ -1,5 +1,7 @@
 'use strict';
 
+const zlib = require('zlib');
+
 jest.mock('redis', () => {
   const mockClient = {
     on: jest.fn(),
@@ -24,6 +26,18 @@ const BackgroundWorker = require('../src/workers/worker');
 
 // Destructure internal helpers used by the metrics-auth / safeEqual tests.
 const { metricsAuth, safeEqual, extractClientIp, LOOPBACK } = metrics;
+
+/**
+ * Decompresses a Buffer using gzip or deflate.
+ * @param {Buffer} buf - Compressed data.
+ * @param {'gzip'|'deflate'} encoding - Compression algorithm.
+ * @returns {string} Decompressed UTF-8 string.
+ */
+function decompress(buf, encoding) {
+  return encoding === 'gzip'
+    ? zlib.gunzipSync(buf).toString('utf8')
+    : zlib.inflateSync(buf).toString('utf8');
+}
 
 describe('GET /metrics', () => {
   let app;
@@ -881,6 +895,101 @@ describe('metrics shim path for Soroban observability', () => {
 
       expect(shimMetrics.normalizeSorobanRpcMethod('secret-payload')).toBe('unknown');
       expect(shimMetrics.normalizeSorobanRetryCause('rate-limited')).toBe('unknown');
+    });
+  });
+});
+
+describe('GET /metrics — response compression', () => {
+  afterEach(() => {
+    delete process.env.METRICS_BEARER_TOKEN;
+  });
+
+  describe('large payload — compression enabled by client', () => {
+    it('compresses with Content-Encoding: gzip when Accept-Encoding: gzip', async () => {
+      metrics.refreshMetrics();
+
+      const res = await request(createApp())
+        .get('/metrics')
+        .set('Accept-Encoding', 'gzip');
+
+      expect(res.status).toBe(200);
+      expect(res.headers['content-encoding']).toBe('gzip');
+      expect(res.headers['vary']).toContain('Accept-Encoding');
+      expect(decompress(res.body, 'gzip')).toContain('# HELP');
+    });
+
+    it('compresses with Content-Encoding: deflate when Accept-Encoding: deflate', async () => {
+      metrics.refreshMetrics();
+
+      const res = await request(createApp())
+        .get('/metrics')
+        .set('Accept-Encoding', 'deflate');
+
+      expect(res.status).toBe(200);
+      expect(res.headers['content-encoding']).toBe('deflate');
+      expect(res.headers['vary']).toContain('Accept-Encoding');
+      expect(decompress(res.body, 'deflate')).toContain('# HELP');
+    });
+
+    it('compresses when Accept-Encoding lists gzip and deflate (gzip preferred)', async () => {
+      metrics.refreshMetrics();
+
+      const res = await request(createApp())
+        .get('/metrics')
+        .set('Accept-Encoding', 'gzip, deflate');
+
+      expect(res.status).toBe(200);
+      expect(res.headers['content-encoding']).toBe('gzip');
+      expect(decompress(res.body, 'gzip')).toContain('# HELP');
+    });
+  });
+
+  describe('large payload — no compression', () => {
+    it('is uncompressed without Accept-Encoding header', async () => {
+      metrics.refreshMetrics();
+
+      const res = await request(createApp())
+        .get('/metrics');
+
+      expect(res.status).toBe(200);
+      expect(res.headers['content-encoding']).toBeUndefined();
+      expect(res.text).toContain('# HELP');
+    });
+
+    it('is uncompressed when Accept-Encoding is identity', async () => {
+      metrics.refreshMetrics();
+
+      const res = await request(createApp())
+        .get('/metrics')
+        .set('Accept-Encoding', 'identity');
+
+      expect(res.status).toBe(200);
+      expect(res.headers['content-encoding']).toBeUndefined();
+      expect(res.text).toContain('# HELP');
+    });
+
+    it('is uncompressed when Accept-Encoding is unsupported (br)', async () => {
+      metrics.refreshMetrics();
+
+      const res = await request(createApp())
+        .get('/metrics')
+        .set('Accept-Encoding', 'br');
+
+      expect(res.status).toBe(200);
+      expect(res.headers['content-encoding']).toBeUndefined();
+      expect(res.text).toContain('# HELP');
+    });
+  });
+
+  describe('Vary header', () => {
+    it('sets Vary: Accept-Encoding on every metrics request', async () => {
+      metrics.refreshMetrics();
+
+      const res = await request(createApp())
+        .get('/metrics')
+        .set('Accept-Encoding', 'gzip');
+
+      expect(res.headers['vary']).toContain('Accept-Encoding');
     });
   });
 });
