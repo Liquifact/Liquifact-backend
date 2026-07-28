@@ -24,6 +24,7 @@ const responseHelper = require('../utils/responseHelper');
 const logger = require('../logger');
 const { validateIndexerQuery } = require('../schemas/indexerQuery');
 const { instrumentIndexer } = require('../middleware/indexerMetrics');
+const { mapQueryToDTO, mapDTOToServiceParams } = require('../dto/indexer');
 
 // Apply a per-client rate limit before admin auth so bursts are contained
 // even when the caller is unauthenticated or misconfigured.

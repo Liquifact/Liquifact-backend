@@ -33,7 +33,7 @@
   "type": "commonjs",
   "jest": {
     "testEnvironment": "node",
-    "transformIgnorePatterns": [],
+    "transform": {},
     "testPathIgnorePatterns": [
       "<rootDir>/dist/"
     ],
