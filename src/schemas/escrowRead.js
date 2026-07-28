@@ -25,7 +25,8 @@ const { parseValidationErrors } = require('./invoice');
 const escrowReadConfigSchema = z.object({
   cacheTtl: z.number({ invalid_type_error: 'cacheTtl must be a number' })
     .int({ message: 'cacheTtl must be an integer' })
-    .positive({ message: 'cacheTtl must be a positive number' }),
+    .positive({ message: 'cacheTtl must be a positive number' })
+    .max(31536000, { message: 'cacheTtl must not exceed 1 year (31536000 seconds)' }),
 }).strict();
 
 const idSchema = z.string({ invalid_type_error: 'id must be a string' })
