@@ -34,8 +34,27 @@
  */
 
 const db = require('../db/knex');
+const { get: getConfig } = require('../config');
 const { encodeCursor, decodeCursor } = require('../utils/cursorPagination');
 const { indexerEventSchema, parseValidationErrors } = require('../schemas/indexerEvent');
+const { IndexerCache, indexerCache } = require('./indexerCache');
+
+/**
+ * Checks whether the indexer listing/caching path is enabled.
+ * Reads `ESCROW_INDEXER_ENABLED` from the validated config.
+ * Safe default when config is not yet validated (e.g. in tests): `false`
+ * (disabled — matches the schema default and avoids unexpected cache writes).
+ *
+ * @returns {boolean} `true` when indexer listing + cache are enabled.
+ */
+function isIndexerEnabled() {
+  try {
+    const cfg = getConfig();
+    return cfg.ESCROW_INDEXER_ENABLED === 'true';
+  } catch (_e) {
+    return false;
+  }
+}
 
 /**
  * Allowed sort fields for the indexer listing endpoint.
@@ -162,7 +181,7 @@ async function listIndexerEvents({
   dbClient,
 } = {}) {
   const knex = dbClient || db;
-  const useCache = !dbClient;
+  const useCache = !dbClient && isIndexerEnabled();
 
   // ── Cache lookup ────────────────────────────────────────────────────────
   if (useCache) {
@@ -399,6 +418,7 @@ module.exports = {
   listIndexerEvents,
   bulkIndexerEvents,
   validateBulkPayload,
+  isIndexerEnabled,
   INDEXER_SORT_FIELDS,
   DEFAULT_SORT_FIELD,
   DEFAULT_ORDER,

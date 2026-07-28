@@ -232,5 +232,33 @@ describe('Config Validation', () => {
     process.env.ESCROW_READ_PROJECTION_ENABLED = 'invalid';
     expect(() => validate()).toThrow();
   });
+
+  // ── ESCROW_INDEXER_ENABLED flag ─────────────────────────────────────────
+
+  test('ESCROW_INDEXER_ENABLED defaults to "false" (safe default)', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    const config = validate();
+    expect(config.ESCROW_INDEXER_ENABLED).toBe('false');
+  });
+
+  test('ESCROW_INDEXER_ENABLED accepts "true"', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    process.env.ESCROW_INDEXER_ENABLED = 'true';
+    const config = validate();
+    expect(config.ESCROW_INDEXER_ENABLED).toBe('true');
+  });
+
+  test('ESCROW_INDEXER_ENABLED accepts "false"', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    process.env.ESCROW_INDEXER_ENABLED = 'false';
+    const config = validate();
+    expect(config.ESCROW_INDEXER_ENABLED).toBe('false');
+  });
+
+  test('ESCROW_INDEXER_ENABLED rejects invalid value', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    process.env.ESCROW_INDEXER_ENABLED = 'yes';
+    expect(() => validate()).toThrow();
+  });
 });
 
