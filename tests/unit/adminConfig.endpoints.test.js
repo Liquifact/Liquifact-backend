@@ -26,6 +26,12 @@ jest.mock('../../src/logger', () => ({
 jest.mock('../../src/metrics', () => ({
   webhookReplayTotal: { inc: jest.fn() },
   registry: { contentType: 'text/plain', metrics: jest.fn().mockResolvedValue('') },
+  configRequestDurationSeconds: { labels: () => ({ observe: jest.fn() }) },
+  configRequestsTotal: { labels: () => ({ inc: jest.fn() }) },
+  configRequestErrorsTotal: { labels: () => ({ inc: jest.fn() }) },
+  normalizeConfigEndpoint: () => 'config_update',
+  normalizeConfigStatusClass: () => '2xx',
+  normalizeConfigCause: () => 'none',
 }));
 jest.mock('prom-client', () => ({
   Counter:  class { constructor() {} inc() {} },
@@ -172,7 +178,6 @@ describe('POST /api/admin/config - success path', () => {
         .post('/api/admin/config')
         .set('Authorization', AUTH)
         .send(payload);
-
       expect(res.status).toBe(200);
       expect(res.body.section).toBe(name);
       expect(res.body.config).toEqual(payload.config);

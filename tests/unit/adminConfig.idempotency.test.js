@@ -29,6 +29,12 @@ jest.mock('../../src/metrics', () => ({
   webhookReplayTotal: { inc: jest.fn() },
   idempotencyStorageFailureTotal: { inc: jest.fn() },
   registry: { contentType: 'text/plain', metrics: jest.fn().mockResolvedValue('') },
+  configRequestDurationSeconds: { labels: () => ({ observe: jest.fn() }) },
+  configRequestsTotal: { labels: () => ({ inc: jest.fn() }) },
+  configRequestErrorsTotal: { labels: () => ({ inc: jest.fn() }) },
+  normalizeConfigEndpoint: () => 'config_update',
+  normalizeConfigStatusClass: () => '2xx',
+  normalizeConfigCause: () => 'none',
 }));
 
 jest.mock('prom-client', () => ({

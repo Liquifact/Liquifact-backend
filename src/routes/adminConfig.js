@@ -41,8 +41,12 @@ const {
 } = require('../schemas/config');
 const { adminConfigLimiter } = require('../middleware/rateLimit');
 const optionalIdempotency = require('../middleware/optionalIdempotency');
-const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
-const logger = require('../logger');
+const { instrumentConfig } = require('../middleware/configMetrics');
+const {
+  toAdminConfigRequestDto,
+  fromAdminConfigRequestDto,
+} = require('../dto/config');
+const { applyConfig, getConfigSections } = require('../services/configService');
 
 const router = express.Router();
 
@@ -191,7 +195,7 @@ router.use(...adminStack);
  *                 error:   { type: string }
  *                 message: { type: string }
  */
-router.post('/', optionalIdempotency, validateBody(runtimeConfigSchema), (req, res) => {
+router.post('/', optionalIdempotency, validateBody(runtimeConfigSchema), instrumentConfig('config_update', (req, res) => {
   // validateBody attaches the parsed, coerced payload to req.validated
   const validatedDto = toAdminConfigRequestDto(req.validated);
   const { section, config: validatedConfig } = fromAdminConfigRequestDto(validatedDto);
@@ -203,7 +207,7 @@ router.post('/', optionalIdempotency, validateBody(runtimeConfigSchema), (req, r
   });
 
   return res.status(200).json(result);
-});
+}));
 
 // ── GET /api/admin/config/sections ───────────────────────────────────────────
 
@@ -235,9 +239,9 @@ router.post('/', optionalIdempotency, validateBody(runtimeConfigSchema), (req, r
  *       403:
  *         $ref: '#/components/responses/Problem403'
  */
-router.get('/sections', (req, res) => {
+router.get('/sections', instrumentConfig('config_sections', (req, res) => {
   return res.status(200).json({ sections: getConfigSections() });
-});
+}));
 
 module.exports = router;
 

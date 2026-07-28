@@ -584,19 +584,6 @@ function indexerKeyGenerator(req) {
 }
 
 /**
- * 429 response body for {@link metricsLimiter}.
- *
- * @param {import('express').Request} _req - Express request (unused).
- * @param {import('express').Response} res - Express response.
- * @returns {void}
- */
-function metricsRateLimitHandler(_req, res) {
-  res.status(429).json({
-    error: 'Too many metrics requests',
-  });
-}
-
-/**
  * Per-client (API key / IP) rate limiter for the invoice-state endpoints.
  * Config-driven via RATE_LIMIT_INVOICE_STATE_WINDOW_MS / RATE_LIMIT_INVOICE_STATE_MAX.
  * express-rate-limit sets Retry-After via standardHeaders on 429.

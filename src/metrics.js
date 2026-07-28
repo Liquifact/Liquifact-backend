@@ -994,6 +994,371 @@ const sorobanRpcRetryCausesTotal = new client.Counter({
   registers: [registry],
 });
 
+// ═════════════════════════════════════════════════════════════════════════════
+// Health endpoint metrics
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Bounded enum of allowed `endpoint` label values for health metrics.
+ * @readonly
+ */
+const HEALTH_ENDPOINT_ENUM = Object.freeze([
+  'health_liveness',
+  'health_full',
+  'health_readiness',
+  'health_checks_list',
+  'health_reports_submit',
+  'unknown',
+]);
+
+/**
+ * Bounded enum of allowed `status_class` label values.
+ * @readonly
+ */
+const HEALTH_STATUS_CLASS_ENUM = Object.freeze(['2xx', '4xx', '5xx']);
+
+/**
+ * Bounded enum of allowed `cause` label values for health error metrics.
+ * @readonly
+ */
+const HEALTH_CAUSE_ENUM = Object.freeze([
+  'none',
+  'validation',
+  'timeout',
+  'dependency_failure',
+  'internal',
+]);
+
+/**
+ * Maps a raw endpoint hint to a bounded Prometheus label value.
+ * @param {unknown} raw - Raw endpoint identifier.
+ * @returns {string} Bounded label value from {@link HEALTH_ENDPOINT_ENUM}.
+ */
+function normalizeHealthEndpoint(raw) {
+  const str = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  return HEALTH_ENDPOINT_ENUM.includes(str) ? str : 'unknown';
+}
+
+/**
+ * Maps an HTTP status code to a bounded status-class label.
+ * @param {unknown} raw - HTTP status code.
+ * @returns {string} '2xx', '4xx', or '5xx'.
+ */
+function normalizeHealthStatusClass(raw) {
+  const code = typeof raw === 'string' ? Number(raw) : Number(raw);
+  if (code >= 500) { return '5xx'; }
+  if (code >= 400) { return '4xx'; }
+  return '2xx';
+}
+
+/**
+ * Maps an error and status code to a bounded cause label.
+ * @param {unknown} err - Error object (or null/undefined).
+ * @param {number} statusCode - HTTP status code.
+ * @returns {string} Bounded cause value.
+ */
+function normalizeHealthCause(err, statusCode) {
+  if (!err && statusCode < 400) { return 'none'; }
+  if (statusCode >= 400 && statusCode < 500) { return 'validation'; }
+
+  const code = err && typeof err === 'object' && 'code' in err ? String(err.code).toLowerCase() : '';
+  const message = err && typeof err === 'object' && 'message' in err ? String(err.message).toLowerCase() : '';
+
+  const combined = `${code} ${message}`;
+  if (combined.includes('econnrefused') || combined.includes('enotfound') || combined.includes('pool_acquire_timeout') || combined.includes('unreachable') || combined.includes('rpc error') || combined.includes('connectivity') || combined.includes('check failed')) {
+    return 'dependency_failure';
+  }
+  if (combined.includes('timeout') || combined.includes('timed out') || combined.includes('etimedout') || combined.includes('econnaborted') || combined.includes('abort_err') || combined.includes('aborted')) {
+    return 'timeout';
+  }
+  return 'internal';
+}
+
+/**
+ * Histogram: End-to-end latency of health check endpoints.
+ * @type {import('prom-client').Histogram}
+ */
+const healthRequestDurationSeconds = new client.Histogram({
+  name: 'health_request_duration_seconds',
+  help: 'Latency of health check endpoints in seconds',
+  labelNames: ['endpoint', 'status_class'],
+  buckets: [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+  registers: [registry],
+});
+
+/**
+ * Counter: Health endpoint request count.
+ * @type {import('prom-client').Counter}
+ */
+const healthRequestsTotal = new client.Counter({
+  name: 'health_requests_total',
+  help: 'Total number of health endpoint requests',
+  labelNames: ['endpoint', 'status_class'],
+  registers: [registry],
+});
+
+/**
+ * Counter: Health endpoint request errors.
+ * @type {import('prom-client').Counter}
+ */
+const healthRequestErrorsTotal = new client.Counter({
+  name: 'health_request_errors_total',
+  help: 'Total number of health endpoint request errors',
+  labelNames: ['endpoint', 'cause'],
+  registers: [registry],
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// API key auth metrics
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Histogram: Latency of API key authentication checks.
+ * @type {import('prom-client').Histogram}
+ */
+const apiKeyAuthDurationSeconds = new client.Histogram({
+  name: 'api_key_auth_duration_seconds',
+  help: 'Latency of API key authentication checks in seconds',
+  labelNames: ['endpoint', 'method', 'status', 'outcome'],
+  buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1],
+  registers: [registry],
+});
+
+/**
+ * Counter: API key authentication errors.
+ * @type {import('prom-client').Counter}
+ */
+const apiKeyAuthErrorsTotal = new client.Counter({
+  name: 'api_key_auth_errors_total',
+  help: 'Total number of API key authentication errors',
+  labelNames: ['cause'],
+  registers: [registry],
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// KYC webhook metrics
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Histogram: Latency of KYC webhook processing.
+ * @type {import('prom-client').Histogram}
+ */
+const kycWebhookRequestDurationSeconds = new client.Histogram({
+  name: 'kyc_webhook_request_duration_seconds',
+  help: 'Latency of KYC webhook request processing in seconds',
+  labelNames: ['status_class'],
+  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+  registers: [registry],
+});
+
+/**
+ * Counter: KYC webhook request count.
+ * @type {import('prom-client').Counter}
+ */
+const kycWebhookRequestsTotal = new client.Counter({
+  name: 'kyc_webhook_requests_total',
+  help: 'Total number of KYC webhook requests',
+  labelNames: ['status_class'],
+  registers: [registry],
+});
+
+/**
+ * Counter: KYC webhook errors.
+ * @type {import('prom-client').Counter}
+ */
+const kycWebhookErrorsTotal = new client.Counter({
+  name: 'kyc_webhook_errors_total',
+  help: 'Total number of KYC webhook errors',
+  labelNames: ['cause'],
+  registers: [registry],
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Metrics endpoint self-instrumentation
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Bounded enum of allowed `status_class` label values for metrics endpoint.
+ * @readonly
+ */
+const METRICS_STATUS_CLASS_ENUM = Object.freeze(['2xx', '4xx', '5xx']);
+
+/**
+ * Bounded enum of allowed `cause` label values for metrics endpoint errors.
+ * @readonly
+ */
+const METRICS_CAUSE_ENUM = Object.freeze(['none', 'auth_failure', 'internal_error']);
+
+/**
+ * Maps an HTTP status code to a bounded status-class label for the metrics endpoint.
+ * @param {unknown} raw - HTTP status code.
+ * @returns {string} '2xx', '4xx', or '5xx'.
+ */
+function normalizeMetricsEndpointStatusClass(raw) {
+  const code = typeof raw === 'string' ? Number(raw) : Number(raw);
+  if (code >= 500) { return '5xx'; }
+  if (code >= 400) { return '4xx'; }
+  return '2xx';
+}
+
+/**
+ * Maps an error and status code to a bounded cause label for the metrics endpoint.
+ * @param {unknown} err - Error object (or null/undefined).
+ * @param {number} statusCode - HTTP status code.
+ * @returns {string} Bounded cause value.
+ */
+function normalizeMetricsEndpointCause(err, statusCode) {
+  if (!err && statusCode < 400) { return 'none'; }
+  if (statusCode >= 400 && statusCode < 500) { return 'auth_failure'; }
+  return 'internal_error';
+}
+
+/**
+ * Histogram: Latency of the /metrics endpoint itself.
+ * @type {import('prom-client').Histogram}
+ */
+const metricsRequestDurationSeconds = new client.Histogram({
+  name: 'metrics_request_duration_seconds',
+  help: 'Latency of /metrics endpoint requests in seconds',
+  labelNames: ['status_class'],
+  buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5],
+  registers: [registry],
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Escrow read cache metrics
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Counter: Escrow read cache hits.
+ * @type {import('prom-client').Counter}
+ */
+const escrowReadCacheHitsTotal = new client.Counter({
+  name: 'escrow_read_cache_hits_total',
+  help: 'Total number of escrow read cache hits',
+  registers: [registry],
+});
+
+/**
+ * Counter: Escrow read cache misses.
+ * @type {import('prom-client').Counter}
+ */
+const escrowReadCacheMissesTotal = new client.Counter({
+  name: 'escrow_read_cache_misses_total',
+  help: 'Total number of escrow read cache misses',
+  registers: [registry],
+});
+
+/**
+ * Counter: Escrow read cache evictions.
+ * @type {import('prom-client').Counter}
+ */
+const escrowReadCacheEvictionsTotal = new client.Counter({
+  name: 'escrow_read_cache_evictions_total',
+  help: 'Total number of escrow read cache evictions',
+  labelNames: ['reason'],
+  registers: [registry],
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Config endpoint metrics
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Bounded enum of allowed `endpoint` label values for config metrics.
+ * @readonly
+ */
+const CONFIG_ENDPOINT_ENUM = Object.freeze([
+  'config_update',
+  'config_sections',
+  'unknown',
+]);
+
+/**
+ * Bounded enum of allowed `status_class` label values for config metrics.
+ * @readonly
+ */
+const CONFIG_STATUS_CLASS_ENUM = Object.freeze(['2xx', '4xx', '5xx']);
+
+/**
+ * Bounded enum of allowed `cause` label values for config error metrics.
+ * @readonly
+ */
+const CONFIG_CAUSE_ENUM = Object.freeze([
+  'none',
+  'validation',
+  'auth_failure',
+  'internal',
+]);
+
+/**
+ * Maps a raw endpoint hint to a bounded Prometheus label value for config.
+ * @param {unknown} raw - Raw endpoint identifier.
+ * @returns {string} Bounded label value from {@link CONFIG_ENDPOINT_ENUM}.
+ */
+function normalizeConfigEndpoint(raw) {
+  const str = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  return CONFIG_ENDPOINT_ENUM.includes(str) ? str : 'unknown';
+}
+
+/**
+ * Maps an HTTP status code to a bounded status-class label for config.
+ * @param {unknown} raw - HTTP status code.
+ * @returns {string} '2xx', '4xx', or '5xx'.
+ */
+function normalizeConfigStatusClass(raw) {
+  const code = typeof raw === 'string' ? Number(raw) : Number(raw);
+  if (code >= 500) { return '5xx'; }
+  if (code >= 400) { return '4xx'; }
+  return '2xx';
+}
+
+/**
+ * Maps an error and status code to a bounded cause label for config.
+ * @param {unknown} err - Error object (or null/undefined).
+ * @param {number} statusCode - HTTP status code.
+ * @returns {string} Bounded cause value.
+ */
+function normalizeConfigCause(err, statusCode) {
+  if (!err && statusCode < 400) { return 'none'; }
+  if (statusCode >= 400 && statusCode < 500) { return 'validation'; }
+  return 'internal';
+}
+
+/**
+ * Histogram: End-to-end latency of config endpoint requests.
+ * @type {import('prom-client').Histogram}
+ */
+const configRequestDurationSeconds = new client.Histogram({
+  name: 'config_request_duration_seconds',
+  help: 'Latency of admin config endpoint requests in seconds',
+  labelNames: ['endpoint', 'status_class'],
+  buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5],
+  registers: [registry],
+});
+
+/**
+ * Counter: Config endpoint request count.
+ * @type {import('prom-client').Counter}
+ */
+const configRequestsTotal = new client.Counter({
+  name: 'config_requests_total',
+  help: 'Total number of admin config endpoint requests',
+  labelNames: ['endpoint', 'status_class'],
+  registers: [registry],
+});
+
+/**
+ * Counter: Config endpoint request errors.
+ * @type {import('prom-client').Counter}
+ */
+const configRequestErrorsTotal = new client.Counter({
+  name: 'config_request_errors_total',
+  help: 'Total number of admin config endpoint request errors',
+  labelNames: ['endpoint', 'cause'],
+  registers: [registry],
+});
+
 /**
  * Returns the shared Prometheus registry.
  *
@@ -1016,6 +1381,9 @@ module.exports = {
   escrowIndexerEventsProcessedTotal,
   escrowIndexerEventsSkippedTotal,
   escrowIndexerLastCursorAdvanceTimestampSeconds,
+  readinessGauge,
+  cacheStoreErrorsTotal,
+  redisCacheFailOpenTotal,
   escrowReconciliationDriftAlertsTotal,
   sorobanRpcCallDurationSeconds,
   sorobanRpcRetryCausesTotal,
@@ -1025,10 +1393,52 @@ module.exports = {
   webhookReplayTotal,
   bodySizeLimitRejectionsTotal,
   normalizeJobType,
+  escrowIndexerCycleFailuresTotal,
+  escrowReconciliationMismatches,
+  escrowReconciliationMismatchedInvoicesGauge,
+  escrowReconciliationDriftMagnitudeGauge,
+  normalizeReminderReason,
   normalizeSorobanRpcMethod,
   normalizeSorobanRpcOutcome,
   normalizeSorobanRetryCause,
   startMetricsRefresh,
   stopMetricsRefresh,
   webhookReplayTotal,
+  HEALTH_ENDPOINT_ENUM,
+  HEALTH_STATUS_CLASS_ENUM,
+  HEALTH_CAUSE_ENUM,
+  normalizeHealthEndpoint,
+  normalizeHealthStatusClass,
+  normalizeHealthCause,
+  healthRequestDurationSeconds,
+  healthRequestsTotal,
+  healthRequestErrorsTotal,
+  apiKeyAuthDurationSeconds,
+  apiKeyAuthErrorsTotal,
+  kycWebhookRequestDurationSeconds,
+  kycWebhookRequestsTotal,
+  kycWebhookErrorsTotal,
+  METRICS_STATUS_CLASS_ENUM,
+  METRICS_CAUSE_ENUM,
+  normalizeMetricsEndpointStatusClass,
+  normalizeMetricsEndpointCause,
+  metricsRequestDurationSeconds,
+  escrowReadCacheHitsTotal,
+  escrowReadCacheMissesTotal,
+  escrowReadCacheEvictionsTotal,
+  CONFIG_ENDPOINT_ENUM,
+  CONFIG_STATUS_CLASS_ENUM,
+  CONFIG_CAUSE_ENUM,
+  normalizeConfigEndpoint,
+  normalizeConfigStatusClass,
+  normalizeConfigCause,
+  configRequestDurationSeconds,
+  configRequestsTotal,
+  configRequestErrorsTotal,
+  maturityReminderDeliveryAttemptsTotal,
+  maturityReminderDeliverySuccessTotal,
+  maturityReminderDeadLetterTotal,
+  contractWasmVersionMismatchAlertsTotal,
+  idempotencyStorageFailureTotal,
+  sorobanCircuitBreakerStateTransitionsTotal,
 };

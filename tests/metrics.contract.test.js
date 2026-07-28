@@ -112,6 +112,11 @@ const REQUIRED_METRIC_NAMES = [
 
   // Readiness
   'readiness_state',
+
+  // Config endpoint
+  'config_request_duration_seconds',
+  'config_requests_total',
+  'config_request_errors_total',
 ];
 
 // ── Helpers ────────────────────────────────────────────────────────────────
