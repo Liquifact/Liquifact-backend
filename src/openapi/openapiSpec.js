@@ -547,6 +547,72 @@ const baseDefinition = {
         },
         additionalProperties: false,
       },
+      /**
+       * Successful response from `POST /api/invoices/bulk`.
+       */
+      InvoiceStateBulkResponse: {
+        type: 'object',
+        required: ['data', 'meta', 'error', 'message'],
+        properties: {
+          data: {
+            type: 'object',
+            required: ['results', 'summary'],
+            properties: {
+              results: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  required: ['index', 'success'],
+                  properties: {
+                    index: { type: 'integer', minimum: 0 },
+                    success: { type: 'boolean' },
+                    action: { type: 'string' },
+                    result: {
+                      type: ['object', 'null'],
+                      properties: {
+                        invoiceId: { type: 'string' },
+                        previousState: { type: 'string' },
+                        currentState: { type: 'string' },
+                        transitionedAt: { type: 'string' },
+                        transitionedBy: { type: 'string' },
+                        auditLogId: { type: 'string' },
+                        escrowId: { type: ['string', 'null'] },
+                      },
+                      additionalProperties: true,
+                    },
+                    error: { type: ['string', 'null'] },
+                    code: { type: ['string', 'null'] },
+                  },
+                  additionalProperties: true,
+                },
+              },
+              summary: {
+                type: 'object',
+                required: ['total', 'succeeded', 'failed'],
+                properties: {
+                  total: { type: 'integer', minimum: 0 },
+                  succeeded: { type: 'integer', minimum: 0 },
+                  failed: { type: 'integer', minimum: 0 },
+                },
+                additionalProperties: false,
+              },
+            },
+            additionalProperties: false,
+          },
+          meta: {
+            type: 'object',
+            required: ['timestamp', 'version'],
+            properties: {
+              timestamp: { type: 'string' },
+              version: { type: 'string' },
+            },
+            additionalProperties: false,
+          },
+          error: { type: 'null' },
+          message: { type: 'string' },
+        },
+        additionalProperties: false,
+      },
     },
     responses: {
       Problem400: {
