@@ -19,14 +19,11 @@ const express = require('express');
 const router = express.Router();
 const investRoutes = require('../invest');
 const smeRouter = require('../sme');
-const apiKeysRoutes = require('../apiKeys'); // ← Added
+const apiKeysRoutes = require('../apiKeys');
 const { extractTenant } = require('../../middleware/tenant');
 const { authenticateToken } = require('../../middleware/auth');
 const invoiceService = require('../../services/invoiceService');
-const { resolveEscrowAddress, EscrowNotFoundError } = require('../../config/escrowMap');
-const { readEscrowState } = require('../../services/escrowRead');
-const { batchReadEscrowStates } = require('../../services/escrowBatchRead');
-const { computeEscrowDerivedFields } = require('../../services/escrowDerived');
+const { getEscrowRead, getEscrowReadBatch } = require('../../services/escrowReadService');
 const { escrowReadLimiter } = require('../../middleware/rateLimit');
 const { recordEscrowRead } = require('../../services/escrowReadMetrics');
 const AppError = require('../../errors/AppError');
@@ -36,9 +33,8 @@ const { validatePatchFields, detectLockedFieldChange } = require('../../middlewa
 const { validateHealthQuery, rejectBodyOnGet } = require('../../schemas/health');
 const { z } = require('zod');
 
-/** Zod schema for GET /v1/escrow/:invoiceId path parameters. */
-const escrowReadParamsSchema = z.object({
-  invoiceId: z.string().min(1, 'invoiceId is required').max(128, 'invoiceId too long'),
+const validateEscrowReadParams = z.object({
+  invoiceId: z.string().min(1).max(64),
 });
 
 // ── Sub-router mounts ────────────────────────────────────────────────────────
@@ -178,59 +174,20 @@ router.post('/invoices', extractTenant, async (req, res, next) => {
  * Returns escrow state with derived display fields.
  * Authentication is required for versioned escrow reads.
  */
-// Rate limiter runs BEFORE authenticateToken so that abuse is stopped
-// before any auth processing (IP-based limiting for this endpoint).
 router.get('/escrow/:invoiceId', escrowReadLimiter, authenticateToken, async (req, res, next) => {
-  const startTime = process.hrtime.bigint();
-
+  const startTime = Date.now();
   try {
-    // Validate path parameters
-    const { success, error, data: validatedParams } = escrowReadParamsSchema.safeParse(req.params);
-    if (!success) {
-      throw new AppError({
-        type: 'https://liquifact.com/probs/bad-request',
-        title: 'Bad Request',
-        status: 400,
-        detail: 'Invalid invoiceId parameter.',
-        code: 'BAD_REQUEST',
-        retryable: false,
-        fieldErrors: error.flatten().fieldErrors,
-      });
+    const invoiceId = req.params.invoiceId;
+    const { result, escrowAddress, error, code, statusCode } = await getEscrowRead(invoiceId);
+
+    if (error) {
+      res.status(statusCode).json({ error, code });
+      return;
     }
 
-    const invoiceId = validatedParams.invoiceId;
-
-    const escrowAddress = resolveEscrowAddress(invoiceId);
-    if (!escrowAddress) {
-      throw new AppError({
-        type: 'https://liquifact.com/probs/not-found',
-        title: 'Not Found',
-        status: 404,
-        detail: `No escrow contract mapping found for invoice ID '${invoiceId}'`,
-        code: 'NOT_FOUND',
-        retryable: false,
-      });
-    }
-
-    const state = await readEscrowState(invoiceId);
-    const derived = computeEscrowDerivedFields(state, {
-      ledgerCloseTime: state ? state.ledgerCloseTime : undefined,
-    });
-
-    return res.json({
-      data: {
-        ...state,
-        ...derived,
-        escrowAddress,
-      },
-      message: state.fromProjection
-        ? 'Escrow state read from event projection.'
-        : 'Escrow state read from live Soroban contract.',
-    });
+    res.set('X-Escrow-Address', escrowAddress);
+    return res.json(result);
   } catch (err) {
-    const statusCode = typeof err.status === 'number' && err.status >= 400 ? err.status : 500;
-    const invoiceId = req.params.invoiceId || 'unknown';
-    recordEscrowRead({ startTime, invoiceId, endpoint: 'v1', statusCode, err });
     return next(err);
   }
 });
@@ -271,52 +228,7 @@ router.post('/escrow/batch', authenticateToken, async (req, res, next) => {
     }
 
     const { invoiceIds } = parsed.data;
-
-    // Resolve escrow addresses up front so an unmapped invoice ID is reported
-    // per-item instead of aborting the whole batch.
-    const addressByInvoiceId = new Map();
-    const errors = [];
-
-    const markUnmapped = (invoiceId) => {
-      errors.push({
-        invoiceId,
-        error: `No escrow contract mapping found for invoice ID '${invoiceId}'`,
-        code: 'NOT_FOUND',
-      });
-    };
-
-    for (const rawId of invoiceIds) {
-      const invoiceId = String(rawId || '').trim().replace(/\s+/g, '');
-      try {
-        const escrowAddress = resolveEscrowAddress(invoiceId);
-        if (!escrowAddress) {
-          markUnmapped(invoiceId);
-          continue;
-        }
-        addressByInvoiceId.set(invoiceId, escrowAddress);
-      } catch (err) {
-        if (err instanceof EscrowNotFoundError) {
-          markUnmapped(invoiceId);
-          continue;
-        }
-        throw err;
-      }
-    }
-
-    const mappedIds = [...addressByInvoiceId.keys()];
-    const { results: readResults, errors: readErrors } = mappedIds.length
-      ? await batchReadEscrowStates(mappedIds)
-      : { results: [], errors: [] };
-
-    const results = readResults.map((state) => {
-      const escrowAddress = addressByInvoiceId.get(state.invoiceId);
-      const derived = computeEscrowDerivedFields(state, {
-        ledgerCloseTime: state.ledgerCloseTime,
-      });
-      return { ...state, ...derived, escrowAddress };
-    });
-
-    errors.push(...readErrors);
+    const { results, errors } = await getEscrowReadBatch(invoiceIds);
 
     return res.json({
       data: { results, errors },
