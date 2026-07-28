@@ -4,6 +4,8 @@ const express = require('express');
 const db = require('../db/knex');
 const kycService = require('../services/kycService');
 const logger = require('../logger');
+const { getAuditLogs } = require('../services/auditLog');
+const { redactValue } = require('../services/auditLogStore');
 const { verifySignature, parseJsonPayload } = require('../middleware/kycWebhookValidation');
 const { kycWebhookSchema, parseValidationErrors, kycWebhookListResponseSchema } = require('../schemas/kycWebhook');
 const { decodeCursor, encodeCursor, CursorError } = require('../utils/cursorPagination');
@@ -17,8 +19,7 @@ const {
   normalizeKycWebhookStatusClass,
   normalizeKycWebhookCause,
 } = require('../metrics');
-const { verifySignature } = require('../services/webhooks');
-const { parseJsonPayload, validateKycWebhookRequest } = require('../middleware/kycWebhookValidation');
+const { validateKycWebhookRequest } = require('../middleware/kycWebhookValidation');
 const {
   HTTP_HEADERS,
   KYC_WEBHOOK_ROUTES,
@@ -177,12 +178,20 @@ router.post(KYC_WEBHOOK_ROUTES.WEBHOOK, asyncHandler(async (req, res) => {
   }
 
   try {
-    const record = await kycService.persistKycRecord({
-      smeId,
-      status,
-      providerRecordId,
-      verifiedAt,
-    });
+    const actor = req.user?.sub || req.user?.userId || req.user?.id || (req.apiClient && req.apiClient.clientId ? `api-key:${req.apiClient.clientId}` : 'kyc-provider');
+    const record = await kycService.persistKycRecord(
+      {
+        smeId,
+        status,
+        providerRecordId,
+        verifiedAt,
+      },
+      {
+        actor,
+        ipAddress: req.ip || 'unknown',
+        userAgent: req.get('user-agent') || 'unknown',
+      }
+    );
 
     logger.info(
       {
@@ -198,6 +207,64 @@ router.post(KYC_WEBHOOK_ROUTES.WEBHOOK, asyncHandler(async (req, res) => {
     logger.error({ smeId, error: error.message }, KYC_WEBHOOK_MESSAGES.FAILED_INGESTION);
     throw new KycWebhookError(error.message, 500, KYC_WEBHOOK_ERROR_CODES.PERSISTENCE_ERROR);
   }
+}));
+
+/**
+ * GET /api/kyc/webhooks/audit
+ *
+ * Bounded read view of audit trail logs for KYC webhooks.
+ * Secrets are automatically redacted via redactValue.
+ */
+router.get('/webhooks/audit', asyncHandler(async (req, res) => {
+  const rawLimit = req.query.limit;
+  const rawOffset = req.query.offset;
+  const smeId = req.query.smeId || req.query.resourceId || null;
+  const action = req.query.action || null;
+
+  let limit = DEFAULT_LIMIT;
+  if (rawLimit !== undefined) {
+    const v = parseInt(rawLimit, 10);
+    if (isNaN(v) || v < 1 || v > MAX_LIMIT) {
+      throw new KycWebhookError(
+        `limit must be an integer between 1 and ${MAX_LIMIT}`,
+        400,
+        KYC_WEBHOOK_ERROR_CODES.INVALID_PAGINATION
+      );
+    }
+    limit = v;
+  }
+
+  let offset = 0;
+  if (rawOffset !== undefined) {
+    const v = parseInt(rawOffset, 10);
+    if (isNaN(v) || v < 0) {
+      throw new KycWebhookError(
+        'offset must be a non-negative integer',
+        400,
+        KYC_WEBHOOK_ERROR_CODES.INVALID_PAGINATION
+      );
+    }
+    offset = v;
+  }
+
+  const logs = await getAuditLogs({
+    resourceType: 'kyc-webhook',
+    resourceId: smeId,
+    action,
+    limit,
+    offset,
+  });
+
+  const safeLogs = redactValue(logs);
+
+  return res.status(200).json({
+    data: safeLogs,
+    meta: {
+      limit,
+      offset,
+      count: safeLogs.length,
+    },
+  });
 }));
 
 /**

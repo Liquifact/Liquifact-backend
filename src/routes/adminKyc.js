@@ -10,6 +10,8 @@ const {
   purgeExpiredSoftDeletes,
   SOFT_DELETE_ERRORS,
 } = require('../services/kycWebhookSoftDelete');
+const { getAuditLogs } = require('../services/auditLog');
+const { redactValue } = require('../services/auditLogStore');
 const AppError = require('../errors/AppError');
 const logger = require('../logger');
 
@@ -81,6 +83,66 @@ function _mapSoftDeleteError(err, req) {
     instance: req.originalUrl,
   });
 }
+
+router.get('/webhooks/audit', async (req, res, next) => {
+  try {
+    const rawLimit = req.query.limit;
+    const rawOffset = req.query.offset;
+    const smeId = req.query.smeId || req.query.resourceId || null;
+    const action = req.query.action || null;
+
+    let limit = 20;
+    if (rawLimit !== undefined) {
+      const v = parseInt(rawLimit, 10);
+      if (isNaN(v) || v < 1 || v > 100) {
+        return next(new AppError({
+          type: 'https://liquifact.com/probs/validation-error',
+          title: 'Validation Error',
+          status: 400,
+          detail: 'limit must be an integer between 1 and 100',
+          instance: req.originalUrl,
+        }));
+      }
+      limit = v;
+    }
+
+    let offset = 0;
+    if (rawOffset !== undefined) {
+      const v = parseInt(rawOffset, 10);
+      if (isNaN(v) || v < 0) {
+        return next(new AppError({
+          type: 'https://liquifact.com/probs/validation-error',
+          title: 'Validation Error',
+          status: 400,
+          detail: 'offset must be a non-negative integer',
+          instance: req.originalUrl,
+        }));
+      }
+      offset = v;
+    }
+
+    const logs = await getAuditLogs({
+      resourceType: 'kyc-webhook',
+      resourceId: smeId,
+      action,
+      limit,
+      offset,
+    });
+
+    const safeLogs = redactValue(logs);
+
+    return res.json({
+      data: safeLogs,
+      meta: {
+        limit,
+        offset,
+        count: safeLogs.length,
+      },
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
 
 router.delete('/webhooks/:smeId', async (req, res, next) => {
   const parsedReason = _parseDeleteReason(req.body && req.body.reason);

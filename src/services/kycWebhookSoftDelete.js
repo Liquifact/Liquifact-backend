@@ -2,6 +2,7 @@
 
 const db = require('../db/knex');
 const logger = require('../logger');
+const { createAuditLog } = require('./auditLog');
 
 const KYC_TABLE = 'kyc_records';
 
@@ -188,7 +189,8 @@ async function softDeleteKycWebhook(smeId, options = {}) {
     'kycWebhookSoftDelete: record soft-deleted'
   );
 
-  return _toSoftDeleteState(
+  const beforeState = _toSoftDeleteState(row, { now });
+  const afterState = _toSoftDeleteState(
     {
       ...row,
       deleted_at: deletedAtIso,
@@ -197,6 +199,22 @@ async function softDeleteKycWebhook(smeId, options = {}) {
     },
     { now }
   );
+
+  try {
+    await createAuditLog({
+      actor: actor || 'admin',
+      action: 'DELETE',
+      resourceType: 'kyc-webhook',
+      resourceId: safeId,
+      before: beforeState,
+      after: afterState,
+      metadata: { reason },
+    });
+  } catch (auditErr) {
+    logger.warn({ smeId: safeId, error: auditErr.message }, 'Failed to record KYC webhook soft-delete audit log');
+  }
+
+  return afterState;
 }
 
 async function restoreKycWebhook(smeId, options = {}) {
@@ -260,7 +278,8 @@ async function restoreKycWebhook(smeId, options = {}) {
     'kycWebhookSoftDelete: record restored'
   );
 
-  return _toSoftDeleteState(
+  const beforeState = _toSoftDeleteState(row, { now });
+  const afterState = _toSoftDeleteState(
     {
       ...row,
       deleted_at: null,
@@ -271,6 +290,22 @@ async function restoreKycWebhook(smeId, options = {}) {
     },
     { now }
   );
+
+  try {
+    await createAuditLog({
+      actor: actor || 'admin',
+      action: 'UPDATE',
+      resourceType: 'kyc-webhook',
+      resourceId: safeId,
+      before: beforeState,
+      after: afterState,
+      metadata: { restoredAt: restoredAtIso },
+    });
+  } catch (auditErr) {
+    logger.warn({ smeId: safeId, error: auditErr.message }, 'Failed to record KYC webhook restore audit log');
+  }
+
+  return afterState;
 }
 
 async function _purgeBatch({ dbClient, cutoffIso, batchSize }) {
@@ -321,6 +356,22 @@ async function purgeExpiredSoftDeletes(options = {}) {
     purged += batch.deleted;
     smeIds.push(...batch.smeIds);
     batches += 1;
+
+    for (const smeId of batch.smeIds) {
+      try {
+        await createAuditLog({
+          actor: options.actor || 'system-purge',
+          action: 'DELETE',
+          resourceType: 'kyc-webhook',
+          resourceId: smeId,
+          before: { smeId, status: 'purged' },
+          after: null,
+          metadata: { cutoff: cutoffIso },
+        });
+      } catch (auditErr) {
+        logger.warn({ smeId, error: auditErr.message }, 'Failed to record KYC webhook purge audit log');
+      }
+    }
 
     if (batch.smeIds.length < batchSize) {
       break;
