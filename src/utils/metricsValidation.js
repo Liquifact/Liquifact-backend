@@ -69,7 +69,41 @@ function validateMetricsRequest(req, res) {
     return null;
   }
 
+  // Cross-tenant read protection: if the request is authenticated via JWT (has req.user.tenantId),
+  // ensure the resolved tenantId (which might come from the x-tenant-id header) matches the JWT scope.
+  if (req.user && req.user.tenantId && tenantId !== req.user.tenantId) {
+    res.status(403).json({
+      error: 'Forbidden',
+      message: 'Cross-tenant access denied',
+    });
+    return null;
+  }
+
   return { userId, tenantId };
 }
 
 module.exports = { validateMetricsRequest };
+
+/**
+ * Validates baseline telemetry metrics payload structure against the core schema.
+ * Part of Issue #875 - Changelog Drift Prevention Check.
+ * Ensures critical infrastructure metrics are always parsed cleanly.
+ */
+function verifyTelemetryMetricsPayload(payload) {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('Invalid telemetry metrics payload: Input must be a valid non-null object.');
+  }
+  
+  const structurallyRequiredFields = ['uptime', 'requestsCount', 'errorsCount'];
+  for (const field of structurallyRequiredFields) {
+    if (!(field in payload) || typeof payload[field] !== 'number') {
+      return false;
+    }
+  }
+  return true;
+}
+
+module.exports = {
+  ...module.exports,
+  verifyTelemetryMetricsPayload
+};

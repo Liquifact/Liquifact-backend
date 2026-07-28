@@ -327,6 +327,56 @@ describe('KYC Gating', () => {
     });
   });
 
+  // ── auditKycAccess ──────────────────────────────────────────────────────
+
+  describe('auditKycAccess', () => {
+    it('should call next and allow the request through', async () => {
+      const app = createApp({ smeId: 'sme-auth-01' });
+      app.use((req, res, next) => {
+        req.kyc = { smeId: 'sme-auth-01', status: 'verified' };
+        next();
+      });
+      app.post('/fund', kycGatingMiddleware.auditKycAccess, (req, res) => {
+        res.status(200).json({ success: true });
+      });
+
+      const res = await request(app).post('/fund');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ success: true });
+    });
+
+    it('should pass through requests with no req.kyc without throwing', async () => {
+      const app = createApp({ smeId: 'sme-auth-01' });
+      app.post('/fund', kycGatingMiddleware.auditKycAccess, (req, res) => {
+        res.status(200).json({ success: true });
+      });
+
+      const res = await request(app).post('/fund');
+
+      expect(res.status).toBe(200);
+    });
+
+    it('should compose with requireKycForFunding on a fully gated route', async () => {
+      kycService.getKycStatus.mockResolvedValue({ status: 'verified', recordId: 'kyc-1' });
+
+      const app = createApp({ smeId: 'sme-auth-01' });
+      app.post(
+        '/fund',
+        kycGatingMiddleware.requireKycForFunding,
+        kycGatingMiddleware.auditKycAccess,
+        (req, res) => {
+          res.status(200).json({ success: true, kyc: req.kyc });
+        },
+      );
+
+      const res = await request(app).post('/fund');
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+    });
+  });
+
   // ── canFundWithKycStatus (fail-closed semantics) ───────────────────────
 
   describe('canFundWithKycStatus', () => {

@@ -102,6 +102,20 @@ describe('validateMetricsRequest — success cases', () => {
     expect(result.userId).toBe('');
   });
 
+  it('returns null and sends 403 when req.tenantId differs from req.user.tenantId (cross-tenant spoofing)', () => {
+    const req = makeReq({ user: { id: 'u1', tenantId: 'tenant-a' }, tenantId: 'tenant-b' });
+    const res = makeRes();
+
+    const result = validateMetricsRequest(req, res);
+
+    expect(result).toBeNull();
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(res.json).toHaveBeenCalledWith({
+      error: 'Forbidden',
+      message: 'Cross-tenant access denied',
+    });
+  });
+
   it('does NOT call res.status or res.json on the success path', () => {
     const req = makeReq();
     const res = makeRes();
@@ -339,5 +353,39 @@ describe('validateMetricsRequest — no side effects on success', () => {
     // res.status should not have been called
     expect(res.status).toBe(originalStatusMock);
     expect(res.status).not.toHaveBeenCalled();
+  });
+});
+
+describe('Issue #875 - Metrics API Changelog Telemetry Protection Tests', () => {
+  const { verifyTelemetryMetricsPayload } = require('../../src/utils/metricsValidation.js');
+
+  it('should pass with 100% accuracy when all required numerical tracking metrics exist', () => {
+    const validData = { uptime: 7200, requestsCount: 450, errorsCount: 2 };
+    const result = verifyTelemetryMetricsPayload(validData);
+    if (result !== true) throw new Error('Expected validation to pass successfully');
+  });
+
+  it('should return false if a critical metric field is completely absent from the payload', () => {
+    const missingFieldsData = { uptime: 7200, requestsCount: 450 }; // missing errorsCount
+    const result = verifyTelemetryMetricsPayload(missingFieldsData);
+    if (result !== false) throw new Error('Expected validation to fail gracefully due to missing fields');
+  });
+
+  it('should return false if a critical tracking parameter is not provided as a numeric value', () => {
+    const badTypeData = { uptime: 7200, requestsCount: "450", errorsCount: 0 }; // string value instead of number
+    const result = verifyTelemetryMetricsPayload(badTypeData);
+    if (result !== false) throw new Error('Expected validation to fail due to string parameter mismatch');
+  });
+
+  it('should immediately throw an informative schema validation error if input payload is completely empty or null', () => {
+    let didThrow = false;
+    try {
+      verifyTelemetryMetricsPayload(null);
+    } catch (err) {
+      if (err.message.includes('Input must be a valid non-null object.')) {
+        didThrow = true;
+      }
+    }
+    if (!didThrow) throw new Error('Expected function to throw structural error for null input payloads');
   });
 });

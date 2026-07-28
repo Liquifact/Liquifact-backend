@@ -24,9 +24,15 @@
  */
 
 const { z } = require('zod');
-const { validateBody, parseValidationErrors } = require('./invoice');
+const {
+  createBodyValidator,
+  createQueryValidator,
+  parseValidationErrors,
+  DEFAULT_PROBLEM_TYPE,
+  DEFAULT_ERROR_CODE,
+} = require('./validationHelper');
 
-// ── Shared primitives ────────────────────────────────────────────────────────
+// -- Shared primitives --------------------------------------------------------
 
 /**
  * A non-empty string bounded to `maxLen` characters, with whitespace trimmed.
@@ -89,7 +95,7 @@ function boundedNumber(min, max, label) {
     .max(max, { message: `${label} must be at most ${max}` });
 }
 
-// ── Webhook config schema ────────────────────────────────────────────────────
+// -- Webhook config schema ----------------------------------------------------
 
 /**
  * Schema for webhook delivery and retry configuration writes.
@@ -133,7 +139,7 @@ const webhookConfigSchema = z
   })
   .strict(); // reject unknown keys
 
-// ── Reconciliation config schema ─────────────────────────────────────────────
+// -- Reconciliation config schema ---------------------------------------------
 
 /**
  * Schema for reconciliation run scheduling configuration writes.
@@ -165,7 +171,7 @@ const reconciliationConfigSchema = z
     message: 'At least one reconciliation config field must be provided',
   });
 
-// ── KYC config schema ────────────────────────────────────────────────────────
+// -- KYC config schema --------------------------------------------------------
 
 /**
  * Schema for KYC provider connection configuration writes.
@@ -196,13 +202,13 @@ const kycConfigSchema = z
   })
   .strict();
 
-// ── Retention config schema ──────────────────────────────────────────────────
+// -- Retention config schema --------------------------------------------------
 
 /**
  * Schema for data-retention and legal-hold configuration writes.
  *
  * Fields:
- *  - `retentionDays`      — Retention window: integer in [1, 3650] (≤ 10 years).
+ *  - `retentionDays`      — Retention window: integer in [1, 3650] (= 10 years).
  *  - `purgeEnabled`       — Boolean toggle (optional).
  *  - `batchSize`          — Rows per purge batch: integer in [1, 1000].
  *  - `purgeCron`          — Cron expression for scheduled purges (max 100 chars).
@@ -241,7 +247,51 @@ const retentionConfigSchema = z
     message: 'At least one retention config field must be provided',
   });
 
-// ── Fraud thresholds schema ──────────────────────────────────────────────────
+// -- CORS config schema ------------------------------------------------------
+
+/**
+ * Schema for CORS (Cross-Origin Resource Sharing) configuration writes.
+ *
+ * Fields:
+ *  - `origins`  — Array of allowed origin URLs (max 20 items, each a valid
+ *                 URL up to 2048 chars).
+ *  - `maxAge`   — Preflight Access-Control-Max-Age in seconds: integer in
+ *                 [60, 86400] (min 1 minute, max 24 hours).
+ *
+ * At least one field must be provided.
+ *
+ * @type {import('zod').ZodObject}
+ */
+const corsConfigSchema = z
+  .object({
+    origins: z
+      .array(
+        z
+          .string({ invalid_type_error: 'each origin must be a string' })
+          .url({ message: 'each origin must be a valid URL (e.g. https://app.example.com)' })
+          .max(2048, { message: 'each origin must not exceed 2048 characters' })
+          .refine((v) => {
+            try {
+              const url = new URL(v);
+              return url.origin === url.href || url.href.endsWith('/') && url.href.slice(0, -1) === url.origin;
+            } catch {
+              return false;
+            }
+          }, { message: 'each origin must be a root origin URL without path or query' }),
+        { invalid_type_error: 'origins must be an array' },
+      )
+      .min(1, { message: 'origins must contain at least one entry' })
+      .max(20, { message: 'origins must not exceed 20 entries' })
+      .optional(),
+
+    maxAge: boundedInt(60, 86400, 'maxAge').optional(),
+  })
+  .strict()
+  .refine((d) => Object.keys(d).length > 0, {
+    message: 'At least one CORS config field must be provided',
+  });
+
+// -- Fraud thresholds schema --------------------------------------------------
 
 /**
  * Schema for per-tenant fraud and manual-review threshold configuration writes.
@@ -252,7 +302,7 @@ const retentionConfigSchema = z
  *  - `manualReviewThreshold`    — Amounts at or above this need human review:
  *                                 finite positive number in [1, 1_000_000_000].
  *
- * Cross-field rule: `manualReviewThreshold` must be ≤ `fraudCeiling` when
+ * Cross-field rule: `manualReviewThreshold` must be = `fraudCeiling` when
  * both fields are supplied, so the manual-review band remains reachable.
  *
  * @type {import('zod').ZodObject}
@@ -282,7 +332,7 @@ const fraudThresholdsSchema = z
     }
   });
 
-// ── Top-level runtime config schema ─────────────────────────────────────────
+// -- Top-level runtime config schema -----------------------------------------
 
 /**
  * Valid configuration section names accepted by POST /api/admin/config.
@@ -294,6 +344,7 @@ const CONFIG_SECTIONS = /** @type {const} */ ([
   'kyc',
   'retention',
   'fraudThresholds',
+  'cors',
 ]);
 
 /**
@@ -342,6 +393,7 @@ const runtimeConfigSchema = z
       kyc: kycConfigSchema,
       retention: retentionConfigSchema,
       fraudThresholds: fraudThresholdsSchema,
+      cors: corsConfigSchema,
     };
 
     const sectionSchema = sectionSchemas[data.section];
@@ -362,7 +414,84 @@ const runtimeConfigSchema = z
     }
   });
 
+// â”€â”€ Bulk config schema â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+/**
+ * Maximum number of operations allowed in a single bulk config request.
+ * Configurable via BULK_CONFIG_MAX_ITEMS env var; defaults to 10.
+ * @type {number}
+ */
+const BULK_CONFIG_MAX_ITEMS = (() => {
+  const raw = parseInt(process.env.BULK_CONFIG_MAX_ITEMS || '', 10);
+  return Number.isFinite(raw) && raw >= 1 ? raw : 10;
+})();
+
+/**
+ * Schema for the individual operation item within a bulk config request.
+ * Shape: `{ section: string, config: object }`
+ *
+ * Unlike `runtimeConfigSchema`, this schema does NOT run section-specific
+ * validation via `.superRefine()`. Per-item validation is performed in the
+ * route handler so that individual failures do not reject the entire batch.
+ *
+ * @type {import('zod').ZodObject}
+ */
+const bulkConfigItemSchema = z
+  .object({
+    section: z.enum(
+      /** @type {[string, ...string[]]} */ (CONFIG_SECTIONS),
+      {
+        invalid_type_error: 'section must be a string',
+        required_error: 'section is required',
+        errorMap: () => ({
+          message: `section must be one of: ${CONFIG_SECTIONS.join(', ')}`,
+        }),
+      },
+    ),
+    config: z
+      .record(z.unknown(), { invalid_type_error: 'config must be an object' })
+      .refine((v) => v !== null && typeof v === 'object' && !Array.isArray(v), {
+        message: 'config must be a plain object',
+      }),
+  })
+  .strict();
+
+/**
+ * Schema for the POST /api/admin/config/bulk request body.
+ *
+ * Shape:
+ * ```json
+ * {
+ *   "operations": [
+ *     { "section": "webhook", "config": { ... } },
+ *     { "section": "cors",    "config": { ... } }
+ *   ]
+ * }
+ * ```
+ *
+ * - `operations` must contain 1â€“BULK_CONFIG_MAX_ITEMS items.
+ * - Each item must have a valid `section` enum and a `config` object.
+ * - Unknown top-level keys are rejected.
+ *
+ * @type {import('zod').ZodObject}
+ */
+const bulkConfigSchema = z
+  .object({
+    operations: z
+      .array(bulkConfigItemSchema, {
+        invalid_type_error: 'operations must be an array',
+        required_error: 'operations is required',
+      })
+      .min(1, { message: 'operations must contain at least one item' })
+      .max(BULK_CONFIG_MAX_ITEMS, {
+        message: `operations must not exceed ${BULK_CONFIG_MAX_ITEMS} items`,
+      }),
+  })
+  .strict();
+
 // ── Exports ──────────────────────────────────────────────────────────────────
+
+const validateBody = (schema, options) => createBodyValidator(schema, options);
 
 module.exports = {
   // Section schemas (exported for direct use in tests and sub-route validation)
@@ -371,13 +500,26 @@ module.exports = {
   kycConfigSchema,
   retentionConfigSchema,
   fraudThresholdsSchema,
+  corsConfigSchema,
 
   // Top-level schema consumed by the admin config route
   runtimeConfigSchema,
 
+  // Bulk config schema and constants
+  bulkConfigSchema,
+  bulkConfigItemSchema,
+  BULK_CONFIG_MAX_ITEMS,
+
   // Re-exported helpers
   validateBody,
   parseValidationErrors,
+
+  // Backward-compatible helper
+  validateBody,
+
+  // Re-exported constants
+  DEFAULT_PROBLEM_TYPE,
+  DEFAULT_ERROR_CODE,
 
   // Constants
   CONFIG_SECTIONS,

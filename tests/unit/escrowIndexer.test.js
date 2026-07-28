@@ -14,7 +14,11 @@ const {
   shouldReplaceProjection,
   fetchEscrowEventsFromHorizon,
   createEscrowIndexer,
+  ValidationError,
 } = require('../../src/jobs/escrowIndexer');
+
+const VALID_CONTRACT_ID = 'CDLZFC3SYJ27SBCC6BAKCY73WFXHBTE357R67CW567QX65ECUGN45RXI';
+const VALID_TX_HASH = 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';
 
 function createInMemoryStore(initial = {}) {
   const state = {
@@ -73,22 +77,22 @@ describe('escrowIndexer ordering and idempotency', () => {
     test('rejects invalid invoiceId', () => {
       expect(() =>
         normalizeEvent({ eventId: 'e1', invoiceId: '!!!', eventType: 'x', ledgerSequence: 1 })
-      ).toThrow(/invoiceId/i);
+      ).toThrow(ValidationError);
     });
 
     test('rejects missing eventId/eventType', () => {
       expect(() =>
         normalizeEvent({ invoiceId: 'inv_1', eventType: 'x', ledgerSequence: 1 })
-      ).toThrow(/eventId/i);
+      ).toThrow(ValidationError);
       expect(() =>
         normalizeEvent({ eventId: 'e1', invoiceId: 'inv_1', ledgerSequence: 1 })
-      ).toThrow(/eventType/i);
+      ).toThrow(ValidationError);
     });
 
     test('rejects when invoiceId is missing/empty', () => {
       expect(() =>
         normalizeEvent({ eventId: 'e1', eventType: 'x', ledgerSequence: 1 })
-      ).toThrow(/invoiceId/i);
+      ).toThrow(ValidationError);
     });
 
     test('keeps optional chain pointers when present', () => {
@@ -98,15 +102,237 @@ describe('escrowIndexer ordering and idempotency', () => {
         eventType: 'escrow_created',
         ledgerSequence: 1,
         pagingToken: '1',
-        contractId: 'CABCDE',
-        txHash: 'TXHASH',
+        contractId: VALID_CONTRACT_ID,
+        txHash: VALID_TX_HASH,
         observedAt: '2026-01-01T00:00:00Z',
         eventBody: { hello: 'world' },
       });
 
-      expect(event.contractId).toBe('CABCDE');
-      expect(event.txHash).toBe('TXHASH');
+      expect(event.contractId).toBe(VALID_CONTRACT_ID);
+      expect(event.txHash).toBe(VALID_TX_HASH);
       expect(event.eventBody).toEqual({ hello: 'world' });
+    });
+
+    test('rejects empty eventId string', () => {
+      expect(() =>
+        normalizeEvent({ eventId: '', invoiceId: 'inv_1', eventType: 'x', ledgerSequence: 1 })
+      ).toThrow(ValidationError);
+    });
+
+    test('throws ValidationError with INVALID_PAYLOAD code for non-object', () => {
+      try {
+        normalizeEvent(null);
+      } catch (err) {
+        expect(err).toBeInstanceOf(ValidationError);
+        expect(err.code).toBe('INVALID_PAYLOAD');
+        expect(err.message).toMatch(/payload/i);
+      }
+    });
+
+    test('throws ValidationError with VALIDATION_ERROR code and field details', () => {
+      try {
+        normalizeEvent({ eventId: 'e1', invoiceId: '!!!', eventType: 'x', ledgerSequence: 1 });
+      } catch (err) {
+        expect(err).toBeInstanceOf(ValidationError);
+        expect(err.code).toBe('VALIDATION_ERROR');
+        expect(err.details).toBeDefined();
+        expect(err.details.invoiceId).toBeDefined();
+      }
+    });
+
+    test('rejects unknown fields in event payload', () => {
+      expect(() =>
+        normalizeEvent({
+          eventId: 'e1',
+          invoiceId: 'inv_1',
+          eventType: 'x',
+          ledgerSequence: 1,
+          unknownField: 'should be rejected',
+        })
+      ).toThrow(ValidationError);
+    });
+
+    test('accepts null contractId', () => {
+      const event = normalizeEvent({
+        eventId: 'e1',
+        invoiceId: 'inv_1',
+        eventType: 'x',
+        ledgerSequence: 1,
+        contractId: null,
+      });
+      expect(event.contractId).toBeNull();
+    });
+
+    test('accepts null txHash', () => {
+      const event = normalizeEvent({
+        eventId: 'e1',
+        invoiceId: 'inv_1',
+        eventType: 'x',
+        ledgerSequence: 1,
+        txHash: null,
+      });
+      expect(event.txHash).toBeNull();
+    });
+
+    test('defaults missing contractId to null', () => {
+      const event = normalizeEvent({
+        eventId: 'e1',
+        invoiceId: 'inv_1',
+        eventType: 'x',
+        ledgerSequence: 1,
+      });
+      expect(event.contractId).toBeNull();
+    });
+
+    test('defaults missing pagingToken to empty string', () => {
+      const event = normalizeEvent({
+        eventId: 'e1',
+        invoiceId: 'inv_1',
+        eventType: 'x',
+        ledgerSequence: 1,
+      });
+      expect(event.pagingToken).toBe('');
+    });
+
+    test('defaults missing eventBody to empty object', () => {
+      const event = normalizeEvent({
+        eventId: 'e1',
+        invoiceId: 'inv_1',
+        eventType: 'x',
+        ledgerSequence: 1,
+      });
+      expect(event.eventBody).toEqual({});
+    });
+
+    test('defaults missing observedAt to current ISO timestamp', () => {
+      const before = new Date().toISOString();
+      const event = normalizeEvent({
+        eventId: 'e1',
+        invoiceId: 'inv_1',
+        eventType: 'x',
+        ledgerSequence: 1,
+      });
+      const after = new Date().toISOString();
+      expect(event.observedAt).toBeDefined();
+      expect(event.observedAt >= before || event.observedAt <= after).toBe(true);
+    });
+
+    test('accepts valid integer string for ledgerSequence', () => {
+      const event = normalizeEvent({
+        eventId: 'e1',
+        invoiceId: 'inv_1',
+        eventType: 'x',
+        ledgerSequence: 42,
+      });
+      expect(event.ledgerSequence).toBe(42);
+    });
+
+    test('accepts ledgerSequence at max safe integer', () => {
+      const event = normalizeEvent({
+        eventId: 'e1',
+        invoiceId: 'inv_1',
+        eventType: 'x',
+        ledgerSequence: Number.MAX_SAFE_INTEGER,
+      });
+      expect(event.ledgerSequence).toBe(Number.MAX_SAFE_INTEGER);
+    });
+
+    test('rejects ledgerSequence exceeding max safe integer', () => {
+      expect(() =>
+        normalizeEvent({
+          eventId: 'e1',
+          invoiceId: 'inv_1',
+          eventType: 'x',
+          ledgerSequence: Number.MAX_SAFE_INTEGER + 1,
+        })
+      ).toThrow(ValidationError);
+    });
+
+    test('accepts eventType at 128 char boundary', () => {
+      const event = normalizeEvent({
+        eventId: 'e1',
+        invoiceId: 'inv_1',
+        eventType: 'x'.repeat(128),
+        ledgerSequence: 1,
+      });
+      expect(event.eventType.length).toBe(128);
+    });
+
+    test('accepts eventId at 256 char boundary', () => {
+      const event = normalizeEvent({
+        eventId: 'x'.repeat(256),
+        invoiceId: 'inv_1',
+        eventType: 'x',
+        ledgerSequence: 1,
+      });
+      expect(event.eventId.length).toBe(256);
+    });
+
+    test('accepts pagingToken at 2048 char boundary', () => {
+      const event = normalizeEvent({
+        eventId: 'e1',
+        invoiceId: 'inv_1',
+        eventType: 'x',
+        ledgerSequence: 1,
+        pagingToken: 'x'.repeat(2048),
+      });
+      expect(event.pagingToken.length).toBe(2048);
+    });
+
+    test('rejects non-string eventId', () => {
+      expect(() =>
+        normalizeEvent({
+          eventId: 123,
+          invoiceId: 'inv_1',
+          eventType: 'x',
+          ledgerSequence: 1,
+        })
+      ).toThrow(ValidationError);
+    });
+
+    test('rejects non-string invoiceId', () => {
+      expect(() =>
+        normalizeEvent({
+          eventId: 'e1',
+          invoiceId: 123,
+          eventType: 'x',
+          ledgerSequence: 1,
+        })
+      ).toThrow(ValidationError);
+    });
+
+    test('rejects non-string eventType', () => {
+      expect(() =>
+        normalizeEvent({
+          eventId: 'e1',
+          invoiceId: 'inv_1',
+          eventType: 123,
+          ledgerSequence: 1,
+        })
+      ).toThrow(ValidationError);
+    });
+
+    test('rejects non-numeric ledgerSequence (string)', () => {
+      expect(() =>
+        normalizeEvent({
+          eventId: 'e1',
+          invoiceId: 'inv_1',
+          eventType: 'x',
+          ledgerSequence: 'not-a-number',
+        })
+      ).toThrow(ValidationError);
+    });
+
+    test('rejects observedAt with non-ISO format', () => {
+      expect(() =>
+        normalizeEvent({
+          eventId: 'e1',
+          invoiceId: 'inv_1',
+          eventType: 'x',
+          ledgerSequence: 1,
+          observedAt: 'not-an-iso-date',
+        })
+      ).toThrow(ValidationError);
     });
   });
 
@@ -282,7 +508,7 @@ describe('escrowIndexer ordering and idempotency', () => {
       expect(secondProjection).toEqual(firstProjection);
     });
 
-    test('throws on invalid event payload (normalizeEvent)', async () => {
+    test('throws ValidationError on invalid event payload (normalizeEvent)', async () => {
       const store = createInMemoryStore();
       const transactionRunner = createTransactionRunner();
 
@@ -291,7 +517,23 @@ describe('escrowIndexer ordering and idempotency', () => {
           { store, transactionRunner },
           { eventId: 'evt-bad', invoiceId: 'inv_1', eventType: 'x', ledgerSequence: 0 }
         )
-      ).rejects.toThrow(/ledgerSequence/i);
+      ).rejects.toThrow(/invalid or out-of-range/i);
+    });
+
+    test('throws ValidationError with details on invalid payload', async () => {
+      const store = createInMemoryStore();
+      const transactionRunner = createTransactionRunner();
+
+      try {
+        await persistEscrowEvent(
+          { store, transactionRunner },
+          { eventId: 'evt-bad', invoiceId: 'inv_1', eventType: 'x', ledgerSequence: 0 }
+        );
+      } catch (err) {
+        expect(err).toBeInstanceOf(ValidationError);
+        expect(err.code).toBe('VALIDATION_ERROR');
+        expect(err.details).toBeDefined();
+      }
     });
   });
 

@@ -264,16 +264,18 @@ async function updateCommitment(id, fields) {
   return row;
 }
 
-  /**
-   * Find commitments for a given investor and invoice.
-   *
-   * @param {string} investorAddress
-   * @param {string} invoiceId
-   * @returns {Promise<CommitmentRecord[]>}
-   */
-  async function findCommitments(investorAddress, invoiceId) {
-    return db(TABLE).where({ investor_address: investorAddress, invoice_id: invoiceId }).orderBy('created_at', 'desc');
-  }
+/**
+ * Find commitments for a given investor and invoice.
+ *
+ * @param {string} investorAddress
+ * @param {string} invoiceId
+ * @returns {Promise<CommitmentRecord[]>}
+ */
+async function findCommitments(investorAddress, invoiceId) {
+  return db(TABLE)
+    .where({ investor_address: investorAddress, invoice_id: invoiceId })
+    .orderBy('created_at', 'desc');
+}
 
 // ── Durable investor lock store ───────────────────────────────────────────────
 // Records are keyed by tenant_id + invoice_id + funder_address.
@@ -537,9 +539,7 @@ module.exports = {
   validateAmountStroops,
   findCommitments,
   validateAddress,
-  validateAmountStroops,
   normalizeAmountStroopsInput,
-  CommitmentValidationError,
   setInvestorLock,
   getInvestorLock,
   getAllInvestorLocks,

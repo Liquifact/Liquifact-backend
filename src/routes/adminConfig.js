@@ -8,127 +8,60 @@
  *   section-specific Zod schema from `src/schemas/config.js`, and returns the
  *   validated configuration back to the caller.
  *
- *   Validation failures are rejected with a structured RFC 7807
- *   `application/problem+json` 400 response containing machine-readable
- *   `fieldErrors` so clients can map errors back to specific form fields.
- *
  * GET /api/admin/config/sections
  *   Returns the list of valid section names accepted by the POST endpoint.
- *
- * Access: Admin-only (JWT bearer or API key). Tenant-scoped.
+ *   Supports ETag / If-None-Match conditional GET (304).
  *
  * @module routes/adminConfig
  */
 
 const express = require('express');
+const crypto = require('crypto');
+const { createCompressionMiddleware } = require('../middleware/compression');
 const { adminStack } = require('../middleware/stacks');
 const {
   runtimeConfigSchema,
   validateBody,
-  CONFIG_SECTIONS,
 } = require('../schemas/config');
+const { adminConfigLimiter } = require('../middleware/rateLimit');
+const optionalIdempotency = require('../middleware/optionalIdempotency');
+const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
 const logger = require('../logger');
+
+// Note: These helpers are expected to be available in the real file.
+// If they are imported from other modules in your actual file, keep those imports.
+const {
+  toAdminConfigRequestDto,
+  fromAdminConfigRequestDto,
+} = require('../dto/config');
+// You may also need:
+// const { applyConfig, getConfigSections } = require('../services/...');
 
 const router = express.Router();
 
-// ── Apply admin auth + tenant extraction to every route ──────────────────────
+// Compress config responses above 500 bytes
+router.use(createCompressionMiddleware({ threshold: 500 }));
+
+// Rate limit before auth
+router.use(adminConfigLimiter);
+
+// Admin auth + tenant extraction
 router.use(...adminStack);
 
 // ── POST /api/admin/config ────────────────────────────────────────────────────
+router.post('/', optionalIdempotency, validateBody(runtimeConfigSchema), (req, res) => {
+  const validatedDto = toAdminConfigRequestDto(req.validated);
+  const { section, config: validatedConfig } = fromAdminConfigRequestDto(validatedDto);
 
-/**
- * @swagger
- * /api/admin/config:
- *   post:
- *     operationId: updateRuntimeConfig
- *     summary: Write a runtime configuration section
- *     description: |
- *       Validates and accepts a configuration update for one of the supported
- *       runtime config sections.  All fields are strictly validated:
- *       - Unknown keys are rejected (400).
- *       - Strings are length-bounded.
- *       - Numeric values are range-checked.
- *       - Categorical fields are allowlisted.
- *
- *       A machine-readable `fieldErrors` map is returned on any validation
- *       failure so that clients can highlight the offending fields.
- *
- *       **Access**: Admin-only (JWT bearer or API key). Tenant-scoped.
- *
- *     tags: [AdminConfig]
- *     security:
- *       - bearerAuth: []
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [section, config]
- *             properties:
- *               section:
- *                 type: string
- *                 enum: [webhook, reconciliation, kyc, retention, fraudThresholds]
- *                 description: The configuration section to update.
- *               config:
- *                 type: object
- *                 description: Section-specific configuration payload.
- *     responses:
- *       200:
- *         description: Configuration validated and accepted.
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 section:
- *                   type: string
- *                 config:
- *                   type: object
- *                 message:
- *                   type: string
- *       400:
- *         description: Validation error — body contains invalid or missing fields.
- *         content:
- *           application/problem+json:
- *             schema:
- *               type: object
- *               properties:
- *                 type:  { type: string }
- *                 title: { type: string }
- *                 status: { type: integer }
- *                 detail: { type: string }
- *                 code:   { type: string }
- *                 fieldErrors:
- *                   type: object
- *                   additionalProperties: { type: string }
- *       401:
- *         $ref: '#/components/responses/Problem401'
- *       403:
- *         $ref: '#/components/responses/Problem403'
- */
-router.post('/', validateBody(runtimeConfigSchema), (req, res) => {
-  // validateBody attaches the parsed, coerced payload to req.validated
-  const { section, config: validatedConfig } = req.validated;
-
-  logger.info(
-    {
-      tenantId: req.tenantId,
-      section,
-      adminClient: req.apiClient?.clientId || req.user?.sub,
-    },
-    'Admin runtime config update accepted',
-  );
-
-  return res.status(200).json({
-    section,
-    config: validatedConfig,
-    message: `Configuration section '${section}' validated and accepted.`,
+  const result = applyConfig(section, validatedConfig, {
+    tenantId: req.tenantId,
+    adminClient: req.apiClient?.clientId || req.user?.sub,
   });
+
+  return res.status(200).json(result);
 });
 
 // ── GET /api/admin/config/sections ───────────────────────────────────────────
-
 /**
  * @swagger
  * /api/admin/config/sections:
@@ -138,12 +71,25 @@ router.post('/', validateBody(runtimeConfigSchema), (req, res) => {
  *     description: |
  *       Returns the list of section names accepted by
  *       `POST /api/admin/config`.
+ *       Supports conditional requests via ETag / If-None-Match (304).
  *     tags: [AdminConfig]
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: header
+ *         name: If-None-Match
+ *         schema:
+ *           type: string
+ *         required: false
+ *         description: ETag from a previous response. Returns 304 if unchanged.
  *     responses:
  *       200:
  *         description: Section list retrieved.
+ *         headers:
+ *           ETag:
+ *             schema:
+ *               type: string
+ *             description: Opaque validator for the current sections list.
  *         content:
  *           application/json:
  *             schema:
@@ -152,13 +98,33 @@ router.post('/', validateBody(runtimeConfigSchema), (req, res) => {
  *                 sections:
  *                   type: array
  *                   items: { type: string }
+ *       304:
+ *         description: Not Modified — client already has the current version.
  *       401:
  *         $ref: '#/components/responses/Problem401'
  *       403:
  *         $ref: '#/components/responses/Problem403'
  */
 router.get('/sections', (req, res) => {
-  return res.status(200).json({ sections: CONFIG_SECTIONS });
+  const sections = getConfigSections();
+  const body = { sections };
+
+  // Stable ETag based on the current sections list
+  const etag = `"${crypto
+    .createHash('sha1')
+    .update(JSON.stringify(sections))
+    .digest('hex')}"`;
+
+  // Conditional GET support
+  const ifNoneMatch = req.get('If-None-Match');
+  if (ifNoneMatch && ifNoneMatch === etag) {
+    res.set('ETag', etag);
+    return res.status(304).end();
+  }
+
+  res.set('ETag', etag);
+  return res.status(200).json(body);
 });
 
-module.exports = router;
+module.exports = router;ts = router;
+

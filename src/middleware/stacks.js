@@ -28,52 +28,9 @@ const _adminApiKeyMiddleware = authenticateApiKey({ scope: 'admin' });
  * @returns {void}
  */
 function adminAuth(req, res, next) {
-  if (req.headers['x-api-key']) {
-    const originalStatus = res.status;
-    const originalJson = res.json;
-    let statusCode;
+  const apiKeyHeaderPresent = Object.prototype.hasOwnProperty.call(req.headers, 'x-api-key');
 
-    res.status = function(code) {
-      statusCode = code;
-      return originalStatus.apply(this, arguments);
-    };
-
-    res.json = function(body) {
-      if (statusCode === 403 && body && body.error && body.error.startsWith('Insufficient permissions')) {
-        let clientId = 'unknown';
-        try {
-          const rawKey = req.headers['x-api-key'].trim();
-          const registry = loadApiKeyRegistry();
-          for (const [key, entry] of registry) {
-            if (timingSafeStringEqual(rawKey, key)) {
-              clientId = entry.clientId;
-              break;
-            }
-          }
-        } catch (err) {}
-
-        createAuditLog({
-          actor: clientId,
-          action: 'READ',
-          resourceType: 'admin_api',
-          resourceId: req.path,
-          statusCode: 403,
-          ipAddress: req.ip,
-          userAgent: req.get('user-agent') || 'unknown',
-          metadata: { reason: 'insufficient_scope', requiredScope: 'admin' }
-        }).catch(() => {});
-
-        res.setHeader('Content-Type', 'application/problem+json');
-        return originalJson.call(this, {
-          type: 'about:blank',
-          title: 'Forbidden',
-          status: 403,
-          detail: 'Insufficient permissions. Required scope: "admin".'
-        });
-      }
-      return originalJson.call(this, body);
-    };
-
+  if (apiKeyHeaderPresent) {
     return _adminApiKeyMiddleware(req, res, next);
   }
   return authenticateToken(req, res, next);

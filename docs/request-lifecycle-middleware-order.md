@@ -40,22 +40,48 @@ Health probes (`/health`, `/healthz`, `/ready`, `/readyz`), API info (`/api`),
 invoice list/create, escrow read, and debug error routes are registered on the
 app instance before feature routers mount.
 
-## Feature router mounts (single mount per router instance)
+## Composed auth and tenant stacks
+
+Protected routers that need both authentication and tenant context mount the
+composed middleware stacks from [`src/middleware/stacks.js`](../src/middleware/stacks.js).
+These stacks preserve a strict ordering contract:
+
+- `authenticatedTenantStack` executes `authenticateToken` first and `extractTenant`
+  second. Tenant extraction must never run when JWT authentication fails.
+- `adminStack` executes `adminAuth` first and `extractTenant` second. `adminAuth`
+  selects the API-key branch only when the `x-api-key` header is present.
+  Empty strings and array-valued headers are treated as non-branching values so
+  the request falls back to JWT authentication.
+
+The repository includes an integration-style regression suite in
+[`tests/stacks.ordering.test.js`](../tests/stacks.ordering.test.js) that mounts
+both stacks on a throwaway Express app and exercises the middleware chain with
+Supertest to guard this ordering contract.
+
+## Feature router mounts (single mount per router instance and app)
 
 Each feature router is imported once and mounted once via
 `mountFeatureRouter` from [`src/utils/routeMountRegistry.js`](../src/utils/routeMountRegistry.js).
-A startup assertion (`assertNoDuplicateRouterMounts`) fails fast if the same
-router instance is mounted twice at the same base path.
+The registry is scoped to the Express app instance, so the same router can be
+mounted at the same path on separately created apps while duplicate pairings on
+the same app still fail fast. `assertNoDuplicateRouterMounts(app)` validates the
+mounts registered for that specific app.
+
+`listRouteMounts(app)` returns an immutable snapshot suitable for test assertions
+and diagnostics. `resetRouteMounts()` clears all tracked state for test setup,
+and `resetRouteMounts(app)` clears only a single app's state. The global Jest
+setup invokes the no-argument reset before each test so cached modules cannot
+leak mount records across suites.
 
 Mount order (preserved intentionally):
 
 | Order | Base path | Router module | Notes |
-|-------|-----------|---------------|-------|
+|------|-----------|---------------|-------|
 | 1 | `/api/sme` | `routes/sme` | SME metrics and uploads |
 | 2 | `/api/invoices` | `routes/invoiceFile` | File upload handlers |
 | 3 | `/api/invoices` | `routes/invoiceStateRoutes` | State machine (second router, different instance) |
 | 4 | `/api/invest` | `routes/invest` | Funding opportunities and fund-invoice |
-| 5 | `/api/investor` | `routes/investor` | **Single mount** — investor lock list/detail |
+| 5 | `/api/investor` | `routes/investor` | **Single mount per app** - investor lock list/detail |
 | 6 | `/api/kyc` | `routes/kyc` | KYC verification |
 | 7 | `/api/marketplace` | `routes/marketplace` | Investable invoice marketplace |
 | 8 | `/api/retention` | `routes/retention` | Data retention policies |
@@ -64,7 +90,7 @@ Mount order (preserved intentionally):
 | 11 | `/api/admin/reconciliation` | `routes/reconciliation` | Reconciliation runs |
 | 12 | `/v1` | `routes/v1` | Versioned API surface |
 
-> **Investor routes:** `/api/investor` is mounted exactly once. The investor
+> **Investor routes:** `/api/investor` is mounted exactly once per app. The investor
 > router applies `authenticateToken` then `extractTenant` on each handler, so
 > auth and tenant context are enforced before lock list or detail logic runs.
 
@@ -74,7 +100,7 @@ Mount order (preserved intentionally):
 |------|---------|---------|
 | Metrics | `GET /metrics` | Prometheus scrape (auth-gated) |
 | 404 | Catch-all | Unknown paths |
-| Error | CORS → payload-too-large → internal | Ordered error normalization |
+| Error | CORS -> payload-too-large -> internal | Ordered error normalization |
 
 ## Standardized response envelope
 

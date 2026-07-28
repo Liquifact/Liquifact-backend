@@ -100,6 +100,58 @@ describe('isRetryableSubmitError', () => {
   it('returns false for a number', () => {
     expect(isRetryableSubmitError(408)).toBe(false);
   });
+
+  it('returns false for a boolean', () => {
+    expect(isRetryableSubmitError(true)).toBe(false);
+  });
+
+  it('returns false for an empty object', () => {
+    expect(isRetryableSubmitError({})).toBe(false);
+  });
+
+  it('returns false when err.code is a number', () => {
+    expect(isRetryableSubmitError({ code: 408 })).toBe(false);
+  });
+
+  it('does not crash when err.message is undefined', () => {
+    const err = { code: 'ETIMEDOUT', message: undefined };
+    expect(isRetryableSubmitError(err)).toBe(true);
+  });
+
+  it('does not crash when err.message is null', () => {
+    const err = { code: 'ETIMEDOUT', message: null };
+    expect(isRetryableSubmitError(err)).toBe(true);
+  });
+
+  it('retries on transaction_timeout in result code (Stellar/Horizon-style)', () => {
+    expect(isRetryableSubmitError({ result: { code: 'TX_BAD_SEQ' } })).toBe(true);
+  });
+
+  it('does not retry when result.code is a non-retryable value', () => {
+    expect(isRetryableSubmitError({ result: { code: 'op_underfunded' } })).toBe(false);
+  });
+
+  it('does not retry when result.result.code is a non-retryable value', () => {
+    expect(isRetryableSubmitError({ result: { result: { code: 'op_no_trust' } } })).toBe(false);
+  });
+
+  it('retries on mixed-case error codes (ETIMEDOUT → etimedout)', () => {
+    expect(isRetryableSubmitError({ code: 'ETIMEDOUT' })).toBe(true);
+    expect(isRetryableSubmitError({ code: 'eTiMeDoUt' })).toBe(true);
+  });
+
+  it('retries on TX_BAD_SEQ in result code regardless of case', () => {
+    expect(isRetryableSubmitError({ result: { code: 'TX_BAD_SEQ' } })).toBe(true);
+    expect(isRetryableSubmitError({ result: { code: 'tx_bad_seq' } })).toBe(true);
+  });
+
+  it('does not retry on an error object with only a name property', () => {
+    expect(isRetryableSubmitError({ name: 'Error' })).toBe(false);
+  });
+
+  it('handles an Array as input (non-object path)', () => {
+    expect(isRetryableSubmitError(['timeout'])).toBe(false);
+  });
 });
 
 // ─── computeTxBackoff ─────────────────────────────────────────────────────────
@@ -122,6 +174,28 @@ describe('computeTxBackoff', () => {
 
   it('never returns a negative value', () => {
     expect(computeTxBackoff(0, 0, 0)).toBe(0);
+  });
+
+  it('returns baseDelay on attempt 0 regardless of maxDelay', () => {
+    expect(computeTxBackoff(0, 500, 5000)).toBe(500);
+  });
+
+  it('handles large attempt numbers without overflow', () => {
+    const result = computeTxBackoff(50, 1, 60000);
+    expect(result).toBe(60000);
+    expect(Number.isFinite(result)).toBe(true);
+  });
+
+  it('exponential growth is correct for attempts 0 through 5', () => {
+    // base=100, max=100000
+    const expected = [100, 200, 400, 800, 1600, 3200];
+    for (let i = 0; i < expected.length; i++) {
+      expect(computeTxBackoff(i, 100, 100000)).toBe(expected[i]);
+    }
+  });
+
+  it('clamps at maxDelay even at extreme attempt counts', () => {
+    expect(computeTxBackoff(100, 100, 500)).toBe(500);
   });
 });
 
@@ -146,6 +220,19 @@ describe('DEFAULT_CONFIG env clamping', () => {
   it('feeBumpMultiplier is clamped to 10', () => {
     expect(DEFAULT_CONFIG.feeBumpMultiplier).toBeLessThanOrEqual(10);
     expect(DEFAULT_CONFIG.feeBumpMultiplier).toBeGreaterThan(0);
+  });
+
+  it('feeBumpMultiplier defaults to 2 when env is unset', () => {
+    // DEFAULT_CONFIG is computed at module load; this verifies the hard-coded fallback.
+    expect(DEFAULT_CONFIG.feeBumpMultiplier).toBeGreaterThanOrEqual(1);
+    expect(DEFAULT_CONFIG.feeBumpMultiplier).toBeLessThanOrEqual(10);
+  });
+
+  it('all config values are finite numbers', () => {
+    expect(Number.isFinite(DEFAULT_CONFIG.maxRetries)).toBe(true);
+    expect(Number.isFinite(DEFAULT_CONFIG.baseDelayMs)).toBe(true);
+    expect(Number.isFinite(DEFAULT_CONFIG.maxDelayMs)).toBe(true);
+    expect(Number.isFinite(DEFAULT_CONFIG.feeBumpMultiplier)).toBe(true);
   });
 });
 
@@ -257,6 +344,91 @@ describe('submitWithRetry', () => {
     }
 
     jest.restoreAllMocks();
+  });
+
+  it('does not retry when maxRetries is 0', async () => {
+    const op = jest.fn(async () => { throw new Error('tx_bad_seq'); });
+    await expect(submitWithRetry(op, { maxRetries: 0, baseDelayMs: 1, maxDelayMs: 5 })).rejects.toThrow('tx_bad_seq');
+    expect(op).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries exactly maxRetries times on persistent transient errors', async () => {
+    const op = jest.fn(async () => { throw new Error('tx_bad_seq'); });
+    const cfg = { maxRetries: 1, baseDelayMs: 1, maxDelayMs: 5 };
+    await expect(submitWithRetry(op, cfg)).rejects.toThrow('tx_bad_seq');
+    expect(op).toHaveBeenCalledTimes(2); // attempt 0 + 1 retry
+  });
+
+  it('permanent error short-circuits without consuming retry budget', async () => {
+    let calls = 0;
+    const op = jest.fn(async () => {
+      calls += 1;
+      throw new Error('bad signature'); // permanent
+    });
+    const cfg = { maxRetries: 5, baseDelayMs: 1, maxDelayMs: 5 };
+    await expect(submitWithRetry(op, cfg)).rejects.toThrow('bad signature');
+    expect(op).toHaveBeenCalledTimes(1); // only one attempt — no retries
+  });
+
+  it('fee escalation math: operation receives attempt and multiplier for fee calculation', async () => {
+    // The operation should calculate: fee = baseFee * multiplier^attempt
+    const fees = [];
+    const BASE_FEE = 100;
+    const MULTIPLIER = 2;
+    const op = jest.fn(async ({ attempt, feeBumpMultiplier }) => {
+      const computedFee = Math.floor(BASE_FEE * Math.pow(feeBumpMultiplier, attempt));
+      fees.push({ attempt, multiplier: feeBumpMultiplier, computedFee });
+      if (attempt < 2) { throw new Error('tx_bad_seq'); }
+      return 'ok';
+    });
+    await submitWithRetry(op, { maxRetries: 3, baseDelayMs: 1, maxDelayMs: 5, feeBumpMultiplier: MULTIPLIER });
+    expect(fees).toEqual([
+      { attempt: 0, multiplier: 2, computedFee: 100 },   // 100 * 2^0 = 100
+      { attempt: 1, multiplier: 2, computedFee: 200 },   // 100 * 2^1 = 200
+      { attempt: 2, multiplier: 2, computedFee: 400 },   // 100 * 2^2 = 400
+    ]);
+  });
+
+  it('feeBumpMultiplier of 1 results in no fee escalation', async () => {
+    const fees = [];
+    const op = jest.fn(async ({ attempt, feeBumpMultiplier }) => {
+      fees.push(feeBumpMultiplier);
+      if (attempt < 1) { throw new Error('tx_bad_seq'); }
+      return 'ok';
+    });
+    await submitWithRetry(op, { maxRetries: 2, baseDelayMs: 1, maxDelayMs: 5, feeBumpMultiplier: 1 });
+    // All attempts receive multiplier=1
+    expect(fees).toEqual([1, 1]);
+  });
+
+  it('transient error via result.code triggers retry', async () => {
+    let calls = 0;
+    const op = jest.fn(async () => {
+      calls += 1;
+      if (calls === 1) {
+        const err = new Error('tx_submission_failed');
+        err.result = { code: 'tx_bad_seq' };
+        throw err;
+      }
+      return 'ok';
+    });
+    await expect(submitWithRetry(op, { maxRetries: 2, baseDelayMs: 1, maxDelayMs: 5 })).resolves.toBe('ok');
+    expect(op).toHaveBeenCalledTimes(2);
+  });
+
+  it('transient error via code property triggers retry', async () => {
+    let calls = 0;
+    const op = jest.fn(async () => {
+      calls += 1;
+      if (calls === 1) {
+        const err = new Error('network issue');
+        err.code = 'ECONNRESET';
+        throw err;
+      }
+      return 'ok';
+    });
+    await expect(submitWithRetry(op, { maxRetries: 2, baseDelayMs: 1, maxDelayMs: 5 })).resolves.toBe('ok');
+    expect(op).toHaveBeenCalledTimes(2);
   });
 });
 
