@@ -104,6 +104,10 @@ if (process.env.NODE_ENV !== 'test' && require.main === module) {
   const { startPurgeWorker } = require('./jobs/idempotencyPurge');
   startPurgeWorker();
 
+  // Start the invoice-state retention purge worker (issue #866)
+  const { startPurgeWorker: startInvoiceStatePurgeWorker } = require('./jobs/invoiceStatePurge');
+  startInvoiceStatePurgeWorker();
+
   startServer();
 }
 

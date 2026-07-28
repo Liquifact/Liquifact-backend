@@ -54,9 +54,11 @@ const marketplaceRoutes = require('./routes/marketplace');
 const retentionRoutes = require('./routes/retention');
 const invoiceStateRoutes = require('./routes/invoiceStateRoutes');
 const adminEscrowRoutes = require('./routes/adminEscrow');
+const adminInvoiceStateRoutes = require('./routes/adminInvoiceState');
 const adminWebhooksRoutes = require('./routes/adminWebhooks');
 const adminConfigRoutes = require('./routes/adminConfig');
 const kycRoutes = require('./routes/kyc');
+const adminKycRoutes = require('./routes/adminKyc');
 const reconciliationRoutes = require('./routes/reconciliation');
 const adminIndexerRoutes = require('./routes/adminIndexer');
 const v1Routes = require('./routes/v1');
@@ -326,7 +328,7 @@ function createApp() {
     try {
       // Resolve escrow contract address using the mapping system
       const escrowAddress = resolveEscrowAddress(invoiceId);
-      
+
       if (!escrowAddress) {
         return next(new AppError({
           type: 'https://liquifact.com/probs/not-found',
@@ -417,10 +419,12 @@ function createApp() {
   mountFeatureRouter(app, '/api/retention', retentionRoutes);
   mountFeatureRouter(app, '/api/admin/audit', auditTrailRoutes);
   mountFeatureRouter(app, '/api/admin/escrow', adminEscrowRoutes);
+  mountFeatureRouter(app, '/api/admin/invoices', adminInvoiceStateRoutes);
   mountFeatureRouter(app, '/api/admin/webhooks', adminWebhooksRoutes);
   mountFeatureRouter(app, '/api/admin/config', adminConfigRoutes);
   mountFeatureRouter(app, '/api/admin/reconciliation', reconciliationRoutes);
   mountFeatureRouter(app, '/api/admin/indexer', adminIndexerRoutes);
+  mountFeatureRouter(app, '/api/admin/kyc', adminKycRoutes);
   mountFeatureRouter(app, '/v1', v1Routes);
   mountFeatureRouter(app, '/api', apiKeysRoutes);
 

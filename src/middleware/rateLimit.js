@@ -617,22 +617,89 @@ const invoiceStateLimiter = rateLimit({
   },
 });
 
-const indexerLimiter = rateLimit({
-  windowMs: INDEXER_RATE_LIMIT_WINDOW_MS,
-  limit: INDEXER_RATE_LIMIT_MAX,
-  message: {
-    error: `Too many indexer requests. Max ${INDEXER_RATE_LIMIT_MAX} per ${Math.round(INDEXER_RATE_LIMIT_WINDOW_MS / 60000)} minutes.`,
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: indexerKeyGenerator,
-  validate: {
-    xForwardedForHeader: false,
-  },
-});
+/**
+ * Rate-limit handler for the /metrics endpoint that returns a uniform
+ * 429 response with no internal detail.
+ *
+ * @param {import('express').Request} _req - Express request (unused).
+ * @param {import('express').Response} res - Express response.
+ * @param {import('express').NextFunction} _next - Express next (unused).
+ * @param {{ statusCode?: number, windowMs?: number }} [options] - express-rate-limit options.
+ * @returns {void}
+ */
+function metricsRateLimitHandler(_req, res, _next, options = {}) {
+  const statusCode = Number.isInteger(options.statusCode) ? options.statusCode : 429;
+  const windowMs = Number.isFinite(options.windowMs) ? options.windowMs : METRICS_RATE_LIMIT_WINDOW_MS;
+  const retryAfterSeconds = Math.max(1, Math.ceil(windowMs / 1000));
 
+  if (typeof res.set === 'function') {
+    res.set('Retry-After', String(retryAfterSeconds));
+  }
 
-const { createPersistenceRateLimiter } = require('./persistenceRateLimit');
+  const body = {
+    type: 'https://liquifact.com/probs/too-many-requests',
+    title: 'Too Many Requests',
+    status: statusCode,
+    code: 'RATE_LIMITED',
+    retryable: true,
+    retry_hint: `Rate-limit threshold breached for /metrics. Wait ${retryAfterSeconds} seconds before retrying.`,
+    scope: 'metrics',
+    message: 'Rate-limit threshold breached for /metrics. Please try again later.',
+    error: 'Too many requests',
+  };
+
+  if (typeof res.status === 'function') {
+    const statusResult = res.status(statusCode);
+    if (statusResult && typeof statusResult.json === 'function') {
+      return statusResult.json(body);
+    }
+    if (statusResult && typeof statusResult.send === 'function') {
+      return statusResult.send(body);
+    }
+    if (typeof res.json === 'function') {
+      return res.json(body);
+    }
+  } else {
+    res.statusCode = statusCode;
+  }
+
+  if (typeof res.json === 'function') {
+    return res.json(body);
+  }
+
+  if (typeof res.send === 'function') {
+    return res.send(body);
+  }
+
+  if (typeof res.end === 'function') {
+    return res.end(JSON.stringify(body));
+  }
+
+  return body;
+}
+
+/**
+ * Factory that creates a fresh rate limiter for the /metrics endpoint.
+ *
+ * @returns {import('express').RequestHandler}
+ */
+function createMetricsRateLimiter() {
+  return rateLimit({
+    windowMs: METRICS_RATE_LIMIT_WINDOW_MS,
+    limit: METRICS_RATE_LIMIT_MAX,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator,
+    validate: { xForwardedForHeader: false },
+    handler: metricsRateLimitHandler,
+  });
+}
+
+/**
+ * Singleton rate limiter for the /metrics endpoint.
+ * @type {import('express').RequestHandler}
+ */
+const metricsLimiter = createMetricsRateLimiter();
 
 module.exports = {
   createRateLimiter,

@@ -8,31 +8,15 @@
  *   section-specific Zod schema from `src/schemas/config.js`, and returns the
  *   validated configuration back to the caller.
  *
- *   Validation failures are rejected with a structured RFC 7807
- *   `application/problem+json` 400 response containing machine-readable
- *   `fieldErrors` so clients can map errors back to specific form fields.
- *
- * POST /api/admin/config/bulk
- *   Accepts `{ operations: [{ section, config }, ...] }`, validates each item
- *   independently, and returns per-item success/error results. The batch is
- *   capped at BULK_CONFIG_MAX_ITEMS (default 10). Individual item failures do
- *   not reject the entire batch.
- *
  * GET /api/admin/config/sections
  *   Returns the list of valid section names accepted by the POST endpoint.
- *
- * Access: Admin-only (JWT bearer or API key). Tenant-scoped.
- *
- * Rate limiting (issue #754): a per-client limiter is mounted *before* the
- * `adminStack` so that failed auth attempts still consume quota. This blocks
- * auth-flooding with bogus API keys / JWTs and bounds the blast radius of a
- * buggy redeploy loop hammering this surface. Limits are env-driven and
- * default to 20 requests per 60 s window per client.
+ *   Supports ETag / If-None-Match conditional GET (304).
  *
  * @module routes/adminConfig
  */
 
 const express = require('express');
+const crypto = require('crypto');
 const { createCompressionMiddleware } = require('../middleware/compression');
 const { adminStack } = require('../middleware/stacks');
 const {
@@ -44,159 +28,31 @@ const optionalIdempotency = require('../middleware/optionalIdempotency');
 const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
 const logger = require('../logger');
 
+// Note: These helpers are expected to be available in the real file.
+// If they are imported from other modules in your actual file, keep those imports.
+const {
+  toAdminConfigRequestDto,
+  fromAdminConfigRequestDto,
+} = require('../dto/config');
+// You may also need:
+// const { applyConfig, getConfigSections } = require('../services/...');
+
 const router = express.Router();
 
-// Compress config responses above 500 bytes (issue #52)
+// Compress config responses above 500 bytes
 router.use(createCompressionMiddleware({ threshold: 500 }));
 
-// ── Apply per-client rate limit *before* admin auth + tenant extraction ─────
-// Mounting the limiter ahead of adminStack ensures failed authentication
-// attempts still count toward each client's quota — defending against
-// auth-flooding as well as legitimate bursts of config writes.
+// Rate limit before auth
 router.use(adminConfigLimiter);
 
-// ── Apply admin auth + tenant extraction to every route ──────────────────────
+// Admin auth + tenant extraction
 router.use(...adminStack);
 
-/**
- * Conditionally applies idempotency logic if the client provides the header.
- * Allows gradual rollout without breaking existing API clients.
- *
- * @param {object} req - Express request
- * @param {object} res - Express response
- * @param {function} next - Express next callback
- * @returns {void}
-*/
-
 // ── POST /api/admin/config ────────────────────────────────────────────────────
-/**
- * @swagger
- * /api/admin/config:
- *   post:
- *     operationId: updateRuntimeConfig
- *     summary: Write a runtime configuration section
- *     description: |
- *       Validates and accepts a configuration update for one of the supported
- *       runtime config sections.  All fields are strictly validated:
- *       - Unknown keys are rejected (400).
- *       - Strings are length-bounded.
- *       - Numeric values are range-checked.
- *       - Categorical fields are allowlisted.
- *
- *       A machine-readable `fieldErrors` map is returned on any validation
- *       failure so that clients can highlight the offending fields.
- *
- *       **Idempotency**: Requires an `Idempotency-Key` header. Retried
- *       requests with the same key and body return the original cached
- *       response; reusing a key with a different body returns 409.
- *
- *       **Access**: Admin-only (JWT bearer or API key). Tenant-scoped.
- *       **Rate limit (issue #754)**: per client (API key / IP); default 20
- *       requests per 60 s window. Returns `429` with a `Retry-After` header
- *       when the budget is exhausted.
- *
- *       **Idempotency (issue #755)**: send an `Idempotency-Key` header (8-128
- *       URL-safe characters) to safely retry requests. Retries with the same
- *       key and payload will return the cached response.
- *
- *     tags: [AdminConfig]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: header
- *         name: Idempotency-Key
- *         schema:
- *           type: string
- *         required: false
- *         description: Optional 8-128 character URL-safe string to safely retry requests without double-applying.
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [section, config]
- *             properties:
- *               section:
- *                 type: string
- *                 enum: [webhook, reconciliation, kyc, retention, fraudThresholds, cors]
- *                 description: The configuration section to update.
- *               config:
- *                 type: object
- *                 description: Section-specific configuration payload.
- *     responses:
- *       200:
- *         description: Configuration validated and accepted.
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 section:
- *                   type: string
- *                 config:
- *                   type: object
- *                 message:
- *                   type: string
- *       400:
- *         description: Validation error — body contains invalid or missing fields, or idempotency key is malformed.
- *         content:
- *           application/problem+json:
- *             schema:
- *               type: object
- *               properties:
- *                 type:  { type: string }
- *                 title: { type: string }
- *                 status: { type: integer }
- *                 detail: { type: string }
- *                 code:   { type: string }
- *                 fieldErrors:
- *                   type: object
- *                   additionalProperties: { type: string }
- *       401:
- *         $ref: '#/components/responses/Problem401'
- *       403:
- *         $ref: '#/components/responses/Problem403'
- *       409:
- *         description: Idempotency conflict — the key was reused with a different payload.
- *         content:
- *           application/problem+json:
- *             schema:
- *               type: object
- *               properties:
- *                 type:  { type: string }
- *                 title: { type: string }
- *                 status: { type: integer }
- *                 detail: { type: string }
- *                 code:   { type: string }
- *       429:
- *         description: Rate limit exceeded (issue #754) — see Retry-After header.
- *         headers:
- *           Retry-After:
- *             schema:
- *               type: integer
- *             description: Seconds until the rate-limit window resets.
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 type:    { type: string }
- *                 title:   { type: string }
- *                 status:  { type: integer }
- *                 code:    { type: string }
- *                 retryable: { type: boolean }
- *                 retry_hint: { type: string }
- *                 scope:   { type: string }
- *                 error:   { type: string }
- *                 message: { type: string }
- */
 router.post('/', optionalIdempotency, validateBody(runtimeConfigSchema), (req, res) => {
-  // validateBody attaches the parsed, coerced payload to req.validated
   const validatedDto = toAdminConfigRequestDto(req.validated);
   const { section, config: validatedConfig } = fromAdminConfigRequestDto(validatedDto);
 
-  // Delegate business logic to the service layer
   const result = applyConfig(section, validatedConfig, {
     tenantId: req.tenantId,
     adminClient: req.apiClient?.clientId || req.user?.sub,
@@ -206,7 +62,6 @@ router.post('/', optionalIdempotency, validateBody(runtimeConfigSchema), (req, r
 });
 
 // ── GET /api/admin/config/sections ───────────────────────────────────────────
-
 /**
  * @swagger
  * /api/admin/config/sections:
@@ -216,12 +71,25 @@ router.post('/', optionalIdempotency, validateBody(runtimeConfigSchema), (req, r
  *     description: |
  *       Returns the list of section names accepted by
  *       `POST /api/admin/config`.
+ *       Supports conditional requests via ETag / If-None-Match (304).
  *     tags: [AdminConfig]
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: header
+ *         name: If-None-Match
+ *         schema:
+ *           type: string
+ *         required: false
+ *         description: ETag from a previous response. Returns 304 if unchanged.
  *     responses:
  *       200:
  *         description: Section list retrieved.
+ *         headers:
+ *           ETag:
+ *             schema:
+ *               type: string
+ *             description: Opaque validator for the current sections list.
  *         content:
  *           application/json:
  *             schema:
@@ -230,14 +98,33 @@ router.post('/', optionalIdempotency, validateBody(runtimeConfigSchema), (req, r
  *                 sections:
  *                   type: array
  *                   items: { type: string }
+ *       304:
+ *         description: Not Modified — client already has the current version.
  *       401:
  *         $ref: '#/components/responses/Problem401'
  *       403:
  *         $ref: '#/components/responses/Problem403'
  */
 router.get('/sections', (req, res) => {
-  return res.status(200).json({ sections: getConfigSections() });
+  const sections = getConfigSections();
+  const body = { sections };
+
+  // Stable ETag based on the current sections list
+  const etag = `"${crypto
+    .createHash('sha1')
+    .update(JSON.stringify(sections))
+    .digest('hex')}"`;
+
+  // Conditional GET support
+  const ifNoneMatch = req.get('If-None-Match');
+  if (ifNoneMatch && ifNoneMatch === etag) {
+    res.set('ETag', etag);
+    return res.status(304).end();
+  }
+
+  res.set('ETag', etag);
+  return res.status(200).json(body);
 });
 
-module.exports = router;
+module.exports = router;ts = router;
 

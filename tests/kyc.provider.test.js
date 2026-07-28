@@ -1449,3 +1449,70 @@ describe('normalizeKycWebhookCause (issue #731)', () => {
     expect(normalizeKycWebhookCause({ status: 500 })).toBe('internal');
   });
 });
+
+// Additional contract tests: field aliases and raw-body signature requirement
+describe('KYC webhook contract — aliases and raw-body signature', () => {
+  let app;
+
+  beforeEach(() => {
+    process.env.JWT_SECRET = 'test-secret-at-least-32-characters-long-string-for-jest';
+    app = require('express')();
+    app.use(require('express').raw({ type: 'application/json', limit: '100kb' }));
+    app.use('/api/kyc', require('../src/routes/kyc'));
+  });
+
+  it('accepts alias fields (`sme_id`, `kyc_status`, `provider_record_id`) and normalises status', async () => {
+    process.env.KYC_PROVIDER_SECRET = 'alias-secret';
+
+    const payload = {
+      sme_id: 'sme-alias-01',
+      kyc_status: 'approved',
+      provider_record_id: 'rec_alias_01',
+      tenant_id: 'tenant-x',
+    };
+    const rawBody = JSON.stringify(payload);
+    const signature = createSignatureHeader('alias-secret', rawBody);
+    const token = jwt.sign({ sub: 'svc', tenantId: 'tenant-x' }, process.env.JWT_SECRET, { expiresIn: '1h' });
+
+    db.mockImplementation(() => ({
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(null),
+      insert: jest.fn().mockResolvedValue([1]),
+      update: jest.fn().mockResolvedValue(1),
+    }));
+
+    const res = await request(app)
+      .post('/api/kyc/webhook')
+      .set('Content-Type', 'application/json')
+      .set('Authorization', `Bearer ${token}`)
+      .set('x-tenant-id', 'tenant-x')
+      .set('X-Signature', signature)
+      .send(rawBody);
+
+    expect(res.status).toBe(200);
+    expect(res.body.smeId).toBe('sme-alias-01');
+    expect(res.body.status).toBe('verified');
+  });
+
+  it('requires signature be computed over the exact raw body bytes (whitespace matters)', async () => {
+    process.env.KYC_PROVIDER_SECRET = 'whitespace-secret';
+
+    const payload = { smeId: 'sme-space-01', status: 'approved' };
+    const rawBodyNoSpace = JSON.stringify(payload);
+    // Pretty-printed with additional whitespace
+    const rawBodyPretty = JSON.stringify(payload, null, 2);
+
+    // Signature computed over the compact form
+    const signature = createSignatureHeader('whitespace-secret', rawBodyNoSpace);
+
+    const res = await request(app)
+      .post('/api/kyc/webhook')
+      .set('Content-Type', 'application/json')
+      .set('X-Signature', signature)
+      .send(rawBodyPretty);
+
+    // Signature must not validate because the raw bytes differ
+    expect(res.status).toBe(401);
+    expect(res.body.error).toMatch(/Invalid webhook signature/);
+  });
+});

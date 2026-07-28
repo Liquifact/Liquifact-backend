@@ -1,0 +1,41 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`Persistence error-response body snapshots 400 validation error (retention policy create) 1`] = `
+{
+  "detail": "name is required, type must be one of [invoice, document]",
+  "instance": "urn:uuid:snap-test-request-id",
+  "status": 400,
+  "title": "Validation Error",
+  "type": "https://liquifact.com/probs/validation-error",
+}
+`;
+
+exports[`Persistence error-response body snapshots 404 not found (retention policy lookup) 1`] = `
+{
+  "detail": "Retention policy not found",
+  "instance": "urn:uuid:snap-test-request-id",
+  "status": 404,
+  "title": "Policy Not Found",
+  "type": "https://liquifact.com/probs/not-found",
+}
+`;
+
+exports[`Persistence error-response body snapshots 409 conflict (retention policy already exists) 1`] = `
+{
+  "detail": "Policy 'default-invoice-policy' already exists for this tenant",
+  "instance": "urn:uuid:snap-test-request-id",
+  "status": 409,
+  "title": "Policy Already Exists",
+  "type": "https://liquifact.com/probs/conflict",
+}
+`;
+
+exports[`Persistence error-response body snapshots 500 internal server error (retention policy fetch failure) 1`] = `
+{
+  "detail": "Failed to fetch retention policies",
+  "instance": "urn:uuid:snap-test-request-id",
+  "status": 500,
+  "title": "Internal Server Error",
+  "type": "https://liquifact.com/probs/internal-server-error",
+}
+`;

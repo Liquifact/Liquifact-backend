@@ -3,6 +3,7 @@
 > **Scope:** `Liquifact/Liquifact-backend`
 > **Last updated:** 2026-07-25
 > **Cross-reference:** `src/routes/adminConfig.js` · `src/schemas/config.js` · `src/middleware/stacks.js` · `src/middleware/rateLimit.js` · `src/middleware/idempotency.js`
+> **Changelog:** [changelog-config.md](./changelog-config.md)
 
 ## Overview
 
