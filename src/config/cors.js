@@ -720,6 +720,10 @@ function processBulkCorsOperations(operations) {
   allowedOrigins.length = 0;
   workingList.forEach((o) => allowedOrigins.push(o));
 
+  // Invalidate the origin-validation cache so stale lookups are not served.
+  const { getCorsCache } = require('./corsCache');
+  getCorsCache().clear();
+
   return { results, updatedOrigins: allowedOrigins.slice() };
 }
 

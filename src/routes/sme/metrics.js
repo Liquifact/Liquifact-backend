@@ -16,7 +16,7 @@ const router = express.Router();
 const { authenticateToken } = require('../../middleware/auth');
 const { extractTenant } = require('../../middleware/tenant');
 const { CursorError } = require('../../utils/cursorPagination');
-const invoiceService = require('../../services/invoiceService');
+const metricsService = require('../../services/metricsService');
 const { validateMetricsRequest } = require('../../utils/metricsValidation');
 const {
   validateBulkMetricsBody,
