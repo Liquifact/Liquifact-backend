@@ -89,6 +89,7 @@ async function approve(id, tenantId, reason, context) {
     currentState: result.newState,
     transitionedAt: result.transitionedAt,
     transitionedBy: result.transitionedBy,
+    reason,
     auditLogId: result.auditLog.id,
   };
 }

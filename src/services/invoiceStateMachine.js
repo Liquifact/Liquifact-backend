@@ -1,6 +1,7 @@
 'use strict';
 
 const { createAuditLog } = require('./auditLog');
+const logger = require('../logger');
 
 /**
  * Canonical invoice status vocabulary shared by invoice-list and marketplace
@@ -96,6 +97,7 @@ const VALID_TRANSITIONS = Object.freeze({
   ]),
   [INVOICE_STATES.APPROVED]: Object.freeze([
     INVOICE_STATES.LINKED_ESCROW,
+    INVOICE_STATES.REJECTED,
     INVOICE_STATES.CANCELLED,
   ]),
   [INVOICE_STATES.LINKED_ESCROW]: Object.freeze([]),
@@ -326,7 +328,7 @@ async function executeTransition(ctx) {
     invoiceId,
     actor,
     transition: `${currentState} -> ${targetState}`,
-    reason: normalizedReason,
+    reason,
     auditLogId: auditLog.id,
   }, 'Invoice state transition executed');
 
@@ -342,7 +344,7 @@ async function executeTransition(ctx) {
       from: currentState,
       to: targetState,
       actor,
-      reason: normalizedReason,
+      reason,
       transitionedAt,
     },
   }).catch((err) => {
