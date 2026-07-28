@@ -23,6 +23,8 @@ The route is mounted in `src/app.js` via:
 mountFeatureRouter(app, '/api/admin/indexer', adminIndexerRoutes);
 ```
 
+For runnable curl examples and auth variations, see [indexer-examples.md](indexer-examples.md).
+
 Indexer health (staleness of the last processed ledger) is reported separately
 through `GET /health` and `GET /health/detailed` (`checkIndexerStaleness` in
 `src/services/health.js`); it is not part of this route and is not covered

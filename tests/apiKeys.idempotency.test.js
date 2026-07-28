@@ -108,6 +108,13 @@ function buildApp() {
 
   // Mount the apiKeys router at /api so full paths are /api/keys and /api/api-keys
   const apiKeysRoutes = require('../src/routes/apiKeys');
+  // Apply idempotency middleware on POST routes before the router
+  app.use('/api', (req, res, next) => {
+    if (req.method === 'POST') {
+      return idempotencyMiddleware(req, res, next);
+    }
+    next();
+  });
   app.use('/api', apiKeysRoutes);
 
   return app;

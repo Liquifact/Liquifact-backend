@@ -1,7 +1,6 @@
 'use strict';
 
 /**
-<<<<<<< test/idempotency-36-mismatch-replay
  * Integration tests for the idempotency middleware in
  * `src/middleware/idempotency.js`.
  *
@@ -24,17 +23,6 @@
  *    never stored.
  *
  * @jest-environment node
-=======
- * Tests for the idempotency middleware covering:
- *  - Missing Idempotency-Key header → 400
- *  - Invalid key format → 400
- *  - First call executes normally → 201
- *  - Duplicate key replays original response → 201
- *  - Same key + different body → 409
- *  - Keys persist in the database
- *  - Storage failure scenarios and safe replay behavior
- *  - Concurrent replay handling
->>>>>>> main
  */
 
 // ---------------------------------------------------------------------------
@@ -80,7 +68,6 @@ function validBody(overrides = {}) {
   };
 }
 
-<<<<<<< test/idempotency-36-mismatch-replay
 /**
  * Compute the SHA-256 fingerprint the middleware would compute for `body`.
  * Kept identical to `fingerprint()` in src/middleware/idempotency.js so
@@ -202,106 +189,6 @@ describe('Idempotency Middleware — Header validation', () => {
   });
 
   it('returns 400 when Idempotency-Key is the empty string', async () => {
-=======
-// -- Mock Factory ---------------------------------------------------------
-
-/**
- * Creates a mock knex module with configurable failure scenarios.
- * @param {object} options
- * @param {boolean} options.failPersistence - If true, simulate storage failure
- * @param {boolean} options.failInsert - If true, simulate initial insert failure
- * @param {boolean} options.failLookup - If true, simulate lookup failure
- * @returns {object} Mocked knex module
- */
-function createKnexMock({ failPersistence = false, failInsert = false, failLookup = false } = {}) {
-  const store = new Map();
-
-  return {
-    transaction: jest.fn((fn) => {
-      const trx = {
-        __store: store,
-        __failPersistence: failPersistence,
-        __failInsert: failInsert,
-        __failLookup: failLookup,
-        _lastKey: null,
-        where: jest.fn().mockReturnThis(),
-        first: jest.fn(async function () {
-          if (trx.__failLookup) {
-            throw new Error('Database lookup failed');
-          }
-          return trx._lastKey ? store.get(trx._lastKey) || null : null;
-        }),
-        insert: jest.fn(async function (row) {
-          if (trx.__failInsert) {
-            throw new Error('Database insert failed');
-          }
-          trx._lastKey = row.idempotency_key;
-          store.set(row.idempotency_key, {
-            ...row,
-            created_at: new Date(),
-            updated_at: new Date(),
-          });
-        }),
-        update: jest.fn(async function (updates) {
-          if (trx.__failPersistence && updates.response_status !== -1) {
-            // Only fail actual persistence, not the failure-marking update
-            throw new Error('Database update failed');
-          }
-          if (trx._lastKey) {
-            const existing = store.get(trx._lastKey) || {};
-            store.set(trx._lastKey, { ...existing, ...updates });
-          }
-        }),
-        raw: jest.fn(() => new Date(Date.now() + 86400000)),
-        fn: { now: () => new Date() },
-      };
-      return fn(trx);
-    }),
-    fn: { now: () => new Date() },
-    raw: jest.fn(() => new Date(Date.now() + 86400000)),
-  };
-}
-
-// -- Test Suites -----------------------------------------------------------
-
-describe('Idempotency Middleware - Normal Operation', () => {
-  let app;
-  let mockDb;
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-    mockDb = createKnexMock();
-    jest.mock('../src/db/knex', () => mockDb);
-  });
-
-  afterEach(() => {
-    jest.resetModules();
-  });
-
-  function createApp() {
-    const app = express();
-    app.use(express.json());
-    // Require fresh module to pick up mocked db
-    const idempotencyMiddleware = require('../middleware/idempotency');
-    app.post('/api/invest/fund-invoice', idempotencyMiddleware, (req, res) => {
-      return res.status(201).json({
-        data: {
-          investmentId: 'inv_test_' + Date.now(),
-          invoiceId: req.body.invoiceId,
-          smeId: req.body.smeId,
-          investmentAmount: req.body.investmentAmount,
-          status: 'pending',
-        },
-        meta: { timestamp: new Date().toISOString() },
-        message: 'Investment submitted successfully.',
-      });
-    });
-    return app;
-  }
-
-  it('returns 400 when Idempotency-Key header is missing', async () => {
-    app = createApp();
->>>>>>> main
     const res = await request(app)
       .post('/test/funding')
       .set('Idempotency-Key', '')
@@ -319,12 +206,7 @@ describe('Idempotency Middleware - Normal Operation', () => {
     expect(res.body.error).toMatch(/URL-safe/);
   });
 
-<<<<<<< test/idempotency-36-mismatch-replay
   it('returns 400 when Idempotency-Key contains a forbidden non-URL-safe char', async () => {
-=======
-  it('returns 400 when Idempotency-Key contains invalid characters', async () => {
-    app = createApp();
->>>>>>> main
     const res = await request(app)
       .post('/test/funding')
       .set('Idempotency-Key', 'abc@xyz1234')
@@ -349,12 +231,7 @@ describe('Idempotency Middleware - Normal Operation', () => {
     expect(res.status).toBe(400);
   });
 
-<<<<<<< test/idempotency-36-mismatch-replay
   it('accepts a key at the minimum length (8 chars)', async () => {
-=======
-  it('returns 400 when Idempotency-Key is too short', async () => {
-    app = createApp();
->>>>>>> main
     const res = await request(app)
       .post('/test/funding')
       .set('Idempotency-Key', 'aB1.c-d:')
@@ -421,7 +298,6 @@ describe('Idempotency Middleware — First request stores fingerprint + response
     expect(row.request_fingerprint).toMatch(/^[a-f0-9]{64}$/);
   });
 
-<<<<<<< test/idempotency-36-mismatch-replay
   it('persists the response status code', async () => {
     await request(app)
       .post('/test/funding')
@@ -433,10 +309,6 @@ describe('Idempotency Middleware — First request stores fingerprint + response
   });
 
   it('persists the response body as a JSON string', async () => {
-=======
-  it('executes the handler on first call (new key)', async () => {
-    app = createApp();
->>>>>>> main
     const res = await request(app)
       .post('/test/funding')
       .set('Idempotency-Key', validKey())
@@ -502,17 +374,12 @@ describe('Idempotency Middleware — First request stores fingerprint + response
   });
 });
 
-<<<<<<< test/idempotency-36-mismatch-replay
 // ===========================================================================
 // Replay — same key + same body
 // ===========================================================================
 
 describe('Idempotency Middleware — Replay (same key + same body)', () => {
   it('returns the same investmentId on duplicate (no double-funding)', async () => {
-=======
-  it('returns the cached response on duplicate key with same body', async () => {
-    app = createApp();
->>>>>>> main
     const key = validKey();
     const body = validBody();
     const r1 = await request(app)
@@ -528,16 +395,11 @@ describe('Idempotency Middleware — Replay (same key + same body)', () => {
     expect(r2.body.investmentId).toBe(r1.body.investmentId);
   });
 
-<<<<<<< test/idempotency-36-mismatch-replay
   it('returns the cached response byte-identically', async () => {
     const key = validKey();
     const body = validBody();
     const r1 = await request(app)
       .post('/test/funding')
-=======
-    const first = await request(app)
-      .post('/api/invest/fund-invoice')
->>>>>>> main
       .set('Idempotency-Key', key)
       .send(body)
       .expect(201);
@@ -549,7 +411,6 @@ describe('Idempotency Middleware — Replay (same key + same body)', () => {
     expect(r2.body).toEqual(r1.body);
   });
 
-<<<<<<< test/idempotency-36-mismatch-replay
   it('does NOT execute the handler again on replay', async () => {
     let handlerInvocations = 0;
     const localApp = buildApp(() => {
@@ -564,20 +425,12 @@ describe('Idempotency Middleware — Replay (same key + same body)', () => {
       .expect(201);
     await request(localApp)
       .post('/test/funding')
-=======
-    // Need to wait for async persistence
-    await new Promise(resolve => setTimeout(resolve, 100));
-
-    const second = await request(app)
-      .post('/api/invest/fund-invoice')
->>>>>>> main
       .set('Idempotency-Key', key)
       .send(body)
       .expect(201);
     expect(handlerInvocations).toBe(1);
   });
 
-<<<<<<< test/idempotency-36-mismatch-replay
   it('does NOT insert a second row for the same key on replay', async () => {
     const key = validKey();
     const body = validBody();
@@ -593,24 +446,15 @@ describe('Idempotency Middleware — Replay (same key + same body)', () => {
       .expect(201);
     const rows = await db('idempotency_keys').select('*');
     expect(rows).toHaveLength(1);
-=======
-    expect(second.body.data.investmentId).toBe(first.body.data.investmentId);
-    expect(second.body.data.status).toBe('pending');
->>>>>>> main
   });
 });
 
-<<<<<<< test/idempotency-36-mismatch-replay
 // ===========================================================================
 // Conflict — same key + different body returns 409 (RFC 7807)
 // ===========================================================================
 
 describe('Idempotency Middleware — Conflict (same key + different body)', () => {
   it('returns 409 with application/problem+json', async () => {
-=======
-  it('returns 409 when same key is used with a different body', async () => {
-    app = createApp();
->>>>>>> main
     const key = validKey();
     await request(app)
       .post('/test/funding')
@@ -628,12 +472,9 @@ describe('Idempotency Middleware — Conflict (same key + different body)', () =
     expect(res.body.detail).toMatch(/different request body/);
   });
 
-<<<<<<< test/idempotency-36-mismatch-replay
   it('preserves the original record on mismatch (no overwrite)', async () => {
     const key = validKey();
     const originalBody = validBody({ amount: 1000 });
-=======
->>>>>>> main
     await request(app)
       .post('/test/funding')
       .set('Idempotency-Key', key)
@@ -656,15 +497,10 @@ describe('Idempotency Middleware — Conflict (same key + different body)', () =
     expect(afterRow.response_body).toBe(beforeRow.response_body);
   });
 
-<<<<<<< test/idempotency-36-mismatch-replay
   it('returns 409 on every subsequent mismatch (not just the first)', async () => {
     const key = validKey();
     await request(app)
       .post('/test/funding')
-=======
-    const res = await request(app)
-      .post('/api/invest/fund-invoice')
->>>>>>> main
       .set('Idempotency-Key', key)
       .send(validBody({ amount: 1000 }))
       .expect(201);
@@ -703,7 +539,6 @@ describe('Idempotency Middleware — Multiple distinct keys', () => {
     expect(rows.map((r) => r.idempotency_key).sort()).toEqual([k1, k2].sort());
   });
 
-<<<<<<< test/idempotency-36-mismatch-replay
   it('two different keys + different bodies store separately', async () => {
     const r1 = await request(app)
       .post('/test/funding')
@@ -723,12 +558,6 @@ describe('Idempotency Middleware — Multiple distinct keys', () => {
 // ===========================================================================
 // TTL expiry
 // ===========================================================================
-=======
-  it('allows multiple requests with different keys', async () => {
-    app = createApp();
-    const key1 = validKey();
-    const key2 = validKey();
->>>>>>> main
 
 describe('Idempotency Middleware — TTL expiry', () => {
   it('default TTL is 24 hours', async () => {
@@ -761,7 +590,6 @@ describe('Idempotency Middleware — TTL expiry', () => {
     expect(expiresMs - beforeMs).toBeLessThanOrEqual(1.05 * 3600 * 1000);
   });
 
-<<<<<<< test/idempotency-36-mismatch-replay
   it('falls back to 24h on non-numeric TTL_H input', async () => {
     process.env.IDEMPOTENCY_KEY_TTL_HOURS = 'forever';
     const beforeMs = Date.now();
@@ -774,128 +602,8 @@ describe('Idempotency Middleware — TTL expiry', () => {
     const expiresMs = parseExpiryMs(row.expires_at);
     expect(Number.isFinite(expiresMs)).toBe(true);
     expect(expiresMs - beforeMs).toBeGreaterThanOrEqual(23.9 * 3600 * 1000);
-=======
-    expect(res1.body.data.investmentId).not.toBe(res2.body.data.investmentId);
-    expect(res1.body.data.invoiceId).toBe('INV-001');
-    expect(res2.body.data.invoiceId).toBe('INV-002');
->>>>>>> main
-  });
-});
-
-describe('Idempotency Middleware - Storage Failure Scenarios', () => {
-  let app;
-  let mockDb;
-  let store;
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-    // We need a shared store that persists across mock instances
-    store = new Map();
   });
 
-  afterEach(() => {
-    jest.resetModules();
-  });
-
-  function createFailingDb({ failPersistence = false, failInsert = false } = {}) {
-    return {
-      transaction: jest.fn((fn) => {
-        const trx = {
-          __store: store,
-          __failPersistence: failPersistence,
-          __failInsert: failInsert,
-          _lastKey: null,
-          where: jest.fn().mockReturnThis(),
-          first: jest.fn(async function () {
-            return trx._lastKey ? store.get(trx._lastKey) || null : null;
-          }),
-          insert: jest.fn(async function (row) {
-            if (trx.__failInsert) {
-              throw new Error('Database insert failed');
-            }
-            trx._lastKey = row.idempotency_key;
-            store.set(row.idempotency_key, {
-              ...row,
-              created_at: new Date(),
-              updated_at: new Date(),
-            });
-          }),
-          update: jest.fn(async function (updates) {
-            if (trx.__failPersistence && updates.response_status !== -1) {
-              throw new Error('Database update failed');
-            }
-            if (trx._lastKey) {
-              const existing = store.get(trx._lastKey) || {};
-              store.set(trx._lastKey, { ...existing, ...updates });
-            }
-          }),
-          raw: jest.fn(() => new Date(Date.now() + 86400000)),
-          fn: { now: () => new Date() },
-        };
-        return fn(trx);
-      }),
-      fn: { now: () => new Date() },
-      raw: jest.fn(() => new Date(Date.now() + 86400000)),
-    };
-  }
-
-  function createAppWithDb(dbMock) {
-    jest.doMock('../src/db/knex', () => dbMock);
-    // Clear require cache to get fresh module
-    jest.resetModules();
-    const idempotencyMiddleware = require('../middleware/idempotency');
-    const testApp = express();
-    testApp.use(express.json());
-    testApp.post('/api/invest/fund-invoice', idempotencyMiddleware, (req, res) => {
-      return res.status(201).json({
-        data: {
-          investmentId: 'inv_test_' + Date.now(),
-          invoiceId: req.body.invoiceId,
-          smeId: req.body.smeId,
-          investmentAmount: req.body.investmentAmount,
-          status: 'pending',
-        },
-        meta: { timestamp: new Date().toISOString() },
-        message: 'Investment submitted successfully.',
-      });
-    });
-    return testApp;
-  }
-
-  it('re-executes handler when storage fails and response is incomplete', async () => {
-    const dbMock = createFailingDb({ failPersistence: true });
-    app = createAppWithDb(dbMock);
-
-    const key = validKey();
-    const body = validBody();
-
-    // First call - storage will fail but request succeeds
-    const first = await request(app)
-      .post('/api/invest/fund-invoice')
-      .set('Idempotency-Key', key)
-      .send(body)
-      .expect(201);
-
-    // Wait for retry attempts to complete
-    await new Promise(resolve => setTimeout(resolve, 200));
-
-    // Check that the key was stored with incomplete marker (-1 status)
-    const storedRecord = store.get(key);
-    expect(storedRecord.response_status).toBe(-1);
-
-    // Second call - should re-execute because status is -1
-    const second = await request(app)
-      .post('/api/invest/fund-invoice')
-      .set('Idempotency-Key', key)
-      .send(body)
-      .expect(500); // New request will fail on insert due to unique constraint conflict
-
-    // The behavior here depends on DB constraint handling
-    // In production, the unique constraint would cause an error
-    expect(second.statusCode).toBeDefined();
-  });
-
-<<<<<<< test/idempotency-36-mismatch-replay
   it('treats an expired key as a fresh request (handler re-executes)', async () => {
     const key = validKey();
     const body = validBody();
@@ -935,104 +643,6 @@ describe('Idempotency Middleware - Storage Failure Scenarios', () => {
       .update({ expires_at: new Date(Date.now() - 1000).toISOString() });
 
     const body2 = validBody({ amount: 9999 });
-=======
-  it('stores response successfully on subsequent attempts after partial failure', async () => {
-    let failCount = 0;
-    const dbMock = {
-      transaction: jest.fn((fn) => {
-        const trx = {
-          __store: store,
-          _lastKey: null,
-          where: jest.fn().mockReturnThis(),
-          first: jest.fn(async function () {
-            return trx._lastKey ? store.get(trx._lastKey) || null : null;
-          }),
-          insert: jest.fn(async function (row) {
-            trx._lastKey = row.idempotency_key;
-            store.set(row.idempotency_key, {
-              ...row,
-              created_at: new Date(),
-              updated_at: new Date(),
-            });
-          }),
-          update: jest.fn(async function (updates) {
-            // Fail 2 times then succeed
-            failCount++;
-            if (failCount <= 2) {
-              throw new Error('Transient database error');
-            }
-            if (trx._lastKey) {
-              const existing = store.get(trx._lastKey) || {};
-              store.set(trx._lastKey, { ...existing, ...updates });
-            }
-          }),
-          raw: jest.fn(() => new Date(Date.now() + 86400000)),
-          fn: { now: () => new Date() },
-        };
-        return fn(trx);
-      }),
-      fn: { now: () => new Date() },
-      raw: jest.fn(() => new Date(Date.now() + 86400000)),
-    };
-
-    jest.doMock('../src/db/knex', () => dbMock);
-    jest.resetModules();
-    const idempotencyMiddleware = require('../middleware/idempotency');
-
-    const testApp = express();
-    testApp.use(express.json());
-    testApp.post('/api/invest/fund-invoice', idempotencyMiddleware, (req, res) => {
-      return res.status(201).json({
-        data: {
-          investmentId: 'inv_test_' + Date.now(),
-          invoiceId: req.body.invoiceId,
-          smeId: req.body.smeId,
-          investmentAmount: req.body.investmentAmount,
-          status: 'pending',
-        },
-        meta: { timestamp: new Date().toISOString() },
-        message: 'Investment submitted successfully.',
-      });
-    });
-
-    const key = validKey();
-    const body = validBody();
-
-    await request(testApp)
-      .post('/api/invest/fund-invoice')
-      .set('Idempotency-Key', key)
-      .send(body)
-      .expect(201);
-
-    // Wait for retries
-    await new Promise(resolve => setTimeout(resolve, 200));
-
-    // Verify the record was eventually stored
-    const storedRecord = store.get(key);
-    expect(storedRecord).toBeDefined();
-    expect(storedRecord.response_status).toBe(201);
-  });
-
-  it('handles in-progress key replay safely', async () => {
-    const dbMock = createFailingDb();
-    app = createAppWithDb(dbMock);
-
-    const key = validKey();
-    const body = validBody();
-
-    // Pre-populate store with an in-progress (incomplete) key
-    store.set(key, {
-      idempotency_key: key,
-      request_fingerprint: fingerprint(body),
-      response_status: null,
-      response_body: null,
-      created_at: new Date(),
-      updated_at: new Date(),
-      expires_at: new Date(Date.now() + 86400000),
-    });
-
-    // Replay should re-execute the handler
->>>>>>> main
     const res = await request(app)
       .post('/test/funding')
       .set('Idempotency-Key', key)
@@ -1228,7 +838,6 @@ describe('Idempotency Middleware — Concurrent duplicate', () => {
       .post('/test/funding')
       .set('Idempotency-Key', key)
       .send(body)
-<<<<<<< test/idempotency-36-mismatch-replay
       .expect(409);
     expect(handlerInvocations).toBe(0);
     expect(res.headers['content-type']).toMatch(/application\/problem\+json/);
@@ -1314,8 +923,6 @@ describe('Idempotency Middleware — Security', () => {
       .post('/test/funding')
       .set('Idempotency-Key', validKey())
       .send({})
-=======
->>>>>>> main
       .expect(201);
     expect(res.body.investmentId).toBeDefined();
     const rows = await db('idempotency_keys').select('*');
@@ -1323,7 +930,6 @@ describe('Idempotency Middleware — Security', () => {
     expect(rows[0].request_fingerprint).toBe(fingerprintOf({}));
   });
 
-<<<<<<< test/idempotency-36-mismatch-replay
   it('the fingerprint is identical for byte-equal bodies (idempotent hashing)', async () => {
     const key1 = validKey('a');
     const key2 = validKey('b');
@@ -1341,263 +947,5 @@ describe('Idempotency Middleware — Security', () => {
     const rows = await db('idempotency_keys').select('*').orderBy('id');
     expect(rows).toHaveLength(2);
     expect(rows[0].request_fingerprint).toBe(rows[1].request_fingerprint);
-=======
-    expect(res.body.data.status).toBe('pending');
-    expect(res.body.data.investmentId).toBeDefined();
->>>>>>> main
-  });
-
-  // -- Integration with purge job ------------------------------------------
-
-  it('creates keys with expires_at timestamp for purge job', async () => {
-    const key = validKey();
-    const body = validBody();
-
-    await request(app)
-  it('handles failed-storage key (-1 status) replay safely', async () => {
-    const dbMock = createFailingDb();
-    app = createAppWithDb(dbMock);
-
-    const key = validKey();
-    const body = validBody();
-
-    // Pre-populate store with a failed-storage key
-    store.set(key, {
-      idempotency_key: key,
-      request_fingerprint: fingerprint(body),
-      response_status: -1, // Failed storage sentinel
-      response_body: null,
-      created_at: new Date(),
-      updated_at: new Date(),
-      expires_at: new Date(Date.now() + 86400000),
-    });
-
-    // Replay should re-execute the handler
-    const res = await request(app)
-      .post('/api/invest/fund-invoice')
-      .set('Idempotency-Key', key)
-      .send(body)
-      .expect(201);
-
-    expect(res.body.data.status).toBe('pending');
-    expect(res.body.data.investmentId).toBeDefined();
-  });
-
-  it('returns 500 when initial key insert fails', async () => {
-    jest.doMock('../src/db/knex', () => createFailingDb({ failInsert: true }));
-    jest.resetModules();
-    const idempotencyMiddleware = require('../middleware/idempotency');
-
-    const testApp = express();
-    testApp.use(express.json());
-    testApp.post('/api/invest/fund-invoice', idempotencyMiddleware, (req, res) => {
-      return res.status(201).json({ success: true });
-    });
-
-    const key = validKey();
-    const res = await request(testApp)
-      .post('/api/invest/fund-invoice')
-      .set('Idempotency-Key', key)
-      .send(validBody())
-      .expect(500);
-
-    expect(res.body.error).toMatch(/Internal server error/);
-  });
-});
-
-describe('Idempotency Middleware - Concurrent Replay', () => {
-  let store;
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-    store = new Map();
-  });
-
-  afterEach(() => {
-    jest.resetModules();
-  });
-
-  function createConcurrentDb() {
-    return {
-      transaction: jest.fn((fn) => {
-        const trx = {
-          __store: store,
-          _lastKey: null,
-          where: jest.fn().mockReturnThis(),
-          first: jest.fn(async function () {
-            return store.get(trx._lastKey) || null;
-          }),
-          insert: jest.fn(async function (row) {
-            trx._lastKey = row.idempotency_key;
-            // Simulate race condition - another transaction may have inserted
-            if (store.has(row.idempotency_key)) {
-              throw new Error('Unique constraint violation');
-            }
-            store.set(row.idempotency_key, {
-              ...row,
-              created_at: new Date(),
-              updated_at: new Date(),
-            });
-          }),
-          update: jest.fn(async function (updates) {
-            if (trx._lastKey) {
-              const existing = store.get(trx._lastKey) || {};
-              store.set(trx._lastKey, { ...existing, ...updates });
-            }
-          }),
-          raw: jest.fn(() => new Date(Date.now() + 86400000)),
-          fn: { now: () => new Date() },
-        };
-        return fn(trx);
-      }),
-      fn: { now: () => new Date() },
-      raw: jest.fn(() => new Date(Date.now() + 86400000)),
-    };
-  }
-
-  it('handles concurrent requests with same key gracefully', async () => {
-    jest.doMock('../src/db/knex', () => createConcurrentDb());
-    jest.resetModules();
-    const idempotencyMiddleware = require('../middleware/idempotency');
-
-    const testApp = express();
-    testApp.use(express.json());
-    // Add concurrency limiter to serialize requests
-    const activeRequests = new Map();
-    testApp.post('/api/invest/fund-invoice', idempotencyMiddleware, (req, res) => {
-      return res.status(201).json({
-        data: {
-          investmentId: 'inv_' + Date.now(),
-          invoiceId: req.body.invoiceId,
-          smeId: req.body.smeId,
-          investmentAmount: req.body.investmentAmount,
-          status: 'pending',
-        },
-        meta: { timestamp: new Date().toISOString() },
-        message: 'Investment submitted successfully.',
-      });
-    });
-
-    const key = validKey();
-    const body = validBody();
-
-    // First request establishes the key
-    const first = await request(testApp)
-      .post('/api/invest/fund-invoice')
-      .set('Idempotency-Key', key)
-      .send(body)
-      .expect(201);
-
-    // Verify the key was stored with an expires_at timestamp
-    const mockDb = require('../src/db/knex');
-    const storedKey = mockDb.transaction.mock.calls[0][0];
-
-    // The key should have an expires_at field set
-    expect(storedKey).toBeDefined();
-    await new Promise(resolve => setTimeout(resolve, 50));
-
-    // Second concurrent request should replay
-    const second = await request(testApp)
-      .post('/api/invest/fund-invoice')
-      .set('Idempotency-Key', key)
-      .send(body)
-      .expect(201);
-
-    expect(second.body.data.investmentId).toBe(first.body.data.investmentId);
-  });
-});
-
-// Helper to expose fingerprint for test setup
-function fingerprint(body) {
-  return crypto
-    .createHash('sha256')
-    .update(JSON.stringify(body), 'utf8')
-    .digest('hex');
-}
-
-describe('Idempotency Middleware - Security Validation', () => {
-  let store;
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-    store = new Map();
-  });
-
-  afterEach(() => {
-    jest.resetModules();
-  });
-
-  it('never leaks cached body across different keys', async () => {
-    const dbMock = {
-      transaction: jest.fn((fn) => {
-        const trx = {
-          __store: store,
-          _lastKey: null,
-          where: jest.fn().mockReturnThis(),
-          first: jest.fn(async function () {
-            return store.get(trx._lastKey) || null;
-          }),
-          insert: jest.fn(async function (row) {
-            trx._lastKey = row.idempotency_key;
-            store.set(row.idempotency_key, {
-              ...row,
-              created_at: new Date(),
-              updated_at: new Date(),
-            });
-          }),
-          update: jest.fn(async function (updates) {
-            if (trx._lastKey) {
-              const existing = store.get(trx._lastKey) || {};
-              store.set(trx._lastKey, { ...existing, ...updates });
-            }
-          }),
-          raw: jest.fn(() => new Date(Date.now() + 86400000)),
-          fn: { now: () => new Date() },
-        };
-        return fn(trx);
-      }),
-      fn: { now: () => new Date() },
-      raw: jest.fn(() => new Date(Date.now() + 86400000)),
-    };
-
-    jest.doMock('../src/db/knex', () => dbMock);
-    jest.resetModules();
-    const idempotencyMiddleware = require('../middleware/idempotency');
-
-    const testApp = express();
-    testApp.use(express.json());
-    testApp.post('/api/invest/fund-invoice', idempotencyMiddleware, (req, res) => {
-      return res.status(201).json({
-        data: {
-          investmentId: 'inv_' + req.body.invoiceId,
-          invoiceId: req.body.invoiceId,
-          smeId: req.body.smeId,
-          investmentAmount: req.body.investmentAmount,
-          status: 'pending',
-        },
-      });
-    });
-
-    // First key with INV-001
-    const key1 = 'ik_' + crypto.randomBytes(8).toString('hex');
-    await request(testApp)
-      .post('/api/invest/fund-invoice')
-      .set('Idempotency-Key', key1)
-      .send({ invoiceId: 'INV-001', investmentAmount: 1000, smeId: 'SME-A' })
-      .expect(201);
-
-    await new Promise(resolve => setTimeout(resolve, 50));
-
-    // Second key with INV-002
-    const key2 = 'ik_' + crypto.randomBytes(8).toString('hex');
-    const res2 = await request(testApp)
-      .post('/api/invest/fund-invoice')
-      .set('Idempotency-Key', key2)
-      .send({ invoiceId: 'INV-002', investmentAmount: 2000, smeId: 'SME-B' })
-      .expect(201);
-
-    // Verify no cross-contamination
-    expect(res2.body.data.invoiceId).toBe('INV-002');
-    expect(res2.body.data.investmentAmount).toBe(2000);
   });
 });

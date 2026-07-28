@@ -28,5 +28,9 @@ const mockQuery = {
 
 const db = jest.fn(() => mockQuery);
 db.raw = jest.fn().mockResolvedValue();
+db.transaction = jest.fn(async (callback) => {
+  // The callback receives the same mock db instance as trx
+  await callback(db);
+});
 
 module.exports = db;

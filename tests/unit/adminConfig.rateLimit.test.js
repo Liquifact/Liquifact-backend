@@ -66,10 +66,14 @@ jest.mock('../../src/logger', () => ({
   error: jest.fn(),
   info: jest.fn(),
 }));
-jest.mock('../../src/metrics', () => ({
-  webhookReplayTotal: { inc: jest.fn() },
-  registry: { contentType: 'text/plain', metrics: jest.fn().mockResolvedValue('') },
-}));
+jest.mock('../../src/metrics', () => {
+  const actual = jest.requireActual('../../src/metrics');
+  return {
+    ...actual,
+    webhookReplayTotal: { inc: jest.fn() },
+  };
+});
+
 
 // ── Imports ───────────────────────────────────────────────────────────────────
 

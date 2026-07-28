@@ -29,8 +29,10 @@ const { CursorError } = require('./utils/cursorPagination');
 const { resolveEscrowAddress } = require('./config/escrowMap');
 const { getEscrowStateWithProjection } = require('./services/escrowRead');
 const { createCorsOptions, isCorsOriginRejectedError } = require('./config/cors');
+const { get: getConfig } = require('./config');
 const { validateInvoiceQueryParams } = require('./utils/validators');
 const { computeEscrowDerivedFields } = require('./services/escrowDerived');
+const AppError = require('./errors/AppError');
 const { invoiceCreateSchema, parseValidationErrors } = require('./schemas/invoice');
 const {
   invoiceBodyLimit,
@@ -44,6 +46,7 @@ const { validateHealthQuery, rejectBodyOnGet } = require('./schemas/health');
 const responseHelper = require('./utils/responseHelper');
 const logger = require('./logger');
 const { metricsAuth, metricsHandler } = require('./metrics');
+const { metricsLimiter } = require('./middleware/rateLimit');
 const { instrumentHealth } = require('./middleware/healthMetrics');
 const smeRoutes = require('./routes/sme');
 const invoiceFileRoutes = require('./routes/invoiceFile');
@@ -54,9 +57,11 @@ const marketplaceRoutes = require('./routes/marketplace');
 const retentionRoutes = require('./routes/retention');
 const invoiceStateRoutes = require('./routes/invoiceStateRoutes');
 const adminEscrowRoutes = require('./routes/adminEscrow');
+const adminInvoiceStateRoutes = require('./routes/adminInvoiceState');
 const adminWebhooksRoutes = require('./routes/adminWebhooks');
 const adminConfigRoutes = require('./routes/adminConfig');
 const kycRoutes = require('./routes/kyc');
+const adminKycRoutes = require('./routes/adminKyc');
 const reconciliationRoutes = require('./routes/reconciliation');
 const adminIndexerRoutes = require('./routes/adminIndexer');
 const v1Routes = require('./routes/v1');
@@ -66,6 +71,7 @@ const {
   assertNoDuplicateRouterMounts,
   resetFeatureRouterMounts,
 } = require('./utils/routeMountRegistry');
+const { createCompressionMiddleware } = require('./middleware/compression');
 
 /**
  * Returns a 403 JSON response only for the dedicated blocked-origin CORS error.
@@ -246,7 +252,9 @@ function createApp() {
     });
   });
 
-  // Invoices — GET (list) with cursor pagination
+  app.use('/api/api-keys', apiKeysRoutes);
+
+  // Invoices — GET (list)
   app.get('/api/invoices', async (req, res) => {
     const { isValid, fieldErrors, validatedParams } = validateInvoiceQueryParams(req.query);
     if (!isValid) {
@@ -306,7 +314,10 @@ function createApp() {
   });
 
   // Escrow — GET by invoiceId (proxied through Soroban retry wrapper with address mapping)
-  app.get('/api/escrow/:invoiceId', async (req, res) => {
+  // Compression middleware: gzip/deflate for large escrow-read responses (issue #961).
+  // Threshold: 1 KB (DEFAULT_THRESHOLD). Respects Accept-Encoding; small responses
+  // pass through uncompressed. Vary: Accept-Encoding is always set.
+  app.get('/api/escrow/:invoiceId', createCompressionMiddleware(), async (req, res, next) => {
     const invoiceId = String(req.params.invoiceId || '')
       .trim()
       .replace(/\s+/g, '');
@@ -314,11 +325,16 @@ function createApp() {
     try {
       // Resolve escrow contract address using the mapping system
       const escrowAddress = resolveEscrowAddress(invoiceId);
-      
+
       if (!escrowAddress) {
-        return res.status(404).json({ 
-          error: `No escrow contract mapping found for invoice ID '${invoiceId}'` 
-        });
+        return next(new AppError({
+          type: 'https://liquifact.com/probs/not-found',
+          title: 'Not Found',
+          status: 404,
+          detail: `No escrow contract mapping found for invoice ID '${invoiceId}'`,
+          code: 'NOT_FOUND',
+          retryable: false,
+        }));
       }
 
       // Read from projection, cache, or live read fallback
@@ -341,7 +357,7 @@ function createApp() {
           : 'Escrow state read from live Soroban contract.',
       });
     } catch (error) {
-      res.status(500).json({ error: error.message || 'Error fetching escrow state' });
+      return next(error);
     }
   });
 
@@ -381,7 +397,9 @@ function createApp() {
    */
   mountFeatureRouter(app, '/api/sme', smeRoutes);
   mountFeatureRouter(app, '/api/invoices', invoiceFileRoutes);
-  mountFeatureRouter(app, '/api/invoices', invoiceStateRoutes);
+  if (getConfig().INVOICE_STATE_ENABLED === 'true') {
+    mountFeatureRouter(app, '/api/invoices', invoiceStateRoutes);
+  }
   mountFeatureRouter(app, '/api/invest', investRoutes);
   mountFeatureRouter(app, '/api/investor', investorRoutes);
   mountFeatureRouter(app, '/api/kyc', kycRoutes);
@@ -390,10 +408,12 @@ function createApp() {
   mountFeatureRouter(app, '/api/retention', retentionRoutes);
   mountFeatureRouter(app, '/api/admin/audit', auditTrailRoutes);
   mountFeatureRouter(app, '/api/admin/escrow', adminEscrowRoutes);
+  mountFeatureRouter(app, '/api/admin/invoices', adminInvoiceStateRoutes);
   mountFeatureRouter(app, '/api/admin/webhooks', adminWebhooksRoutes);
   mountFeatureRouter(app, '/api/admin/config', adminConfigRoutes);
   mountFeatureRouter(app, '/api/admin/reconciliation', reconciliationRoutes);
   mountFeatureRouter(app, '/api/admin/indexer', adminIndexerRoutes);
+  mountFeatureRouter(app, '/api/admin/kyc', adminKycRoutes);
   mountFeatureRouter(app, '/v1', v1Routes);
   mountFeatureRouter(app, '/api', apiKeysRoutes);
 

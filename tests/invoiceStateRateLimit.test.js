@@ -14,6 +14,10 @@ const request = require('supertest');
 // missing invoiceStateLimiter). Use the real implementation for these tests.
 jest.unmock('../src/middleware/rateLimit');
 
+jest.mock('../src/middleware/auth', () => ({
+  authenticateToken: jest.fn((req, res, next) => next()),
+}));
+
 const WINDOW_MS = 200;
 const MAX = 2;
 
@@ -42,16 +46,16 @@ describe('invoice-state rate limiting (#739)', () => {
 
   it('allows requests up to the configured max (at-limit)', async () => {
     for (let i = 0; i < MAX; i++) {
-      const res = await request(app).post('/api/invoices/transition').set('x-tenant-id', 'test-tenant').send(body);
+      const res = await request(app).post('/api/invoices/test-tenant/transition').set('x-tenant-id', 'test-tenant').send(body);
       expect(res.status).not.toBe(429);
     }
   });
 
   it('returns 429 with a Retry-After header once the max is exceeded', async () => {
     for (let i = 0; i < MAX; i++) {
-      await request(app).post('/api/invoices/transition').set('x-tenant-id', 'test-tenant').send(body);
+      await request(app).post('/api/invoices/test-tenant/transition').set('x-tenant-id', 'test-tenant').send(body);
     }
-    const res = await request(app).post('/api/invoices/transition').set('x-tenant-id', 'test-tenant').send(body);
+    const res = await request(app).post('/api/invoices/test-tenant/transition').set('x-tenant-id', 'test-tenant').send(body);
     expect(res.status).toBe(429);
     expect(res.headers).toHaveProperty('retry-after');
     expect(Number(res.headers['retry-after'])).toBeGreaterThanOrEqual(0);
@@ -59,27 +63,27 @@ describe('invoice-state rate limiting (#739)', () => {
 
   it('resets the count after the configured window elapses', async () => {
     for (let i = 0; i < MAX; i++) {
-      await request(app).post('/api/invoices/transition').set('x-tenant-id', 'test-tenant').send(body);
+      await request(app).post('/api/invoices/test-tenant/transition').set('x-tenant-id', 'test-tenant').send(body);
     }
-    const blocked = await request(app).post('/api/invoices/transition').set('x-tenant-id', 'test-tenant').send(body);
+    const blocked = await request(app).post('/api/invoices/test-tenant/transition').set('x-tenant-id', 'test-tenant').send(body);
     expect(blocked.status).toBe(429);
 
     await new Promise((resolve) => setTimeout(resolve, WINDOW_MS + 100));
 
-    const afterReset = await request(app).post('/api/invoices/transition').set('x-tenant-id', 'test-tenant').send(body);
+    const afterReset = await request(app).post('/api/invoices/test-tenant/transition').set('x-tenant-id', 'test-tenant').send(body);
     expect(afterReset.status).not.toBe(429);
   });
 
   it('rate-limits per client key (API key) independently of other clients', async () => {
     for (let i = 0; i < MAX; i++) {
       await request(app)
-        .post('/api/invoices/transition')
+        .post('/api/invoices/test-tenant/transition')
         .set('x-tenant-id', 'test-tenant')
         .set('x-api-key', 'client-a')
         .send(body);
     }
     const blockedA = await request(app)
-      .post('/api/invoices/transition')
+      .post('/api/invoices/test-tenant/transition')
       .set('x-tenant-id', 'test-tenant')
       .set('x-api-key', 'client-a')
       .send(body);
@@ -87,7 +91,7 @@ describe('invoice-state rate limiting (#739)', () => {
 
     // A different API key must not be affected by client-a's usage.
     const clientB = await request(app)
-      .post('/api/invoices/transition')
+      .post('/api/invoices/test-tenant/transition')
       .set('x-tenant-id', 'test-tenant')
       .set('x-api-key', 'client-b')
       .send(body);
@@ -103,9 +107,9 @@ describe('invoice-state rate limiting (#739)', () => {
     smallApp.use(express.json());
     smallApp.use('/api/invoices', routesWithMaxOne);
 
-    const first = await request(smallApp).post('/api/invoices/transition').set('x-tenant-id', 'test-tenant').send(body);
+    const first = await request(smallApp).post('/api/invoices/test-tenant/transition').set('x-tenant-id', 'test-tenant').send(body);
     expect(first.status).not.toBe(429);
-    const second = await request(smallApp).post('/api/invoices/transition').set('x-tenant-id', 'test-tenant').send(body);
+    const second = await request(smallApp).post('/api/invoices/test-tenant/transition').set('x-tenant-id', 'test-tenant').send(body);
     expect(second.status).toBe(429);
   });
 });
