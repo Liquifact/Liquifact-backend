@@ -14,6 +14,7 @@ const { emitKycWebhookForSme } = require('./kycWebhookEmitter');
 const { CircuitBreaker } = require('../utils/circuitBreaker');
 const { MemoryCacheStore } = require('./cacheStore');
 const { KYC_STATUSES } = require('../constants/kycWebhooks');
+const { createAuditLog } = require('./auditLog');
 
 const PROVIDER_STATUS_MAP = {
   pending: KYC_STATUSES.PENDING,
@@ -439,13 +440,15 @@ async function readKycRecord(smeId) {
  * @param {string} params.status
  * @param {string|null} [params.providerRecordId]
  * @param {string|null} [params.verifiedAt]
+ * @param {Object} [options={}] Additional options (actor, ipAddress, userAgent, metadata).
  * @returns {Promise<Object>} Persisted KYC state.
  */
-async function persistKycRecord({ smeId, status, providerRecordId = null, verifiedAt = null }) {
+async function persistKycRecord({ smeId, status, providerRecordId = null, verifiedAt = null }, options = {}) {
   if (!smeId || typeof smeId !== 'string') {
     throw new Error('Invalid SME ID');
   }
 
+  const beforeRecord = await readKycRecord(smeId);
   const normalizedStatus = normalizeProviderStatus(status);
   const updatedAt = new Date();
   const record = {
@@ -474,6 +477,25 @@ async function persistKycRecord({ smeId, status, providerRecordId = null, verifi
     verifiedAt: verifiedAt || null,
     updatedAt: updatedAt.toISOString(),
   };
+
+  const action = beforeRecord ? 'UPDATE' : 'CREATE';
+  const actor = (options && options.actor) || 'kyc-webhook';
+
+  try {
+    await createAuditLog({
+      actor,
+      action,
+      resourceType: 'kyc-webhook',
+      resourceId: smeId,
+      before: beforeRecord,
+      after: result,
+      ipAddress: (options && options.ipAddress) || 'unknown',
+      userAgent: (options && options.userAgent) || 'unknown',
+      metadata: (options && options.metadata) || {},
+    });
+  } catch (auditErr) {
+    logger.warn({ smeId, error: auditErr.message }, 'Failed to record KYC webhook audit log');
+  }
 
   // Fire-and-forget: emit outbound webhook for the KYC status change.
   // Errors are suppressed inside emitKycWebhookForSme so they can never

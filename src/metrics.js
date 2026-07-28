@@ -1106,34 +1106,6 @@ const sorobanRpcRetryCausesTotal = new client.Counter({
 // ── API key auth metrics ─────────────────────────────────────────────────────
 
 /**
- * Histogram: Wall-clock duration of API key-authenticated requests in seconds.
- *
- * Labels are bounded: `endpoint` (req.path), `method` (HTTP verb),
- * `status` (HTTP status code string), `outcome` (success | client_error | server_error).
- * @type {import('prom-client').Histogram}
- */
-const apiKeyAuthDurationSeconds = new client.Histogram({
-  name: 'api_key_auth_duration_seconds',
-  help: 'Duration of API key authenticated requests in seconds',
-  labelNames: ['endpoint', 'method', 'status', 'outcome'],
-  buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
-  registers: [registry],
-});
-
-/**
- * Counter: API key authentication errors by cause.
- *
- * Cause values are limited to a small allowlist to prevent label cardinality
- * explosion: unauthorized, forbidden, internal_error. Raw exception messages
- * are never used as labels.
- * @type {import('prom-client').Counter}
- */
-const apiKeyAuthErrorsTotal = new client.Counter({
-  name: 'api_key_auth_errors_total',
-  help: 'Total number of API key authentication errors by cause',
-  labelNames: ['cause'],
-  registers: [registry],
-});
 
 /**
  * Bounded enum of allowed `endpoint` label values for persistence metrics.
@@ -1293,6 +1265,43 @@ const metricsRequestDurationSeconds = new client.Histogram({
   buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5],
   registers: [registry],
 });
+
+/**
+ * Counter: Total metrics endpoint requests by status class.
+ * @type {import('prom-client').Counter}
+ */
+const metricsRequestsTotal = new client.Counter({
+  name: 'metrics_requests_total',
+  help: 'Total number of metrics endpoint requests',
+  labelNames: ['status_class'],
+  registers: [registry],
+});
+
+/**
+ * Counter: Metrics endpoint request errors by cause.
+ * @type {import('prom-client').Counter}
+ */
+const metricsRequestErrorsTotal = new client.Counter({
+  name: 'metrics_request_errors_total',
+  help: 'Total number of metrics endpoint request errors by cause',
+  labelNames: ['cause'],
+  registers: [registry],
+});
+
+/**
+ * Records metrics for a metrics endpoint request outcome.
+ * @param {number} status - HTTP status code.
+ * @param {unknown} [err] - Optional error object.
+ * @returns {void}
+ */
+function recordMetricsEndpointOutcome(status, err) {
+  const statusClass = normalizeMetricsEndpointStatusClass(status);
+  metricsRequestsTotal.inc({ status_class: statusClass });
+  if (status >= 400 || err) {
+    const cause = normalizeMetricsEndpointCause(err, status);
+    metricsRequestErrorsTotal.inc({ cause });
+  }
+}
 
 
 
@@ -1531,15 +1540,7 @@ const healthRequestErrorsTotal = new client.Counter({
   registers: [registry],
 });
 
-/**
- * Bounded enum of allowed `endpoint` label values for persistence metrics.
- * @readonly
- */
-const PERSISTENCE_ENDPOINT_ENUM = Object.freeze([
-  'sme_invoice_upload',
-  'sme_invoice_presigned_url',
-  'unknown',
-]);
+
 
 
 const escrowReadCacheHitsTotal = new client.Counter({
@@ -1558,6 +1559,30 @@ const escrowReadCacheEvictionsTotal = new client.Counter({
   name: 'escrow_read_cache_evictions_total',
   help: 'Total escrow read cache evictions',
   labelNames: ['reason'],
+  registers: [registry],
+});
+
+const corsCacheHitsTotal = new client.Counter({
+  name: 'cors_cache_hits_total',
+  help: 'Total CORS cache hits',
+  registers: [registry],
+});
+
+const corsCacheMissesTotal = new client.Counter({
+  name: 'cors_cache_misses_total',
+  help: 'Total CORS cache misses',
+  registers: [registry],
+});
+
+const corsCacheEvictionsTotal = new client.Counter({
+  name: 'cors_cache_evictions_total',
+  help: 'Total CORS cache evictions',
+  registers: [registry],
+});
+
+const corsCacheInvalidationsTotal = new client.Counter({
+  name: 'cors_cache_invalidations_total',
+  help: 'Total CORS cache invalidations',
   registers: [registry],
 });
 
