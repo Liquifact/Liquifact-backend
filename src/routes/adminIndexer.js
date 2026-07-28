@@ -256,12 +256,14 @@ router.get('/events', async (req, res, next) => {
     const { isValid, fieldErrors, params } = _parseQuery(req.query);
 
     if (!isValid) {
-      return res.status(400).json(
-        responseHelper.error('Query parameters contain invalid values.', 'VALIDATION_ERROR', fieldErrors),
-      );
+      return res.status(400).json({
+        ...responseHelper.error('Query parameters contain invalid values.', 'VALIDATION_ERROR', fieldErrors),
+        correlation_id: req.correlationId || req.id,
+      });
     }
 
-    // ── 2. Call service ─────────────────────────────────────────────────────
+    // ── 2. Call service with correlation context ────────────────────────────
+    const correlationId = req.correlationId || req.id;
     let result;
     try {
       result = await listIndexerEvents({
@@ -269,24 +271,27 @@ router.get('/events', async (req, res, next) => {
         sorting: params.sorting,
         pagination: params.pagination,
         dbClient: req._dbClient, // injectable in tests
+        correlationId,
       });
     } catch (err) {
       // CursorError is a client error (malformed/tampered cursor) → 400
       if (err instanceof CursorError) {
-        return res.status(400).json(
-          responseHelper.error(
+        return res.status(400).json({
+          ...responseHelper.error(
             'Query parameters contain invalid values.',
             'VALIDATION_ERROR',
             { cursor: err.message },
           ),
-        );
+          correlation_id: req.correlationId || req.id,
+        });
       }
       throw err;
     }
 
-    // ── 3. Logging ──────────────────────────────────────────────────────────
+    // ── 3. Logging with correlation context ─────────────────────────────────
     logger.info(
       {
+        correlationId,
         requestId: req.id,
         count: result.data.length,
         total: result.meta.total,
@@ -296,9 +301,10 @@ router.get('/events', async (req, res, next) => {
       'Indexer events retrieved',
     );
 
-    // ── 4. Respond ──────────────────────────────────────────────────────────
+    // ── 4. Respond with correlation_id ──────────────────────────────────────
     return res.status(200).json({
       ...responseHelper.success(result.data, result.meta),
+      correlation_id: correlationId,
       message: 'Indexer events retrieved successfully.',
     });
   } catch (error) {
