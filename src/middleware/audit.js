@@ -141,9 +141,12 @@ function auditMiddleware(req, res, next) {
     // Only create audit log for successful responses (2xx status codes)
     const wasSuccessful = statusCode >= 200 && statusCode < 300;
 
-    if (wasSuccessful && body) {
+    if (res.locals.audited) return body;
+
+    if (wasSuccessful && body !== undefined) {
+      res.locals.audited = true;
       try {
-        const afterState = typeof body === 'string' ? JSON.parse(body) : body;
+        const afterState = typeof body === 'string' && body ? JSON.parse(body) : body;
         createAuditLog({
           actor,
           action,
@@ -194,6 +197,8 @@ function auditMiddleware(req, res, next) {
         } catch {
           // Not JSON, just proceed
         }
+      } else if (!body) {
+        captureResponse(null);
       }
     }
     return originalSend.call(this, body);

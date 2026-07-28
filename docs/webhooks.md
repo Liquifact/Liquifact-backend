@@ -7,6 +7,52 @@ LiquiFact backend emits webhooks to notify tenant systems about important escrow
 Currently, the following events are supported:
 - `escrow_funded`: Emitted when an escrow account reaches its required funding balance.
 - `escrow_settled`: Emitted when an escrow transaction is finalized and settled on the Stellar network.
+- `config.updated`: Emitted when tenant administrative configuration settings are updated.
+
+### Configuration Event (`config.updated`)
+
+When a tenant admin updates runtime configuration settings (e.g. CORS origins, retention policies, KYC timeouts), LiquiFact emits an outbound signed `config.updated` webhook event.
+
+#### Event Payload Schema
+
+```json
+{
+  "event": "config.updated",
+  "timestamp": "2026-07-26T12:00:00.000Z",
+  "tenantId": "tenant_12345",
+  "section": "cors",
+  "config": {
+    "origins": ["https://app.example.com"],
+    "maxAge": 3600
+  },
+  "actor": "usr_admin",
+  "truncated": false
+}
+```
+
+#### Payload Bounding
+
+To prevent memory and HTTP transfer degradation, configuration payloads are strictly bounded to a maximum of 32 KB (`MAX_CONFIG_WEBHOOK_PAYLOAD_BYTES = 32768`). If a configuration section exceeds 32 KB, the payload `config` object is truncated with summary metadata:
+
+```json
+{
+  "event": "config.updated",
+  "timestamp": "2026-07-26T12:00:00.000Z",
+  "tenantId": "tenant_12345",
+  "section": "largeSection",
+  "config": {
+    "_summary": "Config payload exceeded maximum size limit",
+    "keys": ["key1", "key2"]
+  },
+  "actor": "usr_admin",
+  "truncated": true
+}
+```
+
+#### Delivery, Retry & Dead-Letter Queue (DLQ)
+
+Outbound webhooks utilize exponential retry/backoff on transient errors (e.g., HTTP 5xx or network errors). If all retries are exhausted, the delivery record is persisted to the `webhook_dead_letters` table for audit logging and manual replay.
+
 
 ## Security & Signatures
 

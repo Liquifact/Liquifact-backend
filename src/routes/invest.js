@@ -26,6 +26,7 @@ const { requireKycForFunding } = require('../middleware/kycGating');
 const { legalHoldGate } = require('../middleware/legalHoldGate');
 const { resolveEscrowAddress, EscrowNotFoundError } = require('../config/escrowMap');
 const { submitFundEscrow, EscrowSubmitError } = require('../services/escrowSubmit');
+const { invalidateEscrowReadCache } = require('../services/escrowRead');
 const {
   persistCommitment,
   normalizeAmountStroopsInput,
@@ -94,7 +95,8 @@ function validateFundInvoiceBody(body) {
  * @param {import('express').Response} res - Express response.
  * @returns {Promise<void>} Responds with a JSON envelope containing `data`
  *   (array of {@link InvestmentOpportunity} DTOs) and pagination `meta`.
- *
+ */
+/**
  * @swagger
  * /api/invest/opportunities:
  *   get:
@@ -294,6 +296,9 @@ router.post(
       ledger: submitResult.ledger,
       idempotencyKey,
     });
+
+    // A successful escrow write makes any previously cached read stale.
+    await invalidateEscrowReadCache(invoiceId);
 
     // 7. Return real status — never return internal detail fields like idempotencyKey
     return res.status(200).json({

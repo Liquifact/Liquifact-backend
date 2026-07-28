@@ -1,20 +1,32 @@
 'use strict';
 
 /**
- * @fileoverview Health listing route — GET /api/health/checks
+ * @fileoverview Health routes — GET /api/health/checks (read) and
+ * POST /api/health/reports (idempotent write).
  *
- * Returns a bounded, cursor-paginated list of live dependency health-check
- * records. Each record represents one named upstream dependency (Soroban RPC,
- * database, KYC provider, etc.) captured at the same instant.
+ * Read path:
+ *   Returns a bounded, cursor-paginated list of live dependency health-check
+ *   records. Each record represents one named upstream dependency (Soroban
+ *   RPC, database, KYC provider, etc.) captured at the same instant.
  *
- * Cursor pagination keeps the response stable and bounded as the dependency
- * roster grows. Cursors are HMAC-signed so any tampering is rejected with 400.
+ *   Cursor pagination keeps the response stable and bounded as the dependency
+ *   roster grows. Cursors are HMAC-signed so any tampering is rejected with
+ *   400.
+ *
+ * Write path:
+ *   Accepts an external health report from a named service with an
+ *   `Idempotency-Key` header. Replays the original response when the same
+ *   key and body are retried; returns 409 when the key is reused with a
+ *   different body. Idempotency keys are stored in the `idempotency_keys`
+ *   table with a configurable TTL and automatically expired by a background
+ *   purge job.
  *
  * @module routes/health
  */
 
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
 const { listHealthChecks } = require('../services/health');
 const {
   encodeHealthCursor,
@@ -22,6 +34,10 @@ const {
   resolveLimit,
   HealthCursorError,
 } = require('../utils/healthCursorPagination');
+const idempotencyMiddleware = require('../middleware/idempotency');
+const { healthReportSchema, parseValidationErrors } = require('../schemas/healthReport');
+const logger = require('../logger');
+const { instrumentHealth } = require('../middleware/healthMetrics');
 
 /**
  * @swagger
@@ -71,7 +87,7 @@ const {
  *         description: Malformed or tampered cursor.
  *         $ref: '#/components/responses/Problem400'
  */
-router.get('/checks', async (req, res, next) => {
+router.get('/checks', instrumentHealth('health_checks_list', async (req, res, next) => {
   try {
     const limit = resolveLimit(req.query.limit);
     const rawCursor = req.query.cursor;
@@ -148,6 +164,123 @@ router.get('/checks', async (req, res, next) => {
   } catch (error) {
     next(error);
   }
-});
+}));
+
+// ── Health report write endpoint ─────────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/health/reports:
+ *   post:
+ *     operationId: submitHealthReport
+ *     summary: Submit an external service health report (idempotent)
+ *     description: |
+ *       Accepts a health status report from a named external service.
+ *       Requires an `Idempotency-Key` header so retried submissions
+ *       return the original response instead of double-processing.
+ *
+ *       **Idempotency contract**
+ *
+ *       | Scenario                       | Result |
+ *       |--------------------------------|--------|
+ *       | New key + valid body           | 201    |
+ *       | Same key + same body           | 201 (cached replay) |
+ *       | Same key + different body      | 409    |
+ *       | Missing / malformed key        | 400    |
+ *       | Invalid body                   | 400    |
+ *
+ *     tags: [Health]
+ *     parameters:
+ *       - in: header
+ *         name: Idempotency-Key
+ *         required: true
+ *         schema:
+ *           type: string
+ *           pattern: '^[A-Za-z0-9._:-]{8,128}$'
+ *         description: Unique idempotency key for this health report submission.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [serviceName, status]
+ *             properties:
+ *               serviceName:
+ *                 type: string
+ *                 maxLength: 255
+ *                 description: Name of the service reporting health status.
+ *               status:
+ *                 type: string
+ *                 enum: [healthy, degraded, unhealthy]
+ *               message:
+ *                 type: string
+ *                 maxLength: 1000
+ *               metadata:
+ *                 type: object
+ *               reportedAt:
+ *                 type: string
+ *                 format: date-time
+ *     responses:
+ *       201:
+ *         description: Health report accepted.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/HealthReportResponse'
+ *       400:
+ *         description: Missing or malformed Idempotency-Key, or invalid body.
+ *         $ref: '#/components/responses/Problem400'
+ *       409:
+ *         description: Idempotency key reused with a different request body.
+ *         $ref: '#/components/responses/Problem409'
+ */
+router.post(
+  '/reports',
+  idempotencyMiddleware,
+  instrumentHealth('health_reports_submit', (req, res) => {
+    const requestLogger = logger.createRequestLogger(req);
+
+    // Validate the request body with Zod
+    const result = healthReportSchema.safeParse(req.body);
+
+    if (!result.success) {
+      const fieldErrors = parseValidationErrors(result.error);
+      requestLogger.warn({ fieldErrors }, 'Health report validation failed');
+      return res.status(400).json({
+        type: 'https://liquifact.io/problems/validation-error',
+        title: 'Validation Error',
+        status: 400,
+        detail: 'Health report payload contains invalid or missing fields.',
+        instance: req.originalUrl,
+        fieldErrors,
+      });
+    }
+
+    const { serviceName, status: healthStatus, message, metadata, reportedAt } = result.data;
+
+    // Generate a unique report ID for this submission
+    const reportId = crypto.randomUUID();
+    const acceptedAt = new Date().toISOString();
+
+    requestLogger.info(
+      { reportId, serviceName, status: healthStatus },
+      'Health report accepted'
+    );
+
+    return res.status(201).json({
+      data: {
+        reportId,
+        serviceName,
+        status: healthStatus,
+        message: message || null,
+        metadata: metadata || null,
+        reportedAt: reportedAt || acceptedAt,
+        acceptedAt,
+      },
+      message: `Health report for '${serviceName}' accepted.`,
+    });
+  })
+);
 
 module.exports = router;

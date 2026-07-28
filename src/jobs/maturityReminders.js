@@ -8,6 +8,7 @@ const logger = require('../logger');
 const { sendMailWithRetry } = require('../utils/retry');
 const {
   maturityReminderDeliveryAttemptsTotal,
+  maturityReminderDeliverySuccessTotal,
   maturityReminderDeadLetterTotal,
   normalizeReminderReason,
   normalizeJobType,
@@ -200,6 +201,9 @@ function createMaturityReminderHandler(dependencies = {}) {
         },
         { maxAttempts: getMaxAttempts() }
       );
+
+      // Increment success counter only after a confirmed successful delivery.
+      maturityReminderDeliverySuccessTotal.inc({ job_type: jobType });
     } catch (err) {
       const reason = normalizeReminderReason(err);
       maturityReminderDeadLetterTotal.inc({ reason, job_type: jobType });

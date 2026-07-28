@@ -245,3 +245,6 @@ Before requesting review:
 ## Community and Campaign
 
 LiquiFact backend tasks may be part of the GrantFox OSS / Official Campaign. Use the LiquiFact Discord linked in campaign issues for coordination, review questions, and reward follow-up after eligible merged work.
+
+## Metrics Documentation Rule
+- [ ] I have documented notable metrics API changes in `docs/changelog-metrics.md` (or checked that no metric changes occurred).

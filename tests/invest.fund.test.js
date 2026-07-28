@@ -478,4 +478,42 @@ describe('POST /api/invest/fund-invoice — happy path', () => {
       })
     );
   });
+
+  it('returns 500 when persistCommitment throws an unexpected error', async () => {
+    persistCommitment.mockRejectedValueOnce(new Error('DB connection lost'));
+
+    const res = await agent()
+      .post('/api/invest/fund-invoice')
+      .set('Authorization', `Bearer ${token()}`)
+      .set('x-tenant-id', TENANT_ID)
+      .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: '500' });
+    expect(res.status).toBe(500);
+    expect(res.body.error.code).toBe('INTERNAL_SERVER_ERROR');
+    // The actual error message must not leak to the client
+    expect(JSON.stringify(res.body)).not.toContain('DB connection lost');
+  });
+
+  it('returns the same commitmentId for duplicate requests (idempotent at service layer)', async () => {
+    const body = { invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: '5000' };
+    const firstRes = await agent()
+      .post('/api/invest/fund-invoice')
+      .set('Authorization', `Bearer ${token()}`)
+      .set('x-tenant-id', TENANT_ID)
+      .send(body);
+    expect(firstRes.status).toBe(200);
+    expect(firstRes.body.commitmentId).toBe('cmt-1');
+
+    const secondRes = await agent()
+      .post('/api/invest/fund-invoice')
+      .set('Authorization', `Bearer ${token()}`)
+      .set('x-tenant-id', TENANT_ID)
+      .send(body);
+    expect(secondRes.status).toBe(200);
+    expect(secondRes.body.commitmentId).toBe('cmt-1');
+
+    const firstKey = persistCommitment.mock.calls[0][0].idempotencyKey;
+    const secondKey = persistCommitment.mock.calls[1][0].idempotencyKey;
+    expect(firstKey).toBeDefined();
+    expect(secondKey).toBe(firstKey);
+  });
 });

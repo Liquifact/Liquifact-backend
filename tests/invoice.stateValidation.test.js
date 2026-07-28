@@ -17,6 +17,10 @@
 const request = require('supertest');
 const express = require('express');
 
+jest.mock('../src/middleware/auth', () => ({
+  authenticateToken: jest.fn((req, res, next) => next()),
+}));
+
 const invoiceStateRoutes = require('../src/routes/invoiceStateRoutes');
 const {
   safeParseTransitionBody,
@@ -54,9 +58,13 @@ function repeat(n) {
   return 'x'.repeat(n);
 }
 
-/** Performs a POST /transition with the supplied body. */
+/** Performs a POST /:id/transition with the supplied body. */
+const TEST_INVOICE_ID = 'inv-001';
 function postTransition(body) {
-  return request(buildApp()).post('/api/invoices/transition').send(body);
+  return request(buildApp())
+    .post(`/api/invoices/${TEST_INVOICE_ID}/transition`)
+    .set('x-tenant-id', 'tenant-alpha')
+    .send(body);
 }
 
 // ---------------------------------------------------------------------------
@@ -694,7 +702,7 @@ describe('POST /api/invoices/transition — route integration', () => {
     // assert the route integration with a body that the JSON parser
     // definitely accepts: an object literal whose `req.body` is null.
     const res = await request(buildApp())
-      .post('/api/invoices/transition')
+      .post(`/api/invoices/${TEST_INVOICE_ID}/transition`)
       .set('x-test-null-body', '1')
       .send({});
     expect(res.status).toBe(400);
@@ -702,7 +710,7 @@ describe('POST /api/invoices/transition — route integration', () => {
 
   it('returns INVALID_BODY_TYPE for array body', async () => {
     const res = await request(buildApp())
-      .post('/api/invoices/transition')
+      .post(`/api/invoices/${TEST_INVOICE_ID}/transition`)
       .send([{ targetState: 'pending' }]);
     expect(res.status).toBe(400);
     expect(res.body.fieldErrors._root).toBe('INVALID_BODY_TYPE');

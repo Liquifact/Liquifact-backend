@@ -67,7 +67,7 @@ function startServer() {
 }
 
 /**
- * Resets in-memory state (clears the shared cache store for test isolation).
+ * Resets in-memory state (clears shared cache stores for test isolation).
  *
  * @returns {void}
  */
@@ -77,6 +77,13 @@ function resetStore() {
     getSharedStore().clear();
   } catch (_) {
     // intentional no-op in environments where cacheStore is unavailable
+  }
+
+  try {
+    const { getMetricsCacheStore } = require('./services/metricsCacheStore');
+    getMetricsCacheStore().clear();
+  } catch (_) {
+    // intentional no-op in environments where metricsCacheStore is unavailable
   }
 }
 
@@ -91,12 +98,15 @@ function createApp() {
   return typeof originalCreateApp === 'function' ? originalCreateApp() : app;
 }
 
-
 // Start background workers when running as main module (not in tests)
 if (process.env.NODE_ENV !== 'test' && require.main === module) {
   // Start the idempotency purge worker
   const { startPurgeWorker } = require('./jobs/idempotencyPurge');
   startPurgeWorker();
+
+  // Start the invoice-state retention purge worker (issue #866)
+  const { startPurgeWorker: startInvoiceStatePurgeWorker } = require('./jobs/invoiceStatePurge');
+  startInvoiceStatePurgeWorker();
 
   startServer();
 }

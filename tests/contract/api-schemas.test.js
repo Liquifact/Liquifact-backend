@@ -114,4 +114,139 @@ describe('API Contract Tests - Response Schemas', () => {
       })
     );
   });
+
+  describe('CORS response contract tests', () => {
+    const allowedOrigin = 'https://app.example.com';
+    const blockedOrigin = 'https://blocked.example.com';
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalAllowedOrigins = process.env.CORS_ALLOWED_ORIGINS;
+
+    beforeEach(() => {
+      process.env.NODE_ENV = 'production';
+      process.env.CORS_ALLOWED_ORIGINS = allowedOrigin;
+    });
+
+    afterEach(() => {
+      if (originalNodeEnv === undefined) {
+        delete process.env.NODE_ENV;
+      } else {
+        process.env.NODE_ENV = originalNodeEnv;
+      }
+
+      if (originalAllowedOrigins === undefined) {
+        delete process.env.CORS_ALLOWED_ORIGINS;
+      } else {
+        process.env.CORS_ALLOWED_ORIGINS = originalAllowedOrigins;
+      }
+    });
+
+    it('should validate CORS rejection response against schema', async () => {
+      const { buildOpenApiSpec } = require('../../src/openapi/openapiSpec');
+      const spec = buildOpenApiSpec();
+      const schema = spec.components.schemas.CorsRejection;
+
+      const validate = ajv.compile(schema);
+
+      const corsApp = createApp();
+      const response = await request(corsApp)
+        .get('/health')
+        .set('Origin', blockedOrigin);
+
+      expect(response.status).toBe(403);
+      expect(validate(response.body)).toBe(true);
+    });
+
+    it('should reject CORS response with extra fields', async () => {
+      const { buildOpenApiSpec } = require('../../src/openapi/openapiSpec');
+      const spec = buildOpenApiSpec();
+      const schema = spec.components.schemas.CorsRejection;
+
+      const validate = ajv.compile(schema);
+
+      const invalidResponse = {
+        error: 'CORS policy: origin is not allowed.',
+        code: 'CORS_ORIGIN_REJECTED',
+        extraField: 'should not be present',
+      };
+
+      expect(validate(invalidResponse)).toBe(false);
+      expect(validate.errors).toBeDefined();
+    });
+
+    it('should reject CORS response with missing required fields', async () => {
+      const { buildOpenApiSpec } = require('../../src/openapi/openapiSpec');
+      const spec = buildOpenApiSpec();
+      const schema = spec.components.schemas.CorsRejection;
+
+      const validate = ajv.compile(schema);
+
+      const invalidResponse = {
+        error: 'CORS policy: origin is not allowed.',
+        // missing 'code' field
+      };
+
+      expect(validate(invalidResponse)).toBe(false);
+      expect(validate.errors).toBeDefined();
+    });
+
+    it('should reject CORS response with invalid error message', async () => {
+      const { buildOpenApiSpec } = require('../../src/openapi/openapiSpec');
+      const spec = buildOpenApiSpec();
+      const schema = spec.components.schemas.CorsRejection;
+
+      const validate = ajv.compile(schema);
+
+      const invalidResponse = {
+        error: 'Wrong error message',
+        code: 'CORS_ORIGIN_REJECTED',
+      };
+
+      expect(validate(invalidResponse)).toBe(false);
+      expect(validate.errors).toBeDefined();
+    });
+
+    it('should reject CORS response with invalid code', async () => {
+      const { buildOpenApiSpec } = require('../../src/openapi/openapiSpec');
+      const spec = buildOpenApiSpec();
+      const schema = spec.components.schemas.CorsRejection;
+
+      const validate = ajv.compile(schema);
+
+      const invalidResponse = {
+        error: 'CORS policy: origin is not allowed.',
+        code: 'INVALID_CODE',
+      };
+
+      expect(validate(invalidResponse)).toBe(false);
+      expect(validate.errors).toBeDefined();
+    });
+
+    it('should validate CORS rejection on preflight request', async () => {
+      const { buildOpenApiSpec } = require('../../src/openapi/openapiSpec');
+      const spec = buildOpenApiSpec();
+      const schema = spec.components.schemas.CorsRejection;
+
+      const validate = ajv.compile(schema);
+
+      const corsApp = createApp();
+      const response = await request(corsApp)
+        .options('/health')
+        .set('Origin', blockedOrigin)
+        .set('Access-Control-Request-Method', 'GET');
+
+      expect(response.status).toBe(403);
+      expect(validate(response.body)).toBe(true);
+    });
+
+    it('should validate preflight success response has empty body', async () => {
+      const corsApp = createApp();
+      const response = await request(corsApp)
+        .options('/health')
+        .set('Origin', allowedOrigin)
+        .set('Access-Control-Request-Method', 'GET');
+
+      expect(response.status).toBe(204);
+      expect(response.body).toEqual({});
+    });
+  });
 });

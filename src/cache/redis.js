@@ -10,13 +10,18 @@ const MAX_TTL_SECONDS = 300;
 const DEFAULT_LEDGER_GAP_THRESHOLD = 3;
 const MAX_LEDGER_GAP_THRESHOLD = 1000;
 
-const redis = require('redis');
+let redis;
+try {
+  redis = require('redis');
+} catch (_e) {
+  redis = null;
+}
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 let redisClient = null;
 let isRedisConnected = false;
 
-if (process.env.NODE_ENV !== 'test' || process.env.USE_REDIS_TEST === 'true') {
+if (redis && (process.env.NODE_ENV !== 'test' || process.env.USE_REDIS_TEST === 'true')) {
   redisClient = redis.createClient({ url: REDIS_URL });
 
   redisClient.on('connect', () => {
@@ -266,6 +271,27 @@ class RedisEscrowSummaryCache {
       return result !== null;
     } catch {
       // Redis error, timeout, or circuit breaker exception — fail open.
+      redisCacheFailOpenTotal.inc();
+      return false;
+    }
+  }
+
+  /**
+   * Deletes an invoice summary after a successful escrow write.
+   * Failures are non-fatal because callers can still invalidate their local cache.
+   * @param {string} invoiceId The invoice ID.
+   * @returns {Promise<boolean>} Whether Redis accepted the deletion.
+   */
+  async deleteSummary(invoiceId) {
+    if (!this.client || !isValidInvoiceId(invoiceId)) {
+      return false;
+    }
+    try {
+      const result = await this.circuitBreaker.execute(() =>
+        withTimeout(this.client.del(this.key(invoiceId)), this.timeoutMs)
+      );
+      return result !== null;
+    } catch {
       redisCacheFailOpenTotal.inc();
       return false;
     }

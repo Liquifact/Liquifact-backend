@@ -3,60 +3,70 @@
 The internal backend uses a customized background job worker architecture to send email notifications without holding up critical HTTP requests. It separates the presentation (template strings) from the logical workflow (job queueing).
 
 ## Configuration
-By default, the worker will run in a **dry-run** logging mode to provide transparent observability during local development and CI test runs. It seamlessly switches to a production-grade SMTP pool when credentials are provided in the environment variables (e.g., via `.env`).
 
-Required environment variables for real traffic:
-- `SMTP_HOST`: The host for your SMTP delivery service (e.g., SendGrid, AWS SES).
-- `SMTP_PORT`: (Optional) Defaults to 587.
-- `SMTP_USER`: SMTP authenticated username.
-- `SMTP_PASS`: SMTP authenticated password.
-- `SMTP_FROM`: (Optional) Sender signature overriding `noreply@liquifact.com`.
+By default, the worker runs in a **dry-run** logging mode to provide transparent observability during local development and CI test runs. It seamlessly switches to a production-grade SMTP transport when credentials are provided in the environment variables (e.g., via `.env`).
 
-### Retry Configuration
-- `SMTP_MAX_RETRIES`: (Optional) Maximum retry attempts for transient SMTP failures. Defaults to 3.
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `SMTP_HOST` | No | unset | SMTP server hostname. When absent the system runs in dry-run mode. |
+| `SMTP_PORT` | No | `587` | SMTP server port. |
+| `SMTP_USER` | No | unset | SMTP authenticated username. |
+| `SMTP_PASS` | No | unset | SMTP authenticated password. Never logged. |
+| `SMTP_FROM` | No | `noreply@liquifact.com` | Sender address used in the `From` header. |
+| `SMTP_MAX_RETRIES` | No | `3` | Maximum delivery attempts for transient failures. Clamped to 1–10. |
+
+When `SMTP_HOST` is unset the system operates in **dry-run mode**: emails are logged to the console (to, subject, and text only) and no real SMTP connection is opened. SMTP credentials are never written to any log line in either mode.
 
 ## Delivery Resiliency
 
-Maturity reminder emails include built-in resiliency to handle transient failures:
+Maturity reminder emails include built-in resiliency to handle transient failures without losing messages or crashing the background worker.
 
 ### Exponential Backoff
-- Each retry uses exponential backoff with a base delay of ~1 second
-- Delay multiplies by 2 for each subsequent attempt
-- Maximum delay is capped at the configured `maxDelay` parameter
-- Jitter (±20%) is added to prevent thundering herd during traffic spikes
+
+Each transient failure triggers an automatic retry with exponential backoff:
+- Base delay of ~1 second, doubling on each subsequent attempt.
+- Maximum delay is capped at the `maxDelay` parameter of `withRetry` (60 s hard cap).
+- ±20% jitter is added to each delay to prevent thundering-herd effects.
+- The number of attempts is bounded by `SMTP_MAX_RETRIES` (default 3, clamped to 1–10).
 
 ### Error Classification
-The system distinguishes between **permanent** and **transient** SMTP errors:
 
-**Permanent Errors (no retry, dead-lettered immediately):**
-- SMTP 5xx codes (550-554): invalid recipient, policy rejection, quota exceeded
-- Specific error patterns: "Invalid recipient", "User unknown", "Mailbox not found"
+Before deciding whether to retry, each SMTP error is classified as **permanent** or **transient** by `isPermanentSmtpError` in `src/utils/retry.js`:
 
-**Transient Errors (retried with backoff):**
-- SMTP 4xx codes (421-429): temporary service unavailable
-- Network errors: `ECONNREFUSED`, `ETIMEDOUT`, `EHOSTUNREACH`
-- Generic transport errors without a 5xx code
+**Permanent errors (no retry — dead-lettered immediately):**
+- SMTP 5xx responses (550–554): invalid recipient, policy rejection, quota exceeded.
+- Error message patterns: "invalid recipient", "user unknown", "mailbox not found", "domain not found".
+- Error codes: `EBADRQC`, `EDQUOT`.
+
+**Transient errors (retried with backoff):**
+- SMTP 4xx responses (421–429): temporary service unavailable.
+- Network errors: `ECONNREFUSED`, `ETIMEDOUT`, `EHOSTUNREACH`.
+- Any error not matching a permanent pattern.
+
+The raw SMTP error message is never written to logs or Prometheus labels; only the bounded `normalizeReminderReason` output is used.
 
 ### Dead-Lettering
-When a maturity reminder fails after exhausting all retries (or encounters a permanent error):
-1. A sanitized record is written to `maturity_reminder_dead_letters` for durable inspection
-2. A Prometheus counter (`maturity_reminder_dead_letter_total`) is incremented with the failure reason
-3. Persistence runs asynchronously so a database outage cannot stall the reminder loop
 
-Dead-letter entries include:
-- `id`: Durable dead-letter identifier
-- `job_id`: Background job identifier
-- `invoice_id`: Invoice associated with the failed reminder
-- `reason`: Bounded failure category used by the existing metric
-- `attempts`: Number of SMTP delivery attempts
-- `payload_metadata`: Job type and target date only
-- `created_at`: Database insertion timestamp
+When a reminder exhausts all retries or encounters a permanent error:
+1. The Prometheus counter `maturity_reminder_dead_letter_total` is incremented with a bounded `reason` label.
+2. A **sanitized** record is written asynchronously to `maturity_reminder_dead_letters` for durable operator inspection.
+3. The write is fire-and-forget: a database outage writes a `warn` log but never stalls the reminder handler or crashes the worker.
 
-Recipient email, customer name, invoice amount, generated email subject/body, and raw SMTP error text are deliberately excluded. Operators can correlate `invoice_id` with access-controlled invoice records when investigation requires more context.
+Dead-letter records contain only operational metadata — **no PII**:
+
+| Column | Value |
+|--------|-------|
+| `id` | Auto-generated primary key |
+| `job_id` | Background job identifier |
+| `invoice_id` | Invoice associated with the failed reminder |
+| `reason` | Bounded failure category (`smtp_timeout`, `smtp_reject`, `template_error`, `unknown`) |
+| `attempts` | Number of SMTP delivery attempts made |
+| `payload_metadata` | `{"jobType":"maturity_reminder","targetDate":"..."}` only |
+| `created_at` | Database insertion timestamp |
+
+Recipient email, customer name, invoice amount, generated email body, and raw SMTP error text are **deliberately excluded**.
 
 ### Inspecting Dead Letters
-
-Use the service read path from an authenticated admin workflow or an operations REPL:
 
 ```javascript
 const { listReminderDeadLetters } = require('./src/jobs/maturityReminders');
@@ -71,7 +81,7 @@ const timeouts = await listReminderDeadLetters({
 });
 ```
 
-Because this read path queries the database rather than process memory, entries remain inspectable after an application restart. An empty result is returned as `[]`.
+Dead letters survive application restarts (stored in the database). An empty result is returned as `[]`.
 
 ## Metrics
 

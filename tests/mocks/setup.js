@@ -1,3 +1,7 @@
+const { CircuitBreaker: _CircuitBreaker } = require('../../src/utils/circuitBreaker');
+const { MemoryCacheStore: _MemoryCacheStore } = require('../../src/services/cacheStore');
+globalThis.CircuitBreaker = _CircuitBreaker;
+globalThis.MemoryCacheStore = _MemoryCacheStore;
 
 process.env.JWT_SECRET = 'test-secret-at-least-32-characters-long-string-for-jest';
 process.env.ESCROW_ADDR_BY_INVOICE = JSON.stringify({
@@ -15,6 +19,7 @@ let mockCurrentTable = null;
 jest.mock('../../src/db/knex', () => {
   const auditLogEvents = [];
   const investorLocks = [];
+  const invoiceFiles = [];
   let queryWheres = {};
   let mockCurrentTable;
   let _lastInserted = null;
@@ -24,6 +29,10 @@ jest.mock('../../src/db/knex', () => {
   let _offset = 0;
 
   const filterInvestorLocks = () => investorLocks.filter((row) => {
+    return Object.entries(queryWheres).every(([key, value]) => row[key] === value);
+  });
+
+  const filterInvoiceFiles = () => invoiceFiles.filter((row) => {
     return Object.entries(queryWheres).every(([key, value]) => row[key] === value);
   });
 
@@ -67,6 +76,9 @@ jest.mock('../../src/db/knex', () => {
     if (mockCurrentTable === "audit_log_events") {
       mockInMemoryDb.push(...inserted);
     }
+    if (mockCurrentTable === "invoice_files") {
+      invoiceFiles.push(...inserted);
+    }
     return m;
   });
   m.onConflict = jest.fn().mockReturnThis();
@@ -105,6 +117,9 @@ jest.mock('../../src/db/knex', () => {
   m.first = jest.fn(() => {
     if (mockCurrentTable === "investor_locks") {
       return Promise.resolve(filterInvestorLocks()[0]);
+    }
+    if (mockCurrentTable === "invoice_files") {
+      return Promise.resolve(filterInvoiceFiles()[0]);
     }
     return Promise.resolve({ id: 'test', kyc_status: 'approved' });
   });
@@ -167,6 +182,9 @@ jest.mock('../../src/db/knex', () => {
     }
     if (mockCurrentTable === "audit_log_events") {
       return Promise.resolve(mockInMemoryDb).then(onFulfilled);
+    }
+    if (mockCurrentTable === "invoice_files") {
+      return Promise.resolve(filterInvoiceFiles()).then(onFulfilled);
     }
     return Promise.resolve([]).then(onFulfilled);
   });
@@ -269,10 +287,42 @@ jest.mock('../../src/middleware/rateLimit', () => {
     globalLimiter: noopMiddleware,
     sensitiveLimiter: noopMiddleware,
     apiKeyLimiter: noopMiddleware,
+    adminConfigLimiter: noopMiddleware,
+    metricsLimiter: noopMiddleware,
+    healthLimiter: noopMiddleware,
+    metricsLimiter: noopMiddleware,
+    createConfigRateLimiter: jest.fn(() => noopMiddleware),
+    createMetricsRateLimiter: jest.fn(() => noopMiddleware),
+    invoiceStateLimiter: noopMiddleware,
+    escrowReadLimiter: noopMiddleware,
+    indexerLimiter: noopMiddleware,
+    createPersistenceRateLimiter: jest.fn(() => noopMiddleware),
     createRateLimiter: jest.fn(() => noopMiddleware),
+    adminConfigHandler: jest.fn(),
+    metricsRateLimitHandler: jest.fn(),
+    kycWebhookLimiter: noopMiddleware,
+    createKycWebhookRateLimiter: jest.fn(() => noopMiddleware),
+    kycWebhookRateLimitHandler: jest.fn(),
+    adminConfigKeyGenerator: jest.fn((req) => req.ip || '127.0.0.1'),
+    healthHandler: jest.fn(),
+    metricsRateLimitHandler: jest.fn(),
+    createMetricsRateLimiter: jest.fn(() => noopMiddleware),
     parseRateLimitEnv: jest.fn((_, def) => def),
     keyGenerator: jest.fn((req) => req.ip || '127.0.0.1'),
     apiKeyKeyGenerator: jest.fn((req) => req.ip || '127.0.0.1'),
-    getApiKey: jest.fn(() => undefined),
+    metricsLimiter: noopMiddleware,
+    createMetricsRateLimiter: jest.fn(() => noopMiddleware),
+    metricsRateLimitHandler: jest.fn(),
+    METRICS_RATE_LIMIT_WINDOW_MS: 60000,
+    METRICS_RATE_LIMIT_MAX: 30,
+    CONFIG_RATE_LIMIT_WINDOW_MS: 60000,
+    CONFIG_RATE_LIMIT_MAX: 20,
+    HEALTH_RATE_LIMIT_WINDOW_MS: 15000,
+    HEALTH_RATE_LIMIT_MAX: 60,
+    METRICS_RATE_LIMIT_WINDOW_MS: 60000,
+    METRICS_RATE_LIMIT_MAX: 30,
+    metricsLimiter: noopMiddleware,
+    metricsRateLimitHandler: jest.fn(),
+    createMetricsRateLimiter: jest.fn(() => noopMiddleware),
   };
 }, { virtual: true });

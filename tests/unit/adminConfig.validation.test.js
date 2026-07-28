@@ -23,13 +23,18 @@ jest.mock('../../src/logger', () => ({
   error: jest.fn(),
   info: jest.fn(),
 }));
-jest.mock('../../src/metrics', () => ({
-  webhookReplayTotal: { inc: jest.fn() },
-  registry: { contentType: 'text/plain', metrics: jest.fn().mockResolvedValue('') },
-}));
+jest.mock('../../src/metrics', () => {
+  const actual = jest.requireActual('../../src/metrics');
+  return {
+    ...actual,
+    webhookReplayTotal: { inc: jest.fn() },
+  };
+});
+
 jest.mock('prom-client', () => ({
-  Counter:  class { constructor() {} inc() {} },
-  Gauge:    class { constructor() {} set() {} },
+  Counter:  class { constructor() {} inc() {} labels() { return this; } },
+  Gauge:    class { constructor() {} set() {} labels() { return this; } },
+  Histogram: class { constructor() {} observe() {} labels() { return this; } },
   Registry: class {
     constructor() { this.contentType = 'text/plain'; }
     metrics() { return ''; }
@@ -37,8 +42,10 @@ jest.mock('prom-client', () => ({
   collectDefaultMetrics: () => {},
 }), { virtual: true });
 
+
 // ── Imports ───────────────────────────────────────────────────────────────────
 
+const crypto  = require('crypto');
 const express  = require('express');
 const request  = require('supertest');
 const jwt      = require('jsonwebtoken');
@@ -548,10 +555,11 @@ describe('runtimeConfigSchema', () => {
   });
 
   it('lists all expected sections in CONFIG_SECTIONS', () => {
-    const expected = ['webhook', 'reconciliation', 'kyc', 'retention', 'fraudThresholds'];
+    const expected = ['webhook', 'reconciliation', 'kyc', 'retention', 'fraudThresholds', 'cors'];
     expect(CONFIG_SECTIONS).toEqual(expect.arrayContaining(expected));
     expect(CONFIG_SECTIONS).toHaveLength(expected.length);
   });
+
 });
 
 
@@ -1005,5 +1013,374 @@ describe('GET /api/admin/config/sections', () => {
     expect(res.body.sections).toContain('webhook');
     expect(res.body.sections).toContain('fraudThresholds');
     expect(res.body.sections).toHaveLength(CONFIG_SECTIONS.length);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// SECTION 4 — Authorization & tenant-scoping integration tests
+//
+// These tests use an Express app with the **real** adminStack middleware
+// (adminAuth + extractTenant) so that authentication edge-cases and
+// tenant-resolution behaviour are verified end-to-end.
+// ═════════════════════════════════════════════════════════════════════════════
+
+// RSA key pair used for algorithm-confusion tests
+const { privateKey: rsaPrivateKey } = crypto.generateKeyPairSync('rsa', {
+  modulusLength: 2048,
+  publicKeyEncoding: { type: 'spki', format: 'pem' },
+  privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+});
+
+/**
+ * Build an Express app with the real adminStack so auth/tenant middleware
+ * runs on every request.
+ */
+function buildAppWithRealAuth() {
+  const app = express();
+  app.use(express.json());
+  app.use('/api/admin/config', adminConfigRouter);
+  app.use((err, _req, res, _next) => {
+    res.status(err.status || 500).json({
+      type: err.type,
+      title: err.title,
+      status: err.status || 500,
+      detail: err.detail || err.message,
+    });
+  });
+  return app;
+}
+
+const AUTH_APP = buildAppWithRealAuth();
+
+/** Minimal valid POST body for happy-path tests. */
+const VALID_POST_BODY = {
+  section: 'webhook',
+  config: {
+    url: 'https://example.com/hook',
+    secret: 'supersecret-16chars-long-enough',
+    events: ['invoice.created'],
+  },
+};
+
+// ── POST /api/admin/config ─────────────────────────────────────────────────
+
+describe('POST /api/admin/config — authorization', () => {
+  // ── JWT edge cases ───────────────────────────────────────────────────────
+
+  describe('JWT authentication edge cases', () => {
+    it('returns 401 when JWT is expired', async () => {
+      const expiredToken = jwt.sign(
+        { sub: 'admin', tenantId: 'tenant_test', role: 'admin' },
+        JWT_SECRET,
+        { expiresIn: '-1h' },
+      );
+
+      const res = await request(AUTH_APP)
+        .post('/api/admin/config')
+        .set('Authorization', `Bearer ${expiredToken}`)
+        .send(VALID_POST_BODY);
+
+      expect(res.status).toBe(401);
+      expect(res.body.detail).toBe('Token has expired');
+    });
+
+    it('returns 401 when JWT is signed with a disallowed algorithm (RS256)', async () => {
+      const rsToken = jwt.sign(
+        { sub: 'admin', tenantId: 'tenant_test', role: 'admin' },
+        rsaPrivateKey,
+        { algorithm: 'RS256', expiresIn: '1h' },
+      );
+
+      const res = await request(AUTH_APP)
+        .post('/api/admin/config')
+        .set('Authorization', `Bearer ${rsToken}`)
+        .send(VALID_POST_BODY);
+
+      expect(res.status).toBe(401);
+      expect(res.body.detail).toMatch(/algorithm not allowed/i);
+    });
+
+    it('returns 401 when JWT has alg: none (crafted header)', async () => {
+      const header = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url');
+      const payload = Buffer.from(JSON.stringify({
+        sub: 'admin',
+        tenantId: 'tenant_test',
+        role: 'admin',
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      })).toString('base64url');
+      const noneToken = `${header}.${payload}.`;
+
+      const res = await request(AUTH_APP)
+        .post('/api/admin/config')
+        .set('Authorization', `Bearer ${noneToken}`)
+        .send(VALID_POST_BODY);
+
+      expect(res.status).toBe(401);
+    });
+
+    it('returns 401 when Authorization header uses Basic scheme', async () => {
+      const res = await request(AUTH_APP)
+        .post('/api/admin/config')
+        .set('Authorization', 'Basic somecreds')
+        .send(VALID_POST_BODY);
+
+      expect(res.status).toBe(401);
+      expect(res.body.detail).toMatch(/Invalid Authorization header format/i);
+    });
+  });
+
+  // ── API key auth ─────────────────────────────────────────────────────────
+
+  describe('API key authentication', () => {
+    const VALID_API_KEY = 'lf_testapikey12345';
+    const REVOKED_API_KEY = 'lf_revokedkey12345';
+
+    beforeAll(() => {
+      process.env.API_KEYS = [
+        JSON.stringify({
+          key: VALID_API_KEY,
+          clientId: 'test-client',
+          scopes: ['invoices:read', 'invoices:write', 'escrow:read'],
+        }),
+        JSON.stringify({
+          key: REVOKED_API_KEY,
+          clientId: 'revoked-client',
+          scopes: ['invoices:read'],
+          revoked: true,
+        }),
+      ].join(';');
+    });
+
+    afterAll(() => {
+      delete process.env.API_KEYS;
+    });
+
+    it('returns 200 with valid API key and x-tenant-id header', async () => {
+      const res = await request(AUTH_APP)
+        .post('/api/admin/config')
+        .set('x-api-key', VALID_API_KEY)
+        .set('x-tenant-id', 'tenant_api')
+        .send(VALID_POST_BODY);
+
+      expect(res.status).toBe(200);
+      expect(res.body.section).toBe('webhook');
+    });
+
+    it('returns 401 with an invalid API key', async () => {
+      const res = await request(AUTH_APP)
+        .post('/api/admin/config')
+        .set('x-api-key', 'lf_boguskey')
+        .set('x-tenant-id', 'tenant_api')
+        .send(VALID_POST_BODY);
+
+      expect(res.status).toBe(401);
+      expect(res.body.error).toMatch(/Invalid API key/i);
+    });
+
+    it('returns 401 with a revoked API key', async () => {
+      const res = await request(AUTH_APP)
+        .post('/api/admin/config')
+        .set('x-api-key', REVOKED_API_KEY)
+        .set('x-tenant-id', 'tenant_api')
+        .send(VALID_POST_BODY);
+
+      expect(res.status).toBe(401);
+      expect(res.body.error).toMatch(/revoked/i);
+    });
+
+    it('returns 401 when API key is empty', async () => {
+      const res = await request(AUTH_APP)
+        .post('/api/admin/config')
+        .set('x-api-key', '')
+        .set('x-tenant-id', 'tenant_api')
+        .send(VALID_POST_BODY);
+
+      expect(res.status).toBe(401);
+    });
+  });
+});
+
+describe('POST /api/admin/config — tenant scoping', () => {
+  function makeTenantToken(tenantId) {
+    return jwt.sign(
+      { sub: 'admin', tenantId, role: 'admin' },
+      JWT_SECRET,
+      { expiresIn: '1h' },
+    );
+  }
+
+  it('returns 400 when JWT has no tenantId and no x-tenant-id header', async () => {
+    const noTenantToken = jwt.sign(
+      { sub: 'admin', role: 'admin' },
+      JWT_SECRET,
+      { expiresIn: '1h' },
+    );
+
+    const res = await request(AUTH_APP)
+      .post('/api/admin/config')
+      .set('Authorization', `Bearer ${noTenantToken}`)
+      .send(VALID_POST_BODY);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Missing tenant context/i);
+  });
+
+  it('extracts tenant from JWT when no x-tenant-id header is present', async () => {
+    const token = makeTenantToken('tenant_from_jwt');
+
+    const res = await request(AUTH_APP)
+      .post('/api/admin/config')
+      .set('Authorization', `Bearer ${token}`)
+      .send(VALID_POST_BODY);
+
+    expect(res.status).toBe(200);
+    expect(res.body.section).toBe('webhook');
+  });
+
+  it('x-tenant-id header takes priority over JWT tenantId', async () => {
+    const token = makeTenantToken('tenant_from_jwt');
+
+    const res = await request(AUTH_APP)
+      .post('/api/admin/config')
+      .set('Authorization', `Bearer ${token}`)
+      .set('x-tenant-id', 'tenant_from_header')
+      .send(VALID_POST_BODY);
+
+    expect(res.status).toBe(200);
+    expect(res.body.section).toBe('webhook');
+  });
+
+  it('allows different tenants with their own JWT tokens', async () => {
+    const tokenA = makeTenantToken('tenant_a');
+    const tokenB = makeTenantToken('tenant_b');
+
+    const resA = await request(AUTH_APP)
+      .post('/api/admin/config')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send(VALID_POST_BODY);
+
+    const resB = await request(AUTH_APP)
+      .post('/api/admin/config')
+      .set('Authorization', `Bearer ${tokenB}`)
+      .send(VALID_POST_BODY);
+
+    expect(resA.status).toBe(200);
+    expect(resB.status).toBe(200);
+  });
+});
+
+// ── GET /api/admin/config/sections ─────────────────────────────────────────
+
+describe('GET /api/admin/config/sections — authorization & tenant scoping', () => {
+  describe('JWT edge cases', () => {
+    it('returns 401 when JWT is expired', async () => {
+      const expiredToken = jwt.sign(
+        { sub: 'admin', tenantId: 'tenant_test', role: 'admin' },
+        JWT_SECRET,
+        { expiresIn: '-1h' },
+      );
+
+      const res = await request(AUTH_APP)
+        .get('/api/admin/config/sections')
+        .set('Authorization', `Bearer ${expiredToken}`);
+
+      expect(res.status).toBe(401);
+      expect(res.body.detail).toBe('Token has expired');
+    });
+
+    it('returns 401 when JWT is signed with RS256', async () => {
+      const rsToken = jwt.sign(
+        { sub: 'admin', tenantId: 'tenant_test', role: 'admin' },
+        rsaPrivateKey,
+        { algorithm: 'RS256', expiresIn: '1h' },
+      );
+
+      const res = await request(AUTH_APP)
+        .get('/api/admin/config/sections')
+        .set('Authorization', `Bearer ${rsToken}`);
+
+      expect(res.status).toBe(401);
+    });
+  });
+
+  describe('API key auth', () => {
+    const VALID_API_KEY = 'lf_sectionskey12345';
+
+    beforeAll(() => {
+      process.env.API_KEYS = JSON.stringify({
+        key: VALID_API_KEY,
+        clientId: 'sections-client',
+        scopes: ['invoices:read'],
+      });
+    });
+
+    afterAll(() => {
+      delete process.env.API_KEYS;
+    });
+
+    it('returns 200 with valid API key and x-tenant-id header', async () => {
+      const res = await request(AUTH_APP)
+        .get('/api/admin/config/sections')
+        .set('x-api-key', VALID_API_KEY)
+        .set('x-tenant-id', 'tenant_sections');
+
+      expect(res.status).toBe(200);
+      expect(res.body.sections).toContain('webhook');
+    });
+
+    it('returns 401 with an invalid API key', async () => {
+      const res = await request(AUTH_APP)
+        .get('/api/admin/config/sections')
+        .set('x-api-key', 'lf_boguskey')
+        .set('x-tenant-id', 'tenant_sections');
+
+      expect(res.status).toBe(401);
+    });
+  });
+
+  describe('tenant scoping', () => {
+    it('returns 400 when JWT has no tenantId and no x-tenant-id header', async () => {
+      const noTenantToken = jwt.sign(
+        { sub: 'admin', role: 'admin' },
+        JWT_SECRET,
+        { expiresIn: '1h' },
+      );
+
+      const res = await request(AUTH_APP)
+        .get('/api/admin/config/sections')
+        .set('Authorization', `Bearer ${noTenantToken}`);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/Missing tenant context/i);
+    });
+
+    it('returns 200 when JWT provides tenantId', async () => {
+      const token = jwt.sign(
+        { sub: 'admin', tenantId: 'tenant_test', role: 'admin' },
+        JWT_SECRET,
+        { expiresIn: '1h' },
+      );
+
+      const res = await request(AUTH_APP)
+        .get('/api/admin/config/sections')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+    });
+
+    it('x-tenant-id header takes priority over JWT tenantId', async () => {
+      const token = jwt.sign(
+        { sub: 'admin', tenantId: 'tenant_from_jwt', role: 'admin' },
+        JWT_SECRET,
+        { expiresIn: '1h' },
+      );
+
+      const res = await request(AUTH_APP)
+        .get('/api/admin/config/sections')
+        .set('Authorization', `Bearer ${token}`)
+        .set('x-tenant-id', 'tenant_from_header');
+
+      expect(res.status).toBe(200);
+    });
   });
 });
