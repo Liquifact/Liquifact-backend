@@ -12,13 +12,11 @@
 const { authenticateToken } = require('./auth');
 const { extractTenant } = require('./tenant');
 const { authenticateApiKey } = require('./apiKeyAuth');
+const { createAuditLog } = require('../services/auditLog');
+const { loadApiKeyRegistry, timingSafeStringEqual } = require('../config/apiKeys');
 
 /**
- * Pre-built API key middleware (no required scope — any valid, non-revoked key
- * is accepted for admin access). Built once so the factory overhead is paid
- * at module-load time, not on every request.
- */
-const _adminApiKeyMiddleware = authenticateApiKey();
+const _adminApiKeyMiddleware = authenticateApiKey({ scope: 'admin' });
 
 /**
  * Accepts either a valid admin JWT or a valid API key.
