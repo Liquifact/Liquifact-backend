@@ -237,22 +237,23 @@ router.get(KYC_WEBHOOK_ROUTES.WEBHOOKS, asyncHandler(async (req, res) => {
     }
   }
 
-  // Build query
-  let query = db(KYC_WEBHOOK_DB.TABLE_KYC_RECORDS)
-    .select(
-      'sme_id as smeId',
-      'status',
-      'provider_record_id as recordId',
-      'verified_at as verifiedAt',
-      'updated_at as updatedAt'
-    )
-    .orderBy('updated_at', KYC_WEBHOOK_PAGINATION.DEFAULT_ORDER)
-    .orderBy('sme_id', KYC_WEBHOOK_PAGINATION.DEFAULT_ORDER)
-    .limit(limit + 1);
+    // Build query — exclude soft-deleted records
+    let query = db('kyc_records')
+      .select(
+        'sme_id as smeId',
+        'status',
+        'provider_record_id as recordId',
+        'verified_at as verifiedAt',
+        'updated_at as updatedAt'
+      )
+      .whereNull('deleted_at')
+      .orderBy('updated_at', 'desc')
+      .orderBy('sme_id', 'desc')
+      .limit(limit + 1);
 
-  if (status) {
-    query = query.where('status', status);
-  }
+    if (status) {
+      query = query.where('status', status);
+    }
 
   if (cursorData) {
     query = query.where(function () {

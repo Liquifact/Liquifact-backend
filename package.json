@@ -60,7 +60,19 @@
         "lines": 95,
         "statements": 95
       },
+      "src/services/invoiceStateSoftDelete.js": {
+        "branches": 95,
+        "functions": 95,
+        "lines": 95,
+        "statements": 95
+      },
       "src/jobs/escrowReadPurge.js": {
+        "branches": 75,
+        "functions": 95,
+        "lines": 95,
+        "statements": 95
+      },
+      "src/jobs/invoiceStatePurge.js": {
         "branches": 75,
         "functions": 95,
         "lines": 95,
