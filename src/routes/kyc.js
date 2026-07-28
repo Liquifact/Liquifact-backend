@@ -17,7 +17,8 @@ const {
   normalizeKycWebhookStatusClass,
   normalizeKycWebhookCause,
 } = require('../metrics');
-const { validateKycWebhookRequest } = require('../middleware/kycWebhookValidation');
+const { verifySignature } = require('../services/webhooks');
+const { parseJsonPayload, validateKycWebhookRequest } = require('../middleware/kycWebhookValidation');
 const {
   HTTP_HEADERS,
   KYC_WEBHOOK_ROUTES,

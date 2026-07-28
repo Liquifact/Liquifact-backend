@@ -876,6 +876,86 @@ const idempotencyStorageFailureTotal = new client.Counter({
 });
 
 /**
+ * Histogram: Duration of API key authentication requests in seconds.
+ *
+ * Labels are bounded: `endpoint` (req.path), `method` (HTTP verb),
+ * `status` (HTTP status code string), `outcome` (success | client_error | server_error).
+ * @type {import('prom-client').Histogram}
+ */
+const apiKeyAuthDurationSeconds = new client.Histogram({
+  name: 'api_key_auth_duration_seconds',
+  help: 'Duration of API key authenticated requests in seconds',
+  labelNames: ['endpoint', 'method', 'status', 'outcome'],
+  buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+  registers: [registry],
+});
+
+/**
+ * Counter: API key authentication errors by bounded cause.
+ *
+ * Cause values are limited to a small allowlist to prevent label cardinality
+ * explosion: unauthorized, forbidden, internal_error. Raw exception messages
+ * are never used as labels.
+ * @type {import('prom-client').Counter}
+ */
+const apiKeyAuthErrorsTotal = new client.Counter({
+  name: 'api_key_auth_errors_total',
+  help: 'Total number of API key authentication errors by cause',
+  labelNames: ['cause'],
+  registers: [registry],
+});
+
+/**
+ * Bounded enum of allowed `cause` label values for API key auth error metrics.
+ * @readonly
+ */
+const _API_KEY_ERROR_CAUSE_ENUM = Object.freeze([
+  'validation_error',
+  'unauthorized',
+  'forbidden',
+  'not_found',
+  'internal_error',
+]);
+
+/**
+ * Bounded enum of allowed `outcome` label values for API key auth duration metrics.
+ * @readonly
+ */
+const _API_KEY_OUTCOME_ENUM = Object.freeze([
+  'success',
+  'client_error',
+  'server_error',
+]);
+
+/**
+ * Maps an HTTP status code to a bounded outcome label value.
+ *
+ * @param {number} statusCode - HTTP response status code.
+ * @returns {string} Bounded outcome from {@link API_KEY_OUTCOME_ENUM}.
+ */
+function classifyApiKeyOutcome(statusCode) {
+  if (statusCode < 400) { return 'success'; }
+  if (statusCode < 500) { return 'client_error'; }
+  return 'server_error';
+}
+
+/**
+ * Maps an HTTP status code to a bounded error cause label for API key auth.
+ *
+ * @param {number} statusCode - HTTP response status code.
+ * @returns {string|null} Bounded cause from {@link API_KEY_ERROR_CAUSE_ENUM},
+ *   or `null` when the status does not represent a known error cause.
+ */
+function classifyApiKeyErrorCause(statusCode) {
+  if (statusCode === 400) { return 'validation_error'; }
+  if (statusCode === 401) { return 'unauthorized'; }
+  if (statusCode === 403) { return 'forbidden'; }
+  if (statusCode === 404) { return 'not_found'; }
+  if (statusCode >= 500) { return 'internal_error'; }
+  return null;
+}
+
+/**
  * Counter: Request body-size limit rejections (413 Payload Too Large), labelled by `type`.
  * @type {import('prom-client').Counter}
  */
@@ -1185,54 +1265,7 @@ const metricsRequestDurationSeconds = new client.Histogram({
   registers: [registry],
 });
 
-const metricsRequestsTotal = new client.Counter({
-  name: 'metrics_requests_total',
-  help: 'Total number of metrics endpoint requests',
-  labelNames: ['status_class'],
-  registers: [registry],
-});
 
-const metricsRequestErrorsTotal = new client.Counter({
-  name: 'metrics_request_errors_total',
-  help: 'Total number of metrics endpoint request errors',
-  labelNames: ['cause'],
-  registers: [registry],
-});
-
-/**
- * Records observability data for a metrics endpoint scrape.
- *
- * @param {object} [params]
- * @param {number} params.statusCode - HTTP status code of the response.
- * @param {number} [params.durationSeconds] - Wall-clock duration of the request.
- * @param {unknown} [params.error] - Error associated with the outcome, if any.
- * @param {import('express').Request} [params.req] - Request, used for the
- *   correlated request logger.
- * @returns {void}
- */
-function recordMetricsEndpointOutcome({ statusCode, durationSeconds = 0, error, req } = {}) {
-  const statusClass = normalizeMetricsEndpointStatusClass(statusCode);
-  const cause = normalizeMetricsEndpointCause(error, statusCode);
-
-  metricsRequestsTotal.labels(statusClass).inc();
-  metricsRequestDurationSeconds.labels(statusClass).observe(
-    Number.isFinite(durationSeconds) ? durationSeconds : 0,
-  );
-  if (cause !== 'none') {
-    metricsRequestErrorsTotal.labels(cause).inc();
-  }
-
-  const requestLogger = logger.createRequestLogger(req || {});
-  const payload = { event: 'metrics.scrape', statusClass, cause, durationSeconds };
-
-  if (statusClass === '5xx') {
-    requestLogger.error({ ...payload, err: error && error.message }, 'metrics endpoint request failed');
-  } else if (statusClass === '4xx') {
-    requestLogger.warn(payload, 'metrics endpoint request rejected');
-  } else {
-    requestLogger.info(payload, 'metrics endpoint request served');
-  }
-}
 
 // ── KYC webhook metrics (issue #731) ────────────────────────────────────────
 
@@ -1470,44 +1503,15 @@ const healthRequestErrorsTotal = new client.Counter({
 });
 
 /**
- * Counter: CORS origin-validation cache hits.
- * @type {import('prom-client').Counter}
+ * Bounded enum of allowed `endpoint` label values for persistence metrics.
+ * @readonly
  */
-const corsCacheHitsTotal = new client.Counter({
-  name: 'cors_cache_hits_total',
-  help: 'Total number of CORS origin-validation cache hits',
-  registers: [registry],
-});
+const PERSISTENCE_ENDPOINT_ENUM = Object.freeze([
+  'sme_invoice_upload',
+  'sme_invoice_presigned_url',
+  'unknown',
+]);
 
-/**
- * Counter: CORS origin-validation cache misses.
- * @type {import('prom-client').Counter}
- */
-const corsCacheMissesTotal = new client.Counter({
-  name: 'cors_cache_misses_total',
-  help: 'Total number of CORS origin-validation cache misses',
-  registers: [registry],
-});
-
-/**
- * Counter: CORS origin-validation cache evictions.
- * @type {import('prom-client').Counter}
- */
-const corsCacheEvictionsTotal = new client.Counter({
-  name: 'cors_cache_evictions_total',
-  help: 'Total number of CORS origin-validation cache evictions',
-  registers: [registry],
-});
-
-/**
- * Counter: CORS cache invalidations (full clear on allowlist change).
- * @type {import('prom-client').Counter}
- */
-const corsCacheInvalidationsTotal = new client.Counter({
-  name: 'cors_cache_invalidations_total',
-  help: 'Total number of CORS cache invalidations',
-  registers: [registry],
-});
 
 const escrowReadCacheHitsTotal = new client.Counter({
   name: 'escrow_read_cache_hits_total',

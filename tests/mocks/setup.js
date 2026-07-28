@@ -1,3 +1,7 @@
+const { CircuitBreaker: _CircuitBreaker } = require('../../src/utils/circuitBreaker');
+const { MemoryCacheStore: _MemoryCacheStore } = require('../../src/services/cacheStore');
+globalThis.CircuitBreaker = _CircuitBreaker;
+globalThis.MemoryCacheStore = _MemoryCacheStore;
 
 process.env.JWT_SECRET = 'test-secret-at-least-32-characters-long-string-for-jest';
 process.env.ESCROW_ADDR_BY_INVOICE = JSON.stringify({

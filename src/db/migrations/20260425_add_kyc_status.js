@@ -12,7 +12,9 @@ exports.up = async (knex) => {
     table.string('provider_record_id', 256).nullable();
     table.timestamp('verified_at').nullable();
     table.timestamp('updated_at').notNullable().defaultTo(knex.fn.now());
+    table.timestamp('deleted_at').nullable();
     table.index('status');
+    table.index('deleted_at');
   });
 };
 
