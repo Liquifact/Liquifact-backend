@@ -91,10 +91,56 @@ function createApiKeyHandler(req, res) {
 
 function listApiKeysHandler(req, res) {
   const entries = buildEntries(req.app.locals?.env || process.env);
+  
+  let limit = parseInt(req.query.limit, 10);
+  if (isNaN(limit) || limit < 1) {
+    limit = 20;
+  }
+  const clampedLimit = Math.min(limit, 100);
+
+  let startIndex = 0;
+  if (req.query.cursor) {
+    try {
+      const decoded = Buffer.from(req.query.cursor, 'base64').toString('utf-8');
+      const index = entries.findIndex(e => e.key === decoded);
+      if (index !== -1) {
+        startIndex = index + 1;
+      } else {
+        return res.status(400).json({
+          type: 'https://liquifact.io/problems/validation-error',
+          title: 'Validation Error',
+          status: 400,
+          detail: 'Invalid or tampered cursor.',
+          code: 'INVALID_CURSOR'
+        });
+      }
+    } catch (err) {
+      return res.status(400).json({
+        type: 'https://liquifact.io/problems/validation-error',
+        title: 'Validation Error',
+        status: 400,
+        detail: 'Invalid cursor format.',
+        code: 'INVALID_CURSOR'
+      });
+    }
+  }
+
+  const page = entries.slice(startIndex, startIndex + clampedLimit);
+  const hasMore = startIndex + clampedLimit < entries.length;
+  let nextCursor = null;
+  if (hasMore && page.length > 0) {
+    const lastItem = page[page.length - 1];
+    nextCursor = Buffer.from(lastItem.key).toString('base64');
+  }
 
   return res.status(200).json({
-    data: entries,
-    count: entries.length,
+    data: page,
+    meta: {
+      limit: clampedLimit,
+      hasMore,
+      nextCursor
+    },
+    count: page.length,
     message: 'API keys retrieved successfully.',
   });
 }
