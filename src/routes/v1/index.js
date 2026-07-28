@@ -171,6 +171,14 @@ router.get('/escrow/:invoiceId', authenticateToken, async (req, res, next) => {
   try {
     const invoiceId = String(req.params.invoiceId || '').trim().replace(/\s+/g, '');
 
+    const correlationId = req.correlationId || req.id;
+    const requestLog = req.log || require('../../logger');
+
+    requestLog.info(
+      { invoiceId, correlationId, path: req.path },
+      'escrow-read: v1 request received',
+    );
+
     const escrowAddress = resolveEscrowAddress(invoiceId);
     if (!escrowAddress) {
       return res.status(404).json({
@@ -189,7 +197,13 @@ router.get('/escrow/:invoiceId', authenticateToken, async (req, res, next) => {
       escrowAddress,
     };
 
+    requestLog.info(
+      { invoiceId, correlationId, source: state.source || 'unknown' },
+      'escrow-read: v1 state resolved successfully',
+    );
+
     res.set('X-Escrow-Address', escrowAddress);
+    res.set('X-Correlation-Id', correlationId);
     return res.json({
       data,
       message: state.fromProjection

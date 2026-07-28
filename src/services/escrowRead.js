@@ -423,6 +423,14 @@ async function readEscrowState(invoiceId, options = {}) {
 
   const safeId = invoiceId.trim();
 
+  // Emit a structured log at service entry so the correlationId from the
+  // AsyncLocalStorage context (set by correlationIdMiddleware) is captured
+  // in every downstream log line without manual threading.
+  logger.info(
+    { invoiceId: safeId, service: "escrowRead" },
+    "escrowRead: readEscrowState called",
+  );
+
   // Fetch base escrow state and legal hold status concurrently.
   const [baseState, legalHoldResult] = await Promise.all([
     _fetchBaseEscrowState(safeId, escrowAdapter, { dbClient }),
@@ -680,6 +688,13 @@ async function readFundedAmount(invoiceId, options = {}) {
 async function getEscrowStateWithProjection(invoiceId, options = {}) {
   const safeId = invoiceId.trim();
   const { dbClient } = options;
+
+  // Emit a structured log at service entry so the correlationId from the
+  // AsyncLocalStorage context is captured in downstream log lines.
+  logger.info(
+    { invoiceId: safeId, service: "escrowRead" },
+    "escrowRead: getEscrowStateWithProjection called",
+  );
 
   // 1. The bounded local cache avoids DB/Redis work on the hottest reads.
   const localCached = escrowReadCache.get(safeId);

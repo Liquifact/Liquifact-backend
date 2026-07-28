@@ -306,10 +306,18 @@ function createApp() {
   });
 
   // Escrow — GET by invoiceId (proxied through Soroban retry wrapper with address mapping)
-  app.get('/api/escrow/:invoiceId', async (req, res) => {
+  app.get('/api/escrow/:invoiceId', async (req, res, next) => {
     const invoiceId = String(req.params.invoiceId || '')
       .trim()
       .replace(/\s+/g, '');
+
+    const correlationId = req.correlationId || req.id;
+    const requestLog = req.log || logger;
+
+    requestLog.info(
+      { invoiceId, correlationId, path: req.path },
+      'escrow-read: request received',
+    );
 
     try {
       // Resolve escrow contract address using the mapping system
@@ -332,8 +340,14 @@ function createApp() {
         escrowAddress
       };
 
-      // Include escrow address in response headers
+      requestLog.info(
+        { invoiceId, correlationId, source: state.source || 'unknown' },
+        'escrow-read: state resolved successfully',
+      );
+
+      // Include escrow address and correlation ID in response headers
       res.set('X-Escrow-Address', escrowAddress);
+      res.set('X-Correlation-Id', correlationId);
       res.json({
         data,
         message: state.fromProjection 
@@ -341,7 +355,9 @@ function createApp() {
           : 'Escrow state read from live Soroban contract.',
       });
     } catch (error) {
-      res.status(500).json({ error: error.message || 'Error fetching escrow state' });
+      // Forward to centralized error handler so correlation_id is always
+      // present in the error response envelope (via errorHandler / handleInternalError).
+      return next(error);
     }
   });
 
