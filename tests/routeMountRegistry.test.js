@@ -4,14 +4,14 @@ const express = require('express');
 const {
   mountFeatureRouter,
   assertNoDuplicateRouterMounts,
-  getFeatureRouterMounts,
-  resetFeatureRouterMounts,
+  listRouteMounts,
+  resetRouteMounts,
   recordFeatureRouterMountForTesting,
 } = require('../src/utils/routeMountRegistry');
 
 describe('routeMountRegistry', () => {
   beforeEach(() => {
-    resetFeatureRouterMounts();
+    resetRouteMounts();
   });
 
   it('records a single mount without error', () => {
@@ -20,8 +20,8 @@ describe('routeMountRegistry', () => {
 
     mountFeatureRouter(app, '/api/investor', router);
 
-    expect(getFeatureRouterMounts()).toEqual([{ basePath: '/api/investor', router }]);
-    assertNoDuplicateRouterMounts();
+    expect(listRouteMounts(app)).toEqual([{ basePath: '/api/investor', router }]);
+    assertNoDuplicateRouterMounts(app);
   });
 
   it('allows two different routers at the same base path', () => {
@@ -32,11 +32,11 @@ describe('routeMountRegistry', () => {
     mountFeatureRouter(app, '/api/invoices', routerA);
     mountFeatureRouter(app, '/api/invoices', routerB);
 
-    expect(getFeatureRouterMounts()).toHaveLength(2);
-    assertNoDuplicateRouterMounts();
+    expect(listRouteMounts(app)).toHaveLength(2);
+    assertNoDuplicateRouterMounts(app);
   });
 
-  it('throws when the same router instance is mounted twice at the same base path', () => {
+  it('throws when the same router instance is mounted twice at the same base path on one app', () => {
     const app = express();
     const router = express.Router();
 
@@ -47,20 +47,48 @@ describe('routeMountRegistry', () => {
     );
   });
 
-  it('assertNoDuplicateRouterMounts passes for distinct router instances', () => {
-    const app = express();
-    mountFeatureRouter(app, '/api/investor', express.Router());
-    mountFeatureRouter(app, '/api/invest', express.Router());
+  it('allows the same router and path to be mounted on separate app instances', () => {
+    const firstApp = express();
+    const secondApp = express();
+    const router = express.Router();
 
-    expect(() => assertNoDuplicateRouterMounts()).not.toThrow();
+    mountFeatureRouter(firstApp, '/api/investor', router);
+    mountFeatureRouter(secondApp, '/api/investor', router);
+
+    expect(listRouteMounts(firstApp)).toHaveLength(1);
+    expect(listRouteMounts(secondApp)).toHaveLength(1);
   });
 
-  it('assertNoDuplicateRouterMounts throws when duplicate entries exist in the registry', () => {
-    const router = express.Router();
-    recordFeatureRouterMountForTesting('/api/investor', router);
-    recordFeatureRouterMountForTesting('/api/investor', router);
+  it('returns a read-only snapshot of recorded mounts', () => {
+    const app = express();
+    mountFeatureRouter(app, '/api/investor', express.Router());
 
-    expect(() => assertNoDuplicateRouterMounts()).toThrow(
+    const mounts = listRouteMounts(app);
+
+    expect(Object.isFrozen(mounts)).toBe(true);
+    expect(Object.isFrozen(mounts[0])).toBe(true);
+    expect(() => mounts.push({})).toThrow(TypeError);
+  });
+
+  it('resetRouteMounts clears one app without affecting another', () => {
+    const firstApp = express();
+    const secondApp = express();
+    mountFeatureRouter(firstApp, '/api/investor', express.Router());
+    mountFeatureRouter(secondApp, '/api/invest', express.Router());
+
+    resetRouteMounts(firstApp);
+
+    expect(listRouteMounts(firstApp)).toEqual([]);
+    expect(listRouteMounts(secondApp)).toHaveLength(1);
+  });
+
+  it('assertNoDuplicateRouterMounts throws when duplicate entries exist for an app', () => {
+    const app = express();
+    const router = express.Router();
+    recordFeatureRouterMountForTesting(app, '/api/investor', router);
+    recordFeatureRouterMountForTesting(app, '/api/investor', router);
+
+    expect(() => assertNoDuplicateRouterMounts(app)).toThrow(
       /Duplicate route mount detected at \/api\/investor/
     );
   });

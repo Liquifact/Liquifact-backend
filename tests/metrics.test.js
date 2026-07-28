@@ -1,5 +1,7 @@
 'use strict';
 
+const zlib = require('zlib');
+
 jest.mock('redis', () => {
   const mockClient = {
     on: jest.fn(),
@@ -24,6 +26,18 @@ const BackgroundWorker = require('../src/workers/worker');
 
 // Destructure internal helpers used by the metrics-auth / safeEqual tests.
 const { metricsAuth, safeEqual, extractClientIp, LOOPBACK } = metrics;
+
+/**
+ * Decompresses a Buffer using gzip or deflate.
+ * @param {Buffer} buf - Compressed data.
+ * @param {'gzip'|'deflate'} encoding - Compression algorithm.
+ * @returns {string} Decompressed UTF-8 string.
+ */
+function decompress(buf, encoding) {
+  return encoding === 'gzip'
+    ? zlib.gunzipSync(buf).toString('utf8')
+    : zlib.inflateSync(buf).toString('utf8');
+}
 
 describe('GET /metrics', () => {
   let app;

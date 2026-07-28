@@ -24,6 +24,9 @@
 
 const rateLimit = require('express-rate-limit');
 
+const WINDOW_MS = 15 * 60 * 1000;
+const MAX_REQUESTS = 100;
+
 /**
  * Resolves the Redis-backed store for a scope when the shared Redis client is
  * available and `rate-limit-redis` can be loaded; otherwise returns
@@ -162,6 +165,35 @@ const SENSITIVE_WINDOW_MS = parseRateLimitEnv('RATE_LIMIT_SENSITIVE_WINDOW_MS', 
 const SENSITIVE_MAX = parseRateLimitEnv('RATE_LIMIT_SENSITIVE_MAX', 40);
 const API_KEY_WINDOW_MS = parseRateLimitEnv('RATE_LIMIT_API_KEY_WINDOW_MS', 15 * 60 * 1000);
 const API_KEY_MAX = parseRateLimitEnv('RATE_LIMIT_API_KEY_MAX', 1000);
+const ESCROW_READ_WINDOW_MS = parseRateLimitEnv('RATE_LIMIT_ESCROW_READ_WINDOW_MS', 60 * 1000);
+const ESCROW_READ_MAX = parseRateLimitEnv('RATE_LIMIT_ESCROW_READ_MAX', 30);
+
+/**
+ * Escrow-read rate limiter.
+ *
+ * Protects GET /api/escrow/:invoiceId and GET /v1/escrow/:invoiceId from
+ * abuse.  Per-client (API key or IP) limiting with a short window (default
+ * 60 s, 30 requests) suitable for a read-heavy endpoint.
+ *
+ * Environment overrides:
+ *   RATE_LIMIT_ESCROW_READ_WINDOW_MS  - window in ms (default 60 000)
+ *   RATE_LIMIT_ESCROW_READ_MAX        - max requests per window (default 30)
+ *
+ * @returns {Function} Express rate limiting middleware.
+ */
+const escrowReadLimiter = rateLimit({
+  windowMs: ESCROW_READ_WINDOW_MS,
+  limit: ESCROW_READ_MAX,
+  message: {
+    error: 'Too many escrow-read requests. Please try again shortly.',
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator,
+  validate: {
+    xForwardedForHeader: false,
+  },
+});
 
 // Issue #754 â€” config-endpoint rate limiter. Defaults target the admin-only
 // reality of /api/admin/config: a 60 s window with 20 requests per client is
@@ -177,6 +209,129 @@ const CONFIG_RATE_LIMIT_MAX = parseRateLimitEnv('CONFIG_RATE_LIMIT_MAX', 20);
 // accidental tight loops or abusive reloads within one scrape cycle.
 const METRICS_RATE_LIMIT_WINDOW_MS = parseRateLimitEnv('METRICS_RATE_LIMIT_WINDOW_MS', 60 * 1000);
 const METRICS_RATE_LIMIT_MAX = parseRateLimitEnv('METRICS_RATE_LIMIT_MAX', 30);
+const CORS_RATE_LIMIT_WINDOW_MS = parseRateLimitEnv('CORS_RATE_LIMIT_WINDOW_MS', 15 * 60 * 1000);
+const CORS_RATE_LIMIT_MAX = parseRateLimitEnv('CORS_RATE_LIMIT_MAX', 120);
+
+/**
+ * CORS request rate-limit handler.
+ * Returns a structured 429 response and preserves standard rate-limit headers.
+ *
+ * @param {import('express').Request} _req - Express request object.
+ * @param {import('express').Response} res - Express response object.
+ * @param {import('express').NextFunction} _next - Express next callback.
+ * @param {{ statusCode: number, windowMs: number }} options - Rate limiter options.
+ * @returns {void}
+ */
+function corsRateLimitHandler(_req, res, _next, options) {
+  res.status(options.statusCode).json({
+    type: 'https://liquifact.com/probs/too-many-requests',
+    title: 'Too Many Requests',
+    status: options.statusCode,
+    code: 'RATE_LIMITED',
+    retryable: true,
+    retry_hint: 'Wait for the rate-limit window to reset before retrying.',
+    scope: 'cors',
+    error: 'Too many requests.',
+    message: 'Rate limit threshold breached for CORS requests. Please try again later.',
+  });
+}
+
+/**
+ * Per-client rate limiter for CORS requests.
+ * Limits browser-origin requests by API key or IP and returns Retry-After on 429.
+ *
+ * Env vars:
+ *   - `CORS_RATE_LIMIT_WINDOW_MS` (default 15 min)
+ *   - `CORS_RATE_LIMIT_MAX`       (default 120)
+ *
+ * @type {import('express').RequestHandler}
+ */
+const corsLimiter = rateLimit({
+  windowMs: CORS_RATE_LIMIT_WINDOW_MS,
+  limit: CORS_RATE_LIMIT_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: resolveRateLimitStore('cors'),
+  keyGenerator: apiKeyKeyGenerator,
+  validate: {
+    xForwardedForHeader: false,
+  },
+  skip: (req) => !req.get('Origin'),
+  handler: corsRateLimitHandler,
+});
+
+/**
+ * Factory for creating a fresh CORS limiter instance (useful for tests/apps).
+ * Returns a new express-rate-limit middleware configured for CORS.
+ */
+function createCorsRateLimiter() {
+  return rateLimit({
+    windowMs: CORS_RATE_LIMIT_WINDOW_MS,
+    max: CORS_RATE_LIMIT_MAX,
+    standardHeaders: true,
+    legacyHeaders: false,
+    store: resolveRateLimitStore('cors'),
+    keyGenerator: apiKeyKeyGenerator,
+    validate: {
+      xForwardedForHeader: false,
+    },
+    skip: (req) => !req.get('Origin'),
+    handler: corsRateLimitHandler,
+  });
+}
+
+/**
+ * 429 response body for the metrics rate limiter.
+ *
+ * @param {import('express').Request} _req - Express request (unused).
+ * @param {import('express').Response} res - Express response.
+ * @param {import('express').NextFunction} _next - Express next (unused).
+ * @param {{ statusCode: number }} options - RateLimit options.
+ * @returns {void}
+ */
+function metricsRateLimitHandler(_req, res, _next, options) {
+  res.status(options.statusCode).json({
+    error: 'Too many requests.',
+    message: 'Rate limit threshold breached for /metrics. Please try again later.',
+  });
+}
+
+/**
+ * Metrics endpoint limiter. Keeps Prometheus scrapes and similar probes from
+ * overwhelming the service while still allowing normal traffic.
+ *
+ * @type {import('express').RequestHandler}
+ */
+const metricsLimiter = rateLimit({
+  windowMs: METRICS_RATE_LIMIT_WINDOW_MS,
+  limit: METRICS_RATE_LIMIT_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator,
+  validate: {
+    xForwardedForHeader: false,
+  },
+  handler: metricsRateLimitHandler,
+});
+
+/**
+ * Factory variant for constructing a fresh metrics limiter.
+ *
+ * @returns {import('express').RequestHandler}
+ */
+function createMetricsRateLimiter() {
+  return rateLimit({
+    windowMs: METRICS_RATE_LIMIT_WINDOW_MS,
+    limit: METRICS_RATE_LIMIT_MAX,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator,
+    validate: {
+      xForwardedForHeader: false,
+    },
+    handler: metricsRateLimitHandler,
+  });
+}
 
 /**
  * Standard global rate limiter for all API endpoints.
@@ -400,6 +555,36 @@ function createMetricsRateLimiter() {
 
 const INVOICE_STATE_WINDOW_MS = parseRateLimitEnv('RATE_LIMIT_INVOICE_STATE_WINDOW_MS', 15 * 60 * 1000);
 const INVOICE_STATE_MAX = parseRateLimitEnv('RATE_LIMIT_INVOICE_STATE_MAX', 60);
+const INDEXER_RATE_LIMIT_WINDOW_MS = parseRateLimitEnv('RATE_LIMIT_INDEXER_WINDOW_MS', 15 * 60 * 1000);
+const INDEXER_RATE_LIMIT_MAX = parseRateLimitEnv('RATE_LIMIT_INDEXER_MAX', 60);
+
+/**
+ * Generates a rate-limit key using the API key when present, otherwise the
+ * client IP address.
+ *
+ * @param {import('express').Request} req - Express request object.
+ * @returns {string} The rate-limit key.
+ */
+function indexerKeyGenerator(req) {
+  const apiKey = getApiKey(req);
+  if (apiKey) {
+    return `apikey_${apiKey}`;
+  }
+  return req.ip || req.socket?.remoteAddress || '127.0.0.1';
+}
+
+/**
+ * 429 response body for {@link metricsLimiter}.
+ *
+ * @param {import('express').Request} _req - Express request (unused).
+ * @param {import('express').Response} res - Express response.
+ * @returns {void}
+ */
+function metricsRateLimitHandler(_req, res) {
+  res.status(429).json({
+    error: 'Too many metrics requests',
+  });
+}
 
 /**
  * Per-client (API key / IP) rate limiter for the invoice-state endpoints.
@@ -422,8 +607,94 @@ const invoiceStateLimiter = rateLimit({
   },
 });
 
+/**
+ * Rate-limit handler for the /metrics endpoint that returns a uniform
+ * 429 response with no internal detail.
+ *
+ * @param {import('express').Request} _req - Express request (unused).
+ * @param {import('express').Response} res - Express response.
+ * @param {import('express').NextFunction} _next - Express next (unused).
+ * @param {{ statusCode?: number, windowMs?: number }} [options] - express-rate-limit options.
+ * @returns {void}
+ */
+function metricsRateLimitHandler(_req, res, _next, options = {}) {
+  const statusCode = Number.isInteger(options.statusCode) ? options.statusCode : 429;
+  const windowMs = Number.isFinite(options.windowMs) ? options.windowMs : METRICS_RATE_LIMIT_WINDOW_MS;
+  const retryAfterSeconds = Math.max(1, Math.ceil(windowMs / 1000));
+
+  if (typeof res.set === 'function') {
+    res.set('Retry-After', String(retryAfterSeconds));
+  }
+
+  const body = {
+    type: 'https://liquifact.com/probs/too-many-requests',
+    title: 'Too Many Requests',
+    status: statusCode,
+    code: 'RATE_LIMITED',
+    retryable: true,
+    retry_hint: `Rate-limit threshold breached for /metrics. Wait ${retryAfterSeconds} seconds before retrying.`,
+    scope: 'metrics',
+    message: 'Rate-limit threshold breached for /metrics. Please try again later.',
+    error: 'Too many requests',
+  };
+
+  if (typeof res.status === 'function') {
+    const statusResult = res.status(statusCode);
+    if (statusResult && typeof statusResult.json === 'function') {
+      return statusResult.json(body);
+    }
+    if (statusResult && typeof statusResult.send === 'function') {
+      return statusResult.send(body);
+    }
+    if (typeof res.json === 'function') {
+      return res.json(body);
+    }
+  } else {
+    res.statusCode = statusCode;
+  }
+
+  if (typeof res.json === 'function') {
+    return res.json(body);
+  }
+
+  if (typeof res.send === 'function') {
+    return res.send(body);
+  }
+
+  if (typeof res.end === 'function') {
+    return res.end(JSON.stringify(body));
+  }
+
+  return body;
+}
+
+/**
+ * Factory that creates a fresh rate limiter for the /metrics endpoint.
+ *
+ * @returns {import('express').RequestHandler}
+ */
+function createMetricsRateLimiter() {
+  return rateLimit({
+    windowMs: METRICS_RATE_LIMIT_WINDOW_MS,
+    limit: METRICS_RATE_LIMIT_MAX,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator,
+    validate: { xForwardedForHeader: false },
+    handler: metricsRateLimitHandler,
+  });
+}
+
+/**
+ * Singleton rate limiter for the /metrics endpoint.
+ * @type {import('express').RequestHandler}
+ */
+const metricsLimiter = createMetricsRateLimiter();
+
 module.exports = {
   createRateLimiter,
+  createPersistenceRateLimiter,
+  escrowReadLimiter,
   globalLimiter,
   sensitiveLimiter,
   apiKeyLimiter,
@@ -432,12 +703,23 @@ module.exports = {
   adminConfigKeyGenerator,
   adminConfigHandler,
   invoiceStateLimiter,
+  indexerLimiter,
   getApiKey,
   CONFIG_RATE_LIMIT_WINDOW_MS,
   CONFIG_RATE_LIMIT_MAX,
   METRICS_RATE_LIMIT_WINDOW_MS,
   METRICS_RATE_LIMIT_MAX,
+  CORS_RATE_LIMIT_WINDOW_MS,
+  CORS_RATE_LIMIT_MAX,
+  corsLimiter,
+  corsRateLimitHandler,
+  createCorsRateLimiter,
   metricsLimiter,
   metricsRateLimitHandler,
   createMetricsRateLimiter,
+  KYC_WEBHOOK_RATE_LIMIT_WINDOW_MS,
+  KYC_WEBHOOK_RATE_LIMIT_MAX,
+  kycWebhookLimiter,
+  kycWebhookRateLimitHandler,
+  createKycWebhookRateLimiter,
 };

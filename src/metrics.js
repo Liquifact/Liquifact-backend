@@ -28,6 +28,12 @@
  * value, but this middleware **already** ignores `req.ip` for loopback checks
  * and reads the socket directly, making it resilient to such config changes.
  *
+ * ## Response Compression
+ *
+ * Large metrics responses are compressed with gzip or deflate when the client
+ * advertises support via `Accept-Encoding` and the response exceeds the
+ * compression threshold (see {@link module:middleware/compression}).
+ *
  * @module metrics
  */
 
@@ -415,6 +421,12 @@ try {
 /** Shared registry ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â exported so tests can reset it between runs. */
 let registry = new client.Registry();
 
+const {
+  negotiateEncoding,
+  compress,
+  DEFAULT_THRESHOLD,
+} = require('./middleware/compression');
+
 if (typeof client.collectDefaultMetrics === 'function') {
   client.collectDefaultMetrics({ register: registry });
 }
@@ -779,7 +791,7 @@ const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 /**
  * Extracts the direct TCP connection IP address from the request.
  *
- * Reads `req.socket.remoteAddress` first ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â this is the actual TCP socket peer
+ * Reads `req.socket.remoteAddress` first — this is the actual TCP socket peer
  * and cannot be spoofed via `X-Forwarded-For` or any other HTTP header. Falls
  * back to `req.ip` when the socket address is unavailable (edge case in some
  * test environments or HTTP/2 proxies).
@@ -834,25 +846,13 @@ function metricsAuth(req, res, next) {
   }
 
   const token = process.env.METRICS_BEARER_TOKEN;
-  const startNs = process.hrtime.bigint();
-
-  const finishWithUnauthorized = () => {
-    const durationSeconds = Number(process.hrtime.bigint() - startNs) / 1e9;
-    res.status(401).json({ error: 'Unauthorized' });
-    recordMetricsEndpointOutcome({
-      statusCode: res.statusCode,
-      durationSeconds,
-      error: new Error('Unauthorized'),
-      req,
-    });
-  };
 
   if (token) {
     const auth = req.headers['authorization'] || '';
     if (safeEqual(auth, `Bearer ${token}`)) { return next(); }
     const authFallback = req.headers['Authorization'] || '';
     if (safeEqual(authFallback, `Bearer ${token}`)) { return next(); }
-    finishWithUnauthorized();
+    res.status(401).json({ error: 'Unauthorized' });
     return;
   }
 
@@ -861,13 +861,13 @@ function metricsAuth(req, res, next) {
   const ip = extractClientIp(req);
   if (LOOPBACK.has(ip)) { return next(); }
 
-  finishWithUnauthorized();
+  res.status(401).json({ error: 'Unauthorized' });
 }
 
 /**
  * Express route handler that returns Prometheus metrics in plain-text format.
  *
- * @param {import('express').Request} req - Express request.
+ * @param {import('express').Request} _req - Express request (unused).
  * @param {import('express').Response} res - Express response.
  * @returns {Promise<void>}
  */
@@ -896,19 +896,30 @@ async function metricsHandler(req, res) {
   res.on('close', done);
 
   res.set('Content-Type', registry.contentType);
-  try {
-    // Use the real prom-client registry.metrics() when available (production),
-    // which returns the full Prometheus exposition including ALL registered
-    // counters and gauges. Fall back to cachedMetrics for the shim (tests).
-    const metricsText = typeof client.Gauge !== 'function' || client.Gauge.name === 'GaugeShim'
-      ? cachedMetrics
-      : await registry.metrics();
-    res.end(metricsText);
-  } catch (err) {
-    if (res.locals) { res.locals.metricsError = err; }
-    res.statusCode = 500;
-    res.end('');
+  res.vary('Accept-Encoding');
+  // Use the real prom-client registry.metrics() when available (production),
+  // which returns the full Prometheus exposition including ALL registered
+  // counters and gauges. Fall back to cachedMetrics for the shim (tests).
+  const metricsText = typeof client.Gauge !== 'function' || client.Gauge.name === 'GaugeShim'
+    ? cachedMetrics
+    : await registry.metrics();
+
+  const buffer = Buffer.from(metricsText, 'utf8');
+
+  // Only compress responses above the threshold when the client
+  // advertises supported encodings via Accept-Encoding.
+  if (buffer.length > DEFAULT_THRESHOLD) {
+    const encoding = negotiateEncoding(_req.headers['accept-encoding']);
+
+    if (encoding !== 'identity') {
+      const compressed = await compress(buffer, encoding);
+      res.setHeader('Content-Encoding', encoding);
+      res.removeHeader('Content-Length');
+      return res.end(compressed);
+    }
   }
+
+  res.end(buffer);
 }
 
 /**
@@ -1091,7 +1102,7 @@ let apiKeyAuthErrorsTotal = new client.Counter({
  * Bounded enum of allowed `cause` label values for API key auth error metrics.
  * @readonly
  */
-const API_KEY_ERROR_CAUSE_ENUM = Object.freeze([
+const _API_KEY_ERROR_CAUSE_ENUM = Object.freeze([
   'validation_error',
   'unauthorized',
   'forbidden',
@@ -1103,7 +1114,7 @@ const API_KEY_ERROR_CAUSE_ENUM = Object.freeze([
  * Bounded enum of allowed `outcome` label values for API key auth duration metrics.
  * @readonly
  */
-const API_KEY_OUTCOME_ENUM = Object.freeze([
+const _API_KEY_OUTCOME_ENUM = Object.freeze([
   'success',
   'client_error',
   'server_error',
@@ -1256,6 +1267,19 @@ let sorobanRpcRetryCausesTotal = new client.Counter({
   registers: [registry],
 });
 
+// ── API key auth metrics ─────────────────────────────────────────────────────
+
+/**
+
+/**
+ * Bounded enum of allowed `endpoint` label values for persistence metrics.
+ * @readonly
+ */
+const PERSISTENCE_ENDPOINT_ENUM = Object.freeze([
+  'sme_invoice_upload',
+  'sme_invoice_presigned_url',
+]);
+
 /**
  * Bounded enum of allowed `endpoint` label values for persistence metrics.
  * @readonly
@@ -1304,11 +1328,6 @@ function normalizePersistenceStatusClass(status) {
 
 /**
  * Maps a raw persistence failure to a bounded `cause` label value.
- *
- * Recognises the storage-service error codes surfaced by the SME routes
- * (INVALID_MIME_TYPE, FILE_TOO_LARGE, INVALID_TENANT_ID) as client-side
- * `validation`, storage-layer failures as `storage`, and everything else as
- * `internal`. A 2xx outcome maps to `none`.
  *
  * @param {unknown} err - Raw error object or code (null/undefined for success).
  * @param {number} [status] - HTTP status code, used to disambiguate.
@@ -1489,6 +1508,45 @@ let metricsRequestDurationSeconds = new client.Histogram({
   buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5],
   registers: [registry],
 });
+
+/**
+ * Counter: Total metrics endpoint requests by status class.
+ * @type {import('prom-client').Counter}
+ */
+const metricsRequestsTotal = new client.Counter({
+  name: 'metrics_requests_total',
+  help: 'Total number of metrics endpoint requests',
+  labelNames: ['status_class'],
+  registers: [registry],
+});
+
+/**
+ * Counter: Metrics endpoint request errors by cause.
+ * @type {import('prom-client').Counter}
+ */
+const metricsRequestErrorsTotal = new client.Counter({
+  name: 'metrics_request_errors_total',
+  help: 'Total number of metrics endpoint request errors by cause',
+  labelNames: ['cause'],
+  registers: [registry],
+});
+
+/**
+ * Records metrics for a metrics endpoint request outcome.
+ * @param {number} status - HTTP status code.
+ * @param {unknown} [err] - Optional error object.
+ * @returns {void}
+ */
+function recordMetricsEndpointOutcome(status, err) {
+  const statusClass = normalizeMetricsEndpointStatusClass(status);
+  metricsRequestsTotal.inc({ status_class: statusClass });
+  if (status >= 400 || err) {
+    const cause = normalizeMetricsEndpointCause(err, status);
+    metricsRequestErrorsTotal.inc({ cause });
+  }
+}
+
+
 
 // ── KYC webhook metrics (issue #731) ────────────────────────────────────────
 
@@ -1744,6 +1802,30 @@ let escrowReadCacheEvictionsTotal = new client.Counter({
   registers: [registry],
 });
 
+const corsCacheHitsTotal = new client.Counter({
+  name: 'cors_cache_hits_total',
+  help: 'Total CORS cache hits',
+  registers: [registry],
+});
+
+const corsCacheMissesTotal = new client.Counter({
+  name: 'cors_cache_misses_total',
+  help: 'Total CORS cache misses',
+  registers: [registry],
+});
+
+const corsCacheEvictionsTotal = new client.Counter({
+  name: 'cors_cache_evictions_total',
+  help: 'Total CORS cache evictions',
+  registers: [registry],
+});
+
+const corsCacheInvalidationsTotal = new client.Counter({
+  name: 'cors_cache_invalidations_total',
+  help: 'Total CORS cache invalidations',
+  registers: [registry],
+});
+
 
 /**
  * Returns the shared Prometheus registry.
@@ -1825,6 +1907,8 @@ module.exports = {
   metricsAuth,
   metricsHandler,
   recordMetricsEndpointOutcome,
+  apiKeyAuthDurationSeconds,
+  apiKeyAuthErrorsTotal,
   normalizeMetricsEndpointStatusClass,
   normalizeMetricsEndpointCause,
   metricsRequestDurationSeconds,
@@ -1840,14 +1924,14 @@ module.exports = {
   escrowIndexerLastCursorAdvanceTimestampSeconds,
   escrowIndexerEventsProcessedTotal,
   escrowIndexerEventsSkippedTotal,
-  escrowIndexerCycleFailuresTotal,
-  escrowReconciliationMismatches,
-  escrowReconciliationMismatchedInvoicesGauge,
-  escrowReconciliationDriftMagnitudeGauge,
+  escrowIndexerLastCursorAdvanceTimestampSeconds,
   escrowReconciliationDriftAlertsTotal,
-  readinessGauge,
   sorobanRpcCallDurationSeconds,
   sorobanRpcRetryCausesTotal,
+  corsCacheHitsTotal,
+  corsCacheMissesTotal,
+  corsCacheEvictionsTotal,
+  corsCacheInvalidationsTotal,
   footprintCacheHitsTotal,
   footprintCacheMissesTotal,
   footprintCacheEvictionsTotal,
@@ -1880,20 +1964,10 @@ module.exports = {
   normalizeKycWebhookStatusClass,
   normalizeKycWebhookCause,
   normalizeJobType,
-  normalizeReminderReason,
   normalizeSorobanRpcMethod,
   normalizeSorobanRpcOutcome,
   normalizeSorobanRetryCause,
-  normalizeReminderReason,
-  healthRequestDurationSeconds,
-  healthRequestsTotal,
-  healthRequestErrorsTotal,
-  normalizeHealthEndpoint,
-  normalizeHealthStatusClass,
-  normalizeHealthCause,
-  HEALTH_ENDPOINT_ENUM,
-  HEALTH_STATUS_CLASS_ENUM,
-  HEALTH_CAUSE_ENUM,
   startMetricsRefresh,
   stopMetricsRefresh,
+  webhookReplayTotal,
 };
