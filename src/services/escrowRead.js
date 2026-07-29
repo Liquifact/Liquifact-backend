@@ -42,6 +42,7 @@ const { createRedisEscrowSummaryCache } = require("../cache/redis");
 const { escrowReadCache } = require("./escrowReadCache");
 const { emitEscrowReadWebhook } = require("./webhooks");
 const { get: getConfig } = require("../config");
+const { escrowReadParamsSchema } = require("../schemas/escrowRead");
 
 const cache = createRedisEscrowSummaryCache();
 
@@ -111,14 +112,7 @@ function coerceLegalHoldStatus(raw) {
 // Alias for internal use within this module.
 const _coerceLegalHoldStatus = coerceLegalHoldStatus;
 
-/**
- * Regex that a valid invoice ID must satisfy.
- * Aligned with IDENTIFIER_PATTERN in escrowSubmit.js.
- * Allows alphanumeric start, followed by alphanumeric, underscores, hyphens, dots, or colons, 1–128 chars.
- *
- * @constant {RegExp}
- */
-const INVOICE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
 
 /**
  * Neutral base-state shape returned when neither the projection nor a test
@@ -134,22 +128,31 @@ const NEUTRAL_BASE_STATE = Object.freeze({
 });
 
 /**
- * Validates an invoice ID string.
+ * Validates an invoice ID string using the canonical escrow-read Zod schema.
+ *
+ * Delegates to {@link module:schemas/escrowRead.escrowReadParamsSchema} so
+ * all escrow-read paths share one validation rule. The Zod schema already
+ * enforces:
+ *  - Non-empty string
+ *  - Starts with alphanumeric
+ *  - Contains only alphanumeric, underscore, hyphen, dot, colon
+ *  - Max 128 characters
  *
  * @param {unknown} invoiceId - Value to validate.
  * @returns {{ valid: boolean, reason?: string }}
  */
 function validateInvoiceId(invoiceId) {
-  if (typeof invoiceId !== "string" || invoiceId.trim() === "") {
-    return { valid: false, reason: "invoiceId must be a non-empty string" };
+  const result = escrowReadParamsSchema.safeParse({ invoiceId });
+  if (result.success) {
+    return { valid: true };
   }
-  if (!INVOICE_ID_RE.test(invoiceId.trim())) {
-    return {
-      valid: false,
-      reason: "invoiceId contains invalid characters (allowed: a-z A-Z 0-9 _ -)",
-    };
-  }
-  return { valid: true };
+
+  const firstIssue = result.error.issues && result.error.issues[0];
+  const reason =
+    firstIssue && firstIssue.message
+      ? firstIssue.message
+      : "invoiceId is invalid";
+  return { valid: false, reason };
 }
 
 /**
