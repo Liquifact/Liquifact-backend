@@ -15,7 +15,6 @@ const { authenticateApiKey } = require('./apiKeyAuth');
 const { createAuditLog } = require('../services/auditLog');
 const { loadApiKeyRegistry, timingSafeStringEqual } = require('../config/apiKeys');
 
-/**
 const _adminApiKeyMiddleware = authenticateApiKey({ scope: 'admin' });
 
 /**

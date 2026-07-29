@@ -582,7 +582,7 @@ describe('schema exports', () => {
     expect(MAX_KEY_LENGTH).toBe(256);
     expect(MAX_CLIENT_ID_LENGTH).toBe(128);
     expect(MAX_SCOPES_COUNT).toBe(20);
-    expect(VALID_SCOPES).toEqual(['invoices:read', 'invoices:write', 'escrow:read']);
+    expect(VALID_SCOPES).toEqual(['invoices:read', 'invoices:write', 'escrow:read', 'admin']);
   });
 
   it('config/apiKeys exports all expected constants', () => {
