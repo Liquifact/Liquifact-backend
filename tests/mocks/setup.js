@@ -1,3 +1,17 @@
+jest.mock('../../src/metrics', () => {
+  const makeCounter = () => ({
+    inc: jest.fn(),
+    reset: jest.fn(),
+    val: 0,
+  });
+
+  return {
+    footprintCacheHitsTotal: makeCounter(),
+    footprintCacheMissesTotal: makeCounter(),
+    footprintCacheEvictionsTotal: makeCounter(),
+  };
+});
+
 const { CircuitBreaker: _CircuitBreaker } = require('../../src/utils/circuitBreaker');
 const { MemoryCacheStore: _MemoryCacheStore } = require('../../src/services/cacheStore');
 globalThis.CircuitBreaker = _CircuitBreaker;

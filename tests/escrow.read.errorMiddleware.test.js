@@ -204,6 +204,59 @@ describe('escrow-read error handling centralization', () => {
       expect(res.body.error.message).toContain('inv-999');
     });
 
+  describe('error-response body snapshots', () => {
+    test('400 shape is stable for invalid invoiceId parameter', async () => {
+      const app = buildV1App();
+      const longInvoiceId = 'a'.repeat(129);
+
+      const res = await request(app).get(`/v1/escrow/${longInvoiceId}`);
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchSnapshot();
+    });
+
+    test('404 shape is stable when escrow mapping is missing', async () => {
+      resolveEscrowAddress.mockReturnValue(null);
+      const app = buildLegacyApp();
+
+      const res = await request(app).get('/api/escrow/inv-missing');
+
+      expect(res.status).toBe(404);
+      expect(res.body).toMatchSnapshot();
+    });
+
+    test('409 shape is stable when read conflicts', async () => {
+      resolveEscrowAddress.mockReturnValue('GA...addr');
+      readEscrowState.mockRejectedValue(
+        new AppError({
+          type: 'https://liquifact.com/probs/conflict',
+          title: 'Conflict',
+          status: 409,
+          detail: 'Escrow state conflict while replaying events',
+          code: 'CONFLICT',
+          retryable: false,
+        }),
+      );
+      const app = buildV1App();
+
+      const res = await request(app).get('/v1/escrow/inv-conflict');
+
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchSnapshot();
+    });
+
+    test('500 shape is stable when read service throws generic error', async () => {
+      resolveEscrowAddress.mockReturnValue('GA...addr');
+      getEscrowStateWithProjection.mockRejectedValue(new Error('RPC timeout'));
+      const app = buildLegacyApp();
+
+      const res = await request(app).get('/api/escrow/inv-rpc-500');
+
+      expect(res.status).toBe(500);
+      expect(res.body).toMatchSnapshot();
+    });
+  });
+
     test('returns 500 via next(err) when service throws', async () => {
       resolveEscrowAddress.mockReturnValue('GA...addr');
       getEscrowStateWithProjection.mockRejectedValue(new Error('RPC timeout'));
