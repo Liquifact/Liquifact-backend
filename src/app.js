@@ -28,6 +28,7 @@ const invoiceService = require('./services/invoiceService');
 const { CursorError } = require('./utils/cursorPagination');
 const { getEscrowRead } = require('./services/escrowReadService');
 const { createCorsOptions, isCorsOriginRejectedError } = require('./config/cors');
+const { corsObservability } = require('./middleware/corsObservability');
 const { get: getConfig } = require('./config');
 const { validateInvoiceQueryParams } = require('./utils/validators');
 const { invoiceCreateSchema, parseValidationErrors } = require('./schemas/invoice');
@@ -82,6 +83,7 @@ const { createCompressionMiddleware } = require('./middleware/compression');
  */
 function handleCorsError(err, req, res, next) {
   if (isCorsOriginRejectedError(err)) {
+    if (res.locals) res.locals.isCorsOriginRejected = true;
     res.status(403).json({ error: err.message, code: err.code });
     return;
   }
@@ -144,6 +146,7 @@ function createApp() {
   const app = express();
 
   // ── 1. CORS ──────────────────────────────────────────────────────────────
+  app.use(corsObservability);
   app.use(cors(createCorsOptions()));
 
   // ── 1.a. KYC webhook raw body parser ──────────────────────────────────────

@@ -263,6 +263,8 @@ const corsLimiter = rateLimit({
 /**
  * Factory for creating a fresh CORS limiter instance (useful for tests/apps).
  * Returns a new express-rate-limit middleware configured for CORS.
+ *
+ * @returns {import('express').RequestHandler} Rate limit middleware instance.
  */
 function createCorsRateLimiter() {
   return rateLimit({
@@ -549,6 +551,70 @@ function createMetricsRateLimiter() {
   });
 }
 
+const API_KEYS_RATE_LIMIT_WINDOW_MS = parseRateLimitEnv('RATE_LIMIT_API_KEYS_WINDOW_MS', 15 * 60 * 1000);
+const API_KEYS_RATE_LIMIT_MAX = parseRateLimitEnv('RATE_LIMIT_API_KEYS_MAX', 60);
+
+/**
+ * 429 response body for {@link apiKeysLimiter}.
+ *
+ * @param {import('express').Request} _req - Express request object.
+ * @param {import('express').Response} res - Express response object.
+ * @param {import('express').NextFunction} _next - Express next callback.
+ * @param {{ statusCode: number, windowMs: number }} options - Rate limiter options.
+ * @returns {void}
+ */
+function apiKeysRateLimitHandler(_req, res, _next, options) {
+  res.status(options.statusCode).json({
+    type: 'https://liquifact.com/probs/too-many-requests',
+    title: 'Too Many Requests',
+    status: options.statusCode,
+    code: 'RATE_LIMITED',
+    retryable: true,
+    retry_hint: 'Wait for the rate-limit window to reset before retrying.',
+    scope: 'api-keys',
+    error: 'Too many requests.',
+    message: 'Rate limit threshold breached for api-keys endpoints. Please try again later.',
+  });
+}
+
+/**
+ * Per-client rate limiter for api-keys endpoints.
+ * Returns Retry-After header on 429.
+ */
+const apiKeysLimiter = rateLimit({
+  windowMs: API_KEYS_RATE_LIMIT_WINDOW_MS,
+  limit: API_KEYS_RATE_LIMIT_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: resolveRateLimitStore('api-keys'),
+  keyGenerator: adminConfigKeyGenerator,
+  validate: {
+    xForwardedForHeader: false,
+  },
+  handler: apiKeysRateLimitHandler,
+});
+
+/**
+ * Factory for creating a fresh API keys limiter instance.
+ * Returns a new express-rate-limit middleware configured for API keys.
+ *
+ * @returns {import('express').RequestHandler} Rate limit middleware instance.
+ */
+function createApiKeysRateLimiter() {
+  return rateLimit({
+    windowMs: API_KEYS_RATE_LIMIT_WINDOW_MS,
+    limit: API_KEYS_RATE_LIMIT_MAX,
+    standardHeaders: true,
+    legacyHeaders: false,
+    store: resolveRateLimitStore('api-keys'),
+    keyGenerator: adminConfigKeyGenerator,
+    validate: {
+      xForwardedForHeader: false,
+    },
+    handler: apiKeysRateLimitHandler,
+  });
+}
+
 const INVOICE_STATE_WINDOW_MS = parseRateLimitEnv('RATE_LIMIT_INVOICE_STATE_WINDOW_MS', 15 * 60 * 1000);
 const INVOICE_STATE_MAX = parseRateLimitEnv('RATE_LIMIT_INVOICE_STATE_MAX', 60);
 const INDEXER_RATE_LIMIT_WINDOW_MS = parseRateLimitEnv('RATE_LIMIT_INDEXER_WINDOW_MS', 15 * 60 * 1000);
@@ -655,6 +721,11 @@ function createMetricsRateLimiter() {
 }
 
 module.exports = {
+  apiKeysLimiter,
+  createApiKeysRateLimiter,
+  apiKeysRateLimitHandler,
+  API_KEYS_RATE_LIMIT_WINDOW_MS,
+  API_KEYS_RATE_LIMIT_MAX,
   createRateLimiter,
   createPersistenceRateLimiter,
   escrowReadLimiter,
