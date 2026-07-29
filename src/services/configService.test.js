@@ -25,11 +25,19 @@ jest.mock('../config/cors', () => ({
   reloadCorsMaxAge: jest.fn(),
 }));
 
+// applyConfig persists the record through the soft-delete service (issue #31).
+// Mocked here so these unit tests stay DB-free; the persistence contract itself
+// is covered in tests/adminConfig.softDelete.test.js.
+jest.mock('./configSoftDelete', () => ({
+  persistConfig: jest.fn(async () => undefined),
+}));
+
 // ── Imports ───────────────────────────────────────────────────────────────────
 
 const { applyConfig, applyCorsConfig, getConfigSections } = require('./configService');
 const logger = require('../logger');
 const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
+const { persistConfig } = require('./configSoftDelete');
 
 // ═════════════════════════════════════════════════════════════════════════════
 // applyConfig tests
@@ -46,12 +54,12 @@ describe('applyConfig', () => {
   });
 
   describe('CORS section', () => {
-    it('applies CORS config with origins', () => {
+    it('applies CORS config with origins', async () => {
       const config = {
         origins: ['https://example.com', 'https://app.example.com'],
       };
 
-      const result = applyConfig('cors', config, context);
+      const result = await applyConfig('cors', config, context);
 
       expect(result).toEqual({
         section: 'cors',
@@ -70,12 +78,12 @@ describe('applyConfig', () => {
       );
     });
 
-    it('applies CORS config with maxAge', () => {
+    it('applies CORS config with maxAge', async () => {
       const config = {
         maxAge: 600,
       };
 
-      const result = applyConfig('cors', config, context);
+      const result = await applyConfig('cors', config, context);
 
       expect(result).toEqual({
         section: 'cors',
@@ -94,13 +102,13 @@ describe('applyConfig', () => {
       );
     });
 
-    it('applies CORS config with both origins and maxAge', () => {
+    it('applies CORS config with both origins and maxAge', async () => {
       const config = {
         origins: ['https://example.com'],
         maxAge: 300,
       };
 
-      const result = applyConfig('cors', config, context);
+      const result = await applyConfig('cors', config, context);
 
       expect(result).toEqual({
         section: 'cors',
@@ -121,12 +129,12 @@ describe('applyConfig', () => {
       );
     });
 
-    it('handles CORS config with empty origins array', () => {
+    it('handles CORS config with empty origins array', async () => {
       const config = {
         origins: [],
       };
 
-      const result = applyConfig('cors', config, context);
+      const result = await applyConfig('cors', config, context);
 
       expect(result).toEqual({
         section: 'cors',
@@ -139,14 +147,14 @@ describe('applyConfig', () => {
   });
 
   describe('Other sections (webhook, reconciliation, kyc, retention, fraudThresholds)', () => {
-    it('accepts webhook section without applying runtime changes', () => {
+    it('accepts webhook section without applying runtime changes', async () => {
       const config = {
         url: 'https://hooks.example.com',
         secret: 'valid-secret-16chars',
         events: ['invoice.created'],
       };
 
-      const result = applyConfig('webhook', config, context);
+      const result = await applyConfig('webhook', config, context);
 
       expect(result).toEqual({
         section: 'webhook',
@@ -166,13 +174,13 @@ describe('applyConfig', () => {
       expect(reloadCorsMaxAge).not.toHaveBeenCalled();
     });
 
-    it('accepts reconciliation section without applying runtime changes', () => {
+    it('accepts reconciliation section without applying runtime changes', async () => {
       const config = {
         batchSize: 100,
         enabled: true,
       };
 
-      const result = applyConfig('reconciliation', config, context);
+      const result = await applyConfig('reconciliation', config, context);
 
       expect(result).toEqual({
         section: 'reconciliation',
@@ -191,13 +199,13 @@ describe('applyConfig', () => {
       expect(reloadCorsMaxAge).not.toHaveBeenCalled();
     });
 
-    it('accepts kyc section without applying runtime changes', () => {
+    it('accepts kyc section without applying runtime changes', async () => {
       const config = {
         providerUrl: 'https://kyc.example.com',
         apiKey: 'valid-key-8chars',
       };
 
-      const result = applyConfig('kyc', config, context);
+      const result = await applyConfig('kyc', config, context);
 
       expect(result).toEqual({
         section: 'kyc',
@@ -216,13 +224,13 @@ describe('applyConfig', () => {
       expect(reloadCorsMaxAge).not.toHaveBeenCalled();
     });
 
-    it('accepts retention section without applying runtime changes', () => {
+    it('accepts retention section without applying runtime changes', async () => {
       const config = {
         retentionDays: 365,
         purgeEnabled: false,
       };
 
-      const result = applyConfig('retention', config, context);
+      const result = await applyConfig('retention', config, context);
 
       expect(result).toEqual({
         section: 'retention',
@@ -241,12 +249,12 @@ describe('applyConfig', () => {
       expect(reloadCorsMaxAge).not.toHaveBeenCalled();
     });
 
-    it('accepts fraudThresholds section without applying runtime changes', () => {
+    it('accepts fraudThresholds section without applying runtime changes', async () => {
       const config = {
         fraudCeiling: 5000000,
       };
 
-      const result = applyConfig('fraudThresholds', config, context);
+      const result = await applyConfig('fraudThresholds', config, context);
 
       expect(result).toEqual({
         section: 'fraudThresholds',
@@ -267,11 +275,11 @@ describe('applyConfig', () => {
   });
 
   describe('Context handling', () => {
-    it('logs with tenantId from context', () => {
+    it('logs with tenantId from context', async () => {
       const config = { url: 'https://example.com', secret: 'valid-16', events: ['evt'] };
       const customContext = { tenantId: 'custom_tenant', adminClient: 'custom_admin' };
 
-      applyConfig('webhook', config, customContext);
+      await applyConfig('webhook', config, customContext);
 
       expect(logger.info).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -282,11 +290,11 @@ describe('applyConfig', () => {
       );
     });
 
-    it('logs with adminClient from context', () => {
+    it('logs with adminClient from context', async () => {
       const config = { fraudCeiling: 1000000 };
       const customContext = { tenantId: 'tenant_123', adminClient: 'api_key_abc' };
 
-      applyConfig('fraudThresholds', config, customContext);
+      await applyConfig('fraudThresholds', config, customContext);
 
       expect(logger.info).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -299,9 +307,9 @@ describe('applyConfig', () => {
   });
 
   describe('Return value structure', () => {
-    it('returns object with section, config, and message properties', () => {
+    it('returns object with section, config, and message properties', async () => {
       const config = { batchSize: 50 };
-      const result = applyConfig('reconciliation', config, context);
+      const result = await applyConfig('reconciliation', config, context);
 
       expect(result).toHaveProperty('section');
       expect(result).toHaveProperty('config');
@@ -311,11 +319,53 @@ describe('applyConfig', () => {
       expect(typeof result.message).toBe('string');
     });
 
-    it('message includes the section name', () => {
+    it('message includes the section name', async () => {
       const config = { retentionDays: 90 };
-      const result = applyConfig('retention', config, context);
+      const result = await applyConfig('retention', config, context);
 
       expect(result.message).toContain('retention');
+    });
+  });
+
+  describe('Persistence (issue #31)', () => {
+    it('persists the record and surfaces its id', async () => {
+      persistConfig.mockResolvedValueOnce({ id: 'cfg_abc123' });
+      const config = { batchSize: 25 };
+
+      const result = await applyConfig('reconciliation', config, context);
+
+      expect(persistConfig).toHaveBeenCalledWith({
+        section: 'reconciliation',
+        config,
+        tenantId: 'tenant_test',
+        actor: 'admin-user',
+      });
+      expect(result.id).toBe('cfg_abc123');
+      expect(logger.info).toHaveBeenCalledWith(
+        expect.objectContaining({ recordId: 'cfg_abc123' }),
+        'Admin runtime config update accepted',
+      );
+    });
+
+    it('still accepts the config when persistence fails', async () => {
+      // The section side-effects have already been applied at this point, so a
+      // transient DB failure must not turn a valid write into a 500.
+      persistConfig.mockRejectedValueOnce(new Error('db down'));
+      const config = { batchSize: 25 };
+
+      const result = await applyConfig('reconciliation', config, context);
+
+      expect(result.id).toBeUndefined();
+      expect(result.section).toBe('reconciliation');
+      expect(logger.error).toHaveBeenCalled();
+    });
+
+    it('defaults tenantId and actor when the context omits them', async () => {
+      await applyConfig('retention', { retentionDays: 30 }, {});
+
+      expect(persistConfig).toHaveBeenCalledWith(
+        expect.objectContaining({ tenantId: '', actor: null }),
+      );
     });
   });
 });

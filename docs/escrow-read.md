@@ -1,8 +1,9 @@
 # Escrow-Read API Contract
 
 > **Scope:** `Liquifact/Liquifact-backend`  
-> **Last updated:** 2026-07-25  
-> **Cross-reference:** `src/services/escrowRead.js` · `src/routes/v1/index.js` · `src/app.js` · `src/services/escrowDerived.js`
+> **Last updated:** 2026-07-27  
+> **Cross-reference:** `src/services/escrowRead.js` · `src/routes/v1/index.js` · `src/app.js` · `src/services/escrowDerived.js`  
+> **Changelog:** [changelog-escrow-read.md](./changelog-escrow-read.md) — consumer-facing changes over time.
 
 ---
 
@@ -562,7 +563,10 @@ Schema: `migrations/20260725000000_add_soft_delete_to_escrow_event_projection.sq
 
 ## Changelog
 
+See [changelog-escrow-read.md](./changelog-escrow-read.md) for a detailed, dated changelog of all consumer-facing escrow-read API changes.
+
 | Date | Change |
 |---|---|
+| 2026-07-27 | Service layer extracted; route handlers become thin adapters (issue #31) |
 | 2026-07-25 | Initial documentation of escrow-read API contract and error codes |
 | 2026-07-25 | Added soft-delete, restore, and retention purge for escrow-read records (issue #31) |

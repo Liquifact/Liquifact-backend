@@ -333,46 +333,68 @@ describe('validatePatchFields', () => {
     });
   });
 
-  // ── No valid fields → 400 ────────────────────────────────────────────────
+  // ── No valid fields → 422 ────────────────────────────────────────────────
   describe('rejects bodies with no valid MUTABLE_FIELDS keys', () => {
-    it('body with only unknown fields → 400 no valid fields error', () => {
+    it('body with only unknown fields → 422 validation error with fieldErrors', () => {
       const req = mockReq({ unknownField: 'val' });
       const res = mockRes();
       const next = jest.fn();
 
       validatePatchFields(req, res, next);
 
-      expect(res.status).toHaveBeenCalledWith(400);
+      expect(res.status).toHaveBeenCalledWith(422);
       expect(res.json).toHaveBeenCalledWith({
-        error: 'No valid fields provided. Allowed fields: amount, customer, notes.',
+        type: 'https://liquifact.com/probs/validation-error',
+        title: 'Validation Error',
+        status: 422,
+        detail: 'Request body contains unrecognized or forbidden fields.',
+        code: 'VALIDATION_ERROR',
+        fieldErrors: {
+          unknownField: 'Field is not mutable',
+        },
       });
       expect(next).not.toHaveBeenCalled();
     });
 
-    it('body with status and id (non-mutable system fields) → 400', () => {
+    it('body with status and id (non-mutable system fields) → 422', () => {
       const req = mockReq({ status: 'pending', id: '123' });
       const res = mockRes();
       const next = jest.fn();
 
       validatePatchFields(req, res, next);
 
-      expect(res.status).toHaveBeenCalledWith(400);
+      expect(res.status).toHaveBeenCalledWith(422);
       expect(res.json).toHaveBeenCalledWith({
-        error: 'No valid fields provided. Allowed fields: amount, customer, notes.',
+        type: 'https://liquifact.com/probs/validation-error',
+        title: 'Validation Error',
+        status: 422,
+        detail: 'Request body contains unrecognized or forbidden fields.',
+        code: 'VALIDATION_ERROR',
+        fieldErrors: {
+          status: 'Field is not mutable',
+          id: 'Field is not mutable',
+        },
       });
       expect(next).not.toHaveBeenCalled();
     });
 
-    it('empty body object → 400', () => {
+    it('empty body object → 422', () => {
       const req = mockReq({});
       const res = mockRes();
       const next = jest.fn();
 
       validatePatchFields(req, res, next);
 
-      expect(res.status).toHaveBeenCalledWith(400);
+      expect(res.status).toHaveBeenCalledWith(422);
       expect(res.json).toHaveBeenCalledWith({
-        error: 'No valid fields provided. Allowed fields: amount, customer, notes.',
+        type: 'https://liquifact.com/probs/validation-error',
+        title: 'Validation Error',
+        status: 422,
+        detail: 'No valid fields provided. Allowed fields: amount, customer, notes.',
+        code: 'VALIDATION_ERROR',
+        fieldErrors: {
+          _root: 'No valid fields provided. Allowed fields: amount, customer, notes.',
+        },
       });
       expect(next).not.toHaveBeenCalled();
     });
@@ -403,16 +425,25 @@ describe('validatePatchFields', () => {
       expect(req.sanitizedUpdate).toEqual({ amount: 100, notes: 'x' });
     });
 
-    it('body with amount, customer, and an extra field → sanitizedUpdate strips extra', () => {
+    it('body with amount, customer, and an extra field → rejected with 422', () => {
       const req = mockReq({ amount: 100, customer: 'ACME', extraField: 'ignored' });
       const res = mockRes();
       const next = jest.fn();
 
       validatePatchFields(req, res, next);
 
-      expect(next).toHaveBeenCalledTimes(1);
-      expect(req.sanitizedUpdate).toEqual({ amount: 100, customer: 'ACME' });
-      expect(req.sanitizedUpdate).not.toHaveProperty('extraField');
+      expect(res.status).toHaveBeenCalledWith(422);
+      expect(res.json).toHaveBeenCalledWith({
+        type: 'https://liquifact.com/probs/validation-error',
+        title: 'Validation Error',
+        status: 422,
+        detail: 'Request body contains unrecognized or forbidden fields.',
+        code: 'VALIDATION_ERROR',
+        fieldErrors: {
+          extraField: 'Field is not mutable',
+        },
+      });
+      expect(next).not.toHaveBeenCalled();
     });
 
     it('body with all three mutable fields → sanitizedUpdate has all three', () => {

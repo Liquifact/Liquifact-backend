@@ -104,13 +104,49 @@
  */
 
 /**
- * Payload returned by `GET /api/invoices/:id/history`.
+ * Body of `POST /api/invoices/bulk`.
  *
- * @typedef {Object} InvoiceHistoryResponseDto
+ * @typedef {Object} BulkInvoiceStateOperation
  * @property {string} invoiceId - Invoice identifier.
- * @property {string} currentState - Current lifecycle state.
- * @property {HistoryEntryDto[]} transitions - Ordered transition records.
- * @property {number} totalTransitions - Total number of transitions captured.
+ * @property {string} action - The state-transition action to perform.
+ * @property {string} [reason] - Optional rationale for the action.
+ * @property {string} [escrowId] - Escrow contract identifier (for link-escrow).
+ * @property {string} [targetState] - Target lifecycle state (for transition).
+ */
+
+/**
+ * @typedef {Object} BulkSuccessItem
+ * @property {number} index - Position of the item in the batch.
+ * @property {boolean} success - Always true.
+ * @property {string} action - The action that was performed.
+ * @property {object} result - The transition result.
+ */
+
+/**
+ * @typedef {Object} BulkFailureItem
+ * @property {number} index - Position of the item in the batch.
+ * @property {boolean} success - Always false.
+ * @property {string} error - Human-readable error message.
+ * @property {string} code - Machine-readable error code.
+ */
+
+/**
+ * @typedef {BulkSuccessItem|BulkFailureItem} BulkResultItem
+ */
+
+/**
+ * @typedef {Object} BulkSummary
+ * @property {number} total - Total number of items in the batch.
+ * @property {number} succeeded - Number of successfully processed items.
+ * @property {number} failed - Number of items that failed.
+ */
+
+/**
+ * Payload returned by `POST /api/invoices/bulk`.
+ *
+ * @typedef {Object} BulkInvoiceStateResponseDto
+ * @property {BulkResultItem[]} results - Per-item results.
+ * @property {BulkSummary} summary - Aggregate summary.
  */
 
 // ---------------------------------------------------------------------------

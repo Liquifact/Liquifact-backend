@@ -195,7 +195,7 @@ router.use((req, res, next) => {
  * @swagger
  * /api/admin/webhooks/dead-letters:
  *   get:
- *     operationId: listDeadLetterWebhooks
+ *     operationId: listWebhookDeadLetters
  *     summary: List dead-letter webhook deliveries (filterable, cursor-paginated)
  *     description: |
  *       Returns a cursor-paginated list of rows from `webhook_dead_letters`

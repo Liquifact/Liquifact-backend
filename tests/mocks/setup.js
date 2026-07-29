@@ -1,3 +1,7 @@
+const { CircuitBreaker: _CircuitBreaker } = require('../../src/utils/circuitBreaker');
+const { MemoryCacheStore: _MemoryCacheStore } = require('../../src/services/cacheStore');
+globalThis.CircuitBreaker = _CircuitBreaker;
+globalThis.MemoryCacheStore = _MemoryCacheStore;
 
 process.env.JWT_SECRET = 'test-secret-at-least-32-characters-long-string-for-jest';
 process.env.ESCROW_ADDR_BY_INVOICE = JSON.stringify({
@@ -283,12 +287,18 @@ jest.mock('../../src/middleware/rateLimit', () => {
     globalLimiter: noopMiddleware,
     sensitiveLimiter: noopMiddleware,
     apiKeyLimiter: noopMiddleware,
+    apiKeysLimiter: noopMiddleware,
+    createApiKeysRateLimiter: jest.fn(() => noopMiddleware),
+    apiKeysRateLimitHandler: jest.fn(),
+    API_KEYS_RATE_LIMIT_WINDOW_MS: 900000,
+    API_KEYS_RATE_LIMIT_MAX: 60,
     adminConfigLimiter: noopMiddleware,
     metricsLimiter: noopMiddleware,
     healthLimiter: noopMiddleware,
     metricsLimiter: noopMiddleware,
     createConfigRateLimiter: jest.fn(() => noopMiddleware),
     createMetricsRateLimiter: jest.fn(() => noopMiddleware),
+    metricsRateLimitHandler: jest.fn(),
     invoiceStateLimiter: noopMiddleware,
     escrowReadLimiter: noopMiddleware,
     indexerLimiter: noopMiddleware,
@@ -313,11 +323,14 @@ jest.mock('../../src/middleware/rateLimit', () => {
     METRICS_RATE_LIMIT_MAX: 30,
     CONFIG_RATE_LIMIT_WINDOW_MS: 60000,
     CONFIG_RATE_LIMIT_MAX: 20,
-    HEALTH_RATE_LIMIT_WINDOW_MS: 15000,
-    HEALTH_RATE_LIMIT_MAX: 60,
     METRICS_RATE_LIMIT_WINDOW_MS: 60000,
     METRICS_RATE_LIMIT_MAX: 30,
-    KYC_WEBHOOK_RATE_LIMIT_WINDOW_MS: 60000,
-    KYC_WEBHOOK_RATE_LIMIT_MAX: 100,
+    HEALTH_RATE_LIMIT_WINDOW_MS: 15000,
+    HEALTH_RATE_LIMIT_MAX: 60,
+    metricsLimiter: noopMiddleware,
+    createMetricsRateLimiter: jest.fn(() => noopMiddleware),
+    metricsRateLimitHandler: jest.fn(),
+    METRICS_RATE_LIMIT_WINDOW_MS: 60000,
+    METRICS_RATE_LIMIT_MAX: 30,
   };
 }, { virtual: true });

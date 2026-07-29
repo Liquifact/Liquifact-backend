@@ -21,6 +21,7 @@ const VALID_SCOPES = [
   'invoices:read',
   'invoices:write',
   'escrow:read',
+  'admin',
 ];
 
 /**

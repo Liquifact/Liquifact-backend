@@ -112,6 +112,11 @@ const REQUIRED_METRIC_NAMES = [
 
   // Readiness
   'readiness_state',
+
+  // CORS Observability
+  'cors_request_duration_seconds',
+  'cors_requests_total',
+  'cors_request_errors_total',
 ];
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -220,6 +225,9 @@ describe('GET /metrics — response contract', () => {
 
   describe('Prometheus text structure', () => {
     it('response body contains at least one # HELP line', async () => {
+      metrics.corsRequestDurationSeconds.labels({ status: '200', outcome: 'success', status_class: '2xx' }).observe(0.01);
+      metrics.corsRequestsTotal.labels({ status: '200', outcome: 'success', status_class: '2xx' }).inc(1);
+      metrics.corsRequestErrorsTotal.labels({ cause: 'origin_rejected', status_class: '4xx' }).inc(1);
       metrics.refreshMetrics();
       const res = await request(app).get('/metrics');
       expect(res.status).toBe(200);
@@ -227,6 +235,9 @@ describe('GET /metrics — response contract', () => {
     });
 
     it('every # HELP line is followed by a corresponding # TYPE line', async () => {
+      metrics.corsRequestDurationSeconds.labels({ status: '200', outcome: 'success', status_class: '2xx' }).observe(0.01);
+      metrics.corsRequestsTotal.labels({ status: '200', outcome: 'success', status_class: '2xx' }).inc(1);
+      metrics.corsRequestErrorsTotal.labels({ cause: 'origin_rejected', status_class: '4xx' }).inc(1);
       metrics.refreshMetrics();
       const res = await request(app).get('/metrics');
       expect(res.status).toBe(200);
@@ -241,6 +252,9 @@ describe('GET /metrics — response contract', () => {
     });
 
     it('# TYPE lines use only valid Prometheus type identifiers', async () => {
+      metrics.corsRequestDurationSeconds.labels({ status: '200', outcome: 'success', status_class: '2xx' }).observe(0.01);
+      metrics.corsRequestsTotal.labels({ status: '200', outcome: 'success', status_class: '2xx' }).inc(1);
+      metrics.corsRequestErrorsTotal.labels({ cause: 'origin_rejected', status_class: '4xx' }).inc(1);
       metrics.refreshMetrics();
       const res = await request(app).get('/metrics');
       expect(res.status).toBe(200);
@@ -252,6 +266,9 @@ describe('GET /metrics — response contract', () => {
     });
 
     it('metric sample lines follow the pattern: name[{labels}] value[timestamp]', async () => {
+      metrics.corsRequestDurationSeconds.labels({ status: '200', outcome: 'success', status_class: '2xx' }).observe(0.01);
+      metrics.corsRequestsTotal.labels({ status: '200', outcome: 'success', status_class: '2xx' }).inc(1);
+      metrics.corsRequestErrorsTotal.labels({ cause: 'origin_rejected', status_class: '4xx' }).inc(1);
       metrics.refreshMetrics();
       const res = await request(app).get('/metrics');
       expect(res.status).toBe(200);
@@ -314,6 +331,9 @@ describe('GET /metrics — response contract', () => {
       metrics.healthRequestsTotal.labels({ endpoint: 'health_liveness', status_class: '2xx' }).inc(1);
       metrics.healthRequestErrorsTotal.labels({ endpoint: 'health_liveness', cause: 'none' }).inc(1);
       metrics.readinessGauge.set(1);
+      metrics.corsRequestDurationSeconds.labels({ status: '200', outcome: 'success', status_class: '2xx' }).observe(0.01);
+      metrics.corsRequestsTotal.labels({ status: '200', outcome: 'success', status_class: '2xx' }).inc(1);
+      metrics.corsRequestErrorsTotal.labels({ cause: 'origin_rejected', status_class: '4xx' }).inc(1);
       metrics.refreshMetrics();
     });
 
@@ -395,6 +415,9 @@ describe('GET /metrics — response contract', () => {
 
   describe('response stability', () => {
     it('metric name set is identical on repeated scrapes', async () => {
+      metrics.corsRequestDurationSeconds.labels({ status: '200', outcome: 'success', status_class: '2xx' }).observe(0.01);
+      metrics.corsRequestsTotal.labels({ status: '200', outcome: 'success', status_class: '2xx' }).inc(1);
+      metrics.corsRequestErrorsTotal.labels({ cause: 'origin_rejected', status_class: '4xx' }).inc(1);
       metrics.refreshMetrics();
       const first = await request(app).get('/metrics');
       const second = await request(app).get('/metrics');

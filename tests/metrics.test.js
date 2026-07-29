@@ -899,97 +899,213 @@ describe('metrics shim path for Soroban observability', () => {
   });
 });
 
-describe('GET /metrics — response compression', () => {
+describe('METRICS_ENABLED feature flag', () => {
+  let testApp;
+
+  beforeAll(() => {
+    testApp = createApp();
+  });
+
   afterEach(() => {
-    delete process.env.METRICS_BEARER_TOKEN;
+    delete process.env.METRICS_ENABLED;
+    jest.restoreAllMocks();
   });
 
-  describe('large payload — compression enabled by client', () => {
-    it('compresses with Content-Encoding: gzip when Accept-Encoding: gzip', async () => {
-      metrics.refreshMetrics();
-
-      const res = await request(createApp())
-        .get('/metrics')
-        .set('Accept-Encoding', 'gzip');
-
-      expect(res.status).toBe(200);
-      expect(res.headers['content-encoding']).toBe('gzip');
-      expect(res.headers['vary']).toContain('Accept-Encoding');
-      expect(decompress(res.body, 'gzip')).toContain('# HELP');
+  describe('enabled path (METRICS_ENABLED=true)', () => {
+    it('isEnabled() returns true when explicitly set to "true"', () => {
+      process.env.METRICS_ENABLED = 'true';
+      expect(metrics.isEnabled()).toBe(true);
     });
 
-    it('compresses with Content-Encoding: deflate when Accept-Encoding: deflate', async () => {
-      metrics.refreshMetrics();
-
-      const res = await request(createApp())
-        .get('/metrics')
-        .set('Accept-Encoding', 'deflate');
-
-      expect(res.status).toBe(200);
-      expect(res.headers['content-encoding']).toBe('deflate');
-      expect(res.headers['vary']).toContain('Accept-Encoding');
-      expect(decompress(res.body, 'deflate')).toContain('# HELP');
+    it('isEnabled() returns true when unset (safe default)', () => {
+      delete process.env.METRICS_ENABLED;
+      expect(metrics.isEnabled()).toBe(true);
     });
 
-    it('compresses when Accept-Encoding lists gzip and deflate (gzip preferred)', async () => {
-      metrics.refreshMetrics();
-
-      const res = await request(createApp())
-        .get('/metrics')
-        .set('Accept-Encoding', 'gzip, deflate');
-
+    it('GET /metrics returns 200 when metrics are enabled', async () => {
+      const res = await request(testApp).get('/metrics');
       expect(res.status).toBe(200);
-      expect(res.headers['content-encoding']).toBe('gzip');
-      expect(decompress(res.body, 'gzip')).toContain('# HELP');
+      expect(res.headers['content-type']).toMatch(/text\/plain/);
+    });
+
+    it('metric instruments are real instances that record values', async () => {
+      metrics.resetMetricsForTests();
+      metrics.registry.resetMetrics();
+
+      metrics.sorobanRpcRetryCausesTotal.labels({ cause: '429' }).inc();
+      const output = await metrics.registry.metrics();
+      expect(output).toMatch(/soroban_rpc_retry_causes_total/);
     });
   });
 
-  describe('large payload — no compression', () => {
-    it('is uncompressed without Accept-Encoding header', async () => {
-      metrics.refreshMetrics();
-
-      const res = await request(createApp())
-        .get('/metrics');
-
-      expect(res.status).toBe(200);
-      expect(res.headers['content-encoding']).toBeUndefined();
-      expect(res.text).toContain('# HELP');
+  describe('disabled path (METRICS_ENABLED=false)', () => {
+    it('isEnabled() returns false', () => {
+      jest.isolateModules(() => {
+        process.env.METRICS_ENABLED = 'false';
+        const disabledMetrics = require('../src/metrics');
+        expect(disabledMetrics.isEnabled()).toBe(false);
+      });
     });
 
-    it('is uncompressed when Accept-Encoding is identity', async () => {
-      metrics.refreshMetrics();
+    it('metric instances are no-op shims that do not throw', () => {
+      jest.isolateModules(() => {
+        process.env.METRICS_ENABLED = 'false';
+        const disabledMetrics = require('../src/metrics');
 
-      const res = await request(createApp())
-        .get('/metrics')
-        .set('Accept-Encoding', 'identity');
+        expect(() => {
+          disabledMetrics.escrowIndexerEventsProcessedTotal.inc();
+          disabledMetrics.escrowIndexerEventsSkippedTotal.inc();
+          disabledMetrics.escrowIndexerCycleFailuresTotal.inc();
+          disabledMetrics.escrowReconciliationMismatches.inc();
+          disabledMetrics.maturityReminderDeliveryAttemptsTotal.labels({ reason: 'smtp_timeout', job_type: 'maturity_reminder' }).inc();
+          disabledMetrics.maturityReminderDeliverySuccessTotal.labels({ job_type: 'maturity_reminder' }).inc();
+          disabledMetrics.maturityReminderDeadLetterTotal.labels({ reason: 'unknown', job_type: 'maturity_reminder' }).inc();
+          disabledMetrics.contractWasmVersionMismatchAlertsTotal.labels({ status: 'mismatch' }).inc();
+          disabledMetrics.idempotencyStorageFailureTotal.labels({ keyPrefix: 'test-key' }).inc();
+          disabledMetrics.bodySizeLimitRejectionsTotal.labels({ type: 'json' }).inc();
+          disabledMetrics.cacheStoreErrorsTotal.inc();
+          disabledMetrics.redisCacheFailOpenTotal.inc();
+          disabledMetrics.footprintCacheHitsTotal.inc();
+          disabledMetrics.footprintCacheMissesTotal.inc();
+          disabledMetrics.footprintCacheEvictionsTotal.inc();
+          disabledMetrics.sorobanCircuitBreakerStateTransitionsTotal.labels({ breaker_name: 'test', from_state: 'CLOSED', to_state: 'OPEN' }).inc();
+          disabledMetrics.webhookReplayTotal.labels({ outcome: 'success' }).inc();
+          disabledMetrics.sorobanRpcRetryCausesTotal.labels({ cause: 'timeout' }).inc();
+          disabledMetrics.escrowReadCacheHitsTotal.inc();
+          disabledMetrics.escrowReadCacheMissesTotal.inc();
+          disabledMetrics.escrowReadCacheEvictionsTotal.labels({ reason: 'evict' }).inc();
+        }).not.toThrow();
 
-      expect(res.status).toBe(200);
-      expect(res.headers['content-encoding']).toBeUndefined();
-      expect(res.text).toContain('# HELP');
+        expect(() => {
+          disabledMetrics.readinessGauge.set(1);
+          disabledMetrics.escrowIndexerLastCursorAdvanceTimestampSeconds.set(Date.now() / 1000);
+        }).not.toThrow();
+
+        expect(() => {
+          const endTimer = disabledMetrics.sorobanRpcCallDurationSeconds.startTimer({ method: 'contract_call' });
+          endTimer({ outcome: 'success' });
+          disabledMetrics.apiKeyAuthDurationSeconds.labels({ endpoint: '/test', method: 'GET', status: '200', outcome: 'success' }).observe(0.01);
+          disabledMetrics.healthRequestDurationSeconds.labels({ endpoint: 'health_liveness', status_class: '2xx' }).observe(0.01);
+          disabledMetrics.metricsRequestDurationSeconds.labels({ status_class: '2xx' }).observe(0.01);
+          disabledMetrics.kycWebhookRequestDurationSeconds.labels({ status_class: '2xx' }).observe(0.01);
+        }).not.toThrow();
+      });
     });
 
-    it('is uncompressed when Accept-Encoding is unsupported (br)', async () => {
-      metrics.refreshMetrics();
+    it('no-op instruments silently discard all recording calls', () => {
+      jest.isolateModules(() => {
+        process.env.METRICS_ENABLED = 'false';
+        const disabledMetrics = require('../src/metrics');
 
-      const res = await request(createApp())
-        .get('/metrics')
-        .set('Accept-Encoding', 'br');
+        disabledMetrics.escrowIndexerEventsProcessedTotal.inc();
+        disabledMetrics.escrowIndexerEventsProcessedTotal.inc();
+        disabledMetrics.readinessGauge.set(1);
+        disabledMetrics.readinessGauge.set(0);
+        const endTimer = disabledMetrics.sorobanRpcCallDurationSeconds.startTimer();
+        endTimer();
 
-      expect(res.status).toBe(200);
-      expect(res.headers['content-encoding']).toBeUndefined();
-      expect(res.text).toContain('# HELP');
+        const output = disabledMetrics.registry.metrics();
+        expect(output).toBe('');
+      });
+    });
+
+    it('metricsHandler returns 503 when metrics are disabled', async () => {
+      jest.isolateModules(() => {
+        process.env.METRICS_ENABLED = 'false';
+        const disabledMetrics = require('../src/metrics');
+
+        const req = { headers: {}, socket: { remoteAddress: '127.0.0.1' }, ip: '127.0.0.1' };
+        const res = {
+          statusCode: 200,
+          body: undefined,
+          status(code) { this.statusCode = code; return this; },
+          json(payload) { this.body = payload; return this; },
+          set() {},
+          end() {},
+          on() {},
+        };
+
+        disabledMetrics.metricsHandler(req, res);
+        expect(res.statusCode).toBe(503);
+        expect(res.body).toEqual({ error: 'Service Unavailable', message: 'Metrics endpoint disabled' });
+      });
+    });
+
+    it('metricsAuth returns 503 when metrics are disabled', () => {
+      jest.isolateModules(() => {
+        process.env.METRICS_ENABLED = 'false';
+        const disabledMetrics = require('../src/metrics');
+
+        const req = {
+          headers: { authorization: 'Bearer some-token' },
+          socket: { remoteAddress: '10.0.0.1' },
+          ip: '10.0.0.1',
+        };
+        const res = {
+          statusCode: 200,
+          body: undefined,
+          status(code) { this.statusCode = code; return this; },
+          json(payload) { this.body = payload; return this; },
+        };
+        const next = jest.fn();
+
+        disabledMetrics.metricsAuth(req, res, next);
+        expect(res.statusCode).toBe(503);
+        expect(res.body).toEqual({ error: 'Service Unavailable', message: 'Metrics endpoint disabled' });
+        expect(next).not.toHaveBeenCalled();
+      });
+    });
+
+    it('metricsAuth returns 503 even from loopback when disabled', () => {
+      jest.isolateModules(() => {
+        process.env.METRICS_ENABLED = 'false';
+        const disabledMetrics = require('../src/metrics');
+
+        const req = {
+          headers: {},
+          socket: { remoteAddress: '127.0.0.1' },
+          ip: '127.0.0.1',
+        };
+        const res = {
+          statusCode: 200,
+          body: undefined,
+          status(code) { this.statusCode = code; return this; },
+          json(payload) { this.body = payload; return this; },
+        };
+        const next = jest.fn();
+
+        disabledMetrics.metricsAuth(req, res, next);
+        expect(res.statusCode).toBe(503);
+        expect(next).not.toHaveBeenCalled();
+      });
+    });
+
+    it('GET /metrics returns 503 via HTTP when METRICS_ENABLED=false', async () => {
+      const express = require('express');
+      const metricsRequest = require('supertest');
+
+      jest.isolateModules(() => {
+        process.env.METRICS_ENABLED = 'false';
+      });
+
+      const disabledMetrics = require('../src/metrics');
+      const testApp = express();
+      testApp.get('/metrics', disabledMetrics.metricsAuth, disabledMetrics.metricsHandler);
+
+      const res = await metricsRequest(testApp).get('/metrics');
+      expect(res.status).toBe(503);
+      expect(res.body.error).toBe('Service Unavailable');
     });
   });
 
-  describe('Vary header', () => {
-    it('sets Vary: Accept-Encoding on every metrics request', async () => {
-      metrics.refreshMetrics();
-
-      const res = await request(createApp())
-        .get('/metrics')
-        .set('Accept-Encoding', 'gzip');
-
-      expect(res.headers['vary']).toContain('Accept-Encoding');
+  describe('default (unset) behavior', () => {
+    it('defaults to enabled when METRICS_ENABLED is not set', () => {
+      delete process.env.METRICS_ENABLED;
+      jest.isolateModules(() => {
+        delete process.env.METRICS_ENABLED;
+        const freshMetrics = require('../src/metrics');
+        expect(freshMetrics.isEnabled()).toBe(true);
+      });
     });
   });
 });

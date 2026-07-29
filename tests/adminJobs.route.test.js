@@ -221,14 +221,14 @@ describe('GET /api/admin/jobs — authentication', () => {
 
   it('returns 401 when no Authorization header is provided', async () => {
     const res = await request(app).get('/api/admin/jobs');
-    expect(res.status).toBe(401);
+    if(res.status !== 401) console.log('BODY:', res.body); expect(res.status).toBe(401);
   });
 
   it('returns 401 for a malformed Bearer token', async () => {
     const res = await request(app)
       .get('/api/admin/jobs')
       .set('Authorization', 'Bearer not.a.real.token');
-    expect(res.status).toBe(401);
+    if(res.status !== 401) console.log('BODY:', res.body); expect(res.status).toBe(401);
   });
 
   it('returns 401 for an expired token', async () => {
@@ -240,7 +240,7 @@ describe('GET /api/admin/jobs — authentication', () => {
     const res = await request(app)
       .get('/api/admin/jobs')
       .set(...Object.entries(authHeader(expired))[0]);
-    expect(res.status).toBe(401);
+    if(res.status !== 401) console.log('BODY:', res.body); expect(res.status).toBe(401);
   });
 
   it('returns 200 for a valid JWT bearer token', async () => {
@@ -254,7 +254,7 @@ describe('GET /api/admin/jobs — authentication', () => {
     const res = await request(app)
       .get('/api/admin/jobs')
       .set('x-api-key', 'lf_not_a_real_key_xyz');
-    expect(res.status).toBe(401);
+    if(res.status !== 401) console.log('BODY:', res.body); expect(res.status).toBe(401);
   });
 });
 

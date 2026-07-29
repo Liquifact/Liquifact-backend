@@ -5,8 +5,11 @@ const express = require('express');
 const { loadApiKeyRegistry } = require('../config/apiKeys');
 const { authenticateApiKey } = require('../middleware/apiKeyAuth');
 const { extractTenant } = require('../middleware/tenant');
+const { apiKeysLimiter } = require('../middleware/rateLimit');
 
 const router = express.Router();
+
+router.use(apiKeysLimiter);
 
 const MAX_BULK_ITEMS = 25;
 

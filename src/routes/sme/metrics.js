@@ -6,6 +6,15 @@
  *  - `POST /metrics/bulk` — batch endpoint accepting an array of
  *    (tenantId, userId) pairs with per-item success/error results
  *
+ * `POST /metrics/bulk` optionally accepts an `Idempotency-Key` header
+ * (issue #745). When present, a retried request with the same key and an
+ * identical body replays the original response instead of re-executing the
+ * batch; the same key reused with a different body returns `409 Conflict`.
+ * Omitting the header preserves the prior, non-idempotent behavior. Keys are
+ * stored in the shared, TTL-bounded `idempotency_keys` table (see
+ * `src/middleware/idempotency.js` and `src/jobs/idempotencyPurge.js`) and are
+ * purged automatically once expired.
+ *
  * @module routes/sme/metrics
  */
 
@@ -18,6 +27,7 @@ const { extractTenant } = require('../../middleware/tenant');
 const { CursorError } = require('../../utils/cursorPagination');
 const invoiceService = require('../../services/invoiceService');
 const { validateMetricsRequest } = require('../../utils/metricsValidation');
+const optionalIdempotency = require('../../middleware/optionalIdempotency');
 const {
   validateBulkMetricsBody,
   validateGetMetricsQuery,
@@ -27,7 +37,6 @@ const {
   toSmeMetricsMeta,
   toSmeMetricsApiResponse,
 } = require('../../dto/metrics');
-const { metricsErrorHandler } = require('../../middleware/metricsErrorHandler');
 
 
 /**
@@ -212,6 +221,23 @@ router.get(
  *     tags: [SME]
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: header
+ *         name: Idempotency-Key
+ *         required: false
+ *         schema:
+ *           type: string
+ *           minLength: 8
+ *           maxLength: 128
+ *           pattern: '^[A-Za-z0-9._:-]{8,128}$'
+ *         description: |
+ *           Optional client-generated key (8–128 URL-safe characters).
+ *           When supplied, a retried request with the same key **and** the
+ *           same request body replays the original response instead of
+ *           re-running the batch. Reusing the same key with a different
+ *           body returns `409 Conflict`. Omit the header to opt out of
+ *           idempotency handling entirely (unchanged legacy behavior).
+ *           Keys expire automatically after the configured TTL.
  *     requestBody:
  *       required: true
  *       content:
@@ -275,12 +301,17 @@ router.get(
  *         description: Validation error (empty array, over-cap, missing fields)
  *       401:
  *         description: Unauthorized
+ *       409:
+ *         description: |
+ *           Idempotency-Key was reused with a different request body.
+ *           Returned as an RFC 7807 problem+json document.
  */
 router.post(
   '/metrics/bulk',
   authenticateToken,
   extractTenant,
   express.json({ limit: '100kb' }),
+  optionalIdempotency,
   validateBulkMetricsBody,
   async (req, res, next) => {
     try {
@@ -347,9 +378,5 @@ router.post(
     }
   }
 );
-
-// Centralised metrics error handler — converts any next(err) into a consistent
-// structured response (issue #973).
-router.use(metricsErrorHandler);
 
 module.exports = router;

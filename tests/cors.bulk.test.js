@@ -27,6 +27,10 @@ jest.mock('../src/logger', () => ({
 
 jest.mock('../src/metrics', () => ({
   webhookReplayTotal: { inc: jest.fn() },
+  corsCacheHitsTotal: { inc: jest.fn(), reset: jest.fn(), hashMap: {} },
+  corsCacheMissesTotal: { inc: jest.fn(), reset: jest.fn(), hashMap: {} },
+  corsCacheEvictionsTotal: { inc: jest.fn(), reset: jest.fn(), hashMap: {} },
+  corsCacheInvalidationsTotal: { inc: jest.fn(), reset: jest.fn(), hashMap: {} },
   registry: {
     contentType: 'text/plain',
     metrics: jest.fn().mockResolvedValue(''),
@@ -652,5 +656,168 @@ describe('POST /api/admin/cors/bulk', () => {
       .send({ operations: [{ op: 'remove', origin: 'https://overage0.example.com' }] });
     // remove of non-existent is a success no-op; updatedOrigins should not include it
     expect(checkRes.body.updatedOrigins).not.toContain('https://overage0.example.com');
+  });
+
+  // ── authentication — advanced ──────────────────────────────────────────────
+
+  it('returns 401 when Authorization uses Basic scheme instead of Bearer', async () => {
+    const token = makeAdminToken();
+    const res = await request(APP)
+      .post('/api/admin/cors/bulk')
+      .set('Authorization', `Basic ${token}`)
+      .send({ operations: [{ op: 'add', origin: 'https://a.example.com' }] });
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 401 when the JWT is expired', async () => {
+    const expiredToken = jwt.sign(
+      { sub: 'admin-user', tenantId: 'tenant_test', role: 'admin' },
+      JWT_SECRET,
+      { expiresIn: '0s' },
+    );
+    // Wait a tick so the token is definitely expired
+    await new Promise((r) => setTimeout(r, 10));
+    const res = await request(APP)
+      .post('/api/admin/cors/bulk')
+      .set('Authorization', `Bearer ${expiredToken}`)
+      .send({ operations: [{ op: 'add', origin: 'https://a.example.com' }] });
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 401 when the JWT has a tampered signature', async () => {
+    const tampered = makeAdminToken() + 'x';
+    const res = await request(APP)
+      .post('/api/admin/cors/bulk')
+      .set('Authorization', `Bearer ${tampered}`)
+      .send({ operations: [{ op: 'add', origin: 'https://a.example.com' }] });
+    expect(res.status).toBe(401);
+  });
+
+  // ── tenant scoping ─────────────────────────────────────────────────────────
+
+  it('extracts tenantId from JWT claim and includes it in log context', async () => {
+    const logger = require('../src/logger');
+    const token = makeAdminToken('admin-user', 'jwt_tenant_42');
+    const res = await request(APP)
+      .post('/api/admin/cors/bulk')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ operations: [{ op: 'add', origin: 'https://tenanttest.example.com' }] });
+    expect(res.status).toBe(200);
+    // The logger.info call should contain the tenantId from the JWT
+    const infoCalls = logger.info.mock.calls.filter(
+      (c) => c[1] === 'Admin bulk CORS operation completed',
+    );
+    expect(infoCalls.length).toBeGreaterThanOrEqual(1);
+    // Use the LAST matching call (not the first) to avoid picking up
+    // log entries from earlier tests that also use tenant_test.
+    expect(infoCalls[infoCalls.length - 1][0].tenantId).toBe('jwt_tenant_42');
+  });
+
+  it('extracts tenantId from x-tenant-id header with priority over JWT claim', async () => {
+    const logger = require('../src/logger');
+    const token = makeAdminToken('admin-user', 'jwt_tenant');
+    const res = await request(APP)
+      .post('/api/admin/cors/bulk')
+      .set('Authorization', `Bearer ${token}`)
+      .set('x-tenant-id', 'header_tenant_99')
+      .send({ operations: [{ op: 'add', origin: 'https://headertest.example.com' }] });
+    expect(res.status).toBe(200);
+    // The x-tenant-id header should take priority
+    const infoCalls = logger.info.mock.calls.filter(
+      (c) => c[1] === 'Admin bulk CORS operation completed',
+    );
+    expect(infoCalls.length).toBeGreaterThanOrEqual(1);
+    expect(infoCalls[infoCalls.length - 1][0].tenantId).toBe('header_tenant_99');
+  });
+
+  it('rejects with 400 when no tenant context is available (no JWT claim, no header)', async () => {
+    // Build an app without the stub tenant fallback so we hit extractTenant's 400 path
+    const bareApp = express();
+    bareApp.use(express.json());
+    bareApp.use('/api/admin/cors', adminCorsRouter);
+    bareApp.use((err, _req, res, _next) => {
+      res.status(err.status || 500).json({ error: err.message });
+    });
+
+    // Use a JWT that has no tenantId claim
+    const tokenNoTenant = jwt.sign(
+      { sub: 'admin-user', role: 'admin' },
+      JWT_SECRET,
+      { expiresIn: '1h' },
+    );
+    const res = await request(bareApp)
+      .post('/api/admin/cors/bulk')
+      .set('Authorization', `Bearer ${tokenNoTenant}`)
+      .send({ operations: [{ op: 'add', origin: 'https://a.example.com' }] });
+    expect(res.status).toBe(400);
+  });
+
+  // ── API key authentication ─────────────────────────────────────────────────
+
+  describe('API key authentication', () => {
+    beforeAll(() => {
+      process.env.API_KEYS = [
+        JSON.stringify({
+          key: 'lf_test_admin_key',
+          clientId: 'admin-service',
+          scopes: ['admin'],
+        }),
+        JSON.stringify({
+          key: 'lf_test_user_key',
+          clientId: 'user-service',
+          scopes: ['invoices:read'],
+        }),
+        JSON.stringify({
+          key: 'lf_test_revoked_key',
+          clientId: 'revoked-service',
+          scopes: ['admin'],
+          revoked: true,
+        }),
+      ].join(';');
+    });
+
+    afterAll(() => {
+      delete process.env.API_KEYS;
+    });
+
+    it('returns 200 with a valid admin-scoped API key', async () => {
+      const res = await request(APP)
+        .post('/api/admin/cors/bulk')
+        .set('x-api-key', 'lf_test_admin_key')
+        .set('x-tenant-id', 'tenant_test')
+        .send({ operations: [{ op: 'add', origin: 'https://api-key-test.example.com' }] });
+      expect(res.status).toBe(200);
+      expect(res.body.results[0].success).toBe(true);
+    });
+
+    it('returns 403 with an API key that lacks the admin scope', async () => {
+      const res = await request(APP)
+        .post('/api/admin/cors/bulk')
+        .set('x-api-key', 'lf_test_user_key')
+        .set('x-tenant-id', 'tenant_test')
+        .send({ operations: [{ op: 'add', origin: 'https://a.example.com' }] });
+      expect(res.status).toBe(403);
+      expect(res.body.error).toMatch(/Insufficient permissions/);
+    });
+
+    it('returns 401 with a revoked API key', async () => {
+      const res = await request(APP)
+        .post('/api/admin/cors/bulk')
+        .set('x-api-key', 'lf_test_revoked_key')
+        .set('x-tenant-id', 'tenant_test')
+        .send({ operations: [{ op: 'add', origin: 'https://a.example.com' }] });
+      expect(res.status).toBe(401);
+      expect(res.body.error).toMatch(/revoked/);
+    });
+
+    it('returns 401 with a non-existent API key', async () => {
+      const res = await request(APP)
+        .post('/api/admin/cors/bulk')
+        .set('x-api-key', 'lf_nonexistent_key')
+        .set('x-tenant-id', 'tenant_test')
+        .send({ operations: [{ op: 'add', origin: 'https://a.example.com' }] });
+      expect(res.status).toBe(401);
+      expect(res.body.error).toMatch(/Invalid API key/);
+    });
   });
 });

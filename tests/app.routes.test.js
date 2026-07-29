@@ -251,13 +251,102 @@ describe('Mounted feature routers', () => {
   });
 
   it('does not mount invoice state routes when INVOICE_STATE_ENABLED is false', async () => {
+    await jest.isolateModules(async () => {
+      jest.doMock('../src/config', () => ({
+        get: () => ({ INVOICE_STATE_ENABLED: 'false' }),
+        validate: jest.fn(),
+        getValue: jest.fn(),
+        getInvoiceFileMaxSize: jest.fn(() => '5mb'),
+        logRedactedSummary: jest.fn(),
+        ConfigSchema: {},
+        InvoiceFileMaxSizeSchema: {},
+        securityHeaders: {},
+      }));
+      const { createApp: freshCreateApp } = require('../src/app');
+      const res = await request(freshCreateApp()).get('/api/invoices/inv-001/state');
+      expect(res.status).toBe(404);
+    });
+  });
+
+  it('does not mount admin config routes when CONFIG_RUNTIME_ENABLED is false', async () => {
+    await jest.isolateModules(async () => {
+      jest.doMock('../src/config', () => ({
+        get: () => ({ CONFIG_RUNTIME_ENABLED: 'false' }),
+        validate: jest.fn(),
+        getValue: jest.fn(),
+        getInvoiceFileMaxSize: jest.fn(() => '5mb'),
+        logRedactedSummary: jest.fn(),
+        ConfigSchema: {},
+        InvoiceFileMaxSizeSchema: {},
+        securityHeaders: {},
+      }));
+      const { createApp: freshCreateApp } = require('../src/app');
+      const res = await request(freshCreateApp()).get('/api/admin/config/sections');
+      expect(res.status).toBe(404);
+    });
+  });
+
+  it('mounts admin config routes when CONFIG_RUNTIME_ENABLED is true', async () => {
+    await jest.isolateModules(async () => {
+      jest.doMock('../src/config', () => ({
+        get: () => ({ CONFIG_RUNTIME_ENABLED: 'true' }),
+        validate: jest.fn(),
+        getValue: jest.fn(),
+        getInvoiceFileMaxSize: jest.fn(() => '5mb'),
+        logRedactedSummary: jest.fn(),
+        ConfigSchema: {},
+        InvoiceFileMaxSizeSchema: {},
+        securityHeaders: {},
+      }));
+      const { createApp: freshCreateApp } = require('../src/app');
+      const res = await request(freshCreateApp()).get('/api/admin/config/sections');
+      expect(res.status).not.toBe(404);
+    });
+  });
+
+  it('mounts admin indexer routes when ESCROW_INDEXER_ENABLED is true', async () => {
     const config = require('../src/config');
     const originalGet = config.get;
-    config.get = jest.fn(() => ({ INVOICE_STATE_ENABLED: 'false' }));
+    config.get = jest.fn(() => ({ ESCROW_INDEXER_ENABLED: 'true' }));
+
+    try {
+      const enabledApp = createApp();
+      const res = await request(enabledApp)
+        .get('/api/admin/indexer/events')
+        .set('Authorization', authHeader());
+      expect(res.status).not.toBe(404);
+    } finally {
+      config.get = originalGet;
+    }
+  });
+
+  it('does not mount admin indexer routes when ESCROW_INDEXER_ENABLED is false', async () => {
+    const config = require('../src/config');
+    const originalGet = config.get;
+    config.get = jest.fn(() => ({ ESCROW_INDEXER_ENABLED: 'false' }));
 
     try {
       const disabledApp = createApp();
-      const res = await request(disabledApp).get('/api/invoices/inv-001/state');
+      const res = await request(disabledApp)
+        .get('/api/admin/indexer/events')
+        .set('Authorization', authHeader());
+      expect(res.status).toBe(404);
+    } finally {
+      config.get = originalGet;
+    }
+  });
+
+  it('does not mount admin indexer bulk endpoint when ESCROW_INDEXER_ENABLED is false', async () => {
+    const config = require('../src/config');
+    const originalGet = config.get;
+    config.get = jest.fn(() => ({ ESCROW_INDEXER_ENABLED: 'false' }));
+
+    try {
+      const disabledApp = createApp();
+      const res = await request(disabledApp)
+        .post('/api/admin/indexer/events/bulk')
+        .set('Authorization', authHeader())
+        .send([{ eventId: 'evt_1' }]);
       expect(res.status).toBe(404);
     } finally {
       config.get = originalGet;

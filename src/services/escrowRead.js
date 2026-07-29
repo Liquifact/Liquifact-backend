@@ -747,9 +747,8 @@ module.exports = {
   validateInvoiceId,
   getEscrowStateWithProjection,
   invalidateEscrowReadCache,
+  isProjectionEnabled,
   LEGAL_HOLD_STATUS,
   LEGAL_HOLD_UNKNOWN_REASONS,
   coerceLegalHoldStatus,
-};
-  isProjectionEnabled,
 };

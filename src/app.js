@@ -26,13 +26,11 @@ const requestId = require('./middleware/requestId');
 const { correlationIdMiddleware } = require('./middleware/correlationId');
 const invoiceService = require('./services/invoiceService');
 const { CursorError } = require('./utils/cursorPagination');
-const { resolveEscrowAddress } = require('./config/escrowMap');
-const { getEscrowStateWithProjection } = require('./services/escrowRead');
+const { getEscrowRead } = require('./services/escrowReadService');
 const { createCorsOptions, isCorsOriginRejectedError } = require('./config/cors');
+const { corsObservability } = require('./middleware/corsObservability');
 const { get: getConfig } = require('./config');
 const { validateInvoiceQueryParams } = require('./utils/validators');
-const { computeEscrowDerivedFields } = require('./services/escrowDerived');
-const AppError = require('./errors/AppError');
 const { invoiceCreateSchema, parseValidationErrors } = require('./schemas/invoice');
 const {
   invoiceBodyLimit,
@@ -57,11 +55,14 @@ const marketplaceRoutes = require('./routes/marketplace');
 const retentionRoutes = require('./routes/retention');
 const invoiceStateRoutes = require('./routes/invoiceStateRoutes');
 const adminEscrowRoutes = require('./routes/adminEscrow');
+const adminEscrowReadRoutes = require('./routes/adminEscrowRead');
 const adminWebhooksRoutes = require('./routes/adminWebhooks');
 const adminConfigRoutes = require('./routes/adminConfig');
 const kycRoutes = require('./routes/kyc');
+const adminKycRoutes = require('./routes/adminKyc');
 const reconciliationRoutes = require('./routes/reconciliation');
 const adminIndexerRoutes = require('./routes/adminIndexer');
+const adminMetricsRoutes = require('./routes/adminMetrics');
 const v1Routes = require('./routes/v1');
 const apiKeysRoutes = require('./routes/apiKeys');
 const {
@@ -82,6 +83,7 @@ const { createCompressionMiddleware } = require('./middleware/compression');
  */
 function handleCorsError(err, req, res, next) {
   if (isCorsOriginRejectedError(err)) {
+    if (res.locals) res.locals.isCorsOriginRejected = true;
     res.status(403).json({ error: err.message, code: err.code });
     return;
   }
@@ -144,6 +146,7 @@ function createApp() {
   const app = express();
 
   // ── 1. CORS ──────────────────────────────────────────────────────────────
+  app.use(corsObservability);
   app.use(cors(createCorsOptions()));
 
   // ── 1.a. KYC webhook raw body parser ──────────────────────────────────────
@@ -312,55 +315,25 @@ function createApp() {
   });
 
   // Escrow — GET by invoiceId (proxied through Soroban retry wrapper with address mapping)
-<<<<<<< HEAD
   // Compression middleware: gzip/deflate for large escrow-read responses (issue #961).
   // Threshold: 1 KB (DEFAULT_THRESHOLD). Respects Accept-Encoding; small responses
   // pass through uncompressed. Vary: Accept-Encoding is always set.
-  app.get('/api/escrow/:invoiceId', createCompressionMiddleware(), async (req, res) => {
-=======
-  app.get('/api/escrow/:invoiceId', async (req, res, next) => {
->>>>>>> pr-1067
+  app.get('/api/escrow/:invoiceId', createCompressionMiddleware(), async (req, res, next) => {
     const invoiceId = String(req.params.invoiceId || '')
       .trim()
       .replace(/\s+/g, '');
 
-    try {
-      // Resolve escrow contract address using the mapping system
-      const escrowAddress = resolveEscrowAddress(invoiceId);
-      
-      if (!escrowAddress) {
-        return next(new AppError({
-          type: 'https://liquifact.com/probs/not-found',
-          title: 'Not Found',
-          status: 404,
-          detail: `No escrow contract mapping found for invoice ID '${invoiceId}'`,
-          code: 'NOT_FOUND',
-          retryable: false,
-        }));
-      }
-
-      // Read from projection, cache, or live read fallback
-      const state = await getEscrowStateWithProjection(invoiceId);
-
-      const derived = computeEscrowDerivedFields(state);
-
-      const data = {
-        ...state,
-        ...derived,
-        escrowAddress
-      };
-
-      // Include escrow address in response headers
-      res.set('X-Escrow-Address', escrowAddress);
-      res.json({
-        data,
-        message: state.fromProjection 
-          ? 'Escrow state read from event projection.'
-          : 'Escrow state read from live Soroban contract.',
-      });
-    } catch (error) {
-      return next(error);
+    if (error) {
+      return res.status(statusCode).json({ error, code });
     }
+
+    res.set('X-Escrow-Address', escrowAddress);
+    return res.json({
+      data: result,
+      message: result && result.fromProjection
+        ? 'Escrow state read from event projection.'
+        : 'Escrow state read from live Soroban contract.',
+    });
   });
 
   /**
@@ -410,10 +383,17 @@ function createApp() {
   mountFeatureRouter(app, '/api/retention', retentionRoutes);
   mountFeatureRouter(app, '/api/admin/audit', auditTrailRoutes);
   mountFeatureRouter(app, '/api/admin/escrow', adminEscrowRoutes);
+  mountFeatureRouter(app, '/api/admin/escrow-read', adminEscrowReadRoutes);
   mountFeatureRouter(app, '/api/admin/webhooks', adminWebhooksRoutes);
-  mountFeatureRouter(app, '/api/admin/config', adminConfigRoutes);
+  if (getConfig().CONFIG_RUNTIME_ENABLED === 'true') {
+    mountFeatureRouter(app, '/api/admin/config', adminConfigRoutes);
+  }
   mountFeatureRouter(app, '/api/admin/reconciliation', reconciliationRoutes);
-  mountFeatureRouter(app, '/api/admin/indexer', adminIndexerRoutes);
+  if (getConfig().ESCROW_INDEXER_ENABLED === 'true') {
+    mountFeatureRouter(app, '/api/admin/indexer', adminIndexerRoutes);
+  }
+  mountFeatureRouter(app, '/api/admin/metrics', adminMetricsRoutes);
+  mountFeatureRouter(app, '/api/admin/kyc', adminKycRoutes);
   mountFeatureRouter(app, '/v1', v1Routes);
   mountFeatureRouter(app, '/api', apiKeysRoutes);
 

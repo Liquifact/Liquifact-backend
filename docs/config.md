@@ -50,7 +50,7 @@ Provides Zod-based validation of all environment variables. Called once during a
 | `NETWORK_PASSPHRASE` | `string` | `Test SDF Network ; September 2015` | — | Stellar network passphrase. |
 | `SOROBAN_BATCH_CONCURRENCY` | `number` | `5` | `1–50` | Max concurrent on-chain reads in batch operations. |
 | `SOROBAN_BATCH_TIMEOUT_MS` | `number` | `5000` | `100–30000` | Per-request timeout for on-chain reads (ms). |
-| `ESCROW_INDEXER_ENABLED` | `string` | `false` | `true \| false` | Feature flag for the background escrow indexer job. |
+| `ESCROW_INDEXER_ENABLED` | `string` | `false` | `true \| false` | Master feature flag for the indexer surface. Gates the background polling job, the admin indexer API routes (`/api/admin/indexer/events` + `/bulk`), and the in-process listing response cache. Safe default is disabled. |
 | `ESCROW_INDEXER_STALE_THRESHOLD_SECONDS` | `number` | `300` | min 1 | Seconds before indexer cursor is considered stale for `/ready`. |
 | `KYC_PROVIDER_URL` | `string` (URL) | — | optional | KYC provider base URL. Must be paired with `KYC_PROVIDER_API_KEY`. |
 | `KYC_PROVIDER_API_KEY` | `string` | — | optional, min 1 | KYC provider API key. Must be paired with `KYC_PROVIDER_URL`. |

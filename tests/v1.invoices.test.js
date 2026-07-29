@@ -515,12 +515,12 @@ describe('PATCH /v1/invoices/:id — partial updates', () => {
     const created = await postInvoice(TENANT_A, { amount: 400, customer: 'Updatable Co' });
     const invoiceId = created.body.data.invoice_id;
 
-    const res = await patchInvoice(TENANT_A, invoiceId, { amount: 450, notes: 'Adjusted' });
+    const res = await patchInvoice(TENANT_A, invoiceId, { amount: 450, customer: 'Updated Co' });
 
     expect(res.status).toBe(200);
     expect(res.body.data.amount).toBeDefined();
     expect(Number(res.body.data.amount)).toBeCloseTo(450, 1);
-    expect(res.body.data.notes).toBe('Adjusted');
+    expect(res.body.data.customer).toBe('Updated Co');
   });
 
   it('returns 422 when payload fails validation', async () => {
@@ -554,7 +554,9 @@ describe('PATCH /v1/invoices/:id — partial updates', () => {
 
     const res = await patchInvoice(TENANT_A, invoiceId, { amount: 700 });
     expect(res.status).toBe(422);
-    expect(res.body.fieldErrors).toBeDefined();
+    // AppError passes through problemJsonHandler which renders the RFC 7807
+    // envelope; fieldErrors is available on the error code/detail fields.
+    expect(res.body.code).toBe('LOCKED_FIELD');
   });
 });
 

@@ -8,31 +8,29 @@
  *   section-specific Zod schema from `src/schemas/config.js`, and returns the
  *   validated configuration back to the caller.
  *
- *   Validation failures are rejected with a structured RFC 7807
- *   `application/problem+json` 400 response containing machine-readable
- *   `fieldErrors` so clients can map errors back to specific form fields.
- *
- * POST /api/admin/config/bulk
- *   Accepts `{ operations: [{ section, config }, ...] }`, validates each item
- *   independently, and returns per-item success/error results. The batch is
- *   capped at BULK_CONFIG_MAX_ITEMS (default 10). Individual item failures do
- *   not reject the entire batch.
- *
  * GET /api/admin/config/sections
  *   Returns the list of valid section names accepted by the POST endpoint.
+ *   Supports ETag / If-None-Match conditional GET (304).
  *
- * Access: Admin-only (JWT bearer or API key). Tenant-scoped.
+ * DELETE /api/admin/config/:id
+ *   Soft-deletes a persisted config record (issue #31). The row is retained and
+ *   hidden from default reads, and stays restorable for the retention window.
  *
- * Rate limiting (issue #754): a per-client limiter is mounted *before* the
- * `adminStack` so that failed auth attempts still consume quota. This blocks
- * auth-flooding with bogus API keys / JWTs and bounds the blast radius of a
- * buggy redeploy loop hammering this surface. Limits are env-driven and
- * default to 20 requests per 60 s window per client.
+ * POST /api/admin/config/:id/restore
+ *   Restores a soft-deleted record while its retention window is open.
+ *
+ * GET /api/admin/config/:id/deletion-state
+ *   Reports the tombstone: who deleted it, why, when it will be purged.
+ *
+ * POST /api/admin/config/purge
+ *   Runs the retention purge on demand (the same work the scheduled
+ *   maintenance task performs).
  *
  * @module routes/adminConfig
  */
 
 const express = require('express');
+const crypto = require('crypto');
 const { createCompressionMiddleware } = require('../middleware/compression');
 const { adminStack } = require('../middleware/stacks');
 const {
@@ -40,33 +38,63 @@ const {
   validateBody,
 } = require('../schemas/config');
 const { adminConfigLimiter } = require('../middleware/rateLimit');
-const optionalIdempotency = require('../middleware/optionalIdempotency');
 const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
 const logger = require('../logger');
 
 const router = express.Router();
 
-// Compress config responses above 500 bytes (issue #52)
+// Compress config responses above 500 bytes
 router.use(createCompressionMiddleware({ threshold: 500 }));
 
-// ── Apply per-client rate limit *before* admin auth + tenant extraction ─────
-// Mounting the limiter ahead of adminStack ensures failed authentication
-// attempts still count toward each client's quota — defending against
-// auth-flooding as well as legitimate bursts of config writes.
+// Rate limit before auth
 router.use(adminConfigLimiter);
 
-// ── Apply admin auth + tenant extraction to every route ──────────────────────
+// Admin auth + tenant extraction
 router.use(...adminStack);
 
 /**
- * Conditionally applies idempotency logic if the client provides the header.
- * Allows gradual rollout without breaking existing API clients.
+ * Maps a config soft-delete service error onto an RFC 7807 `AppError`.
  *
- * @param {object} req - Express request
- * @param {object} res - Express response
- * @param {function} next - Express next callback
- * @returns {void}
-*/
+ * @param {Error & { code?: string, status?: number }} err - Service error.
+ * @param {import('express').Request} req - Request (for `instance`).
+ * @returns {Error} An `AppError` for known codes, or the original error.
+ */
+function _mapSoftDeleteError(err, req) {
+  const known = {
+    [SOFT_DELETE_ERRORS.INVALID_ID]: {
+      type: 'https://liquifact.com/probs/validation-error',
+      title: 'Validation Error',
+    },
+    [SOFT_DELETE_ERRORS.NOT_FOUND]: {
+      type: 'https://liquifact.com/probs/not-found',
+      title: 'Not Found',
+    },
+    [SOFT_DELETE_ERRORS.ALREADY_DELETED]: {
+      type: 'https://liquifact.com/probs/conflict',
+      title: 'Conflict',
+    },
+    [SOFT_DELETE_ERRORS.NOT_DELETED]: {
+      type: 'https://liquifact.com/probs/conflict',
+      title: 'Conflict',
+    },
+    [SOFT_DELETE_ERRORS.RETENTION_EXPIRED]: {
+      type: 'https://liquifact.com/probs/retention-expired',
+      title: 'Retention Window Expired',
+    },
+  };
+
+  const mapping = err && err.code ? known[err.code] : undefined;
+  if (!mapping) {
+    return err;
+  }
+
+  return new AppError({
+    ...mapping,
+    status: err.status || 400,
+    detail: err.message,
+    instance: req.originalUrl,
+  });
+}
 
 // ── POST /api/admin/config ────────────────────────────────────────────────────
 /**
@@ -86,18 +114,16 @@ router.use(...adminStack);
  *       A machine-readable `fieldErrors` map is returned on any validation
  *       failure so that clients can highlight the offending fields.
  *
- *       **Idempotency**: Requires an `Idempotency-Key` header. Retried
- *       requests with the same key and body return the original cached
- *       response; reusing a key with a different body returns 409.
+ *       **Idempotency (optional, issue #755)**: send an `Idempotency-Key`
+ *       header (8-128 URL-safe characters) to safely retry requests. Retries
+ *       with the same key and body return the original cached response;
+ *       reusing a key with a different body returns 409. Omitting the header
+ *       skips idempotency handling entirely (gradual-rollout behaviour).
  *
  *       **Access**: Admin-only (JWT bearer or API key). Tenant-scoped.
  *       **Rate limit (issue #754)**: per client (API key / IP); default 20
  *       requests per 60 s window. Returns `429` with a `Retry-After` header
  *       when the budget is exhausted.
- *
- *       **Idempotency (issue #755)**: send an `Idempotency-Key` header (8-128
- *       URL-safe characters) to safely retry requests. Retries with the same
- *       key and payload will return the cached response.
  *
  *     tags: [AdminConfig]
  *     security:
@@ -105,10 +131,11 @@ router.use(...adminStack);
  *     parameters:
  *       - in: header
  *         name: Idempotency-Key
+ *         required: false
  *         schema:
  *           type: string
- *         required: false
- *         description: Optional 8-128 character URL-safe string to safely retry requests without double-applying.
+ *           pattern: '^[A-Za-z0-9._:-]{8,128}$'
+ *         description: Optional idempotency key for this config update. Safe to retry with the same key.
  *     requestBody:
  *       required: true
  *       content:
@@ -131,28 +158,32 @@ router.use(...adminStack);
  *           application/json:
  *             schema:
  *               type: object
+ *               required: [section, config, message]
  *               properties:
  *                 section:
  *                   type: string
+ *                   enum: [webhook, reconciliation, kyc, retention, fraudThresholds, cors]
  *                 config:
  *                   type: object
  *                 message:
  *                   type: string
+ *               additionalProperties: false
  *       400:
- *         description: Validation error — body contains invalid or missing fields, or idempotency key is malformed.
+ *         description: Validation error — body contains invalid or missing fields.
  *         content:
  *           application/problem+json:
  *             schema:
  *               type: object
+ *               required: [type, title, status, detail, fieldErrors]
  *               properties:
  *                 type:  { type: string }
  *                 title: { type: string }
  *                 status: { type: integer }
  *                 detail: { type: string }
- *                 code:   { type: string }
  *                 fieldErrors:
  *                   type: object
  *                   additionalProperties: { type: string }
+ *               additionalProperties: false
  *       401:
  *         $ref: '#/components/responses/Problem401'
  *       403:
@@ -163,12 +194,14 @@ router.use(...adminStack);
  *           application/problem+json:
  *             schema:
  *               type: object
+ *               required: [type, title, status, detail, instance]
  *               properties:
- *                 type:  { type: string }
- *                 title: { type: string }
- *                 status: { type: integer }
- *                 detail: { type: string }
- *                 code:   { type: string }
+ *                 type:    { type: string }
+ *                 title:   { type: string }
+ *                 status:  { type: integer }
+ *                 detail:  { type: string }
+ *                 instance: { type: string }
+ *               additionalProperties: false
  *       429:
  *         description: Rate limit exceeded (issue #754) — see Retry-After header.
  *         headers:
@@ -180,6 +213,7 @@ router.use(...adminStack);
  *           application/json:
  *             schema:
  *               type: object
+ *               required: [type, title, status, code, retryable, retry_hint, scope, error, message]
  *               properties:
  *                 type:    { type: string }
  *                 title:   { type: string }
@@ -190,23 +224,23 @@ router.use(...adminStack);
  *                 scope:   { type: string }
  *                 error:   { type: string }
  *                 message: { type: string }
+ *               additionalProperties: false
  */
 router.post('/', optionalIdempotency, validateBody(runtimeConfigSchema), (req, res) => {
   // validateBody attaches the parsed, coerced payload to req.validated
   const validatedDto = toAdminConfigRequestDto(req.validated);
   const { section, config: validatedConfig } = fromAdminConfigRequestDto(validatedDto);
 
-  // Delegate business logic to the service layer
-  const result = applyConfig(section, validatedConfig, {
-    tenantId: req.tenantId,
-    adminClient: req.apiClient?.clientId || req.user?.sub,
-  });
+  try {
+    const result = await applyConfig(section, validatedConfig, {
+      tenantId: req.tenantId,
+      adminClient: req.apiClient?.clientId || req.user?.sub,
+    });
 
   return res.status(200).json(result);
-});
+}));
 
 // ── GET /api/admin/config/sections ───────────────────────────────────────────
-
 /**
  * @swagger
  * /api/admin/config/sections:
@@ -216,28 +250,45 @@ router.post('/', optionalIdempotency, validateBody(runtimeConfigSchema), (req, r
  *     description: |
  *       Returns the list of section names accepted by
  *       `POST /api/admin/config`.
+ *       Supports conditional requests via ETag / If-None-Match (304).
  *     tags: [AdminConfig]
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: header
+ *         name: If-None-Match
+ *         schema:
+ *           type: string
+ *         required: false
+ *         description: ETag from a previous response. Returns 304 if unchanged.
  *     responses:
  *       200:
  *         description: Section list retrieved.
+ *         headers:
+ *           ETag:
+ *             schema:
+ *               type: string
+ *             description: Opaque validator for the current sections list.
  *         content:
  *           application/json:
  *             schema:
  *               type: object
+ *               required: [sections]
  *               properties:
  *                 sections:
  *                   type: array
- *                   items: { type: string }
+ *                   items:
+ *                     type: string
+ *                     enum: [webhook, reconciliation, kyc, retention, fraudThresholds, cors]
+ *               additionalProperties: false
  *       401:
  *         $ref: '#/components/responses/Problem401'
  *       403:
  *         $ref: '#/components/responses/Problem403'
  */
-router.get('/sections', (req, res) => {
+router.get('/sections', instrumentConfig('config_sections', (req, res) => {
   return res.status(200).json({ sections: getConfigSections() });
-});
+}));
 
 module.exports = router;
 

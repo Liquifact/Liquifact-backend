@@ -547,6 +547,121 @@ const baseDefinition = {
         },
         additionalProperties: false,
       },
+      /**
+       * A single escrow event row from the indexer.
+       * Represents an event indexed from Stellar/Soroban contracts.
+       */
+      EscrowEventRow: {
+        type: 'object',
+        required: ['eventId', 'invoiceId', 'eventType', 'ledgerSequence', 'observedAt', 'createdAt'],
+        properties: {
+          eventId: { type: 'string', minLength: 1 },
+          invoiceId: { type: 'string', minLength: 1 },
+          eventType: { type: 'string', minLength: 1 },
+          ledgerSequence: { type: 'integer', minimum: 0 },
+          pagingToken: { type: ['string', 'null'] },
+          contractId: { type: ['string', 'null'] },
+          txHash: { type: ['string', 'null'] },
+          observedAt: { type: 'string', format: 'date-time' },
+          createdAt: { type: 'string', format: 'date-time' },
+        },
+        additionalProperties: false,
+      },
+      /**
+       * Request body for bulk indexer event ingestion.
+       * Each item is validated independently.
+       */
+      IndexerEvent: {
+        type: 'object',
+        required: ['eventId', 'invoiceId', 'eventType', 'ledgerSequence'],
+        properties: {
+          eventId: { type: 'string', minLength: 1, maxLength: 256 },
+          invoiceId: { type: 'string', minLength: 1, maxLength: 128 },
+          eventType: { type: 'string', minLength: 1, maxLength: 128 },
+          ledgerSequence: { type: 'integer', minimum: 1 },
+          pagingToken: { type: 'string', maxLength: 2048 },
+          contractId: { type: ['string', 'null'] },
+          txHash: { type: ['string', 'null'] },
+          eventBody: { type: 'object' },
+          observedAt: { type: 'string', format: 'date-time' },
+        },
+        additionalProperties: false,
+      },
+      /**
+       * Pagination metadata for indexer list response.
+       */
+      IndexerListMeta: {
+        type: 'object',
+        required: ['total', 'limit', 'hasMore'],
+        properties: {
+          total: { type: 'integer', minimum: 0 },
+          limit: { type: 'integer', minimum: 1, maximum: 100 },
+          hasMore: { type: 'boolean' },
+          nextCursor: { type: ['string', 'null'] },
+          page: { type: 'integer', minimum: 1 },
+          totalPages: { type: 'integer', minimum: 0 },
+        },
+        additionalProperties: false,
+      },
+      /**
+       * Successful response from `GET /api/admin/indexer/events`.
+       */
+      IndexerListResponse: {
+        type: 'object',
+        required: ['data', 'meta', 'message'],
+        properties: {
+          data: {
+            type: 'array',
+            items: { $ref: '#/components/schemas/EscrowEventRow' },
+          },
+          meta: { $ref: '#/components/schemas/IndexerListMeta' },
+          message: { type: 'string' },
+        },
+        additionalProperties: false,
+      },
+      /**
+       * Per-item result from bulk indexer event ingestion.
+       */
+      IndexerBulkResultItem: {
+        type: 'object',
+        required: ['index', 'success'],
+        properties: {
+          index: { type: 'integer', minimum: 0 },
+          success: { type: 'boolean' },
+          error: { type: ['string', 'null'] },
+          eventId: { type: ['string', 'null'] },
+        },
+        additionalProperties: false,
+      },
+      /**
+       * Metadata for bulk indexer event ingestion response.
+       */
+      IndexerBulkMeta: {
+        type: 'object',
+        required: ['total', 'succeeded', 'failed'],
+        properties: {
+          total: { type: 'integer', minimum: 0 },
+          succeeded: { type: 'integer', minimum: 0 },
+          failed: { type: 'integer', minimum: 0 },
+        },
+        additionalProperties: false,
+      },
+      /**
+       * Successful response from `POST /api/admin/indexer/events/bulk`.
+       */
+      IndexerBulkResponse: {
+        type: 'object',
+        required: ['data', 'meta', 'message'],
+        properties: {
+          data: {
+            type: 'array',
+            items: { $ref: '#/components/schemas/IndexerBulkResultItem' },
+          },
+          meta: { $ref: '#/components/schemas/IndexerBulkMeta' },
+          message: { type: 'string' },
+        },
+        additionalProperties: false,
+      },
     },
     responses: {
       Problem400: {

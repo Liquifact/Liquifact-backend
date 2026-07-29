@@ -669,6 +669,7 @@ Default port: `3001`.
 Escrow Redis cache is optional and disabled by default; set `REDIS_ESCROW_CACHE_ENABLED=true` with `REDIS_URL` to enable it.
 `REDIS_ESCROW_CACHE_TTL_SECONDS` is strictly clamped to `5..300`, and `REDIS_ESCROW_LEDGER_GAP_THRESHOLD` controls ledger-gap invalidation.
 `ESCROW_READ_PROJECTION_ENABLED` — feature flag that gates the projection/cache-based escrow read path (`getEscrowStateWithProjection`). When set to `false`, the service skips the Redis cache and `escrow_event_projection` table and reads directly from the Soroban contract (live read). Defaults to `true`.
+`CONFIG_RUNTIME_ENABLED` — feature flag that gates the `/api/admin/config` POST and GET `/sections` endpoints. When set to `false`, requests return `404` so the runtime config surface can be disabled without a deploy. Defaults to `true`.
 
 Incremental TypeScript setup and migration guidance lives in `docs/typescript-plan.md`.
 
