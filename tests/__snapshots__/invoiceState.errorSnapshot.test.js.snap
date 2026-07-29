@@ -1,0 +1,168 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`invoice-state error response body snapshots 400 Bad Request — transition-error envelope ALREADY_IN_TARGET_STATE — invoice already in the requested state 1`] = `
+{
+  "data": null,
+  "error": {
+    "code": "ALREADY_IN_TARGET_STATE",
+    "details": null,
+    "message": "Invoice is already in state: approved",
+  },
+  "meta": {
+    "timestamp": Any<String>,
+    "version": "0.1.0",
+  },
+}
+`;
+
+exports[`invoice-state error response body snapshots 400 Bad Request — transition-error envelope CANNOT_LINK_TO_ESCROW — invoice not in approved state 1`] = `
+{
+  "data": null,
+  "error": {
+    "code": "CANNOT_LINK_TO_ESCROW",
+    "details": null,
+    "message": "Invoice must be in approved state to link to escrow.",
+  },
+  "meta": {
+    "timestamp": Any<String>,
+    "version": "0.1.0",
+  },
+}
+`;
+
+exports[`invoice-state error response body snapshots 400 Bad Request — transition-error envelope INVALID_TRANSITION — disallowed state transition with allowedTransitions hint 1`] = `
+{
+  "data": null,
+  "error": {
+    "code": "INVALID_TRANSITION",
+    "details": {
+      "allowedTransitions": [
+        "approved",
+        "rejected",
+        "cancelled",
+      ],
+    },
+    "message": "Invalid state transition: pending → linked_escrow",
+  },
+  "meta": {
+    "timestamp": Any<String>,
+    "version": "0.1.0",
+  },
+}
+`;
+
+exports[`invoice-state error response body snapshots 400 Bad Request — transition-error envelope MISSING_TARGET_STATE — no target state in request body 1`] = `
+{
+  "data": null,
+  "error": {
+    "code": "MISSING_TARGET_STATE",
+    "details": null,
+    "message": "Target state is required",
+  },
+  "meta": {
+    "timestamp": Any<String>,
+    "version": "0.1.0",
+  },
+}
+`;
+
+exports[`invoice-state error response body snapshots 400 Bad Request — transition-error envelope MISSING_TRANSITION_REASON — reason required for terminal target 1`] = `
+{
+  "data": null,
+  "error": {
+    "code": "MISSING_TRANSITION_REASON",
+    "details": null,
+    "message": "Reason is required for rejection",
+  },
+  "meta": {
+    "timestamp": Any<String>,
+    "version": "0.1.0",
+  },
+}
+`;
+
+exports[`invoice-state error response body snapshots 400 Bad Request — transition-error envelope TERMINAL_STATE — cannot transition from a terminal state 1`] = `
+{
+  "data": null,
+  "error": {
+    "code": "TERMINAL_STATE",
+    "details": null,
+    "message": "Cannot transition from terminal state: linked_escrow",
+  },
+  "meta": {
+    "timestamp": Any<String>,
+    "version": "0.1.0",
+  },
+}
+`;
+
+exports[`invoice-state error response body snapshots 404 Not Found INVOICE_NOT_FOUND — via transition-error envelope 1`] = `
+{
+  "data": null,
+  "error": {
+    "code": "INVOICE_NOT_FOUND",
+    "details": null,
+    "message": "Invoice not found",
+  },
+  "meta": {
+    "timestamp": Any<String>,
+    "version": "0.1.0",
+  },
+}
+`;
+
+exports[`invoice-state error response body snapshots 404 Not Found global 404 — unknown sub-route forwards to problemJson notFoundHandler 1`] = `
+{
+  "detail": "The requested resource GET /api/invoices/no-such-route was not found.",
+  "instance": "/api/invoices/no-such-route",
+  "status": 404,
+  "title": "Not Found",
+  "type": "https://liquifact.com/probs/not-found",
+}
+`;
+
+exports[`invoice-state error response body snapshots 409 Conflict 409 — via global problemJson handler 1`] = `
+{
+  "code": "RESOURCE_CONFLICT",
+  "detail": "A conflicting resource state was detected.",
+  "instance": "urn:uuid:unknown",
+  "status": 409,
+  "title": "Conflict",
+  "type": "https://liquifact.com/probs/conflict",
+}
+`;
+
+exports[`invoice-state error response body snapshots 409 Conflict CONCURRENCY_CONFLICT — via transition-error envelope (simulated optimistic-concurrency) 1`] = `
+{
+  "data": null,
+  "error": {
+    "code": "CONCURRENCY_CONFLICT",
+    "details": null,
+    "message": "Optimistic concurrency conflict: the invoice state changed. Please retry.",
+  },
+  "meta": {
+    "timestamp": Any<String>,
+    "version": "0.1.0",
+  },
+}
+`;
+
+exports[`invoice-state error response body snapshots 500 Internal Server Error unhandled DB error — falls through to problemJsonHandler 1`] = `
+{
+  "detail": "An internal server error occurred.",
+  "instance": "urn:uuid:unknown",
+  "status": 500,
+  "title": "An internal server error occurred.",
+  "type": "https://liquifact.com/probs/internal-server-error",
+}
+`;
+
+exports[`invoice-state error response body snapshots 500 Internal Server Error unhandled service error — no error.code, falls through to problemJsonHandler 1`] = `
+{
+  "detail": "An internal server error occurred.",
+  "instance": "urn:uuid:unknown",
+  "status": 500,
+  "title": "An internal server error occurred.",
+  "type": "https://liquifact.com/probs/internal-server-error",
+}
+`;
