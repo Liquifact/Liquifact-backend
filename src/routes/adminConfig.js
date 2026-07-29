@@ -39,6 +39,13 @@ const {
 } = require('../schemas/config');
 const { adminConfigLimiter } = require('../middleware/rateLimit');
 const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
+const { configErrorHandler } = require('../middleware/configErrorHandler');
+const optionalIdempotency = require('../middleware/optionalIdempotency');
+const { instrumentConfig } = require('../middleware/configMetrics');
+const { toAdminConfigRequestDto, fromAdminConfigRequestDto } = require('../dto/config');
+const { applyConfig, getConfigSections } = require('../services/configService');
+const { SOFT_DELETE_ERRORS } = require('../services/configSoftDelete');
+const AppError = require('../errors/AppError');
 const logger = require('../logger');
 
 const router = express.Router();
@@ -226,19 +233,21 @@ function _mapSoftDeleteError(err, req) {
  *                 message: { type: string }
  *               additionalProperties: false
  */
-router.post('/', optionalIdempotency, validateBody(runtimeConfigSchema), (req, res) => {
-  // validateBody attaches the parsed, coerced payload to req.validated
-  const validatedDto = toAdminConfigRequestDto(req.validated);
-  const { section, config: validatedConfig } = fromAdminConfigRequestDto(validatedDto);
-
+router.post('/', optionalIdempotency, validateBody(runtimeConfigSchema), async (req, res, next) => {
   try {
+    const validatedDto = toAdminConfigRequestDto(req.validated);
+    const { section, config: validatedConfig } = fromAdminConfigRequestDto(validatedDto);
+
     const result = await applyConfig(section, validatedConfig, {
       tenantId: req.tenantId,
       adminClient: req.apiClient?.clientId || req.user?.sub,
     });
 
-  return res.status(200).json(result);
-}));
+    return res.status(200).json(result);
+  } catch (error) {
+    return next(error);
+  }
+});
 
 // ── GET /api/admin/config/sections ───────────────────────────────────────────
 /**
@@ -289,6 +298,8 @@ router.post('/', optionalIdempotency, validateBody(runtimeConfigSchema), (req, r
 router.get('/sections', instrumentConfig('config_sections', (req, res) => {
   return res.status(200).json({ sections: getConfigSections() });
 }));
+
+router.use(configErrorHandler);
 
 module.exports = router;
 

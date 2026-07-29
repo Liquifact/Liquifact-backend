@@ -71,6 +71,7 @@ const {
   resetFeatureRouterMounts,
 } = require('./utils/routeMountRegistry');
 const { createCompressionMiddleware } = require('./middleware/compression');
+const { configErrorHandler } = require('./middleware/configErrorHandler');
 
 /**
  * Returns a 403 JSON response only for the dedicated blocked-origin CORS error.
@@ -415,6 +416,7 @@ function createApp() {
   // ── 8 – 10. Error handlers (order matters) ───────────────────────────────
   app.use(handleCorsError);
   app.use(payloadTooLargeHandler);
+  app.use(configErrorHandler);
   app.use(handleInternalError);
 
   return app;

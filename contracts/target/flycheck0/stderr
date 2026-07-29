@@ -1,4 +1,1 @@
-error: process didn't exit successfully: `rustc -vV` (exit code: 1)
---- stderr
-error: the 'rustc.exe' binary, normally provided by the 'rustc' component, is not applicable to the 'stable-x86_64-pc-windows-msvc' toolchain
-
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.53s
