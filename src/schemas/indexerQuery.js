@@ -11,16 +11,11 @@
 
 const { z } = require('zod');
 const { INDEXER_SORT_FIELDS } = require('../services/indexerService');
-
-/**
- * Regex for invoiceId validation: 1-128 alphanumeric/underscore/hyphen characters.
- */
-const INVOICE_ID_REGEX = /^[a-zA-Z0-9_-]{1,128}$/;
-
-/**
- * Regex for contractId validation: Stellar contract address (C + 55 alphanumeric/base32 chars).
- */
-const CONTRACT_ID_REGEX = /^C[A-Z2-7]{55}$/;
+const {
+  parseValidationErrors,
+  INVOICE_ID_REGEX,
+  CONTRACT_ID_REGEX,
+} = require('./validationHelper');
 
 /**
  * Maximum allowed limit for pagination.
@@ -147,23 +142,6 @@ const indexerQuerySchema = z
     limit: limitSchema,
   })
   .strict();
-
-/**
- * Parses Zod validation errors into a field-level error map.
- *
- * @param {import('zod').ZodError} zodError - The Zod validation error.
- * @returns {Record<string, string>} Field name to error message mapping.
- */
-function parseValidationErrors(zodError) {
-  const fieldErrors = {};
-  for (const issue of zodError.issues ?? zodError.errors ?? []) {
-    const path = issue.path.join('.') || '_root';
-    if (!fieldErrors[path]) {
-      fieldErrors[path] = issue.message;
-    }
-  }
-  return fieldErrors;
-}
 
 /**
  * Validates query parameters against the indexer schema.

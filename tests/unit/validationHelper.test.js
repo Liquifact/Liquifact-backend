@@ -16,6 +16,10 @@ const { z } = require('zod');
 const {
   createBodyValidator,
   createQueryValidator,
+  parseValidationErrors,
+  INVOICE_ID_REGEX,
+  CONTRACT_ID_REGEX,
+  TX_HASH_REGEX,
   DEFAULT_PROBLEM_TYPE,
   DEFAULT_ERROR_CODE,
 } = require('../../src/schemas/validationHelper');
@@ -61,6 +65,136 @@ describe('validationHelper', () => {
 
     it('exports DEFAULT_ERROR_CODE', () => {
       expect(DEFAULT_ERROR_CODE).toBe('VALIDATION_ERROR');
+    });
+  });
+
+  describe('INVOICE_ID_REGEX', () => {
+    it('matches valid invoice IDs', () => {
+      expect(INVOICE_ID_REGEX.test('inv_123')).toBe(true);
+      expect(INVOICE_ID_REGEX.test('a')).toBe(true);
+      expect(INVOICE_ID_REGEX.test('A'.repeat(128))).toBe(true);
+      expect(INVOICE_ID_REGEX.test('my-invoice-001')).toBe(true);
+      expect(INVOICE_ID_REGEX.test('test_id')).toBe(true);
+    });
+
+    it('rejects invalid invoice IDs', () => {
+      expect(INVOICE_ID_REGEX.test('')).toBe(false);
+      expect(INVOICE_ID_REGEX.test('has spaces')).toBe(false);
+      expect(INVOICE_ID_REGEX.test('a'.repeat(129))).toBe(false);
+      expect(INVOICE_ID_REGEX.test('special!chars')).toBe(false);
+      expect(INVOICE_ID_REGEX.test('inv@lid')).toBe(false);
+    });
+  });
+
+  describe('CONTRACT_ID_REGEX', () => {
+    const VALID_CONTRACT_ID = 'CDLZFC3SYJ27SBCC6BAKCY73WFXHBTE357R67CW567QX65ECUGN45RXI';
+
+    it('matches valid Stellar contract IDs', () => {
+      expect(CONTRACT_ID_REGEX.test(VALID_CONTRACT_ID)).toBe(true);
+    });
+
+    it('rejects invalid contract IDs', () => {
+      expect(CONTRACT_ID_REGEX.test('BADADDR')).toBe(false);
+      expect(CONTRACT_ID_REGEX.test('')).toBe(false);
+      expect(CONTRACT_ID_REGEX.test('D' + 'A'.repeat(55))).toBe(false);
+      expect(CONTRACT_ID_REGEX.test('C' + 'A'.repeat(54))).toBe(false);
+      expect(CONTRACT_ID_REGEX.test('C' + 'A'.repeat(56))).toBe(false);
+      expect(CONTRACT_ID_REGEX.test(123)).toBe(false);
+    });
+  });
+
+  describe('TX_HASH_REGEX', () => {
+    it('matches valid 64-char hex transaction hashes', () => {
+      expect(TX_HASH_REGEX.test('a'.repeat(64))).toBe(true);
+      expect(TX_HASH_REGEX.test('A'.repeat(64))).toBe(true);
+      expect(TX_HASH_REGEX.test('0'.repeat(64))).toBe(true);
+      expect(TX_HASH_REGEX.test('abcdef0123456789'.repeat(4))).toBe(true);
+    });
+
+    it('rejects invalid transaction hashes', () => {
+      expect(TX_HASH_REGEX.test('')).toBe(false);
+      expect(TX_HASH_REGEX.test('abc')).toBe(false);
+      expect(TX_HASH_REGEX.test('a'.repeat(63))).toBe(false);
+      expect(TX_HASH_REGEX.test('z'.repeat(64))).toBe(false);
+      expect(TX_HASH_REGEX.test('a'.repeat(65))).toBe(false);
+      expect(TX_HASH_REGEX.test(123)).toBe(false);
+    });
+  });
+
+  describe('parseValidationErrors', () => {
+    it('returns empty object for empty issues array', () => {
+      const result = parseValidationErrors({ issues: [] });
+      expect(result).toEqual({});
+    });
+
+    it('returns empty object for missing issues', () => {
+      const result = parseValidationErrors({});
+      expect(result).toEqual({});
+    });
+
+    it('formats a single field error', () => {
+      const zodError = {
+        issues: [{ path: ['name'], message: 'name is required' }],
+      };
+      const result = parseValidationErrors(zodError);
+      expect(result).toEqual({ name: 'name is required' });
+    });
+
+    it('formats multiple field errors', () => {
+      const zodError = {
+        issues: [
+          { path: ['name'], message: 'name is required' },
+          { path: ['age'], message: 'age must be positive' },
+        ],
+      };
+      const result = parseValidationErrors(zodError);
+      expect(result).toEqual({
+        name: 'name is required',
+        age: 'age must be positive',
+      });
+    });
+
+    it('uses _root for empty path', () => {
+      const zodError = {
+        issues: [{ path: [], message: 'Invalid payload' }],
+      };
+      const result = parseValidationErrors(zodError);
+      expect(result).toEqual({ _root: 'Invalid payload' });
+    });
+
+    it('keeps first error per field when multiple issues exist for same path', () => {
+      const zodError = {
+        issues: [
+          { path: ['limit'], message: 'limit must be an integer' },
+          { path: ['limit'], message: 'limit must be between 1 and 100' },
+        ],
+      };
+      const result = parseValidationErrors(zodError);
+      expect(result).toEqual({ limit: 'limit must be an integer' });
+    });
+
+    it('handles nested paths by joining with dots', () => {
+      const zodError = {
+        issues: [{ path: ['user', 'address', 'city'], message: 'city is required' }],
+      };
+      const result = parseValidationErrors(zodError);
+      expect(result).toEqual({ 'user.address.city': 'city is required' });
+    });
+
+    it('handles array indices in paths', () => {
+      const zodError = {
+        issues: [{ path: ['items', 0, 'name'], message: 'name is required' }],
+      };
+      const result = parseValidationErrors(zodError);
+      expect(result).toEqual({ 'items.0.name': 'name is required' });
+    });
+
+    it('falls back to zodError.errors when issues is missing', () => {
+      const zodError = {
+        errors: [{ path: ['field'], message: 'field is invalid' }],
+      };
+      const result = parseValidationErrors(zodError);
+      expect(result).toEqual({ field: 'field is invalid' });
     });
   });
 

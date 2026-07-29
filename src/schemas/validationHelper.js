@@ -13,6 +13,23 @@
  * @module schemas/validationHelper
  */
 
+// ── Shared indexer regex constants ───────────────────────────────────────────
+
+/**
+ * Regex for invoiceId validation: 1-128 alphanumeric/underscore/hyphen characters.
+ */
+const INVOICE_ID_REGEX = /^[a-zA-Z0-9_-]{1,128}$/;
+
+/**
+ * Regex for contractId validation: Stellar contract address (C + 55 base32 chars).
+ */
+const CONTRACT_ID_REGEX = /^C[A-Z2-7]{55}$/;
+
+/**
+ * Regex for transaction hash validation: 64 hexadecimal characters.
+ */
+const TX_HASH_REGEX = /^[0-9a-fA-F]{64}$/;
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
@@ -126,6 +143,9 @@ module.exports = {
   createBodyValidator,
   createQueryValidator,
   parseValidationErrors,
+  INVOICE_ID_REGEX,
+  CONTRACT_ID_REGEX,
+  TX_HASH_REGEX,
   DEFAULT_PROBLEM_TYPE,
   DEFAULT_ERROR_CODE,
 };
