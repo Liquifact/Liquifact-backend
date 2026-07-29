@@ -39,19 +39,7 @@ const {
 } = require('../schemas/config');
 const { adminConfigLimiter } = require('../middleware/rateLimit');
 const optionalIdempotency = require('../middleware/optionalIdempotency');
-const {
-  toAdminConfigRequestDto,
-  fromAdminConfigRequestDto,
-} = require('../dto/config');
-const { applyConfig, getConfigSections } = require('../services/configService');
-const {
-  softDeleteConfig,
-  restoreConfig,
-  getConfigDeletionState,
-  purgeExpiredConfigSoftDeletes,
-  SOFT_DELETE_ERRORS,
-} = require('../services/configSoftDelete');
-const AppError = require('../errors/AppError');
+const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
 const logger = require('../logger');
 
 const router = express.Router();

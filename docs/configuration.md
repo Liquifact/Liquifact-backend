@@ -93,6 +93,7 @@ Any violation causes a fast startup failure with a clear, redacted error message
 | `STORAGE_IN_MEMORY` | boolean string | unset; auto-on when `NODE_ENV=test` | No | No | [`src/services/storage.js`](../src/services/storage.js) |
 | `STORAGE_HEALTHCHECK_TIMEOUT_MS` | integer milliseconds | `5000` | No | No | [`src/services/storage.js`](../src/services/storage.js) |
 | `METRICS_BEARER_TOKEN` | string | Loopback-only metrics access when unset | Recommended in production | **Secret** | [`src/metrics.js`](../src/metrics.js) |
+| `METRICS_ENABLED` | boolean string | `true` | No | No | [`src/config/index.js`](../src/config/index.js), [`src/metrics.js`](../src/metrics.js) |
 | `API_KEYS` | semicolon-separated JSON objects | Empty registry | Required for API-key clients | **Secret** | [`src/config/apiKeys.js`](../src/config/apiKeys.js), [`src/middleware/apiKeyAuth.js`](../src/middleware/apiKeyAuth.js) |
 | `RATE_LIMIT_WINDOW_MS` | integer milliseconds | `900000` | No | No | [`src/middleware/rateLimit.js`](../src/middleware/rateLimit.js) |
 | `RATE_LIMIT_MAX_REQUESTS` | integer | `100` | No | No | [`src/middleware/rateLimit.js`](../src/middleware/rateLimit.js) |

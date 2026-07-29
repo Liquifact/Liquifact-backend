@@ -487,15 +487,8 @@ function createConfigRateLimiter() {
 // metricsLimiter (issue #744)
 // ────────────────────────────────────────────────────────────────────────────
 
-// ────────────────────────────────────────────────────────────────────────────
-// kycWebhookLimiter (issue #729)
-// ────────────────────────────────────────────────────────────────────────────
-
-const KYC_WEBHOOK_RATE_LIMIT_WINDOW_MS = parseRateLimitEnv('KYC_WEBHOOK_RATE_LIMIT_WINDOW_MS', 60 * 1000);
-const KYC_WEBHOOK_RATE_LIMIT_MAX = parseRateLimitEnv('KYC_WEBHOOK_RATE_LIMIT_MAX', 30);
-
 /**
- * 429 response body for {@link kycWebhookLimiter}.
+ * 429 response body for the /metrics rate limiter.
  *
  * @param {import('express').Request} _req - Express request (unused).
  * @param {import('express').Response} res - Express response.
@@ -503,7 +496,7 @@ const KYC_WEBHOOK_RATE_LIMIT_MAX = parseRateLimitEnv('KYC_WEBHOOK_RATE_LIMIT_MAX
  * @param {{ statusCode: number, windowMs: number }} options - RateLimit options.
  * @returns {void}
  */
-function kycWebhookRateLimitHandler(_req, res, _next, options) {
+function metricsRateLimitHandler(_req, res, _next, options) {
   res.status(options.statusCode).json({
     type: 'https://liquifact.com/probs/too-many-requests',
     title: 'Too Many Requests',
@@ -511,55 +504,52 @@ function kycWebhookRateLimitHandler(_req, res, _next, options) {
     code: 'RATE_LIMITED',
     retryable: true,
     retry_hint: 'Wait for the rate-limit window to reset before retrying.',
-    scope: 'kyc-webhooks',
+    scope: 'metrics',
     error: 'Too many requests.',
-    message: 'Rate limit threshold breached for /api/kyc webhook endpoints. Please try again later.',
+    message: 'Rate limit threshold breached for /metrics. Please try again later.',
   });
 }
 
 /**
- * Per-client (API key / IP) rate limiter for the kyc-webhooks endpoints
- * (issue #729): POST /api/kyc/webhook (provider ingestion) and
- * GET /api/kyc/webhooks (listing).
+ * Per-client rate limiter for /metrics (issue #744).
  *
- * Config-driven via KYC_WEBHOOK_RATE_LIMIT_WINDOW_MS / KYC_WEBHOOK_RATE_LIMIT_MAX.
- * express-rate-limit sets Retry-After via standardHeaders on 429.
- * Reuses adminConfigKeyGenerator: X-API-Key first, falling back to the
- * socket-bound req.ip (X-Forwarded-For is never trusted).
+ * Env vars:
+ *   - `METRICS_RATE_LIMIT_WINDOW_MS` (default 60 000)
+ *   - `METRICS_RATE_LIMIT_MAX`       (default 30)
  *
  * @type {import('express').RequestHandler}
  */
-const kycWebhookLimiter = rateLimit({
-  windowMs: KYC_WEBHOOK_RATE_LIMIT_WINDOW_MS,
-  limit: KYC_WEBHOOK_RATE_LIMIT_MAX,
+const metricsLimiter = rateLimit({
+  windowMs: METRICS_RATE_LIMIT_WINDOW_MS,
+  limit: METRICS_RATE_LIMIT_MAX,
   standardHeaders: true,
   legacyHeaders: false,
-  store: resolveRateLimitStore('kyc-webhooks'),
+  store: resolveRateLimitStore('metrics'),
   keyGenerator: adminConfigKeyGenerator,
   validate: {
     xForwardedForHeader: false,
   },
-  handler: kycWebhookRateLimitHandler,
+  handler: metricsRateLimitHandler,
 });
 
 /**
- * Factory variant of {@link kycWebhookLimiter} for callers (mostly tests)
+ * Factory variant of {@link metricsLimiter} for callers (mostly tests)
  * that need to construct a fresh limiter with different bounds.
  *
  * @returns {import('express').RequestHandler}
  */
-function createKycWebhookRateLimiter() {
+function createMetricsRateLimiter() {
   return rateLimit({
-    windowMs: KYC_WEBHOOK_RATE_LIMIT_WINDOW_MS,
-    limit: KYC_WEBHOOK_RATE_LIMIT_MAX,
+    windowMs: METRICS_RATE_LIMIT_WINDOW_MS,
+    limit: METRICS_RATE_LIMIT_MAX,
     standardHeaders: true,
     legacyHeaders: false,
-    store: resolveRateLimitStore('kyc-webhooks'),
+    store: resolveRateLimitStore('metrics'),
     keyGenerator: adminConfigKeyGenerator,
     validate: {
       xForwardedForHeader: false,
     },
-    handler: kycWebhookRateLimitHandler,
+    handler: metricsRateLimitHandler,
   });
 }
 

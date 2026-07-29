@@ -61,7 +61,10 @@ const ConfigSchema = z
     // Required in production and must use HTTPS. Falls back to localhost in development/test.
     PUBLIC_API_BASE_URL: z.string().url().optional(),
     INVOICE_FILE_MAX_SIZE: InvoiceFileMaxSizeSchema,
-    INVOICE_STATE_ENABLED: z.enum(['true', 'false']).default('true'),
+    // Feature flag: gates Prometheus metrics collection and the /metrics endpoint.
+    // When 'false', all metric recording becomes a silent no-op and GET /metrics
+    // returns 503. Default 'true' preserves existing behaviour.
+    METRICS_ENABLED: z.enum(['true', 'false']).default('true'),
   })
   .superRefine((data, ctx) => {
     if (data.NODE_ENV === 'test') { return; }
