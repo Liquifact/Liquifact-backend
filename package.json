@@ -153,5 +153,15 @@
     "supertest": "^7.0.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
+  },
+  "overrides": {
+    "@stacks/common": "7.5.0",
+    "@stacks/encryption": "7.5.0",
+    "@stacks/network": "7.6.0",
+    "@stacks/auth": "7.6.0",
+    "@stacks/bns": "7.6.0",
+    "@stacks/profile": "7.6.0",
+    "@stacks/transactions": "7.6.0",
+    "@stacks/storage": "7.6.0"
   }
 }
