@@ -105,8 +105,8 @@ describe('Indexer cache integration', () => {
   let IndexerCache;
 
   beforeAll(() => {
-    ({ listIndexerEvents, indexerCache } = require('../src/services/indexerService'));
-    ({ IndexerCache } = require('../src/services/indexerCache'));
+    ({ listIndexerEvents } = require('../src/services/indexerService'));
+    ({ indexerCache, IndexerCache } = require('../src/services/indexerCache'));
   });
 
   beforeEach(() => {

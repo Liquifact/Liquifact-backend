@@ -1289,6 +1289,99 @@ const metricsRequestErrorsTotal = new client.Counter({
 });
 
 /**
+ * Maps an HTTP status code to a bounded indexer `status_class` label value.
+ *
+ * @param {unknown} status - HTTP status code.
+ * @returns {string} Bounded value from {'2xx'|'4xx'|'5xx'}.
+ */
+function normalizeIndexerStatusClass(status) {
+  const code = Number(status);
+  if (code >= 500) { return '5xx'; }
+  if (code >= 400) { return '4xx'; }
+  return '2xx';
+}
+
+/**
+ * Maps an indexer request outcome to a bounded `cause` label value.
+ *
+ * @param {unknown} err - Raw error object, if any.
+ * @param {number} [status] - HTTP status code.
+ * @returns {string} Bounded value from {'none'|'authorization'|'validation'|'internal'}.
+ */
+function normalizeIndexerCause(err, status) {
+  const code = Number(status);
+  if (!err && code < 400) { return 'none'; }
+  if (code === 401 || code === 403) { return 'authorization'; }
+  if (code >= 400 && code < 500) { return 'validation'; }
+  return 'internal';
+}
+
+/**
+ * Histogram: Wall-clock duration of indexer endpoint requests in seconds.
+ * @type {import('prom-client').Histogram}
+ */
+const indexerRequestDurationSeconds = new client.Histogram({
+  name: 'indexer_request_duration_seconds',
+  help: 'Duration of indexer endpoint requests in seconds',
+  labelNames: ['status_class'],
+  buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+  registers: [registry],
+});
+
+/**
+ * Counter: Total indexer endpoint requests by status class.
+ * @type {import('prom-client').Counter}
+ */
+const indexerRequestsTotal = new client.Counter({
+  name: 'indexer_requests_total',
+  help: 'Total number of indexer endpoint requests',
+  labelNames: ['status_class'],
+  registers: [registry],
+});
+
+/**
+ * Counter: Total indexer request errors by cause.
+ * @type {import('prom-client').Counter}
+ */
+const indexerRequestErrorsTotal = new client.Counter({
+  name: 'indexer_request_errors_total',
+  help: 'Total number of indexer request errors by cause',
+  labelNames: ['cause'],
+  registers: [registry],
+});
+
+/**
+ * Counter: Total indexer cache hits.
+ * @type {import('prom-client').Counter}
+ */
+const indexerCacheHitsTotal = new client.Counter({
+  name: 'indexer_cache_hits_total',
+  help: 'Total number of indexer cache hits',
+  registers: [registry],
+});
+
+/**
+ * Counter: Total indexer cache misses.
+ * @type {import('prom-client').Counter}
+ */
+const indexerCacheMissesTotal = new client.Counter({
+  name: 'indexer_cache_misses_total',
+  help: 'Total number of indexer cache misses',
+  registers: [registry],
+});
+
+/**
+ * Counter: Total indexer cache evictions by reason.
+ * @type {import('prom-client').Counter}
+ */
+const indexerCacheEvictionsTotal = new client.Counter({
+  name: 'indexer_cache_evictions_total',
+  help: 'Total number of indexer cache evictions by reason',
+  labelNames: ['reason'],
+  registers: [registry],
+});
+
+/**
  * Records metrics for a metrics endpoint request outcome.
  * @param {number} status - HTTP status code.
  * @param {unknown} [err] - Optional error object.
@@ -1616,10 +1709,18 @@ module.exports = {
   registerWorker,
   refreshMetrics,
   resetMetricsForTests,
-  escrowIndexerLastCursorAdvanceTimestampSeconds,
+  escrowIndexerCycleFailuresTotal,
   escrowIndexerEventsProcessedTotal,
   escrowIndexerEventsSkippedTotal,
   escrowIndexerLastCursorAdvanceTimestampSeconds,
+  indexerRequestDurationSeconds,
+  indexerRequestsTotal,
+  indexerRequestErrorsTotal,
+  indexerCacheHitsTotal,
+  indexerCacheMissesTotal,
+  indexerCacheEvictionsTotal,
+  normalizeIndexerStatusClass,
+  normalizeIndexerCause,
   escrowReconciliationDriftAlertsTotal,
   sorobanRpcCallDurationSeconds,
   sorobanRpcRetryCausesTotal,
@@ -1630,12 +1731,49 @@ module.exports = {
   footprintCacheHitsTotal,
   footprintCacheMissesTotal,
   footprintCacheEvictionsTotal,
-  webhookReplayTotal,
-  bodySizeLimitRejectionsTotal,
+  escrowReadCacheHitsTotal,
+  escrowReadCacheMissesTotal,
+  escrowReadCacheEvictionsTotal,
   normalizeJobType,
+  normalizeReminderReason,
   normalizeSorobanRpcMethod,
   normalizeSorobanRpcOutcome,
   normalizeSorobanRetryCause,
+  normalizePersistenceEndpoint,
+  normalizePersistenceStatusClass,
+  normalizePersistenceCause,
+  normalizeKycWebhookStatusClass,
+  normalizeKycWebhookCause,
+  normalizeHealthEndpoint,
+  normalizeHealthStatusClass,
+  normalizeHealthCause,
+  classifyApiKeyOutcome,
+  classifyApiKeyErrorCause,
+  persistenceRequestDurationSeconds,
+  persistenceRequestsTotal,
+  persistenceRequestErrorsTotal,
+  kycWebhookRequestDurationSeconds,
+  kycWebhookRequestsTotal,
+  kycWebhookErrorsTotal,
+  healthRequestDurationSeconds,
+  healthRequestsTotal,
+  healthRequestErrorsTotal,
+  escrowReconciliationMismatches,
+  escrowReconciliationMismatchedInvoicesGauge,
+  escrowReconciliationDriftMagnitudeGauge,
+  maturityReminderDeliveryAttemptsTotal,
+  maturityReminderDeliverySuccessTotal,
+  maturityReminderDeadLetterTotal,
+  contractWasmVersionMismatchAlertsTotal,
+  idempotencyStorageFailureTotal,
+  cacheStoreErrorsTotal,
+  redisCacheFailOpenTotal,
+  sorobanCircuitBreakerStateTransitionsTotal,
+  readinessGauge,
+  PERSISTENCE_STATUS_CLASS_ENUM,
+  PERSISTENCE_CAUSE_ENUM,
+  HEALTH_STATUS_CLASS_ENUM,
+  HEALTH_CAUSE_ENUM,
   startMetricsRefresh,
   stopMetricsRefresh,
   webhookReplayTotal,

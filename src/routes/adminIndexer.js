@@ -16,7 +16,7 @@
 const express = require('express');
 
 const router = express.Router();
-const { listIndexerEvents, bulkIndexerEvents, validateBulkPayload, INDEXER_SORT_FIELDS, MAX_BULK_BATCH_SIZE } = require('../services/indexerService');
+const { listIndexerEvents, bulkIndexerEvents, validateBulkPayload } = require('../services/indexerService');
 const { CursorError } = require('../utils/cursorPagination');
 const { adminStack } = require('../middleware/stacks');
 const { indexerLimiter } = require('../middleware/rateLimit');
@@ -24,6 +24,7 @@ const responseHelper = require('../utils/responseHelper');
 const logger = require('../logger');
 const { validateIndexerQuery } = require('../schemas/indexerQuery');
 const { instrumentIndexer } = require('../middleware/indexerMetrics');
+const { mapQueryToDTO, mapDTOToServiceParams, mapServiceResultToResponseDTO } = require('../dto/indexer');
 
 // Apply a per-client rate limit before admin auth so bursts are contained
 // even when the caller is unauthenticated or misconfigured.
@@ -204,10 +205,9 @@ router.get('/events', instrumentIndexer(async (req, res, next) => {
     );
 
     // ── 5. Respond ──────────────────────────────────────────────────────────
-    // result.data is already an EscrowEventRowDTO[] and result.meta is an
-    // IndexerEventsMetaDTO — both mapped by indexerService at the boundary.
+    const responseDTO = mapServiceResultToResponseDTO(result);
     return res.status(200).json({
-      ...responseHelper.success(result.data, result.meta),
+      ...responseHelper.success(responseDTO.data, responseDTO.meta),
       message: 'Indexer events retrieved successfully.',
     });
   } catch (error) {
