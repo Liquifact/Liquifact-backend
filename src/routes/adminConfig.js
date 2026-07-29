@@ -38,7 +38,6 @@ const {
   validateBody,
 } = require('../schemas/config');
 const { adminConfigLimiter } = require('../middleware/rateLimit');
-const idempotencyMiddleware = require('../middleware/idempotency');
 const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
 const logger = require('../logger');
 
@@ -115,18 +114,16 @@ function _mapSoftDeleteError(err, req) {
  *       A machine-readable `fieldErrors` map is returned on any validation
  *       failure so that clients can highlight the offending fields.
  *
- *       **Idempotency**: Requires an `Idempotency-Key` header. Retried
- *       requests with the same key and body return the original cached
- *       response; reusing a key with a different body returns 409.
+ *       **Idempotency (optional, issue #755)**: send an `Idempotency-Key`
+ *       header (8-128 URL-safe characters) to safely retry requests. Retries
+ *       with the same key and body return the original cached response;
+ *       reusing a key with a different body returns 409. Omitting the header
+ *       skips idempotency handling entirely (gradual-rollout behaviour).
  *
  *       **Access**: Admin-only (JWT bearer or API key). Tenant-scoped.
  *       **Rate limit (issue #754)**: per client (API key / IP); default 20
  *       requests per 60 s window. Returns `429` with a `Retry-After` header
  *       when the budget is exhausted.
- *
- *       **Idempotency (issue #755)**: send an `Idempotency-Key` header (8-128
- *       URL-safe characters) to safely retry requests. Retries with the same
- *       key and payload will return the cached response.
  *
  *     tags: [AdminConfig]
  *     security:
@@ -134,10 +131,11 @@ function _mapSoftDeleteError(err, req) {
  *     parameters:
  *       - in: header
  *         name: Idempotency-Key
+ *         required: false
  *         schema:
  *           type: string
- *         required: false
- *         description: Optional 8-128 character URL-safe string to safely retry requests without double-applying.
+ *           pattern: '^[A-Za-z0-9._:-]{8,128}$'
+ *         description: Optional idempotency key for this config update. Safe to retry with the same key.
  *     requestBody:
  *       required: true
  *       content:
@@ -160,28 +158,32 @@ function _mapSoftDeleteError(err, req) {
  *           application/json:
  *             schema:
  *               type: object
+ *               required: [section, config, message]
  *               properties:
  *                 section:
  *                   type: string
+ *                   enum: [webhook, reconciliation, kyc, retention, fraudThresholds, cors]
  *                 config:
  *                   type: object
  *                 message:
  *                   type: string
+ *               additionalProperties: false
  *       400:
- *         description: Validation error — body contains invalid or missing fields, or idempotency key is malformed.
+ *         description: Validation error — body contains invalid or missing fields.
  *         content:
  *           application/problem+json:
  *             schema:
  *               type: object
+ *               required: [type, title, status, detail, fieldErrors]
  *               properties:
  *                 type:  { type: string }
  *                 title: { type: string }
  *                 status: { type: integer }
  *                 detail: { type: string }
- *                 code:   { type: string }
  *                 fieldErrors:
  *                   type: object
  *                   additionalProperties: { type: string }
+ *               additionalProperties: false
  *       401:
  *         $ref: '#/components/responses/Problem401'
  *       403:
@@ -192,12 +194,14 @@ function _mapSoftDeleteError(err, req) {
  *           application/problem+json:
  *             schema:
  *               type: object
+ *               required: [type, title, status, detail, instance]
  *               properties:
- *                 type:  { type: string }
- *                 title: { type: string }
- *                 status: { type: integer }
- *                 detail: { type: string }
- *                 code:   { type: string }
+ *                 type:    { type: string }
+ *                 title:   { type: string }
+ *                 status:  { type: integer }
+ *                 detail:  { type: string }
+ *                 instance: { type: string }
+ *               additionalProperties: false
  *       429:
  *         description: Rate limit exceeded (issue #754) — see Retry-After header.
  *         headers:
@@ -209,6 +213,7 @@ function _mapSoftDeleteError(err, req) {
  *           application/json:
  *             schema:
  *               type: object
+ *               required: [type, title, status, code, retryable, retry_hint, scope, error, message]
  *               properties:
  *                 type:    { type: string }
  *                 title:   { type: string }
@@ -219,8 +224,9 @@ function _mapSoftDeleteError(err, req) {
  *                 scope:   { type: string }
  *                 error:   { type: string }
  *                 message: { type: string }
+ *               additionalProperties: false
  */
-router.post('/', optionalIdempotency, validateBody(runtimeConfigSchema), instrumentConfig('config_update', (req, res) => {
+router.post('/', optionalIdempotency, validateBody(runtimeConfigSchema), (req, res) => {
   // validateBody attaches the parsed, coerced payload to req.validated
   const validatedDto = toAdminConfigRequestDto(req.validated);
   const { section, config: validatedConfig } = fromAdminConfigRequestDto(validatedDto);
@@ -267,12 +273,14 @@ router.post('/', optionalIdempotency, validateBody(runtimeConfigSchema), instrum
  *           application/json:
  *             schema:
  *               type: object
+ *               required: [sections]
  *               properties:
  *                 sections:
  *                   type: array
- *                   items: { type: string }
- *       304:
- *         description: Not Modified — client already has the current version.
+ *                   items:
+ *                     type: string
+ *                     enum: [webhook, reconciliation, kyc, retention, fraudThresholds, cors]
+ *               additionalProperties: false
  *       401:
  *         $ref: '#/components/responses/Problem401'
  *       403:

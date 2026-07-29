@@ -1383,6 +1383,16 @@ const PERSISTENCE_ENDPOINT_ENUM = Object.freeze([
 ]);
 
 /**
+ * Bounded enum of allowed `endpoint` label values for persistence metrics.
+ * @readonly
+ */
+const PERSISTENCE_ENDPOINT_ENUM = Object.freeze([
+  'sme_invoice_upload',
+  'sme_invoice_presigned_url',
+  'unknown',
+]);
+
+/**
  * Bounded enum of allowed `status_class` label values.
  * @readonly
  */
@@ -1394,23 +1404,10 @@ const PERSISTENCE_STATUS_CLASS_ENUM = Object.freeze(['2xx', '4xx', '5xx']);
  * @readonly
  */
 const PERSISTENCE_CAUSE_ENUM = Object.freeze([
-  'none',
   'validation',
   'storage',
   'internal',
-]);
-
-const _PERSISTENCE_VALIDATION_CODES = Object.freeze([
-  'INVALID_MIME_TYPE',
-  'FILE_TOO_LARGE',
-  'INVALID_TENANT_ID',
-]);
-
-const _PERSISTENCE_STORAGE_CODES = Object.freeze([
-  'STORAGE_WRITE_FAILED',
-  'STORAGE_READ_FAILED',
-  'ENOENT',
-  'EACCES',
+  'none',
 ]);
 
 /**
@@ -1420,9 +1417,8 @@ const _PERSISTENCE_STORAGE_CODES = Object.freeze([
  * @returns {string} Bounded value from {@link PERSISTENCE_ENDPOINT_ENUM}.
  */
 function normalizePersistenceEndpoint(raw) {
-  return typeof raw === 'string' && PERSISTENCE_ENDPOINT_ENUM.includes(raw)
-    ? raw
-    : 'unknown';
+  const str = typeof raw === 'string' ? raw.trim() : '';
+  return PERSISTENCE_ENDPOINT_ENUM.includes(str) ? str : 'unknown';
 }
 
 /**
@@ -1449,13 +1445,14 @@ function normalizePersistenceCause(err, status) {
   const code = Number(status);
   if (!err && code < 400) { return 'none'; }
 
-  const errCode = err && typeof err === 'object' ? err.code : err;
-  if (typeof errCode === 'string') {
-    if (_PERSISTENCE_VALIDATION_CODES.includes(errCode)) { return 'validation'; }
-    if (_PERSISTENCE_STORAGE_CODES.includes(errCode)) { return 'storage'; }
+  const errCode = err && typeof err === 'object' && 'code' in err ? String(err.code) : '';
+  if (['INVALID_MIME_TYPE', 'FILE_TOO_LARGE', 'INVALID_TENANT_ID'].includes(errCode)) {
+    return 'validation';
   }
-
   if (code >= 400 && code < 500) { return 'validation'; }
+  if (errCode.startsWith('STORAGE') || errCode === 'ENOENT' || errCode === 'EACCES') {
+    return 'storage';
+  }
   return 'internal';
 }
 
@@ -1467,7 +1464,7 @@ const persistenceRequestDurationSeconds = new client.Histogram({
   name: 'persistence_request_duration_seconds',
   help: 'Duration of persistence endpoint requests in seconds',
   labelNames: ['endpoint', 'status_class'],
-  buckets: [0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5],
   registers: [registry],
 });
 
@@ -1477,7 +1474,7 @@ const persistenceRequestDurationSeconds = new client.Histogram({
  */
 const persistenceRequestsTotal = new client.Counter({
   name: 'persistence_requests_total',
-  help: 'Total persistence endpoint requests by endpoint and status class',
+  help: 'Total number of persistence endpoint requests',
   labelNames: ['endpoint', 'status_class'],
   registers: [registry],
 });
@@ -1488,10 +1485,20 @@ const persistenceRequestsTotal = new client.Counter({
  */
 const persistenceRequestErrorsTotal = new client.Counter({
   name: 'persistence_request_errors_total',
-  help: 'Total persistence endpoint request errors by endpoint and cause',
+  help: 'Total number of persistence endpoint request errors by cause',
   labelNames: ['endpoint', 'cause'],
   registers: [registry],
 });
+
+/**
+ * Bounded enum of allowed `status_class` label values for metrics endpoint.
+ * @readonly
+ */
+
+/**
+ * Bounded enum of allowed `cause` label values for metrics endpoint errors.
+ * @readonly
+ */
 
 /**
  * Maps an HTTP status code to a bounded `status_class` label value.
@@ -1532,6 +1539,10 @@ const metricsRequestDurationSeconds = new client.Histogram({
   registers: [registry],
 });
 
+/**
+ * Counter: Total metrics endpoint requests.
+ * @type {import('prom-client').Counter}
+ */
 const metricsRequestsTotal = new client.Counter({
   name: 'metrics_requests_total',
   help: 'Total number of metrics endpoint requests',
@@ -1539,45 +1550,54 @@ const metricsRequestsTotal = new client.Counter({
   registers: [registry],
 });
 
+/**
+ * Counter: Metrics endpoint request errors by cause.
+ * @type {import('prom-client').Counter}
+ */
 const metricsRequestErrorsTotal = new client.Counter({
   name: 'metrics_request_errors_total',
-  help: 'Total number of metrics endpoint request errors',
+  help: 'Total number of metrics endpoint request errors by cause',
   labelNames: ['cause'],
   registers: [registry],
 });
 
 /**
- * Records observability data for a metrics endpoint scrape.
+ * Records metrics and a structured log for one completed metrics endpoint request.
  *
- * @param {object} [params]
- * @param {number} params.statusCode - HTTP status code of the response.
- * @param {number} [params.durationSeconds] - Wall-clock duration of the request.
- * @param {unknown} [params.error] - Error associated with the outcome, if any.
- * @param {import('express').Request} [params.req] - Request, used for the
- *   correlated request logger.
+ * @param {object} params
+ * @param {number} params.statusCode - Final HTTP status code.
+ * @param {number} params.durationSeconds - Wall-clock duration in seconds.
+ * @param {unknown} [params.error] - Error thrown by the handler, if any.
+ * @param {import('express').Request} [params.req] - Request, for a scoped logger.
  * @returns {void}
  */
-function recordMetricsEndpointOutcome({ statusCode, durationSeconds = 0, error, req } = {}) {
+function recordMetricsEndpointOutcome({ statusCode, durationSeconds, error, req }) {
   const statusClass = normalizeMetricsEndpointStatusClass(statusCode);
   const cause = normalizeMetricsEndpointCause(error, statusCode);
 
+  metricsRequestDurationSeconds.labels(statusClass).observe(durationSeconds);
   metricsRequestsTotal.labels(statusClass).inc();
-  metricsRequestDurationSeconds.labels(statusClass).observe(
-    Number.isFinite(durationSeconds) ? durationSeconds : 0,
-  );
+
   if (cause !== 'none') {
     metricsRequestErrorsTotal.labels(cause).inc();
   }
 
-  const requestLogger = logger.createRequestLogger(req || {});
-  const payload = { event: 'metrics.scrape', statusClass, cause, durationSeconds };
+  const log = (req && typeof logger.createRequestLogger === 'function')
+    ? logger.createRequestLogger(req)
+    : logger;
+  const fields = {
+    statusClass,
+    statusCode,
+    durationSeconds: Number(durationSeconds.toFixed(6)),
+    cause,
+  };
 
   if (statusClass === '5xx') {
-    requestLogger.error({ ...payload, err: error && error.message }, 'metrics endpoint request failed');
+    log.error(fields, 'metrics request failed');
   } else if (statusClass === '4xx') {
-    requestLogger.warn(payload, 'metrics endpoint request rejected');
+    log.warn(fields, 'metrics request rejected');
   } else {
-    requestLogger.info(payload, 'metrics endpoint request served');
+    log.info(fields, 'metrics request completed');
   }
 }
 
@@ -2563,6 +2583,11 @@ if (!isEnabled()) {
 module.exports = {
   isEnabled,
   registry,
+  getRegistry,
+  apiKeyAuthDurationSeconds,
+  apiKeyAuthErrorsTotal,
+  classifyApiKeyOutcome,
+  classifyApiKeyErrorCause,
   metricsAuth,
   metricsHandler,
   recordMetricsEndpointOutcome,

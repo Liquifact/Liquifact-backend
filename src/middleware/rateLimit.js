@@ -483,12 +483,8 @@ function createConfigRateLimiter() {
   });
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// metricsLimiter (issue #744)
-// ────────────────────────────────────────────────────────────────────────────
-
 /**
- * 429 response body for the /metrics rate limiter.
+ * 429 response body for {@link metricsLimiter} (issue #744).
  *
  * @param {import('express').Request} _req - Express request (unused).
  * @param {import('express').Response} res - Express response.
@@ -533,8 +529,8 @@ const metricsLimiter = rateLimit({
 });
 
 /**
- * Factory variant of {@link metricsLimiter} for callers (mostly tests)
- * that need to construct a fresh limiter with different bounds.
+ * Factory variant of {@link metricsLimiter} for callers (mostly tests) that
+ * need to construct a fresh limiter with different bounds.
  *
  * @returns {import('express').RequestHandler}
  */

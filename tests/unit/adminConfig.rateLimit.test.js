@@ -66,14 +66,25 @@ jest.mock('../../src/logger', () => ({
   error: jest.fn(),
   info: jest.fn(),
 }));
-jest.mock('../../src/metrics', () => {
-  const actual = jest.requireActual('../../src/metrics');
-  return {
-    ...actual,
-    webhookReplayTotal: { inc: jest.fn() },
-  };
-});
-
+jest.mock('../../src/metrics', () => ({
+  webhookReplayTotal: { inc: jest.fn() },
+  registry: { contentType: 'text/plain', metrics: jest.fn().mockResolvedValue('') },
+  apiKeyAuthDurationSeconds: { observe: jest.fn() },
+  apiKeyAuthErrorsTotal: { inc: jest.fn() },
+  classifyApiKeyOutcome: (statusCode) => {
+    if (statusCode < 400) { return 'success'; }
+    if (statusCode < 500) { return 'client_error'; }
+    return 'server_error';
+  },
+  classifyApiKeyErrorCause: (statusCode) => {
+    if (statusCode === 400) { return 'validation_error'; }
+    if (statusCode === 401) { return 'unauthorized'; }
+    if (statusCode === 403) { return 'forbidden'; }
+    if (statusCode === 404) { return 'not_found'; }
+    if (statusCode >= 500) { return 'internal_error'; }
+    return null;
+  },
+}));
 
 // ── Imports ───────────────────────────────────────────────────────────────────
 
