@@ -23,7 +23,7 @@ const { optionalMultipartIdempotency } = require('../../middleware/multipartIdem
 const { instrumentPersistence } = require('../../middleware/persistenceMetrics');
 const { MAX_FILE_SIZE_BYTES, validatePersistenceBody, presignedUploadBodySchema } = require('../../schemas/persistence');
 const { createPersistenceRateLimiter } = require('../../middleware/persistenceRateLimit');
-const { persistenceErrorHandler } = require('../../middleware/persistenceErrorHandler');
+const { createCompressionMiddleware } = require('../../middleware/compression');
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -34,6 +34,10 @@ const upload = multer({
 
 // Initialize persistence rate limiter
 const persistenceRateLimiter = createPersistenceRateLimiter();
+
+// Compress large persistence responses above 1 KB threshold.
+// Small responses pass through uncompressed to avoid overhead.
+router.use(createCompressionMiddleware());
 
 router.use('/', metricsRoutes);
 
