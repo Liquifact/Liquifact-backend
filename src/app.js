@@ -385,7 +385,9 @@ function createApp() {
   mountFeatureRouter(app, '/api/admin/escrow', adminEscrowRoutes);
   mountFeatureRouter(app, '/api/admin/escrow-read', adminEscrowReadRoutes);
   mountFeatureRouter(app, '/api/admin/webhooks', adminWebhooksRoutes);
-  mountFeatureRouter(app, '/api/admin/config', adminConfigRoutes);
+  if (getConfig().CONFIG_RUNTIME_ENABLED === 'true') {
+    mountFeatureRouter(app, '/api/admin/config', adminConfigRoutes);
+  }
   mountFeatureRouter(app, '/api/admin/reconciliation', reconciliationRoutes);
   if (getConfig().ESCROW_INDEXER_ENABLED === 'true') {
     mountFeatureRouter(app, '/api/admin/indexer', adminIndexerRoutes);
