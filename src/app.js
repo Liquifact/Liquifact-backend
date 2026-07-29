@@ -380,7 +380,9 @@ function createApp() {
   mountFeatureRouter(app, '/api/admin/webhooks', adminWebhooksRoutes);
   mountFeatureRouter(app, '/api/admin/config', adminConfigRoutes);
   mountFeatureRouter(app, '/api/admin/reconciliation', reconciliationRoutes);
-  mountFeatureRouter(app, '/api/admin/indexer', adminIndexerRoutes);
+  if (getConfig().ESCROW_INDEXER_ENABLED === 'true') {
+    mountFeatureRouter(app, '/api/admin/indexer', adminIndexerRoutes);
+  }
   mountFeatureRouter(app, '/api/admin/metrics', adminMetricsRoutes);
   mountFeatureRouter(app, '/api/admin/kyc', adminKycRoutes);
   mountFeatureRouter(app, '/v1', v1Routes);

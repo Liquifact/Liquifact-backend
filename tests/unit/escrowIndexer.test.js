@@ -535,6 +535,102 @@ describe('escrowIndexer ordering and idempotency', () => {
         expect(err.details).toBeDefined();
       }
     });
+
+    test('invalidates indexer cache when ESCROW_INDEXER_ENABLED is true', async () => {
+      const config = require('../../src/config');
+      const { indexerCache } = require('../../src/services/indexerCache');
+      const { IndexerCache } = require('../../src/services/indexerCache');
+      const originalGet = config.get;
+      config.get = jest.fn(() => ({ ESCROW_INDEXER_ENABLED: 'true' }));
+
+      try {
+        indexerCache.invalidateAll();
+        const cacheKey = IndexerCache.buildKey({});
+        indexerCache.set(cacheKey, { data: [{ stale: true }], meta: { total: 1 } });
+        expect(indexerCache.size).toBe(1);
+
+        const store = createInMemoryStore();
+        const transactionRunner = createTransactionRunner();
+        await persistEscrowEvent(
+          { store, transactionRunner },
+          {
+            eventId: 'evt-1',
+            invoiceId: 'inv_1',
+            eventType: 'escrow_created',
+            ledgerSequence: 10,
+            pagingToken: '10',
+          }
+        );
+
+        expect(indexerCache.size).toBe(0);
+      } finally {
+        config.get = originalGet;
+        indexerCache.invalidateAll();
+      }
+    });
+
+    test('does NOT invalidate indexer cache when ESCROW_INDEXER_ENABLED is false', async () => {
+      const config = require('../../src/config');
+      const { indexerCache } = require('../../src/services/indexerCache');
+      const { IndexerCache } = require('../../src/services/indexerCache');
+      const originalGet = config.get;
+      config.get = jest.fn(() => ({ ESCROW_INDEXER_ENABLED: 'false' }));
+
+      try {
+        indexerCache.invalidateAll();
+        const cacheKey = IndexerCache.buildKey({});
+        indexerCache.set(cacheKey, { data: [{ stale: true }], meta: { total: 1 } });
+        expect(indexerCache.size).toBe(1);
+
+        const store = createInMemoryStore();
+        const transactionRunner = createTransactionRunner();
+        await persistEscrowEvent(
+          { store, transactionRunner },
+          {
+            eventId: 'evt-2',
+            invoiceId: 'inv_2',
+            eventType: 'escrow_created',
+            ledgerSequence: 10,
+            pagingToken: '10',
+          }
+        );
+
+        expect(indexerCache.size).toBe(1);
+      } finally {
+        config.get = originalGet;
+        indexerCache.invalidateAll();
+      }
+    });
+
+    test('always invalidates escrowReadCache regardless of indexer flag', async () => {
+      const config = require('../../src/config');
+      const { escrowReadCache } = require('../../src/services/escrowReadCache');
+      const originalGet = config.get;
+      config.get = jest.fn(() => ({ ESCROW_INDEXER_ENABLED: 'false' }));
+
+      try {
+        escrowReadCache.set('inv_3', { state: 'stale' });
+        const before = escrowReadCache.get('inv_3');
+        expect(before).toEqual({ state: 'stale' });
+
+        const store = createInMemoryStore();
+        const transactionRunner = createTransactionRunner();
+        await persistEscrowEvent(
+          { store, transactionRunner },
+          {
+            eventId: 'evt-3',
+            invoiceId: 'inv_3',
+            eventType: 'escrow_created',
+            ledgerSequence: 10,
+            pagingToken: '10',
+          }
+        );
+
+        expect(escrowReadCache.get('inv_3')).toBeUndefined();
+      } finally {
+        config.get = originalGet;
+      }
+    });
   });
 
   describe('runEscrowIndexerCycle', () => {

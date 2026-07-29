@@ -356,6 +356,106 @@ describe('indexerService – listIndexerEvents()', () => {
     expect(INDEXER_SORT_FIELDS).toContain('observed_at');
     expect(INDEXER_SORT_FIELDS).toContain('ledger_sequence');
   });
+
+  // ── isIndexerEnabled() / ESCROW_INDEXER_ENABLED feature flag ───────────
+
+  describe('ESCROW_INDEXER_ENABLED feature flag', () => {
+    let isIndexerEnabled;
+    let indexerCache;
+    let IndexerCache;
+
+    beforeAll(() => {
+      ({ isIndexerEnabled, IndexerCache } = require('../src/services/indexerService'));
+      ({ indexerCache } = require('../src/services/indexerCache'));
+    });
+
+    beforeEach(() => {
+      indexerCache.invalidateAll();
+    });
+
+    test('isIndexerEnabled defaults to false when config is not validated', () => {
+      jest.resetModules();
+      const fresh = require('../src/services/indexerService');
+      expect(fresh.isIndexerEnabled()).toBe(false);
+    });
+
+    test('isIndexerEnabled returns true when ESCROW_INDEXER_ENABLED is "true"', () => {
+      const config = require('../src/config');
+      const originalGet = config.get;
+      config.get = jest.fn(() => ({ ESCROW_INDEXER_ENABLED: 'true' }));
+      try {
+        expect(isIndexerEnabled()).toBe(true);
+      } finally {
+        config.get = originalGet;
+      }
+    });
+
+    test('isIndexerEnabled returns false when ESCROW_INDEXER_ENABLED is "false"', () => {
+      const config = require('../src/config');
+      const originalGet = config.get;
+      config.get = jest.fn(() => ({ ESCROW_INDEXER_ENABLED: 'false' }));
+      try {
+        expect(isIndexerEnabled()).toBe(false);
+      } finally {
+        config.get = originalGet;
+      }
+    });
+
+    test('listIndexerEvents bypasses cache when flag is disabled (no dbClient → cache normally used but skipped)', async () => {
+      const config = require('../src/config');
+      const originalGet = config.get;
+      config.get = jest.fn(() => ({ ESCROW_INDEXER_ENABLED: 'false' }));
+
+      try {
+        const events = [makeEvent({ event_id: 'e1' }), makeEvent({ event_id: 'e2' })];
+        const fakeKnex = makeFakeKnex(events);
+
+        const result1 = await listIndexerEvents({ dbClient: fakeKnex });
+        expect(result1.data).toHaveLength(2);
+
+        const cacheKey = IndexerCache.buildKey({});
+        expect(indexerCache.get(cacheKey)).toBeUndefined();
+      } finally {
+        config.get = originalGet;
+      }
+    });
+
+    test('listIndexerEvents populates and reads from cache when flag is enabled', async () => {
+      const config = require('../src/config');
+      const originalGet = config.get;
+      config.get = jest.fn(() => ({ ESCROW_INDEXER_ENABLED: 'true' }));
+
+      try {
+        const events = [makeEvent({ event_id: 'e1' })];
+        let callCount = 0;
+        const countingKnex = makeFakeKnex(events);
+        const originalFn = countingKnex;
+        const wrappedKnex = jest.fn((...args) => {
+          callCount += 1;
+          return originalFn(...args);
+        });
+
+        await listIndexerEvents({ dbClient: wrappedKnex });
+        const firstCallCount = callCount;
+
+        const cacheKey = IndexerCache.buildKey({});
+        expect(indexerCache.get(cacheKey)).toBeDefined();
+
+        callCount = 0;
+        const secondKnex = jest.fn((...args) => {
+          callCount += 1;
+          return makeFakeKnex([])(...args);
+        });
+        const secondKnexOrig = secondKnex;
+
+        await listIndexerEvents();
+        expect(callCount).toBe(0);
+      } finally {
+        config.get = originalGet;
+        indexerCache.invalidateAll();
+      }
+    });
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
