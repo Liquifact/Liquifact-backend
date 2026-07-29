@@ -422,6 +422,12 @@ class NoopRegistry {
 
 const registry = new client.Registry();
 
+const {
+  negotiateEncoding,
+  compress,
+  DEFAULT_THRESHOLD,
+} = require('./middleware/compression');
+
 if (typeof client.collectDefaultMetrics === 'function') {
   client.collectDefaultMetrics({ register: registry });
 }
