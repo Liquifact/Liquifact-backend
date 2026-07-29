@@ -26,12 +26,7 @@ const responseHelper = require('../utils/responseHelper');
 const logger = require('../logger');
 const { validateIndexerQuery } = require('../schemas/indexerQuery');
 const { instrumentIndexer } = require('../middleware/indexerMetrics');
-const { mapQueryToDTO, mapDTOToServiceParams, mapServiceResultToResponseDTO } = require('../dto/indexer');
-
-// Compress indexer responses above the default 1 KB threshold.
-// Respects Accept-Encoding (gzip preferred over deflate); small responses
-// are always sent as plain JSON regardless of the client's encoding preference.
-router.use(createCompressionMiddleware());
+const { mapQueryToDTO, mapDTOToServiceParams } = require('../dto/indexer');
 
 // Apply a per-client rate limit before admin auth so bursts are contained
 // even when the caller is unauthenticated or misconfigured.

@@ -36,7 +36,7 @@
 const db = require('../db/knex');
 const { encodeCursor, decodeCursor } = require('../utils/cursorPagination');
 const { indexerEventSchema, parseValidationErrors } = require('../schemas/indexerEvent');
-const { indexerCache, IndexerCache } = require('./indexerCache');
+const { IndexerCache, indexerCache } = require('./indexerCache');
 
 /**
  * Allowed sort fields for the indexer listing endpoint.
