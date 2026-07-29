@@ -33,8 +33,9 @@ const { validatePatchFields, detectLockedFieldChange } = require('../../middlewa
 const { validateHealthQuery, rejectBodyOnGet } = require('../../schemas/health');
 const { z } = require('zod');
 
-const validateEscrowReadParams = z.object({
-  invoiceId: z.string().min(1).max(64),
+/** Zod schema for GET /v1/escrow/:invoiceId path parameters. */
+const escrowReadParamsSchema = z.object({
+  invoiceId: z.string().min(1, 'invoiceId is required').max(128, 'invoiceId too long'),
 });
 
 // ── Sub-router mounts ────────────────────────────────────────────────────────

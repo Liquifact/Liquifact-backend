@@ -233,24 +233,31 @@ describe('Config Validation', () => {
     expect(() => validate()).toThrow();
   });
 
-  // ── CONFIG_RUNTIME_ENABLED flag ──────────────────────────────────────────
+  // ── ESCROW_INDEXER_ENABLED flag ─────────────────────────────────────────
 
-  test('CONFIG_RUNTIME_ENABLED defaults to "true"', () => {
+  test('ESCROW_INDEXER_ENABLED defaults to "false" (safe default)', () => {
     process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
     const config = validate();
-    expect(config.CONFIG_RUNTIME_ENABLED).toBe('true');
+    expect(config.ESCROW_INDEXER_ENABLED).toBe('false');
   });
 
-  test('CONFIG_RUNTIME_ENABLED accepts "false"', () => {
+  test('ESCROW_INDEXER_ENABLED accepts "true"', () => {
     process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
-    process.env.CONFIG_RUNTIME_ENABLED = 'false';
+    process.env.ESCROW_INDEXER_ENABLED = 'true';
     const config = validate();
-    expect(config.CONFIG_RUNTIME_ENABLED).toBe('false');
+    expect(config.ESCROW_INDEXER_ENABLED).toBe('true');
   });
 
-  test('CONFIG_RUNTIME_ENABLED rejects invalid value', () => {
+  test('ESCROW_INDEXER_ENABLED accepts "false"', () => {
     process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
-    process.env.CONFIG_RUNTIME_ENABLED = 'invalid';
+    process.env.ESCROW_INDEXER_ENABLED = 'false';
+    const config = validate();
+    expect(config.ESCROW_INDEXER_ENABLED).toBe('false');
+  });
+
+  test('ESCROW_INDEXER_ENABLED rejects invalid value', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    process.env.ESCROW_INDEXER_ENABLED = 'yes';
     expect(() => validate()).toThrow();
   });
 });

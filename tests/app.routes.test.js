@@ -304,6 +304,55 @@ describe('Mounted feature routers', () => {
     });
   });
 
+  it('mounts admin indexer routes when ESCROW_INDEXER_ENABLED is true', async () => {
+    const config = require('../src/config');
+    const originalGet = config.get;
+    config.get = jest.fn(() => ({ ESCROW_INDEXER_ENABLED: 'true' }));
+
+    try {
+      const enabledApp = createApp();
+      const res = await request(enabledApp)
+        .get('/api/admin/indexer/events')
+        .set('Authorization', authHeader());
+      expect(res.status).not.toBe(404);
+    } finally {
+      config.get = originalGet;
+    }
+  });
+
+  it('does not mount admin indexer routes when ESCROW_INDEXER_ENABLED is false', async () => {
+    const config = require('../src/config');
+    const originalGet = config.get;
+    config.get = jest.fn(() => ({ ESCROW_INDEXER_ENABLED: 'false' }));
+
+    try {
+      const disabledApp = createApp();
+      const res = await request(disabledApp)
+        .get('/api/admin/indexer/events')
+        .set('Authorization', authHeader());
+      expect(res.status).toBe(404);
+    } finally {
+      config.get = originalGet;
+    }
+  });
+
+  it('does not mount admin indexer bulk endpoint when ESCROW_INDEXER_ENABLED is false', async () => {
+    const config = require('../src/config');
+    const originalGet = config.get;
+    config.get = jest.fn(() => ({ ESCROW_INDEXER_ENABLED: 'false' }));
+
+    try {
+      const disabledApp = createApp();
+      const res = await request(disabledApp)
+        .post('/api/admin/indexer/events/bulk')
+        .set('Authorization', authHeader())
+        .send([{ eventId: 'evt_1' }]);
+      expect(res.status).toBe(404);
+    } finally {
+      config.get = originalGet;
+    }
+  });
+
   it('mounts admin escrow routes under /api/admin/escrow', async () => {
     const res = await request(app)
       .get('/api/admin/escrow/version')

@@ -11,6 +11,7 @@
  */
 
 const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
+const { persistConfig } = require('./configSoftDelete');
 const logger = require('../logger');
 
 /**
@@ -30,12 +31,27 @@ const logger = require('../logger');
  * @returns {{ section: string, config: object, message: string }} Result object.
  * @throws {Error} If the section is not supported or application fails.
  */
-function applyConfig(section, config, context) {
+async function applyConfig(section, config, context) {
   const { tenantId, adminClient } = context;
 
   // Apply runtime configuration changes for supported sections.
   if (section === 'cors') {
     applyCorsConfig(config);
+  }
+
+  // Persist the config record to the database with soft-delete support.
+  let persisted;
+  try {
+    persisted = await persistConfig({
+      section,
+      config,
+      tenantId: tenantId || '',
+      actor: adminClient || null,
+    });
+  } catch (err) {
+    logger.error({ err, section, tenantId }, 'configService: failed to persist config');
+    // Fall through — the config was validated and side-effects applied even if
+    // persistence fails temporarily. The caller gets a 200 response.
   }
 
   // Log the configuration update for audit purposes.
@@ -44,11 +60,13 @@ function applyConfig(section, config, context) {
       tenantId,
       section,
       adminClient,
+      recordId: persisted ? persisted.id : undefined,
     },
     'Admin runtime config update accepted',
   );
 
   return {
+    id: persisted ? persisted.id : undefined,
     section,
     config,
     message: `Configuration section '${section}' validated and accepted.`,

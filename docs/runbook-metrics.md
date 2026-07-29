@@ -51,11 +51,8 @@ Counter/Gauge/Histogram). `GET /metrics` is mounted in
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
+| `METRICS_ENABLED` | `true` | Feature flag that gates Prometheus metrics collection and the `/metrics` endpoint. When `false`, all metric recording becomes a silent no-op and `GET /metrics` returns `503 Service Unavailable`. Changing this value requires a restart. |
 | `METRICS_BEARER_TOKEN` | unset (loopback-only mode) | When set, `GET /metrics` requires `Authorization: Bearer <token>`, compared in constant time. When unset, only loopback addresses (`127.0.0.1`, `::1`, `::ffff:127.0.0.1`) may scrape. |
-
-No environment variable currently exists to disable the metrics registry or
-the `/metrics` route entirely; the registry is always constructed at module
-load, and the route is always mounted.
 
 `GET /api/sme/metrics` has no metrics-specific configuration of its own — its
 behavior is governed by the standard auth (`authenticateToken`) and tenant
@@ -97,7 +94,22 @@ comparison). If unset, confirm the scraper is running on the same host
 (loopback) — Prometheus running on a separate host or container requires
 setting `METRICS_BEARER_TOKEN` and configuring the scrape job with it.
 
-### 2. Metrics missing from scrape output despite the app running
+### 2. Prometheus scrape returns 503
+
+**Symptom:** Prometheus (or `curl`) gets `503 Service Unavailable` hitting
+`/metrics`.
+
+**Cause:** `METRICS_ENABLED` is set to `false` in the environment. When
+disabled, both the auth middleware and the handler short-circuit with a 503
+before performing any auth checks or returning metric data.
+
+**Check:** confirm whether `METRICS_ENABLED=false` is set in the target
+environment. If this is intentional (metrics are disabled for maintenance or
+cost reasons), no action is needed — Prometheus should be configured to
+tolerate 503 from this target. If unintentional, set `METRICS_ENABLED=true`
+and restart the process.
+
+### 3. Metrics missing from scrape output despite the app running
 
 **Symptom:** `/metrics` returns `200` but a specific counter/gauge is absent
 or stuck at zero.
@@ -111,7 +123,7 @@ environments or freshly deployed instances, not a bug.
 **Check:** exercise the relevant endpoint once and re-scrape; the series
 should appear.
 
-### 3. `GET /api/sme/metrics` returns 400 "Missing tenant context"
+### 4. `GET /api/sme/metrics` returns 400 "Missing tenant context"
 
 **Symptom:** the SME invoice metrics endpoint returns `400` with
 `{ "error": "Bad Request", "message": "Missing tenant context" }`.
@@ -124,7 +136,7 @@ should appear.
 caller must supply a tenant identifier via header or use a JWT that carries
 one.
 
-### 4. `GET /api/sme/metrics` returns 403 "Cross-tenant access denied"
+### 5. `GET /api/sme/metrics` returns 403 "Cross-tenant access denied"
 
 **Symptom:** `403` with `{ "error": "Forbidden", "message": "Cross-tenant access denied" }`.
 
@@ -136,7 +148,7 @@ guard in `validateMetricsRequest()` working as intended.
 **Check:** confirm the caller isn't passing a stale or mismatched
 `x-tenant-id` header alongside a JWT scoped to a different tenant.
 
-### 5. Registry inconsistent between processes (multi-instance)
+### 6. Registry inconsistent between processes (multi-instance)
 
 **Symptom:** a scrape from one instance shows different counts than another
 behind the same load balancer.
@@ -166,7 +178,7 @@ defined there: `BodySizeLimitRejection*` (invoice upload abuse),
 `persistence_request_errors_total`) are documented in
 [`runbook-persistence.md`](./runbook-persistence.md).
 
-If `/metrics` itself becomes unreachable (see Failure Mode 1), no alert rule
+If `/metrics` itself becomes unreachable (see Failure Modes 1 or 2), no alert rule
 can fire on any metric it exports — treat scrape-target-down as the
 highest-priority signal, since it silently blinds every other alert in
 `prometheus-rules.yml`.
@@ -174,6 +186,13 @@ highest-priority signal, since it silently blinds every other alert in
 ---
 
 ## Recovery Steps
+
+### Restore Prometheus scraping after a 503
+
+1. Confirm whether `METRICS_ENABLED=false` is set in the target environment.
+2. If intentional: no action needed — configure Prometheus to tolerate 503.
+3. If unintentional: set `METRICS_ENABLED=true` and restart the process. The
+   change takes effect at module load time, not at runtime.
 
 ### Restore Prometheus scraping after a 401
 
@@ -188,7 +207,7 @@ highest-priority signal, since it silently blinds every other alert in
 ### Diagnose a missing or zero-valued series
 
 1. Confirm the code path that increments the metric has actually run since
-   process start (see Failure Mode 2).
+   process start (see Failure Mode 3).
 2. If it has run and the series is still missing, check the relevant
    feature's own runbook (`runbook-persistence.md`, `storage-ops.md`,
    `rate-limit-ops.md`) for whether that subsystem itself is degraded.

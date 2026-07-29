@@ -28,6 +28,7 @@ const invoiceService = require('./services/invoiceService');
 const { CursorError } = require('./utils/cursorPagination');
 const { getEscrowRead } = require('./services/escrowReadService');
 const { createCorsOptions, isCorsOriginRejectedError } = require('./config/cors');
+const { corsObservability } = require('./middleware/corsObservability');
 const { get: getConfig } = require('./config');
 const { validateInvoiceQueryParams } = require('./utils/validators');
 const { invoiceCreateSchema, parseValidationErrors } = require('./schemas/invoice');
@@ -54,7 +55,7 @@ const marketplaceRoutes = require('./routes/marketplace');
 const retentionRoutes = require('./routes/retention');
 const invoiceStateRoutes = require('./routes/invoiceStateRoutes');
 const adminEscrowRoutes = require('./routes/adminEscrow');
-const adminInvoiceStateRoutes = require('./routes/adminInvoiceState');
+const adminEscrowReadRoutes = require('./routes/adminEscrowRead');
 const adminWebhooksRoutes = require('./routes/adminWebhooks');
 const adminConfigRoutes = require('./routes/adminConfig');
 const kycRoutes = require('./routes/kyc');
@@ -82,6 +83,7 @@ const { createCompressionMiddleware } = require('./middleware/compression');
  */
 function handleCorsError(err, req, res, next) {
   if (isCorsOriginRejectedError(err)) {
+    if (res.locals) res.locals.isCorsOriginRejected = true;
     res.status(403).json({ error: err.message, code: err.code });
     return;
   }
@@ -144,6 +146,7 @@ function createApp() {
   const app = express();
 
   // ── 1. CORS ──────────────────────────────────────────────────────────────
+  app.use(corsObservability);
   app.use(cors(createCorsOptions()));
 
   // ── 1.a. KYC webhook raw body parser ──────────────────────────────────────
@@ -311,10 +314,14 @@ function createApp() {
     });
   });
 
-  // Escrow — GET by invoiceId (delegates to escrowReadService)
-  app.get('/api/escrow/:invoiceId', createCompressionMiddleware(), async (req, res) => {
-    const invoiceId = String(req.params.invoiceId || '').trim();
-    const { result, escrowAddress, error, code, statusCode } = await getEscrowRead(invoiceId);
+  // Escrow — GET by invoiceId (proxied through Soroban retry wrapper with address mapping)
+  // Compression middleware: gzip/deflate for large escrow-read responses (issue #961).
+  // Threshold: 1 KB (DEFAULT_THRESHOLD). Respects Accept-Encoding; small responses
+  // pass through uncompressed. Vary: Accept-Encoding is always set.
+  app.get('/api/escrow/:invoiceId', createCompressionMiddleware(), async (req, res, next) => {
+    const invoiceId = String(req.params.invoiceId || '')
+      .trim()
+      .replace(/\s+/g, '');
 
     if (error) {
       return res.status(statusCode).json({ error, code });
@@ -376,13 +383,15 @@ function createApp() {
   mountFeatureRouter(app, '/api/retention', retentionRoutes);
   mountFeatureRouter(app, '/api/admin/audit', auditTrailRoutes);
   mountFeatureRouter(app, '/api/admin/escrow', adminEscrowRoutes);
-  mountFeatureRouter(app, '/api/admin/invoices', adminInvoiceStateRoutes);
+  mountFeatureRouter(app, '/api/admin/escrow-read', adminEscrowReadRoutes);
   mountFeatureRouter(app, '/api/admin/webhooks', adminWebhooksRoutes);
   if (getConfig().CONFIG_RUNTIME_ENABLED === 'true') {
     mountFeatureRouter(app, '/api/admin/config', adminConfigRoutes);
   }
   mountFeatureRouter(app, '/api/admin/reconciliation', reconciliationRoutes);
-  mountFeatureRouter(app, '/api/admin/indexer', adminIndexerRoutes);
+  if (getConfig().ESCROW_INDEXER_ENABLED === 'true') {
+    mountFeatureRouter(app, '/api/admin/indexer', adminIndexerRoutes);
+  }
   mountFeatureRouter(app, '/api/admin/metrics', adminMetricsRoutes);
   mountFeatureRouter(app, '/api/admin/kyc', adminKycRoutes);
   mountFeatureRouter(app, '/v1', v1Routes);
