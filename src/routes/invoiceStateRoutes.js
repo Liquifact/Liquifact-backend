@@ -47,6 +47,18 @@ function invalidateInvoiceStateCache(tenantId, invoiceId) {
 }
 
 /**
+ * Extracts the correlation ID from the request object.
+ * Prefers the explicitly set correlationId, falls back to the request ID,
+ * and returns null when neither is available.
+ *
+ * @param {import('express').Request} req - Express request.
+ * @returns {string|null} Correlation ID.
+ */
+function getCorrelationId(req) {
+  return req.correlationId || req.id || null;
+}
+
+/**
  * Extracts the actor identifier from the request object.
  * @param {import('express').Request} req - Express request.
  * @returns {string} Actor identifier.
@@ -71,6 +83,7 @@ function getActorFromRequest(req) {
 function buildContext(req, additionalMetadata = {}) {
   return {
     actor: getActorFromRequest(req),
+    correlationId: getCorrelationId(req),
     ipAddress: req.ip || (req.socket && req.socket.remoteAddress) || 'unknown',
     userAgent: req.get('user-agent') || 'unknown',
     metadata: {
@@ -86,13 +99,17 @@ function buildContext(req, additionalMetadata = {}) {
  *
  * @param {import('express').Response} res - Express response object.
  * @param {Error & {code?: string, allowedTransitions?: string[], statusCode?: number}} error - The thrown error.
+ * @param {string} [correlationId] - Correlation ID for traceability.
  * @returns {import('express').Response} The error response.
  */
-function sendTransitionError(res, error) {
+function sendTransitionError(res, error, correlationId) {
   const status = error.statusCode || 400;
   const details = error.allowedTransitions ? { allowedTransitions: error.allowedTransitions } : null;
 
-  return res.status(status).json(responseHelper.error(error.message, error.code, details));
+  return res.status(status).json({
+    ...responseHelper.error(error.message, error.code, details),
+    correlationId: correlationId || null,
+  });
 }
 
 /**
@@ -257,9 +274,13 @@ router.post('/:id/approve', async (req, res, next) => {
 
     return res.status(200).json({
       ...responseHelper.success(result),
+      correlationId: getCorrelationId(req),
       message: 'Invoice approved successfully',
     });
   } catch (error) {
+    if (error.code) {
+      return sendTransitionError(res, error, getCorrelationId(req));
+    }
     return next(error);
   }
 });
@@ -326,9 +347,13 @@ router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, async (req
 
     return res.status(200).json({
       ...responseHelper.success(result),
+      correlationId: getCorrelationId(req),
       message: 'Invoice linked to escrow successfully',
     });
   } catch (error) {
+    if (error.code) {
+      return sendTransitionError(res, error, getCorrelationId(req));
+    }
     return next(error);
   }
 });
@@ -391,9 +416,13 @@ router.post('/:id/reject', async (req, res, next) => {
 
     return res.status(200).json({
       ...responseHelper.success(result),
+      correlationId: getCorrelationId(req),
       message: 'Invoice rejected successfully',
     });
   } catch (error) {
+    if (error.code) {
+      return sendTransitionError(res, error, getCorrelationId(req));
+    }
     return next(error);
   }
 });
@@ -441,9 +470,13 @@ router.get('/:id/history', async (req, res, next) => {
 
     return res.json({
       ...responseHelper.success(result),
+      correlationId: getCorrelationId(req),
       message: 'Invoice transition history retrieved successfully',
     });
   } catch (error) {
+    if (error.code) {
+      return sendTransitionError(res, error, getCorrelationId(req));
+    }
     return next(error);
   }
 });
@@ -509,15 +542,24 @@ router.post('/bulk', async (req, res, _next) => {
   const items = req.body;
 
   if (!Array.isArray(items)) {
-    return res.status(400).json(responseHelper.error('Request body must be a JSON array of invoice-state operations', 'INVALID_BATCH_TYPE'));
+    return res.status(400).json({
+      ...responseHelper.error('Request body must be a JSON array of invoice-state operations', 'INVALID_BATCH_TYPE'),
+      correlationId: getCorrelationId(req),
+    });
   }
 
   if (items.length === 0) {
-    return res.status(400).json(responseHelper.error('Batch must contain at least one invoice-state operation', 'EMPTY_BATCH'));
+    return res.status(400).json({
+      ...responseHelper.error('Batch must contain at least one invoice-state operation', 'EMPTY_BATCH'),
+      correlationId: getCorrelationId(req),
+    });
   }
 
   if (items.length > MAX_BULK_ITEMS) {
-    return res.status(400).json(responseHelper.error(`Batch size exceeds maximum of ${MAX_BULK_ITEMS}`, 'BATCH_OVER_CAP'));
+    return res.status(400).json({
+      ...responseHelper.error(`Batch size exceeds maximum of ${MAX_BULK_ITEMS}`, 'BATCH_OVER_CAP'),
+      correlationId: getCorrelationId(req),
+    });
   }
 
   const results = [];
@@ -591,6 +633,7 @@ router.post('/bulk', async (req, res, _next) => {
 
   return res.status(200).json({
     ...responseHelper.success({ results, summary }),
+    correlationId: req.correlationId || req.id || null,
     message: 'Bulk invoice-state operation completed',
   });
 });
