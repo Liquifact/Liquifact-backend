@@ -260,5 +260,69 @@ describe('Config Validation', () => {
     process.env.ESCROW_INDEXER_ENABLED = 'yes';
     expect(() => validate()).toThrow();
   });
+
+  // ── CONFIG_RUNTIME_ENABLED flag ──────────────────────────────────────────
+
+  test('CONFIG_RUNTIME_ENABLED defaults to "true" (safe default — surface enabled)', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    const config = validate();
+    expect(config.CONFIG_RUNTIME_ENABLED).toBe('true');
+  });
+
+  test('CONFIG_RUNTIME_ENABLED accepts "true"', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    process.env.CONFIG_RUNTIME_ENABLED = 'true';
+    const config = validate();
+    expect(config.CONFIG_RUNTIME_ENABLED).toBe('true');
+  });
+
+  test('CONFIG_RUNTIME_ENABLED accepts "false" (disables /api/admin/config routes)', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    process.env.CONFIG_RUNTIME_ENABLED = 'false';
+    const config = validate();
+    expect(config.CONFIG_RUNTIME_ENABLED).toBe('false');
+  });
+
+  test('CONFIG_RUNTIME_ENABLED rejects truthy-but-not-"true" values', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    for (const val of ['1', 'yes', 'TRUE', 'enabled', 'on']) {
+      process.env.CONFIG_RUNTIME_ENABLED = val;
+      expect(() => validate()).toThrow();
+    }
+  });
+
+  test('CONFIG_RUNTIME_ENABLED rejects invalid value', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    process.env.CONFIG_RUNTIME_ENABLED = 'invalid';
+    expect(() => validate()).toThrow();
+  });
+
+  // ── INVOICE_STATE_ENABLED flag ───────────────────────────────────────────
+
+  test('INVOICE_STATE_ENABLED defaults to "true" (safe default — routes enabled)', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    const config = validate();
+    expect(config.INVOICE_STATE_ENABLED).toBe('true');
+  });
+
+  test('INVOICE_STATE_ENABLED accepts "true"', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    process.env.INVOICE_STATE_ENABLED = 'true';
+    const config = validate();
+    expect(config.INVOICE_STATE_ENABLED).toBe('true');
+  });
+
+  test('INVOICE_STATE_ENABLED accepts "false"', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    process.env.INVOICE_STATE_ENABLED = 'false';
+    const config = validate();
+    expect(config.INVOICE_STATE_ENABLED).toBe('false');
+  });
+
+  test('INVOICE_STATE_ENABLED rejects invalid value', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    process.env.INVOICE_STATE_ENABLED = 'yes';
+    expect(() => validate()).toThrow();
+  });
 });
 

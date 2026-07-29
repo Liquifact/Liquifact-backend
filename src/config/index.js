@@ -41,6 +41,15 @@ const ConfigSchema = z
     ESCROW_INDEXER_STALE_THRESHOLD_SECONDS: z.coerce.number().min(1).default(300),
     // Escrow read projection — gates the new projection/cache-based escrow read path
     ESCROW_READ_PROJECTION_ENABLED: z.enum(['true', 'false']).default('true'),
+    // Invoice state machine — gates /api/invoices state-transition endpoints.
+    // When 'false', the invoice state routes are not mounted so requests return 404.
+    // Defaults to 'true' (enabled) to preserve existing behaviour.
+    INVOICE_STATE_ENABLED: z.enum(['true', 'false']).default('true'),
+    // Runtime admin config surface — gates POST /api/admin/config and
+    // GET /api/admin/config/sections. When 'false' the router is not mounted
+    // so requests return 404, allowing the surface to be disabled without a
+    // deploy. Defaults to 'true' (enabled).
+    CONFIG_RUNTIME_ENABLED: z.enum(['true', 'false']).default('true'),
     // KYC provider — all optional, but URL+key must be provided together in non-test envs
     KYC_PROVIDER_URL: z.string().url().optional(),
     KYC_PROVIDER_API_KEY: z.string().min(1).optional(),
