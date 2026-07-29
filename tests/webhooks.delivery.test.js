@@ -37,8 +37,9 @@ jest.mock('../src/services/auditLog', () => ({
 
 // Mock prom-client and metrics to avoid Counter constructor errors in test env
 jest.mock('prom-client', () => ({
-  Counter: class { constructor() {} inc() {} },
-  Gauge: class { constructor() {} set() {} },
+  Counter: class { constructor() {} inc() {} labels() { return this; } },
+  Gauge: class { constructor() {} set() {} labels() { return this; } },
+  Histogram: class { constructor() {} observe() {} labels() { return this; } },
   Registry: class {
     constructor() { this.contentType = 'text/plain'; }
     metrics() { return ''; }
@@ -46,18 +47,20 @@ jest.mock('prom-client', () => ({
   collectDefaultMetrics: () => {},
 }), { virtual: true });
 
-jest.mock('../src/metrics', () => ({
-  registry: {
-    contentType: 'text/plain',
-    metrics: jest.fn().mockResolvedValue(''),
-  },
-  escrowIndexerEventsProcessedTotal: { inc: jest.fn() },
-  escrowIndexerEventsSkippedTotal: { inc: jest.fn() },
-  escrowIndexerCycleFailuresTotal: { inc: jest.fn() },
-  escrowIndexerLastCursorAdvanceTimestampSeconds: { set: jest.fn() },
-  metricsAuth: jest.fn(),
-  metricsHandler: jest.fn(),
-}));
+
+jest.mock('../src/metrics', () => {
+  const actual = jest.requireActual('../src/metrics');
+  return {
+    ...actual,
+    escrowIndexerEventsProcessedTotal: { inc: jest.fn() },
+    escrowIndexerEventsSkippedTotal: { inc: jest.fn() },
+    escrowIndexerCycleFailuresTotal: { inc: jest.fn() },
+    escrowIndexerLastCursorAdvanceTimestampSeconds: { set: jest.fn() },
+    webhookReplayTotal: { inc: jest.fn() },
+  };
+});
+
+
 
 
 // ─── Imports ─────────────────────────────────────────────────────────────────

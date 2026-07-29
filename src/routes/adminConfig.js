@@ -8,66 +8,95 @@
  *   section-specific Zod schema from `src/schemas/config.js`, and returns the
  *   validated configuration back to the caller.
  *
- *   Validation failures are rejected with a structured RFC 7807
- *   `application/problem+json` 400 response containing machine-readable
- *   `fieldErrors` so clients can map errors back to specific form fields.
- *
  * GET /api/admin/config/sections
  *   Returns the list of valid section names accepted by the POST endpoint.
+ *   Supports ETag / If-None-Match conditional GET (304).
  *
- * Access: Admin-only (JWT bearer or API key). Tenant-scoped.
+ * DELETE /api/admin/config/:id
+ *   Soft-deletes a persisted config record (issue #31). The row is retained and
+ *   hidden from default reads, and stays restorable for the retention window.
  *
- * Rate limiting (issue #754): a per-client limiter is mounted *before* the
- * `adminStack` so that failed auth attempts still consume quota. This blocks
- * auth-flooding with bogus API keys / JWTs and bounds the blast radius of a
- * buggy redeploy loop hammering this surface. Limits are env-driven and
- * default to 20 requests per 60 s window per client.
+ * POST /api/admin/config/:id/restore
+ *   Restores a soft-deleted record while its retention window is open.
+ *
+ * GET /api/admin/config/:id/deletion-state
+ *   Reports the tombstone: who deleted it, why, when it will be purged.
+ *
+ * POST /api/admin/config/purge
+ *   Runs the retention purge on demand (the same work the scheduled
+ *   maintenance task performs).
  *
  * @module routes/adminConfig
  */
 
 const express = require('express');
+const crypto = require('crypto');
+const { createCompressionMiddleware } = require('../middleware/compression');
 const { adminStack } = require('../middleware/stacks');
 const {
   runtimeConfigSchema,
   validateBody,
-  CONFIG_SECTIONS,
 } = require('../schemas/config');
 const { adminConfigLimiter } = require('../middleware/rateLimit');
-const idempotencyMiddleware = require('../middleware/idempotency');
 const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
 const logger = require('../logger');
-const idempotencyMiddleware = require('../middleware/idempotency');
 
 const router = express.Router();
 
-// ── Apply per-client rate limit *before* admin auth + tenant extraction ─────
-// Mounting the limiter ahead of adminStack ensures failed authentication
-// attempts still count toward each client's quota — defending against
-// auth-flooding as well as legitimate bursts of config writes.
+// Compress config responses above 500 bytes
+router.use(createCompressionMiddleware({ threshold: 500 }));
+
+// Rate limit before auth
 router.use(adminConfigLimiter);
 
-// ── Apply admin auth + tenant extraction to every route ──────────────────────
+// Admin auth + tenant extraction
 router.use(...adminStack);
 
 /**
- * Conditionally applies idempotency logic if the client provides the header.
- * Allows gradual rollout without breaking existing API clients.
+ * Maps a config soft-delete service error onto an RFC 7807 `AppError`.
  *
- * @param {object} req - Express request
- * @param {object} res - Express response
- * @param {function} next - Express next callback
- * @returns {void}
+ * @param {Error & { code?: string, status?: number }} err - Service error.
+ * @param {import('express').Request} req - Request (for `instance`).
+ * @returns {Error} An `AppError` for known codes, or the original error.
  */
-const optionalIdempotency = (req, res, next) => {
-  if (req.header('Idempotency-Key')) {
-    return idempotencyMiddleware(req, res, next);
+function _mapSoftDeleteError(err, req) {
+  const known = {
+    [SOFT_DELETE_ERRORS.INVALID_ID]: {
+      type: 'https://liquifact.com/probs/validation-error',
+      title: 'Validation Error',
+    },
+    [SOFT_DELETE_ERRORS.NOT_FOUND]: {
+      type: 'https://liquifact.com/probs/not-found',
+      title: 'Not Found',
+    },
+    [SOFT_DELETE_ERRORS.ALREADY_DELETED]: {
+      type: 'https://liquifact.com/probs/conflict',
+      title: 'Conflict',
+    },
+    [SOFT_DELETE_ERRORS.NOT_DELETED]: {
+      type: 'https://liquifact.com/probs/conflict',
+      title: 'Conflict',
+    },
+    [SOFT_DELETE_ERRORS.RETENTION_EXPIRED]: {
+      type: 'https://liquifact.com/probs/retention-expired',
+      title: 'Retention Window Expired',
+    },
+  };
+
+  const mapping = err && err.code ? known[err.code] : undefined;
+  if (!mapping) {
+    return err;
   }
-  next();
-};
+
+  return new AppError({
+    ...mapping,
+    status: err.status || 400,
+    detail: err.message,
+    instance: req.originalUrl,
+  });
+}
 
 // ── POST /api/admin/config ────────────────────────────────────────────────────
-
 /**
  * @swagger
  * /api/admin/config:
@@ -85,18 +114,16 @@ const optionalIdempotency = (req, res, next) => {
  *       A machine-readable `fieldErrors` map is returned on any validation
  *       failure so that clients can highlight the offending fields.
  *
- *       **Idempotency**: Requires an `Idempotency-Key` header. Retried
- *       requests with the same key and body return the original cached
- *       response; reusing a key with a different body returns 409.
+ *       **Idempotency (optional, issue #755)**: send an `Idempotency-Key`
+ *       header (8-128 URL-safe characters) to safely retry requests. Retries
+ *       with the same key and body return the original cached response;
+ *       reusing a key with a different body returns 409. Omitting the header
+ *       skips idempotency handling entirely (gradual-rollout behaviour).
  *
  *       **Access**: Admin-only (JWT bearer or API key). Tenant-scoped.
  *       **Rate limit (issue #754)**: per client (API key / IP); default 20
  *       requests per 60 s window. Returns `429` with a `Retry-After` header
  *       when the budget is exhausted.
- *
- *       **Idempotency (issue #755)**: send an `Idempotency-Key` header (8-128
- *       URL-safe characters) to safely retry requests. Retries with the same
- *       key and payload will return the cached response.
  *
  *     tags: [AdminConfig]
  *     security:
@@ -104,11 +131,11 @@ const optionalIdempotency = (req, res, next) => {
  *     parameters:
  *       - in: header
  *         name: Idempotency-Key
- *         required: true
+ *         required: false
  *         schema:
  *           type: string
  *           pattern: '^[A-Za-z0-9._:-]{8,128}$'
- *         description: Unique idempotency key for this config update. Safe to retry with the same key.
+ *         description: Optional idempotency key for this config update. Safe to retry with the same key.
  *     requestBody:
  *       required: true
  *       content:
@@ -131,44 +158,50 @@ const optionalIdempotency = (req, res, next) => {
  *           application/json:
  *             schema:
  *               type: object
+ *               required: [section, config, message]
  *               properties:
  *                 section:
  *                   type: string
+ *                   enum: [webhook, reconciliation, kyc, retention, fraudThresholds, cors]
  *                 config:
  *                   type: object
  *                 message:
  *                   type: string
+ *               additionalProperties: false
  *       400:
- *         description: Validation error — body contains invalid or missing fields, or missing/malformed Idempotency-Key.
+ *         description: Validation error — body contains invalid or missing fields.
  *         content:
  *           application/problem+json:
  *             schema:
  *               type: object
+ *               required: [type, title, status, detail, fieldErrors]
  *               properties:
  *                 type:  { type: string }
  *                 title: { type: string }
  *                 status: { type: integer }
  *                 detail: { type: string }
- *                 code:   { type: string }
  *                 fieldErrors:
  *                   type: object
  *                   additionalProperties: { type: string }
+ *               additionalProperties: false
  *       401:
  *         $ref: '#/components/responses/Problem401'
  *       403:
  *         $ref: '#/components/responses/Problem403'
  *       409:
- *         description: Idempotency key reused with a different request body.
+ *         description: Idempotency conflict — the key was reused with a different payload.
  *         content:
  *           application/problem+json:
  *             schema:
  *               type: object
+ *               required: [type, title, status, detail, instance]
  *               properties:
  *                 type:    { type: string }
  *                 title:   { type: string }
  *                 status:  { type: integer }
  *                 detail:  { type: string }
- *                 requestId: { type: string }
+ *                 instance: { type: string }
+ *               additionalProperties: false
  *       429:
  *         description: Rate limit exceeded (issue #754) — see Retry-After header.
  *         headers:
@@ -180,6 +213,7 @@ const optionalIdempotency = (req, res, next) => {
  *           application/json:
  *             schema:
  *               type: object
+ *               required: [type, title, status, code, retryable, retry_hint, scope, error, message]
  *               properties:
  *                 type:    { type: string }
  *                 title:   { type: string }
@@ -190,42 +224,23 @@ const optionalIdempotency = (req, res, next) => {
  *                 scope:   { type: string }
  *                 error:   { type: string }
  *                 message: { type: string }
+ *               additionalProperties: false
  */
-router.post('/', idempotencyMiddleware, validateBody(runtimeConfigSchema), (req, res) => {
+router.post('/', optionalIdempotency, validateBody(runtimeConfigSchema), (req, res) => {
   // validateBody attaches the parsed, coerced payload to req.validated
-  const { section, config: validatedConfig } = req.validated;
+  const validatedDto = toAdminConfigRequestDto(req.validated);
+  const { section, config: validatedConfig } = fromAdminConfigRequestDto(validatedDto);
 
-  // Apply runtime configuration changes for supported sections.
-  if (section === 'cors') {
-    if (validatedConfig.origins) {
-      // Update the env var so reloadCorsOrigins can re-read it.
-      process.env.CORS_ALLOWED_ORIGINS = validatedConfig.origins.join(',');
-      reloadCorsOrigins();
-    }
-    if (validatedConfig.maxAge !== undefined) {
-      process.env.CORS_MAX_AGE = String(validatedConfig.maxAge);
-      reloadCorsMaxAge();
-    }
-  }
-
-  logger.info(
-    {
+  try {
+    const result = await applyConfig(section, validatedConfig, {
       tenantId: req.tenantId,
-      section,
       adminClient: req.apiClient?.clientId || req.user?.sub,
-    },
-    'Admin runtime config update accepted',
-  );
+    });
 
-  return res.status(200).json({
-    section,
-    config: validatedConfig,
-    message: `Configuration section '${section}' validated and accepted.`,
-  });
-});
+  return res.status(200).json(result);
+}));
 
 // ── GET /api/admin/config/sections ───────────────────────────────────────────
-
 /**
  * @swagger
  * /api/admin/config/sections:
@@ -235,27 +250,45 @@ router.post('/', idempotencyMiddleware, validateBody(runtimeConfigSchema), (req,
  *     description: |
  *       Returns the list of section names accepted by
  *       `POST /api/admin/config`.
+ *       Supports conditional requests via ETag / If-None-Match (304).
  *     tags: [AdminConfig]
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: header
+ *         name: If-None-Match
+ *         schema:
+ *           type: string
+ *         required: false
+ *         description: ETag from a previous response. Returns 304 if unchanged.
  *     responses:
  *       200:
  *         description: Section list retrieved.
+ *         headers:
+ *           ETag:
+ *             schema:
+ *               type: string
+ *             description: Opaque validator for the current sections list.
  *         content:
  *           application/json:
  *             schema:
  *               type: object
+ *               required: [sections]
  *               properties:
  *                 sections:
  *                   type: array
- *                   items: { type: string }
+ *                   items:
+ *                     type: string
+ *                     enum: [webhook, reconciliation, kyc, retention, fraudThresholds, cors]
+ *               additionalProperties: false
  *       401:
  *         $ref: '#/components/responses/Problem401'
  *       403:
  *         $ref: '#/components/responses/Problem403'
  */
-router.get('/sections', (req, res) => {
-  return res.status(200).json({ sections: CONFIG_SECTIONS });
-});
+router.get('/sections', instrumentConfig('config_sections', (req, res) => {
+  return res.status(200).json({ sections: getConfigSections() });
+}));
 
 module.exports = router;
+

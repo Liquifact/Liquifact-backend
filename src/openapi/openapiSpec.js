@@ -25,7 +25,7 @@
 const path = require('path');
 const swaggerJsdoc = require('swagger-jsdoc');
 
-const ROUTES_GLOB = path.join(__dirname, '..', 'routes', '**', '*.js');
+const ROUTES_GLOB = path.join(__dirname, '..', 'routes', '**', '*.js').replace(/\\/g, '/');
 
 /**
  * The hostname pattern for loopback addresses (localhost, 127.x.x.x, ::1).
@@ -274,6 +274,25 @@ const baseDefinition = {
         additionalProperties: false,
       },
       /**
+       * CORS origin rejection error. Returned when a request Origin header
+       * is not in the configured allowlist.
+       */
+      CorsRejection: {
+        type: 'object',
+        required: ['error', 'code'],
+        properties: {
+          error: {
+            type: 'string',
+            enum: ['CORS policy: origin is not allowed.'],
+          },
+          code: {
+            type: 'string',
+            enum: ['CORS_ORIGIN_REJECTED'],
+          },
+        },
+        additionalProperties: false,
+      },
+      /**
        * Summary row from the `reconciliation_runs` table.
        * Intentionally excludes the per-invoice `results` column so that
        * raw on-chain funding values are not surfaced in bulk list responses.
@@ -320,6 +339,329 @@ const baseDefinition = {
         },
         additionalProperties: false,
       },
+      /**
+       * Successful response from `POST /api/invoices/:id/approve`.
+       */
+      InvoiceStateApproveResponse: {
+        type: 'object',
+        required: ['data', 'meta', 'error', 'message'],
+        properties: {
+          data: {
+            type: 'object',
+            required: [
+              'invoiceId',
+              'previousState',
+              'currentState',
+              'transitionedAt',
+              'transitionedBy',
+              'auditLogId',
+            ],
+            properties: {
+              invoiceId: { type: 'string', minLength: 1 },
+              previousState: { type: 'string' },
+              currentState: { type: 'string' },
+              transitionedAt: { type: 'string' },
+              transitionedBy: { type: 'string' },
+              auditLogId: { type: 'string' },
+            },
+            additionalProperties: false,
+          },
+          meta: {
+            type: 'object',
+            required: ['timestamp', 'version'],
+            properties: {
+              timestamp: { type: 'string' },
+              version: { type: 'string' },
+            },
+            additionalProperties: false,
+          },
+          error: { type: 'null' },
+          message: { type: 'string' },
+        },
+        additionalProperties: false,
+      },
+      /**
+       * Successful response from `POST /api/invoices/:id/link-escrow`.
+       */
+      InvoiceStateLinkEscrowResponse: {
+        type: 'object',
+        required: ['data', 'meta', 'error', 'message'],
+        properties: {
+          data: {
+            type: 'object',
+            required: [
+              'invoiceId',
+              'previousState',
+              'currentState',
+              'escrowId',
+              'transitionedAt',
+              'transitionedBy',
+              'auditLogId',
+            ],
+            properties: {
+              invoiceId: { type: 'string', minLength: 1 },
+              previousState: { type: 'string' },
+              currentState: { type: 'string' },
+              escrowId: { type: ['string', 'null'] },
+              transitionedAt: { type: 'string' },
+              transitionedBy: { type: 'string' },
+              auditLogId: { type: 'string' },
+            },
+            additionalProperties: false,
+          },
+          meta: {
+            type: 'object',
+            required: ['timestamp', 'version'],
+            properties: {
+              timestamp: { type: 'string' },
+              version: { type: 'string' },
+            },
+            additionalProperties: false,
+          },
+          error: { type: 'null' },
+          message: { type: 'string' },
+        },
+        additionalProperties: false,
+      },
+      /**
+       * Successful response from `POST /api/invoices/:id/reject`.
+       */
+      InvoiceStateRejectResponse: {
+        type: 'object',
+        required: ['data', 'meta', 'error', 'message'],
+        properties: {
+          data: {
+            type: 'object',
+            required: [
+              'invoiceId',
+              'previousState',
+              'currentState',
+              'reason',
+              'transitionedAt',
+              'transitionedBy',
+              'auditLogId',
+            ],
+            properties: {
+              invoiceId: { type: 'string', minLength: 1 },
+              previousState: { type: 'string' },
+              currentState: { type: 'string' },
+              reason: { type: 'string' },
+              transitionedAt: { type: 'string' },
+              transitionedBy: { type: 'string' },
+              auditLogId: { type: 'string' },
+            },
+            additionalProperties: false,
+          },
+          meta: {
+            type: 'object',
+            required: ['timestamp', 'version'],
+            properties: {
+              timestamp: { type: 'string' },
+              version: { type: 'string' },
+            },
+            additionalProperties: false,
+          },
+          error: { type: 'null' },
+          message: { type: 'string' },
+        },
+        additionalProperties: false,
+      },
+      /**
+       * Successful response from `GET /api/invoices/:id/history`.
+       */
+      InvoiceStateHistoryResponse: {
+        type: 'object',
+        required: ['data', 'meta', 'error', 'message'],
+        properties: {
+          data: {
+            type: 'object',
+            required: ['invoiceId', 'currentState', 'transitions', 'totalTransitions'],
+            properties: {
+              invoiceId: { type: 'string', minLength: 1 },
+              currentState: { type: 'string' },
+              transitions: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  required: ['id', 'timestamp', 'actor'],
+                  properties: {
+                    id: { type: 'string' },
+                    timestamp: { type: 'string' },
+                    actor: { type: 'string' },
+                    fromState: { type: 'string' },
+                    toState: { type: 'string' },
+                    reason: { type: 'string' },
+                    ipAddress: { type: 'string' },
+                  },
+                  additionalProperties: false,
+                },
+              },
+              totalTransitions: { type: 'integer', minimum: 0 },
+            },
+            additionalProperties: false,
+          },
+          meta: {
+            type: 'object',
+            required: ['timestamp', 'version'],
+            properties: {
+              timestamp: { type: 'string' },
+              version: { type: 'string' },
+            },
+            additionalProperties: false,
+          },
+          error: { type: 'null' },
+          message: { type: 'string' },
+        },
+        additionalProperties: false,
+      },
+      /**
+       * Error response from invoice-state transition validation or execution failures.
+       */
+      InvoiceStateErrorResponse: {
+        type: 'object',
+        required: ['data', 'meta', 'error'],
+        properties: {
+          data: { type: 'null' },
+          meta: {
+            type: 'object',
+            required: ['timestamp', 'version'],
+            properties: {
+              timestamp: { type: 'string' },
+              version: { type: 'string' },
+            },
+            additionalProperties: false,
+          },
+          error: {
+            type: 'object',
+            required: ['message', 'code'],
+            properties: {
+              message: { type: 'string' },
+              code: { type: 'string' },
+              details: {
+                type: ['object', 'null'],
+                additionalProperties: true,
+              },
+            },
+            additionalProperties: false,
+          },
+        },
+        additionalProperties: false,
+      },
+      /**
+       * A single escrow event row from the indexer.
+       * Represents an event indexed from Stellar/Soroban contracts.
+       */
+      EscrowEventRow: {
+        type: 'object',
+        required: ['eventId', 'invoiceId', 'eventType', 'ledgerSequence', 'observedAt', 'createdAt'],
+        properties: {
+          eventId: { type: 'string', minLength: 1 },
+          invoiceId: { type: 'string', minLength: 1 },
+          eventType: { type: 'string', minLength: 1 },
+          ledgerSequence: { type: 'integer', minimum: 0 },
+          pagingToken: { type: ['string', 'null'] },
+          contractId: { type: ['string', 'null'] },
+          txHash: { type: ['string', 'null'] },
+          observedAt: { type: 'string', format: 'date-time' },
+          createdAt: { type: 'string', format: 'date-time' },
+        },
+        additionalProperties: false,
+      },
+      /**
+       * Request body for bulk indexer event ingestion.
+       * Each item is validated independently.
+       */
+      IndexerEvent: {
+        type: 'object',
+        required: ['eventId', 'invoiceId', 'eventType', 'ledgerSequence'],
+        properties: {
+          eventId: { type: 'string', minLength: 1, maxLength: 256 },
+          invoiceId: { type: 'string', minLength: 1, maxLength: 128 },
+          eventType: { type: 'string', minLength: 1, maxLength: 128 },
+          ledgerSequence: { type: 'integer', minimum: 1 },
+          pagingToken: { type: 'string', maxLength: 2048 },
+          contractId: { type: ['string', 'null'] },
+          txHash: { type: ['string', 'null'] },
+          eventBody: { type: 'object' },
+          observedAt: { type: 'string', format: 'date-time' },
+        },
+        additionalProperties: false,
+      },
+      /**
+       * Pagination metadata for indexer list response.
+       */
+      IndexerListMeta: {
+        type: 'object',
+        required: ['total', 'limit', 'hasMore'],
+        properties: {
+          total: { type: 'integer', minimum: 0 },
+          limit: { type: 'integer', minimum: 1, maximum: 100 },
+          hasMore: { type: 'boolean' },
+          nextCursor: { type: ['string', 'null'] },
+          page: { type: 'integer', minimum: 1 },
+          totalPages: { type: 'integer', minimum: 0 },
+        },
+        additionalProperties: false,
+      },
+      /**
+       * Successful response from `GET /api/admin/indexer/events`.
+       */
+      IndexerListResponse: {
+        type: 'object',
+        required: ['data', 'meta', 'message'],
+        properties: {
+          data: {
+            type: 'array',
+            items: { $ref: '#/components/schemas/EscrowEventRow' },
+          },
+          meta: { $ref: '#/components/schemas/IndexerListMeta' },
+          message: { type: 'string' },
+        },
+        additionalProperties: false,
+      },
+      /**
+       * Per-item result from bulk indexer event ingestion.
+       */
+      IndexerBulkResultItem: {
+        type: 'object',
+        required: ['index', 'success'],
+        properties: {
+          index: { type: 'integer', minimum: 0 },
+          success: { type: 'boolean' },
+          error: { type: ['string', 'null'] },
+          eventId: { type: ['string', 'null'] },
+        },
+        additionalProperties: false,
+      },
+      /**
+       * Metadata for bulk indexer event ingestion response.
+       */
+      IndexerBulkMeta: {
+        type: 'object',
+        required: ['total', 'succeeded', 'failed'],
+        properties: {
+          total: { type: 'integer', minimum: 0 },
+          succeeded: { type: 'integer', minimum: 0 },
+          failed: { type: 'integer', minimum: 0 },
+        },
+        additionalProperties: false,
+      },
+      /**
+       * Successful response from `POST /api/admin/indexer/events/bulk`.
+       */
+      IndexerBulkResponse: {
+        type: 'object',
+        required: ['data', 'meta', 'message'],
+        properties: {
+          data: {
+            type: 'array',
+            items: { $ref: '#/components/schemas/IndexerBulkResultItem' },
+          },
+          meta: { $ref: '#/components/schemas/IndexerBulkMeta' },
+          message: { type: 'string' },
+        },
+        additionalProperties: false,
+      },
     },
     responses: {
       Problem400: {
@@ -343,6 +685,14 @@ const baseDefinition = {
         content: {
           'application/problem+json': {
             schema: { $ref: '#/components/schemas/Problem' },
+          },
+        },
+      },
+      CorsRejection403: {
+        description: 'CORS origin rejection',
+        content: {
+          'application/json': {
+            schema: { $ref: '#/components/schemas/CorsRejection' },
           },
         },
       },

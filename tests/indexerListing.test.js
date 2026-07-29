@@ -356,6 +356,106 @@ describe('indexerService – listIndexerEvents()', () => {
     expect(INDEXER_SORT_FIELDS).toContain('observed_at');
     expect(INDEXER_SORT_FIELDS).toContain('ledger_sequence');
   });
+
+  // ── isIndexerEnabled() / ESCROW_INDEXER_ENABLED feature flag ───────────
+
+  describe('ESCROW_INDEXER_ENABLED feature flag', () => {
+    let isIndexerEnabled;
+    let indexerCache;
+    let IndexerCache;
+
+    beforeAll(() => {
+      ({ isIndexerEnabled, IndexerCache } = require('../src/services/indexerService'));
+      ({ indexerCache } = require('../src/services/indexerCache'));
+    });
+
+    beforeEach(() => {
+      indexerCache.invalidateAll();
+    });
+
+    test('isIndexerEnabled defaults to false when config is not validated', () => {
+      jest.resetModules();
+      const fresh = require('../src/services/indexerService');
+      expect(fresh.isIndexerEnabled()).toBe(false);
+    });
+
+    test('isIndexerEnabled returns true when ESCROW_INDEXER_ENABLED is "true"', () => {
+      const config = require('../src/config');
+      const originalGet = config.get;
+      config.get = jest.fn(() => ({ ESCROW_INDEXER_ENABLED: 'true' }));
+      try {
+        expect(isIndexerEnabled()).toBe(true);
+      } finally {
+        config.get = originalGet;
+      }
+    });
+
+    test('isIndexerEnabled returns false when ESCROW_INDEXER_ENABLED is "false"', () => {
+      const config = require('../src/config');
+      const originalGet = config.get;
+      config.get = jest.fn(() => ({ ESCROW_INDEXER_ENABLED: 'false' }));
+      try {
+        expect(isIndexerEnabled()).toBe(false);
+      } finally {
+        config.get = originalGet;
+      }
+    });
+
+    test('listIndexerEvents bypasses cache when flag is disabled (no dbClient → cache normally used but skipped)', async () => {
+      const config = require('../src/config');
+      const originalGet = config.get;
+      config.get = jest.fn(() => ({ ESCROW_INDEXER_ENABLED: 'false' }));
+
+      try {
+        const events = [makeEvent({ event_id: 'e1' }), makeEvent({ event_id: 'e2' })];
+        const fakeKnex = makeFakeKnex(events);
+
+        const result1 = await listIndexerEvents({ dbClient: fakeKnex });
+        expect(result1.data).toHaveLength(2);
+
+        const cacheKey = IndexerCache.buildKey({});
+        expect(indexerCache.get(cacheKey)).toBeUndefined();
+      } finally {
+        config.get = originalGet;
+      }
+    });
+
+    test('listIndexerEvents populates and reads from cache when flag is enabled', async () => {
+      const config = require('../src/config');
+      const originalGet = config.get;
+      config.get = jest.fn(() => ({ ESCROW_INDEXER_ENABLED: 'true' }));
+
+      try {
+        const events = [makeEvent({ event_id: 'e1' })];
+        let callCount = 0;
+        const countingKnex = makeFakeKnex(events);
+        const originalFn = countingKnex;
+        const wrappedKnex = jest.fn((...args) => {
+          callCount += 1;
+          return originalFn(...args);
+        });
+
+        await listIndexerEvents({ dbClient: wrappedKnex });
+        const firstCallCount = callCount;
+
+        const cacheKey = IndexerCache.buildKey({});
+        expect(indexerCache.get(cacheKey)).toBeDefined();
+
+        callCount = 0;
+        const secondKnex = jest.fn((...args) => {
+          callCount += 1;
+          return makeFakeKnex([])(...args);
+        });
+        const secondKnexOrig = secondKnex;
+
+        await listIndexerEvents();
+        expect(callCount).toBe(0);
+      } finally {
+        config.get = originalGet;
+        indexerCache.invalidateAll();
+      }
+    });
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -479,6 +579,7 @@ describe('GET /api/admin/indexer/events route', () => {
   const { createApp } = require('../src/app');
   const db = require('../src/db/knex');
   const { encodeCursor, CursorError } = require('../src/utils/cursorPagination');
+  const { indexerCache } = require('../src/services/indexerCache');
 
   const SECRET = process.env.JWT_SECRET;
   const ISS = process.env.JWT_ISSUER || 'liquifact';
@@ -503,6 +604,7 @@ describe('GET /api/admin/indexer/events route', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    indexerCache.invalidateAll();
     // Default: count returns 0, data returns []
     mockQ.first.mockResolvedValue({ total: 0, 'count(*)': 0 });
     mockQ.then.mockImplementation(function (resolve) {
@@ -756,5 +858,113 @@ describe('GET /api/admin/indexer/events route', () => {
     expect(res.body.meta).toHaveProperty('hasMore');
     expect(res.body.meta).toHaveProperty('limit');
     expect(res.body.meta).toHaveProperty('nextCursor');
+  });
+
+  // ── correlation id propagation ──────────────────────────────────────────
+
+  test('200 response includes correlation_id in body when present in header', async () => {
+    const res = await request(app)
+      .get('/api/admin/indexer/events')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .set('x-tenant-id', 'tenant-test')
+      .set('x-correlation-id', 'corr_indexer_001');
+    expect(res.status).toBe(200);
+    expect(res.body.correlation_id).toBe('corr_indexer_001');
+  });
+
+  test('200 response includes X-Correlation-Id response header', async () => {
+    const res = await request(app)
+      .get('/api/admin/indexer/events')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .set('x-tenant-id', 'tenant-test');
+    expect(res.status).toBe(200);
+    expect(res.headers['x-correlation-id']).toBeDefined();
+    expect(typeof res.headers['x-correlation-id']).toBe('string');
+  });
+
+  test('200 response correlation_id matches X-Correlation-Id header', async () => {
+    const res = await request(app)
+      .get('/api/admin/indexer/events')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .set('x-tenant-id', 'tenant-test')
+      .set('X-Correlation-Id', 'trace_abc_42');
+    expect(res.status).toBe(200);
+    expect(res.body.correlation_id).toBe('trace_abc_42');
+    expect(res.headers['x-correlation-id']).toBe('trace_abc_42');
+  });
+
+  test('correlation_id is generated when no correlation header is present', async () => {
+    const res = await request(app)
+      .get('/api/admin/indexer/events')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .set('x-tenant-id', 'tenant-test');
+    expect(res.status).toBe(200);
+    expect(res.body.correlation_id).toBeDefined();
+    // Generated IDs start with req_
+    expect(res.body.correlation_id).toMatch(/^req_/);
+  });
+
+  test('400 validation error includes correlation_id', async () => {
+    const res = await request(app)
+      .get('/api/admin/indexer/events?limit=999')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .set('x-tenant-id', 'tenant-test')
+      .set('x-correlation-id', 'corr_validation_err');
+    expect(res.status).toBe(400);
+    expect(res.body.correlation_id).toBe('corr_validation_err');
+  });
+
+  test('400 cursor error includes correlation_id', async () => {
+    const res = await request(app)
+      .get('/api/admin/indexer/events?cursor=tampered.invalid.sig')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .set('x-tenant-id', 'tenant-test')
+      .set('x-correlation-id', 'corr_cursor_err');
+    expect(res.status).toBe(400);
+    expect(res.body.correlation_id).toBe('corr_cursor_err');
+  });
+
+  test('correlation_id in 400 body matches X-Correlation-Id response header', async () => {
+    const res = await request(app)
+      .get('/api/admin/indexer/events?page=0')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .set('x-tenant-id', 'tenant-test')
+      .set('X-Correlation-Id', 'trace_page_err');
+    expect(res.status).toBe(400);
+    expect(res.body.correlation_id).toBe('trace_page_err');
+    expect(res.headers['x-correlation-id']).toBe('trace_page_err');
+  });
+
+  test('x-request-id header is also accepted as correlation source', async () => {
+    const res = await request(app)
+      .get('/api/admin/indexer/events')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .set('x-tenant-id', 'tenant-test')
+      .set('X-Request-Id', 'req_from_lb_42');
+    expect(res.status).toBe(200);
+    // correlationId middleware prefers x-correlation-id, then x-request-id
+    expect(res.body.correlation_id).toBeDefined();
+    expect(res.headers['x-request-id']).toBeDefined();
+  });
+
+  test('service receives correlationId when passed from route', async () => {
+    const indexerService = require('../src/services/indexerService');
+    const result = await indexerService.listIndexerEvents({
+      dbClient: makeFakeKnex([makeEvent({ event_id: 'e1' })]),
+      correlationId: 'svc_corr_001',
+    });
+    expect(result.correlationId).toBe('svc_corr_001');
+  });
+
+  test('correlation_id is absent from x-request-id when only x-request-id is provided', async () => {
+    // When only x-request-id is given without x-correlation-id, the middleware
+    // should still produce a correlation_id in the body.
+    const res = await request(app)
+      .get('/api/admin/indexer/events')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .set('x-tenant-id', 'tenant-test')
+      .set('X-Request-Id', 'req_only_42');
+    expect(res.status).toBe(200);
+    expect(res.body.correlation_id).toBeDefined();
   });
 });

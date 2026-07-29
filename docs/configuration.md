@@ -4,7 +4,7 @@ This reference is aligned with [`.env.example`](../.env.example). It lists every
 
 Secret values are marked **Secret** and must come from local `.env` files, deployment secret stores, or a KMS. Do not commit real secret values.
 
-For operations guidance and incident response on the configuration subsystem, see [runbook-config.md](./runbook-config.md).
+For operations guidance and incident response on the configuration subsystem, see [runbook-config.md](./runbook-config.md). For notable consumer-facing changes to the admin config HTTP API, see [changelog-config.md](./changelog-config.md).
 
 ## Boot-Time Validation
 
@@ -80,6 +80,7 @@ Any violation causes a fast startup failure with a clear, redacted error message
 | `SOROBAN_MAX_RETRIES` | integer | `3` | No | No | [`src/services/soroban.js`](../src/services/soroban.js) |
 | `SOROBAN_BASE_DELAY` | integer milliseconds | `200` | No | No | [`src/services/soroban.js`](../src/services/soroban.js) |
 | `SOROBAN_MAX_DELAY` | integer milliseconds | `5000` | No | No | [`src/services/soroban.js`](../src/services/soroban.js) |
+| `SOROBAN_MAX_ELAPSED_MS` | integer milliseconds | `10000` | No | No | [`src/services/soroban.js`](../src/services/soroban.js) |
 | `DATABASE_URL` | database URL | Development/test local fallbacks; production requires deployment value | Required for production DB/migrations | **Secret** | [`knexfile.js`](../knexfile.js), [`migrator-config.js`](../migrator-config.js), [`src/services/health.js`](../src/services/health.js) |
 | `AUDIT_LOG_ENABLED` | boolean string | Feature default | No | No | [`.env.example`](../.env.example) |
 | `AUDIT_LOG_FAIL_CLOSED` | boolean string | `false` | No | No | [`.env.example`](../.env.example) |
@@ -92,6 +93,7 @@ Any violation causes a fast startup failure with a clear, redacted error message
 | `STORAGE_IN_MEMORY` | boolean string | unset; auto-on when `NODE_ENV=test` | No | No | [`src/services/storage.js`](../src/services/storage.js) |
 | `STORAGE_HEALTHCHECK_TIMEOUT_MS` | integer milliseconds | `5000` | No | No | [`src/services/storage.js`](../src/services/storage.js) |
 | `METRICS_BEARER_TOKEN` | string | Loopback-only metrics access when unset | Recommended in production | **Secret** | [`src/metrics.js`](../src/metrics.js) |
+| `METRICS_ENABLED` | boolean string | `true` | No | No | [`src/config/index.js`](../src/config/index.js), [`src/metrics.js`](../src/metrics.js) |
 | `API_KEYS` | semicolon-separated JSON objects | Empty registry | Required for API-key clients | **Secret** | [`src/config/apiKeys.js`](../src/config/apiKeys.js), [`src/middleware/apiKeyAuth.js`](../src/middleware/apiKeyAuth.js) |
 | `RATE_LIMIT_WINDOW_MS` | integer milliseconds | `900000` | No | No | [`src/middleware/rateLimit.js`](../src/middleware/rateLimit.js) |
 | `RATE_LIMIT_MAX_REQUESTS` | integer | `100` | No | No | [`src/middleware/rateLimit.js`](../src/middleware/rateLimit.js) |
@@ -101,6 +103,7 @@ Any violation causes a fast startup failure with a clear, redacted error message
 | `RATE_LIMIT_API_KEY_MAX` | integer | `1000` | No | No | [`src/middleware/rateLimit.js`](../src/middleware/rateLimit.js) |
 | `CONFIG_RATE_LIMIT_WINDOW_MS` | integer milliseconds | `60000` | No | No | [`src/middleware/rateLimit.js`](../src/middleware/rateLimit.js) — issue #754 per-client limit on `/api/admin/config` (mounted before `adminStack` so failed auth still counts) |
 | `CONFIG_RATE_LIMIT_MAX` | integer (≥ 1) | `20` | No | No | [`src/middleware/rateLimit.js`](../src/middleware/rateLimit.js) — issue #754 per-client cap, paired with `CONFIG_RATE_LIMIT_WINDOW_MS` |
+| `CONFIG_RUNTIME_ENABLED` | boolean string | `true` | No | No | [`src/config/index.js`](../src/config/index.js) — gates `/api/admin/config` POST / sections endpoints |
 | `WEB_CONCURRENCY` | integer | `1` (single-instance default) | No | No | [`src/middleware/rateLimit.js`](../src/middleware/rateLimit.js) — issues #429 cluster-detection signal |
 | `INVOICE_FRAUD_CEILING` | number > 0 | `10000000` | No | No | [`src/config/verificationThresholds.js`](../src/config/verificationThresholds.js) |
 | `INVOICE_MANUAL_REVIEW_THRESHOLD` | number > 0, `<= INVOICE_FRAUD_CEILING` | `1000000` | No | No | [`src/config/verificationThresholds.js`](../src/config/verificationThresholds.js) |
@@ -121,6 +124,10 @@ Any violation causes a fast startup failure with a clear, redacted error message
 | `IDEMPOTENCY_PURGE_BATCH_SIZE` | integer, `1..10000` | `1000` | No | No | [`src/jobs/idempotencyPurge.js`](../src/jobs/idempotencyPurge.js) |
 | `IDEMPOTENCY_PURGE_INTERVAL_MS` | integer milliseconds, min `60000` | `3600000` | No | No | [`src/jobs/idempotencyPurge.js`](../src/jobs/idempotencyPurge.js) |
 | `IDEMPOTENCY_PURGE_MAX_BATCHES` | integer, `1..1000` | `100` | No | No | [`src/jobs/idempotencyPurge.js`](../src/jobs/idempotencyPurge.js) |
+| `ESCROW_READ_SOFT_DELETE_RETENTION_DAYS` | integer days, `1..3650` | `30` | No | No | [`src/services/escrowReadSoftDelete.js`](../src/services/escrowReadSoftDelete.js) — restore window for soft-deleted escrow-read records |
+| `ESCROW_READ_PURGE_BATCH_SIZE` | integer, `1..10000` | `500` | No | No | [`src/services/escrowReadSoftDelete.js`](../src/services/escrowReadSoftDelete.js) |
+| `ESCROW_READ_PURGE_MAX_BATCHES` | integer, `1..1000` | `100` | No | No | [`src/services/escrowReadSoftDelete.js`](../src/services/escrowReadSoftDelete.js) |
+| `ESCROW_READ_PURGE_INTERVAL_MS` | integer milliseconds, min `60000` | `21600000` (6 h) | No | No | [`src/jobs/escrowReadPurge.js`](../src/jobs/escrowReadPurge.js) |
 <!-- env-reference:end -->
 
 ## Invoice Verification Thresholds
@@ -167,8 +174,18 @@ Every non-approval decision carries a stable, machine-readable `reasonCode` (in 
 
 These codes are part of the service contract: existing values must not be renamed or repurposed.
 
+## Outbound Config Event Webhooks (Issue #975)
+
+Whenever runtime configuration sections are updated via `POST /api/admin/config`, LiquiFact emits an outbound signed `config.updated` webhook event to tenant subscribers.
+
+- **Signature Format**: `X-Signature: t=<timestamp>,v1=<hmac_sha256_hex>`
+- **Payload Bounding**: Config payload size is bounded by `MAX_CONFIG_WEBHOOK_PAYLOAD_BYTES` (32 KB / 32,768 bytes). If a section configuration exceeds 32 KB, the payload `config` object is truncated with `_summary` and `keys` arrays, and `truncated: true` is set.
+- **Retry & Backoff**: Retries on transient HTTP 5xx or network errors using exponential backoff.
+- **Dead-Letter Queue (DLQ)**: Persists failed attempts to `webhook_dead_letters` upon retry exhaustion.
+
 ## Sync Notes
 
 - The reference table above is tested against `.env.example` by [`tests/config.envReference.test.js`](../tests/config.envReference.test.js). Add a row here whenever `.env.example` gains a key.
 - The scoped code consumers from issue #288 are covered: [`src/config/index.js`](../src/config/index.js), [`src/services/escrowSubmit.js`](../src/services/escrowSubmit.js), [`src/middleware/rateLimit.js`](../src/middleware/rateLimit.js), and [`src/metrics.js`](../src/metrics.js).
 - Drift found while documenting: `.env.example` had duplicate `SOROBAN_RPC_URL`, `ESCROW_ADDR_BY_INVOICE`, `JWT_SECRET`, and `API_KEYS` entries. Those duplicates were removed. It also lacked `NETWORK_PASSPHRASE`, `ESCROW_PLATFORM_ADDRESS`, and `ESCROW_PLATFORM_SECRET`, which are consumed by the scoped configuration code; those keys were added without real secret values.
+

@@ -177,3 +177,93 @@ describe('persistence metrics instrumentation', () => {
     });
   });
 });
+
+describe('METRICS_ENABLED=false persistence metrics', () => {
+  afterEach(() => {
+    delete process.env.METRICS_ENABLED;
+    jest.restoreAllMocks();
+  });
+
+  it('isEnabled() returns false when disabled', () => {
+    jest.isolateModules(() => {
+      process.env.METRICS_ENABLED = 'false';
+      const disabledMetrics = require('../src/metrics');
+      expect(disabledMetrics.isEnabled()).toBe(false);
+    });
+  });
+
+  it('persistence metric instances are no-op shims that do not throw', () => {
+    jest.isolateModules(() => {
+      process.env.METRICS_ENABLED = 'false';
+      const disabledMetrics = require('../src/metrics');
+
+      expect(() => {
+        disabledMetrics.persistenceRequestsTotal.labels({ endpoint: 'sme_invoice_upload', status_class: '2xx' }).inc();
+        disabledMetrics.persistenceRequestErrorsTotal.labels({ endpoint: 'sme_invoice_upload', cause: 'internal' }).inc();
+        const endTimer = disabledMetrics.persistenceRequestDurationSeconds.startTimer({ endpoint: 'sme_invoice_upload' });
+        endTimer({ status_class: '2xx' });
+      }).not.toThrow();
+    });
+  });
+
+  it('no-op persistence instruments silently discard all recording calls', () => {
+    jest.isolateModules(() => {
+      process.env.METRICS_ENABLED = 'false';
+      const disabledMetrics = require('../src/metrics');
+
+      disabledMetrics.persistenceRequestsTotal.labels({ endpoint: 'sme_invoice_upload', status_class: '2xx' }).inc();
+      disabledMetrics.persistenceRequestsTotal.labels({ endpoint: 'sme_invoice_upload', status_class: '2xx' }).inc();
+      disabledMetrics.persistenceRequestErrorsTotal.labels({ endpoint: 'sme_invoice_upload', cause: 'storage' }).inc();
+      const endTimer = disabledMetrics.persistenceRequestDurationSeconds.startTimer();
+      endTimer();
+
+      expect(typeof disabledMetrics.persistenceRequestDurationSeconds.observe).toBe('function');
+      expect(typeof disabledMetrics.persistenceRequestsTotal.inc).toBe('function');
+      expect(typeof disabledMetrics.persistenceRequestErrorsTotal.inc).toBe('function');
+    });
+  });
+
+  it('recordPersistenceOutcome does not throw when metrics are disabled', () => {
+    jest.isolateModules(() => {
+      process.env.METRICS_ENABLED = 'false';
+      const disabledMetrics = require('../src/metrics');
+      // Re-require middleware with the disabled metrics
+      const { recordPersistenceOutcome } = require('../src/middleware/persistenceMetrics');
+
+      expect(() => {
+        recordPersistenceOutcome({
+          endpoint: 'sme_invoice_upload',
+          statusCode: 200,
+          durationSeconds: 0.01,
+        });
+      }).not.toThrow();
+    });
+  });
+
+  it('normalizer functions still work when metrics are disabled', () => {
+    jest.isolateModules(() => {
+      process.env.METRICS_ENABLED = 'false';
+      const disabledMetrics = require('../src/metrics');
+
+      expect(disabledMetrics.normalizePersistenceEndpoint('sme_invoice_upload')).toBe('sme_invoice_upload');
+      expect(disabledMetrics.normalizePersistenceEndpoint('nope')).toBe('unknown');
+      expect(disabledMetrics.normalizePersistenceStatusClass(200)).toBe('2xx');
+      expect(disabledMetrics.normalizePersistenceStatusClass(400)).toBe('4xx');
+      expect(disabledMetrics.normalizePersistenceStatusClass(500)).toBe('5xx');
+      expect(disabledMetrics.normalizePersistenceCause(null, 200)).toBe('none');
+      expect(disabledMetrics.normalizePersistenceCause(new Error('boom'), 500)).toBe('internal');
+    });
+  });
+
+  describe('default (unset) behavior', () => {
+    it('defaults to enabled when METRICS_ENABLED is not set', () => {
+      delete process.env.METRICS_ENABLED;
+      jest.isolateModules(() => {
+        delete process.env.METRICS_ENABLED;
+        const freshMetrics = require('../src/metrics');
+        expect(freshMetrics.isEnabled()).toBe(true);
+        expect(typeof freshMetrics.persistenceRequestDurationSeconds.observe).toBe('function');
+      });
+    });
+  });
+});

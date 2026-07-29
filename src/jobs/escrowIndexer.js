@@ -4,6 +4,8 @@ const db = require('../db/knex');
 const logger = require('../logger');
 const { resolveInvoiceByAddress } = require('../config/escrowMap');
 const { escrowReadCache } = require('../services/escrowReadCache');
+const { indexerCache } = require('../services/indexerCache');
+const { isIndexerEnabled } = require('../services/indexerService');
 const {
   escrowIndexerEventsProcessedTotal,
   escrowIndexerEventsSkippedTotal,
@@ -309,6 +311,14 @@ async function persistEscrowEvent({ store, transactionRunner }, rawEvent) {
 
   // Projection writes supersede any process-local response cached for this invoice.
   escrowReadCache.invalidate(event.invoiceId);
+
+  // Invalidate the indexer listing cache so stale total counts and pages are dropped.
+  // Only invalidates when the indexer feature flag is enabled, avoiding unnecessary
+  // cache churn when the indexer surface is disabled.
+  if (isIndexerEnabled()) {
+    indexerCache.invalidateAll();
+  }
+
   return event;
 }
 

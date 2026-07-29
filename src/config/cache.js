@@ -1,5 +1,7 @@
 const DEFAULT_ESCROW_TTL_SECONDS = 30;
 const DEFAULT_ESCROW_MAX_ENTRIES = 500;
+const DEFAULT_INDEXER_TTL_SECONDS = 10;
+const DEFAULT_INDEXER_MAX_ENTRIES = 200;
 
 const DEFAULT_INVOICE_STATE_TTL_SECONDS = 30;
 const DEFAULT_INVOICE_STATE_MAX_ENTRIES = 500;
@@ -45,4 +47,5 @@ const cacheConfig = parseCacheConfig();
 module.exports = {
   cacheConfig,
   parseCacheConfig,
+  DEFAULT_ESCROW_MAX_ENTRIES,
 };

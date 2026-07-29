@@ -666,21 +666,10 @@ When a termination signal (`SIGTERM` or `SIGINT`) is received:
 | `npm run load:baseline` | Run the core endpoint load baseline suite |
 
 Default port: `3001`.
-
-## Caching
-
-The application uses an in-memory cache store (`MemoryCacheStore`) by default for token metadata and other transient data to avoid unbounded memory growth.
-
-### Bounded In-Memory Cache (`MemoryCacheStore`)
-- **Eviction Policy**: Configurable `maxEntries` bound (defaults to `5000`) with **Least Recently Used (LRU)** eviction. Expired entries are also lazily evicted on `get()`.
-- **Metrics**: Emits hit, miss, and eviction counts to Prometheus via standard counters:
-  - `soroban_footprint_cache_hits_total`
-  - `soroban_footprint_cache_misses_total`
-  - `soroban_footprint_cache_evictions_total`
-
-### Escrow Redis Cache
-- **Configuration**: Optional and disabled by default. Set `REDIS_ESCROW_CACHE_ENABLED=true` with `REDIS_URL` to enable it.
-- **Tuning**: `REDIS_ESCROW_CACHE_TTL_SECONDS` is strictly clamped to `5..300`, and `REDIS_ESCROW_LEDGER_GAP_THRESHOLD` controls ledger-gap invalidation.
+Escrow Redis cache is optional and disabled by default; set `REDIS_ESCROW_CACHE_ENABLED=true` with `REDIS_URL` to enable it.
+`REDIS_ESCROW_CACHE_TTL_SECONDS` is strictly clamped to `5..300`, and `REDIS_ESCROW_LEDGER_GAP_THRESHOLD` controls ledger-gap invalidation.
+`ESCROW_READ_PROJECTION_ENABLED` — feature flag that gates the projection/cache-based escrow read path (`getEscrowStateWithProjection`). When set to `false`, the service skips the Redis cache and `escrow_event_projection` table and reads directly from the Soroban contract (live read). Defaults to `true`.
+`CONFIG_RUNTIME_ENABLED` — feature flag that gates the `/api/admin/config` POST and GET `/sections` endpoints. When set to `false`, requests return `404` so the runtime config surface can be disabled without a deploy. Defaults to `true`.
 
 Incremental TypeScript setup and migration guidance lives in `docs/typescript-plan.md`.
 

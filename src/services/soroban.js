@@ -346,8 +346,10 @@ function isRetryable(err) {
  */
 async function withRetry(operation, config) {
   const cfg = Object.assign({}, SOROBAN_RETRY_CONFIG, config);
-  const maxRetries = Math.min(cfg.maxRetries, 10);
-  const maxElapsedMs = Math.min(cfg.maxElapsedMs, 120_000);
+  const rawRetries = Number.isFinite(cfg.maxRetries) ? cfg.maxRetries : 3;
+  const maxRetries = Math.max(0, Math.min(rawRetries, 10));
+  const rawMaxElapsed = Number.isFinite(cfg.maxElapsedMs) ? cfg.maxElapsedMs : 10000;
+  const maxElapsedMs = Math.max(0, Math.min(rawMaxElapsed, 120_000));
 
   const startTime = Date.now();
   let lastErr;

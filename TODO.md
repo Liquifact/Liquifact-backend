@@ -1,19 +1,12 @@
-# TODO - enhancement/reconciliation-14-mismatch-alerts
+# Task: #908 — Gate escrow-read behind a feature flag
 
-- [ ] Inspect current Sentry wiring and matcher for captureException
-- [x] Implement structured mismatch alert helper in `src/jobs/reconcileEscrow.js`:
-  - [x] Keep existing warn log and `escrowReconciliationMismatches.inc()` untouched
-  - [x] Add Sentry capture (minimal, scrubbed fields only) behind Sentry enabled check
-  - [x] Add env configurable mismatch alert threshold + channel
+## Steps
 
-- [ ] Update `src/services/health.js` (`checkReconciliationHealth`) so `/ready` degrades only when `summary.mismatches >= RECONCILIATION_DRIFT_THRESHOLD`
-
-- [ ] Update tests in `tests/reconcileEscrow.test.js`:
-  - [ ] Cover mismatch alerts (log + Sentry capture)
-  - [ ] Cover Sentry disabled
-  - [ ] Cover threshold breach health degradation
-  - [ ] Cover read failure health path
-- [ ] Update documentation `docs/ops-reconcile.md` with env vars + behavior
-- [ ] Run `npm test` and `npm run lint`
-- [ ] Ensure ≥95% test coverage for impacted modules
+- [x] Plan created and approved
+- [x] Step 1: Edit `src/config/index.js` — add `ESCROW_READ_PROJECTION_ENABLED` to Zod schema
+- [x] Step 2: Edit `src/services/escrowRead.js` — gate `getEscrowStateWithProjection()` with feature flag
+- [x] Step 3: Edit `src/config/index.test.js` — add config validation tests for new flag
+- [x] Step 4: Edit `tests/escrow.read.test.js` — add feature flag tests covering flag on, flag off, default
+- [x] Step 5: Edit `README.md` — document the new env flag
+- [x] Step 6: Cannot run `npm run lint` and `npm test` — Node.js is not available in this environment
 

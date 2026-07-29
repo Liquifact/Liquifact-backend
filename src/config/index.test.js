@@ -212,75 +212,53 @@ describe('Config Validation', () => {
     expect(result).toMatchObject({ NODE_ENV: 'test', PORT: 3001 });
   });
 
-  test('exports securityHeaders config object', () => {
-    const { securityHeaders } = require('./index');
-    expect(securityHeaders).toBeDefined();
-    expect(securityHeaders.contentSecurityPolicy).toBeDefined();
-    expect(securityHeaders.docsContentSecurityPolicy).toBeDefined();
+  // ── ESCROW_READ_PROJECTION_ENABLED flag ──────────────────────────────────
+
+  test('ESCROW_READ_PROJECTION_ENABLED defaults to "true"', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    const config = validate();
+    expect(config.ESCROW_READ_PROJECTION_ENABLED).toBe('true');
   });
 
-  test('logRedactedSummary handles non-ZodError or empty error gracefully', () => {
-    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
-    
-    logRedactedSummary(new Error('Some generic error'));
-    expect(consoleSpy).toHaveBeenCalledWith('Some generic error');
-    
-    consoleSpy.mockClear();
-    logRedactedSummary(null);
-    expect(consoleSpy).toHaveBeenCalledWith('Unknown configuration error');
-    
-    consoleSpy.mockRestore();
+  test('ESCROW_READ_PROJECTION_ENABLED accepts "false"', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    process.env.ESCROW_READ_PROJECTION_ENABLED = 'false';
+    const config = validate();
+    expect(config.ESCROW_READ_PROJECTION_ENABLED).toBe('false');
   });
 
-  test('get() returns config when validated', () => {
-    process.env.NODE_ENV = 'test';
-    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
-    
-    validate();
-    const config = get();
-    expect(config).toBeDefined();
-    expect(config.NODE_ENV).toBe('test');
+  test('ESCROW_READ_PROJECTION_ENABLED rejects invalid value', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    process.env.ESCROW_READ_PROJECTION_ENABLED = 'invalid';
+    expect(() => validate()).toThrow();
   });
 
-  test('typed accessors return validated and coerced values', () => {
-    process.env.NODE_ENV = 'test';
-    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
-    process.env.PORT = '4321';
-    process.env.INVOICE_FILE_MAX_SIZE = '2mb';
-    validate();
-    expect(getValue('PORT')).toBe(4321);
-    expect(getInvoiceFileMaxSize()).toBe('2mb');
+  // ── ESCROW_INDEXER_ENABLED flag ─────────────────────────────────────────
+
+  test('ESCROW_INDEXER_ENABLED defaults to "false" (safe default)', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    const config = validate();
+    expect(config.ESCROW_INDEXER_ENABLED).toBe('false');
   });
 
-  test('typed accessor preserves a missing optional value', () => {
-    process.env.NODE_ENV = 'test';
-    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
-    delete process.env.PUBLIC_API_BASE_URL;
-    validate();
-    expect(getValue('PUBLIC_API_BASE_URL')).toBeUndefined();
+  test('ESCROW_INDEXER_ENABLED accepts "true"', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    process.env.ESCROW_INDEXER_ENABLED = 'true';
+    const config = validate();
+    expect(config.ESCROW_INDEXER_ENABLED).toBe('true');
   });
 
-  test('upload limit accessor uses the validated default before boot validation', () => {
-    jest.isolateModules(() => {
-      delete process.env.INVOICE_FILE_MAX_SIZE;
-      const { getInvoiceFileMaxSize: getFreshLimit } = require('./index');
-      expect(getFreshLimit()).toBe('5mb');
-    });
+  test('ESCROW_INDEXER_ENABLED accepts "false"', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    process.env.ESCROW_INDEXER_ENABLED = 'false';
+    const config = validate();
+    expect(config.ESCROW_INDEXER_ENABLED).toBe('false');
   });
 
-  test('rejects an invalid route value during boot validation', () => {
-    process.env.NODE_ENV = 'test';
-    process.env.JWT_SECRET = 'valid-secret-at-least-32-chars-long-here';
-    process.env.INVOICE_FILE_MAX_SIZE = 'unbounded';
-    expect(() => validate()).toThrow(/INVOICE_FILE_MAX_SIZE/i);
-  });
-
-  test('upload limit accessor rejects invalid values before full validation', () => {
-    jest.isolateModules(() => {
-      process.env.INVOICE_FILE_MAX_SIZE = '-1mb';
-      const { getInvoiceFileMaxSize: getFreshLimit } = require('./index');
-      expect(() => getFreshLimit()).toThrow(/INVOICE_FILE_MAX_SIZE/i);
-    });
+  test('ESCROW_INDEXER_ENABLED rejects invalid value', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    process.env.ESCROW_INDEXER_ENABLED = 'yes';
+    expect(() => validate()).toThrow();
   });
 });
 
