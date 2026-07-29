@@ -15,6 +15,7 @@ const {
 
 const { StrKey } = require('@stellar/stellar-sdk');
 const { indexerEventSchema } = require('../schemas/indexerEvent');
+const { INVOICE_ID_REGEX } = require('../schemas/validationHelper');
 
 class ValidationError extends Error {
   /**
@@ -31,7 +32,6 @@ class ValidationError extends Error {
   }
 }
 
-const INVOICE_ID_REGEX = /^[a-zA-Z0-9_-]{1,128}$/;
 const DEFAULT_POLL_INTERVAL_MS = 15_000;
 const DEFAULT_BATCH_SIZE = 100;
 
