@@ -205,6 +205,20 @@ Response:
 }
 ```
 
+### Reconciliation Runs History
+
+A paginated list of recent escrow reconciliation run summaries is exposed to authorized admin callers:
+
+```
+GET /api/admin/reconciliation/runs?limit=20&page=1
+Authorization: Bearer <admin-token>
+```
+
+- **Tenant Scoped**: Only rows belonging to the authenticated tenant are returned.
+- **Pagination**: Supports `limit` (clamped to 1-100) and `page` parameters.
+- **Data Privacy**: Per-invoice results (including contract addresses, XDR, or ledger keys) are intentionally excluded from this endpoint to prevent leaking on-chain data in bulk list responses.
+
+
 ## Alerting
 
 ### Mismatch Detection
