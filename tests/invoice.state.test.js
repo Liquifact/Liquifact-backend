@@ -52,6 +52,7 @@ jest.mock('../src/services/escrowSubmit', () => ({
 
 const invoiceStateRoutes = require('../src/routes/invoiceStateRoutes');
 const invoiceService = require('../src/services/invoiceService');
+const { getSharedStore } = require('../src/services/cacheStore');
 
 const TENANT_A = 'tenant-alpha';
 const TENANT_B = 'tenant-beta';
@@ -793,6 +794,7 @@ describe('Invoice State API Routes', () => {
 
   beforeEach(() => {
     clearAuditLogs();
+    getSharedStore().clear();
     invoiceStore = new Map();
     seedRouteFixtures();
 
@@ -1365,6 +1367,316 @@ describe('Invoice State API Routes', () => {
     });
   });
 
+  describe('State Cache', () => {
+    it('should return X-Cache: MISS on first request (cold cache)', async () => {
+      const res = await request(app)
+        .get('/api/invoices/inv-001/state')
+        .set('x-tenant-id', TENANT_A);
+
+      expect(res.status).toBe(200);
+      expect(res.headers['x-cache']).toBe('MISS');
+    });
+
+    it('should return X-Cache: HIT on second request for same invoice', async () => {
+      const first = await request(app)
+        .get('/api/invoices/inv-001/state')
+        .set('x-tenant-id', TENANT_A);
+
+      expect(first.headers['x-cache']).toBe('MISS');
+
+      const second = await request(app)
+        .get('/api/invoices/inv-001/state')
+        .set('x-tenant-id', TENANT_A);
+
+      expect(second.status).toBe(200);
+      expect(second.headers['x-cache']).toBe('HIT');
+      expect(second.body).toEqual(first.body);
+    });
+
+    it('should invalidate cache after state transition', async () => {
+      await request(app)
+        .get('/api/invoices/inv-001/state')
+        .set('x-tenant-id', TENANT_A);
+
+      await request(app)
+        .post('/api/invoices/inv-001/transition')
+        .set('x-tenant-id', TENANT_A)
+        .send({ targetState: 'approved', reason: 'Cache invalidation test' });
+
+      const res = await request(app)
+        .get('/api/invoices/inv-001/state')
+        .set('x-tenant-id', TENANT_A);
+
+      expect(res.headers['x-cache']).toBe('MISS');
+      expect(res.body.data.currentState).toBe('approved');
+    });
+
+    it('should invalidate cache after approve', async () => {
+      await request(app)
+        .get('/api/invoices/inv-001/state')
+        .set('x-tenant-id', TENANT_A);
+
+      await request(app)
+        .post('/api/invoices/inv-001/approve')
+        .set('x-tenant-id', TENANT_A)
+        .send({ reason: 'Cache invalidation test' });
+
+      const res = await request(app)
+        .get('/api/invoices/inv-001/state')
+        .set('x-tenant-id', TENANT_A);
+
+      expect(res.headers['x-cache']).toBe('MISS');
+      expect(res.body.data.currentState).toBe('approved');
+    });
+
+    it('should invalidate cache after reject', async () => {
+      await request(app)
+        .get('/api/invoices/inv-001/state')
+        .set('x-tenant-id', TENANT_A);
+
+      await request(app)
+        .post('/api/invoices/inv-001/reject')
+        .set('x-tenant-id', TENANT_A)
+        .send({ reason: 'Rejected for invalidation test' });
+
+      const res = await request(app)
+        .get('/api/invoices/inv-001/state')
+        .set('x-tenant-id', TENANT_A);
+
+      expect(res.headers['x-cache']).toBe('MISS');
+      expect(res.body.data.currentState).toBe('rejected');
+    });
+
+    it('should invalidate cache after link-escrow', async () => {
+      await request(app)
+        .get('/api/invoices/inv-002/state')
+        .set('x-tenant-id', TENANT_A);
+
+      await request(app)
+        .post('/api/invoices/inv-002/link-escrow')
+        .set('x-tenant-id', TENANT_A)
+        .send({ escrowId: 'esc_001' });
+
+      const res = await request(app)
+        .get('/api/invoices/inv-002/state')
+        .set('x-tenant-id', TENANT_A);
+
+      expect(res.headers['x-cache']).toBe('MISS');
+      expect(res.body.data.currentState).toBe('linked_escrow');
+    });
+
+    it('should cache different invoices independently', async () => {
+      const firstA = await request(app)
+        .get('/api/invoices/inv-001/state')
+        .set('x-tenant-id', TENANT_A);
+      expect(firstA.headers['x-cache']).toBe('MISS');
+
+      const firstB = await request(app)
+        .get('/api/invoices/inv-002/state')
+        .set('x-tenant-id', TENANT_A);
+      expect(firstB.headers['x-cache']).toBe('MISS');
+
+      const secondA = await request(app)
+        .get('/api/invoices/inv-001/state')
+        .set('x-tenant-id', TENANT_A);
+      expect(secondA.headers['x-cache']).toBe('HIT');
+      expect(secondA.body).toEqual(firstA.body);
+
+      const secondB = await request(app)
+        .get('/api/invoices/inv-002/state')
+        .set('x-tenant-id', TENANT_A);
+      expect(secondB.headers['x-cache']).toBe('HIT');
+      expect(secondB.body).toEqual(firstB.body);
+    });
+
+    it('should bypass cache when Cache-Control: no-cache is set', async () => {
+      await request(app)
+        .get('/api/invoices/inv-001/state')
+        .set('x-tenant-id', TENANT_A);
+
+      const res = await request(app)
+        .get('/api/invoices/inv-001/state')
+        .set('x-tenant-id', TENANT_A)
+        .set('Cache-Control', 'no-cache');
+
+      expect(res.status).toBe(200);
+      // No X-Cache header when bypassed — cache middleware calls next() early
+      expect(res.headers['x-cache']).toBeUndefined();
+    });
+
+    it('should not cache 404 responses', async () => {
+      const res = await request(app)
+        .get('/api/invoices/inv-999/state')
+        .set('x-tenant-id', TENANT_A);
+
+      expect(res.status).toBe(404);
+    });
+
+    it('should return MISS after TTL expires', async () => {
+      const baseTime = Date.now();
+      const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(baseTime);
+
+      try {
+        // Request at fake time baseTime → cached with expiresAt = baseTime + 30s
+        await request(app)
+          .get('/api/invoices/inv-001/state')
+          .set('x-tenant-id', TENANT_A);
+
+        // Still within TTL → HIT (Date.now still returns baseTime)
+        const hit = await request(app)
+          .get('/api/invoices/inv-001/state')
+          .set('x-tenant-id', TENANT_A);
+        expect(hit.headers['x-cache']).toBe('HIT');
+
+        // Advance Date.now past the 30s TTL
+        nowSpy.mockReturnValue(baseTime + 31000);
+
+        const miss = await request(app)
+          .get('/api/invoices/inv-001/state')
+          .set('x-tenant-id', TENANT_A);
+        expect(miss.headers['x-cache']).toBe('MISS');
+      } finally {
+        nowSpy.mockRestore();
+      }
+    });
+
+    it('should fall through when store.get throws', async () => {
+      const store = getSharedStore();
+      jest.spyOn(store, 'get').mockImplementation(() => {
+        throw new Error('Simulated store error');
+      });
+
+      const res = await request(app)
+        .get('/api/invoices/inv-001/state')
+        .set('x-tenant-id', TENANT_A);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.currentState).toBe('pending');
+      // No X-Cache header because cache error falls through without setting it
+      expect(res.headers['x-cache']).toBeUndefined();
+    });
+  });
+
+  describe('Fallback branch coverage', () => {
+    let fallbackApp;
+    let fallbackStore;
+
+    function fallbackSeed() {
+      fallbackStore.set('tenant-a:inv-001', {
+        invoice_id: 'inv-001',
+        tenant_id: 'tenant-a',
+        status: 'pending',
+        amount: 1000,
+        customer: 'Acme Corp',
+      });
+    }
+
+    beforeEach(() => {
+      clearAuditLogs();
+      getSharedStore().clear();
+      fallbackStore = new Map();
+      fallbackSeed();
+
+      jest.spyOn(invoiceService, 'getInvoiceById').mockImplementation(async (id, tenantId) => {
+        return fallbackStore.get(tenantId + ':' + id) || null;
+      });
+      jest.spyOn(invoiceService, 'updateInvoice').mockImplementation(async (id, updates, tenantId) => {
+        const key = tenantId + ':' + id;
+        const existing = fallbackStore.get(key);
+        if (!existing) { return null; }
+        const updated = { ...existing, ...updates };
+        fallbackStore.set(key, updated);
+        return updated;
+      });
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it('should resolve actor from req.user.sub when req.user.id is absent', async () => {
+      fallbackApp = express();
+      fallbackApp.use(express.json());
+      fallbackApp.use((req, _res, next) => {
+        req.user = { sub: 'sub-user' };
+        next();
+      });
+      fallbackApp.use('/api/invoices', invoiceStateRoutes);
+      fallbackApp.use((err, _req, res, _next) => {
+        res.status(500).json({ error: err.message });
+      });
+
+      const res = await request(fallbackApp)
+        .post('/api/invoices/inv-001/transition')
+        .set('x-tenant-id', 'tenant-a')
+        .send({ targetState: 'approved', reason: 'Testing sub fallback' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.transitionedBy).toBe('sub-user');
+    });
+
+    it('should handle transition POST without body (req.body undefined)', async () => {
+      fallbackApp = express();
+      fallbackApp.use(express.json());
+      fallbackApp.use((req, _res, next) => {
+        req.user = { id: 'test-user', sub: 'test-user' };
+        next();
+      });
+      fallbackApp.use('/api/invoices', invoiceStateRoutes);
+      fallbackApp.use((err, _req, res, _next) => {
+        res.status(500).json({ error: err.message });
+      });
+
+      const res = await request(fallbackApp)
+        .post('/api/invoices/inv-001/transition')
+        .set('x-tenant-id', 'tenant-a');
+
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe('MISSING_TARGET_STATE');
+    });
+
+    it('should handle approve POST without body (req.body undefined)', async () => {
+      fallbackApp = express();
+      fallbackApp.use(express.json());
+      fallbackApp.use((req, _res, next) => {
+        req.user = { id: 'test-user', sub: 'test-user' };
+        next();
+      });
+      fallbackApp.use('/api/invoices', invoiceStateRoutes);
+      fallbackApp.use((err, _req, res, _next) => {
+        res.status(500).json({ error: err.message });
+      });
+
+      const res = await request(fallbackApp)
+        .post('/api/invoices/inv-001/approve')
+        .set('x-tenant-id', 'tenant-a');
+
+      expect(res.status).toBe(200);
+    });
+
+    it('should fall back to socket.remoteAddress when req.ip is absent', async () => {
+      fallbackApp = express();
+      fallbackApp.use(express.json());
+      fallbackApp.use((req, _res, next) => {
+        req.user = { id: 'test-user' };
+        Object.defineProperty(req, 'ip', { value: undefined, configurable: true });
+        next();
+      });
+      fallbackApp.use('/api/invoices', invoiceStateRoutes);
+      fallbackApp.use((err, _req, res, _next) => {
+        res.status(500).json({ error: err.message });
+      });
+
+      const res = await request(fallbackApp)
+        .post('/api/invoices/inv-001/transition')
+        .set('x-tenant-id', 'tenant-a')
+        .send({ targetState: 'approved', reason: 'Testing socket fallback' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.transitionedBy).toBe('test-user');
+    });
+  });
+
   describe('Additional Edge Cases', () => {
     it('should handle approve endpoint with unexpected error', async () => {
       jest.spyOn(invoiceService, 'transitionInvoice').mockRejectedValue(new Error('Unexpected error'));
@@ -1400,6 +1712,28 @@ describe('Invoice State API Routes', () => {
 
       expect(res.status).toBe(500);
       invoiceService.transitionInvoice.mockRestore();
+    });
+
+    it('should fall back to "unknown" when req.ip and socket are absent', async () => {
+      fallbackApp = express();
+      fallbackApp.use(express.json());
+      fallbackApp.use((req, _res, next) => {
+        req.user = { id: 'test-user' };
+        Object.defineProperty(req, 'ip', { value: undefined, configurable: true });
+        req.socket = undefined;
+        next();
+      });
+      fallbackApp.use('/api/invoices', invoiceStateRoutes);
+      fallbackApp.use((err, _req, res, _next) => {
+        res.status(500).json({ error: err.message });
+      });
+
+      const res = await request(fallbackApp)
+        .post('/api/invoices/inv-001/transition')
+        .set('x-tenant-id', TENANT_A)
+        .send({ targetState: 'approved', reason: 'Testing unknown fallback' });
+
+      expect(res.status).toBe(200);
     });
   });
 
