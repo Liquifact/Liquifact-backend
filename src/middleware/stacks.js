@@ -12,11 +12,8 @@
 const { authenticateToken } = require('./auth');
 const { extractTenant } = require('./tenant');
 const { authenticateApiKey } = require('./apiKeyAuth');
-const { createAuditLog } = require('../services/auditLog');
-const { loadApiKeyRegistry, timingSafeStringEqual } = require('../config/apiKeys');
 
-/**
-const _adminApiKeyMiddleware = authenticateApiKey({ scope: 'admin' });
+const _adminApiKeyMiddleware = authenticateApiKey({ requiredScope: 'admin' });
 
 /**
  * Accepts either a valid admin JWT or a valid API key.
