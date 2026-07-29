@@ -1,3 +1,5 @@
+const client = require("prom-client");
+const registry = new client.Registry();
 'use strict';
 
 /**
@@ -346,7 +348,6 @@ async function metricsHandler(_req, res) {
 }
 
 /** Shared registry — exported so tests can reset it between runs. */
-const registry = new client.Registry();
 
 if (typeof client.collectDefaultMetrics === 'function') {
   client.collectDefaultMetrics({ register: registry });
