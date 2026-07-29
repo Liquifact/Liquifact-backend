@@ -113,6 +113,7 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.665.0",
     "@aws-sdk/s3-request-presigner": "^3.665.0",
+    "@stacks/common": "^7.5.0",
     "@sentry/node": "^8.0.0",
     "@stellar/stellar-sdk": "^16.0.1",
     "ajv": "^8.17.1",
