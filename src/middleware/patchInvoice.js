@@ -10,7 +10,7 @@
 
 /**
  * Fields a caller is ever permitted to send in a PATCH body.
- * Any key absent from this set is silently stripped before processing.
+ * Any key absent from this set is rejected with a 422 response.
  *
  * @type {ReadonlySet<string>}
  */
@@ -118,11 +118,38 @@ function validatePatchFields(req, res, next) {
     return res.status(400).json({ error: 'Request body must be a JSON object.' });
   }
 
+  const bodyKeys = Object.keys(body);
+  const rejectedKeys = bodyKeys.filter((key) => !MUTABLE_FIELDS.has(key));
+
+  if (rejectedKeys.length > 0) {
+    const fieldErrors = {};
+    for (const key of rejectedKeys) {
+      fieldErrors[key] = 'Field is not mutable';
+    }
+    return res.status(422).json({
+      type: 'https://liquifact.com/probs/validation-error',
+      title: 'Validation Error',
+      status: 422,
+      detail: 'Request body contains unrecognized or forbidden fields.',
+      instance: req.originalUrl,
+      code: 'VALIDATION_ERROR',
+      fieldErrors,
+    });
+  }
+
   const sanitized = extractAllowedFields(body);
 
   if (Object.keys(sanitized).length === 0) {
-    return res.status(400).json({
-      error: 'No valid fields provided. Allowed fields: amount, customer, notes.',
+    return res.status(422).json({
+      type: 'https://liquifact.com/probs/validation-error',
+      title: 'Validation Error',
+      status: 422,
+      detail: 'No valid fields provided. Allowed fields: amount, customer, notes.',
+      instance: req.originalUrl,
+      code: 'VALIDATION_ERROR',
+      fieldErrors: {
+        _root: 'No valid fields provided. Allowed fields: amount, customer, notes.',
+      },
     });
   }
 
