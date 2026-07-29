@@ -255,6 +255,7 @@ function validateTransition(ctx) {
  */
 function buildTransitionError(code, message, statusCode = 400, allowedTransitions) {
   const err = new Error(message);
+  err.name = 'StateTransitionError';
   err.code = code;
   err.statusCode = statusCode;
   if (allowedTransitions) {
@@ -417,4 +418,5 @@ module.exports = {
   executeTransition,
   getTransitionHistory,
   canLinkToEscrow,
+  buildTransitionError,
 };
