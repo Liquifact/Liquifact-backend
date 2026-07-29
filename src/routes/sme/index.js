@@ -20,10 +20,10 @@ const storageService = require('../../services/storage');
 const { extractTenant } = require('../../middleware/tenant');
 const idempotencyMiddleware = require('../../middleware/idempotency');
 const { optionalMultipartIdempotency } = require('../../middleware/multipartIdempotency');
-const logger = require('../../logger');
 const { instrumentPersistence } = require('../../middleware/persistenceMetrics');
 const { MAX_FILE_SIZE_BYTES, validatePersistenceBody, presignedUploadBodySchema } = require('../../schemas/persistence');
 const { createPersistenceRateLimiter } = require('../../middleware/persistenceRateLimit');
+const { persistenceErrorHandler } = require('../../middleware/persistenceErrorHandler');
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -44,8 +44,7 @@ router.post(
   extractTenant,
   idempotencyMiddleware,
   validatePersistenceBody(presignedUploadBodySchema),
-  async (req, res) => {
-    const requestLogger = logger.createRequestLogger(req);
+  async (req, res, next) => {
     try {
       const { fileName, mimeType, fileSize, invoiceId: bodyInvoiceId } = req.validated;
       const tenantId = req.tenantId;
@@ -66,11 +65,7 @@ router.post(
         invoiceId,
       });
     } catch (error) {
-      if (error.code === 'INVALID_MIME_TYPE' || error.code === 'FILE_TOO_LARGE' || error.code === 'INVALID_TENANT_ID') {
-        return res.status(400).json({ error: error.message });
-      }
-      requestLogger.error({ err: error }, 'Presigned URL error');
-      res.status(500).json({ error: 'Failed to generate presigned upload URL' });
+      return next(error);
     }
   }
 );
@@ -82,8 +77,7 @@ router.post(
   upload.single('invoice'),
   extractTenant,
   optionalMultipartIdempotency,
-  instrumentPersistence('sme_invoice_upload', async (req, res) => {
-    const requestLogger = logger.createRequestLogger(req);
+  instrumentPersistence('sme_invoice_upload', async (req, res, next) => {
     try {
       if (!req.file) {
         return res.status(400).json({ error: 'Invoice file is required' });
@@ -109,13 +103,14 @@ router.post(
         invoiceId,
       });
     } catch (error) {
-      if (error.code === 'INVALID_MIME_TYPE' || error.code === 'FILE_TOO_LARGE' || error.code === 'INVALID_TENANT_ID') {
-        return res.status(400).json({ error: error.message });
-      }
-      requestLogger.error({ err: error }, 'Upload error');
-      res.status(500).json({ error: 'Failed to upload invoice' });
+      return next(error);
     }
   })
 );
+
+// Mount the shared persistence error middleware after all route handlers.
+// Inline try/catch blocks have been replaced with next(error) calls so that
+// all persistence errors flow through this centralised handler.
+router.use(persistenceErrorHandler);
 
 module.exports = router;
