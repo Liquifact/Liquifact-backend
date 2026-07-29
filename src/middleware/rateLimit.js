@@ -595,68 +595,52 @@ const invoiceStateLimiter = rateLimit({
 });
 
 /**
- * Rate-limit handler for the /metrics endpoint that returns a uniform
- * 429 response with no internal detail.
+ * Per-client rate limiter for /metrics (issue #744).
+ *
+ * Env vars:
+ *   - `METRICS_RATE_LIMIT_WINDOW_MS` (default 60 000)
+ *   - `METRICS_RATE_LIMIT_MAX`       (default 30)
+ *
+ * @type {import('express').RequestHandler}
+ */
+const metricsLimiter = rateLimit({
+  windowMs: METRICS_RATE_LIMIT_WINDOW_MS,
+  limit: METRICS_RATE_LIMIT_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator,
+  validate: {
+    xForwardedForHeader: false,
+  },
+  handler: metricsRateLimitHandler,
+});
+
+/**
+ * Custom response handler for metrics rate limit violations.
  *
  * @param {import('express').Request} _req - Express request (unused).
  * @param {import('express').Response} res - Express response.
  * @param {import('express').NextFunction} _next - Express next (unused).
- * @param {{ statusCode?: number, windowMs?: number }} [options] - express-rate-limit options.
+ * @param {{ statusCode: number, windowMs: number }} options - RateLimit options.
  * @returns {void}
  */
-function metricsRateLimitHandler(_req, res, _next, options = {}) {
-  const statusCode = Number.isInteger(options.statusCode) ? options.statusCode : 429;
-  const windowMs = Number.isFinite(options.windowMs) ? options.windowMs : METRICS_RATE_LIMIT_WINDOW_MS;
-  const retryAfterSeconds = Math.max(1, Math.ceil(windowMs / 1000));
-
-  if (typeof res.set === 'function') {
-    res.set('Retry-After', String(retryAfterSeconds));
-  }
-
-  const body = {
+function metricsRateLimitHandler(_req, res, _next, options) {
+  res.status(options.statusCode).json({
     type: 'https://liquifact.com/probs/too-many-requests',
     title: 'Too Many Requests',
-    status: statusCode,
+    status: options.statusCode,
     code: 'RATE_LIMITED',
     retryable: true,
-    retry_hint: `Rate-limit threshold breached for /metrics. Wait ${retryAfterSeconds} seconds before retrying.`,
+    retry_hint: 'Wait for the rate-limit window to reset before retrying.',
     scope: 'metrics',
-    message: 'Rate-limit threshold breached for /metrics. Please try again later.',
-    error: 'Too many requests',
-  };
-
-  if (typeof res.status === 'function') {
-    const statusResult = res.status(statusCode);
-    if (statusResult && typeof statusResult.json === 'function') {
-      return statusResult.json(body);
-    }
-    if (statusResult && typeof statusResult.send === 'function') {
-      return statusResult.send(body);
-    }
-    if (typeof res.json === 'function') {
-      return res.json(body);
-    }
-  } else {
-    res.statusCode = statusCode;
-  }
-
-  if (typeof res.json === 'function') {
-    return res.json(body);
-  }
-
-  if (typeof res.send === 'function') {
-    return res.send(body);
-  }
-
-  if (typeof res.end === 'function') {
-    return res.end(JSON.stringify(body));
-  }
-
-  return body;
+    error: 'Too many requests.',
+    message: 'Rate limit threshold breached for /metrics. Please try again later.',
+  });
 }
 
 /**
- * Factory that creates a fresh rate limiter for the /metrics endpoint.
+ * Factory variant of {@link metricsLimiter} for callers (mostly tests)
+ * that need to construct a fresh limiter with different bounds.
  *
  * @returns {import('express').RequestHandler}
  */
@@ -667,16 +651,12 @@ function createMetricsRateLimiter() {
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator,
-    validate: { xForwardedForHeader: false },
+    validate: {
+      xForwardedForHeader: false,
+    },
     handler: metricsRateLimitHandler,
   });
 }
-
-/**
- * Singleton rate limiter for the /metrics endpoint.
- * @type {import('express').RequestHandler}
- */
-const metricsLimiter = createMetricsRateLimiter();
 
 module.exports = {
   createRateLimiter,

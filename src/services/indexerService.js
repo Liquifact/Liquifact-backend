@@ -166,8 +166,9 @@ function _applyFilters(qb, filters) {
  * @param {number}  [options.pagination.page=1]  - 1-based page number (offset mode).
  * @param {number}  [options.pagination.limit=20] - Page size (1–100).
  * @param {import('knex').Knex} [options.dbClient] - Injectable Knex client (for tests).
+ * @param {string} [options.correlationId] - Correlation ID for tracing across layers.
  *
- * @returns {Promise<{ data: object[], meta: object }>}
+ * @returns {Promise<{ data: object[], meta: object, correlationId?: string }>}
  *   `meta` always contains `{ total, limit, hasMore, nextCursor }`.
  *   In offset mode it also contains `{ page, totalPages }`.
  *
@@ -179,6 +180,7 @@ async function listIndexerEvents({
   sorting = {},
   pagination = {},
   dbClient,
+  correlationId,
 } = {}) {
   const knex = dbClient || db;
   const useCache = !dbClient && isIndexerEnabled();
@@ -259,6 +261,7 @@ async function listIndexerEvents({
         hasMore,
         nextCursor,
       },
+      correlationId,
     };
 
     if (useCache) {
@@ -301,6 +304,7 @@ async function listIndexerEvents({
       hasMore: pagedHasMore,
       nextCursor: pagedNextCursor,
     },
+    correlationId,
   };
 
   if (useCache) {

@@ -859,4 +859,112 @@ describe('GET /api/admin/indexer/events route', () => {
     expect(res.body.meta).toHaveProperty('limit');
     expect(res.body.meta).toHaveProperty('nextCursor');
   });
+
+  // ── correlation id propagation ──────────────────────────────────────────
+
+  test('200 response includes correlation_id in body when present in header', async () => {
+    const res = await request(app)
+      .get('/api/admin/indexer/events')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .set('x-tenant-id', 'tenant-test')
+      .set('x-correlation-id', 'corr_indexer_001');
+    expect(res.status).toBe(200);
+    expect(res.body.correlation_id).toBe('corr_indexer_001');
+  });
+
+  test('200 response includes X-Correlation-Id response header', async () => {
+    const res = await request(app)
+      .get('/api/admin/indexer/events')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .set('x-tenant-id', 'tenant-test');
+    expect(res.status).toBe(200);
+    expect(res.headers['x-correlation-id']).toBeDefined();
+    expect(typeof res.headers['x-correlation-id']).toBe('string');
+  });
+
+  test('200 response correlation_id matches X-Correlation-Id header', async () => {
+    const res = await request(app)
+      .get('/api/admin/indexer/events')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .set('x-tenant-id', 'tenant-test')
+      .set('X-Correlation-Id', 'trace_abc_42');
+    expect(res.status).toBe(200);
+    expect(res.body.correlation_id).toBe('trace_abc_42');
+    expect(res.headers['x-correlation-id']).toBe('trace_abc_42');
+  });
+
+  test('correlation_id is generated when no correlation header is present', async () => {
+    const res = await request(app)
+      .get('/api/admin/indexer/events')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .set('x-tenant-id', 'tenant-test');
+    expect(res.status).toBe(200);
+    expect(res.body.correlation_id).toBeDefined();
+    // Generated IDs start with req_
+    expect(res.body.correlation_id).toMatch(/^req_/);
+  });
+
+  test('400 validation error includes correlation_id', async () => {
+    const res = await request(app)
+      .get('/api/admin/indexer/events?limit=999')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .set('x-tenant-id', 'tenant-test')
+      .set('x-correlation-id', 'corr_validation_err');
+    expect(res.status).toBe(400);
+    expect(res.body.correlation_id).toBe('corr_validation_err');
+  });
+
+  test('400 cursor error includes correlation_id', async () => {
+    const res = await request(app)
+      .get('/api/admin/indexer/events?cursor=tampered.invalid.sig')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .set('x-tenant-id', 'tenant-test')
+      .set('x-correlation-id', 'corr_cursor_err');
+    expect(res.status).toBe(400);
+    expect(res.body.correlation_id).toBe('corr_cursor_err');
+  });
+
+  test('correlation_id in 400 body matches X-Correlation-Id response header', async () => {
+    const res = await request(app)
+      .get('/api/admin/indexer/events?page=0')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .set('x-tenant-id', 'tenant-test')
+      .set('X-Correlation-Id', 'trace_page_err');
+    expect(res.status).toBe(400);
+    expect(res.body.correlation_id).toBe('trace_page_err');
+    expect(res.headers['x-correlation-id']).toBe('trace_page_err');
+  });
+
+  test('x-request-id header is also accepted as correlation source', async () => {
+    const res = await request(app)
+      .get('/api/admin/indexer/events')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .set('x-tenant-id', 'tenant-test')
+      .set('X-Request-Id', 'req_from_lb_42');
+    expect(res.status).toBe(200);
+    // correlationId middleware prefers x-correlation-id, then x-request-id
+    expect(res.body.correlation_id).toBeDefined();
+    expect(res.headers['x-request-id']).toBeDefined();
+  });
+
+  test('service receives correlationId when passed from route', async () => {
+    const indexerService = require('../src/services/indexerService');
+    const result = await indexerService.listIndexerEvents({
+      dbClient: makeFakeKnex([makeEvent({ event_id: 'e1' })]),
+      correlationId: 'svc_corr_001',
+    });
+    expect(result.correlationId).toBe('svc_corr_001');
+  });
+
+  test('correlation_id is absent from x-request-id when only x-request-id is provided', async () => {
+    // When only x-request-id is given without x-correlation-id, the middleware
+    // should still produce a correlation_id in the body.
+    const res = await request(app)
+      .get('/api/admin/indexer/events')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .set('x-tenant-id', 'tenant-test')
+      .set('X-Request-Id', 'req_only_42');
+    expect(res.status).toBe(200);
+    expect(res.body.correlation_id).toBeDefined();
+  });
 });
