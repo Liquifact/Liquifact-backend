@@ -27,12 +27,41 @@ const { getAuditLogs } = require('../services/auditLog');
 const { requireKycForFunding, auditKycAccess } = require('../middleware/kycGating');
 const { extractTenant } = require('../middleware/tenant');
 const responseHelper = require('../utils/responseHelper');
+const { cacheResponse, makeInvoiceStateKey } = require('../middleware/cache');
+const { getSharedStore } = require('../services/cacheStore');
+const { cacheConfig } = require('../config/cache');
+const { invoiceStateCacheEvictionsTotal } = require('../metrics');
 
 router.use(extractTenant);
 
 // Per-client (API key / IP) rate limit on the invoice-state endpoints (#739).
 const { invoiceStateLimiter } = require('../middleware/rateLimit');
 router.use(invoiceStateLimiter);
+
+// Response cache for GET /:id/state — bounded, config-driven TTL (#21).
+const cacheState = cacheResponse({
+  ttl: cacheConfig.invoiceStateTtl,
+  store: getSharedStore(),
+  keyFn: makeInvoiceStateKey,
+});
+
+/**
+ * Invalidates the cached state for a given invoice.
+ *
+ * Deletes the cache entry so subsequent reads fetch fresh data.
+ * The eviction is recorded on the invoiceStateCacheEvictionsTotal
+ * counter with reason="invalidation".
+ *
+ * @param {string} tenantId - Tenant identifier.
+ * @param {string} invoiceId - Invoice identifier.
+ * @returns {void}
+ */
+function invalidateInvoiceStateCache(tenantId, invoiceId) {
+  const store = getSharedStore();
+  const key = 'invoiceState:state:' + tenantId + ':' + invoiceId;
+  store.del(key);
+  invoiceStateCacheEvictionsTotal.labels('invalidation').inc();
+}
 
 /**
  * Resolves the acting principal identifier from the authenticated request.
@@ -78,7 +107,7 @@ function sendTransitionError(res, error) {
  * GET /api/invoices/:id/state
  * Returns the current state and allowed transitions for an invoice.
  */
-router.get('/:id/state', async (req, res, next) => {
+router.get('/:id/state', cacheState, async (req, res, next) => {
   const { id } = req.params;
 
   try {
@@ -137,6 +166,8 @@ router.post('/:id/transition', async (req, res, next) => {
       },
     });
 
+    invalidateInvoiceStateCache(req.tenantId, id);
+
     return res.status(200).json({
       ...responseHelper.success({
         invoiceId: id,
@@ -181,6 +212,8 @@ router.post('/:id/approve', async (req, res, next) => {
         action: 'approve',
       },
     });
+
+    invalidateInvoiceStateCache(req.tenantId, id);
 
     return res.status(200).json({
       ...responseHelper.success({
@@ -242,6 +275,8 @@ router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, async (req
       },
     });
 
+    invalidateInvoiceStateCache(req.tenantId, id);
+
     return res.status(200).json({
       ...responseHelper.success({
         invoiceId: id,
@@ -292,6 +327,8 @@ router.post('/:id/reject', async (req, res, next) => {
         action: 'reject',
       },
     });
+
+    invalidateInvoiceStateCache(req.tenantId, id);
 
     return res.status(200).json({
       ...responseHelper.success({
