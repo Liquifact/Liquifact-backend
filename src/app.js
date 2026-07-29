@@ -323,6 +323,8 @@ function createApp() {
       .trim()
       .replace(/\s+/g, '');
 
+    const { result, escrowAddress, error, code, statusCode } = await getEscrowRead(invoiceId);
+
     if (error) {
       return res.status(statusCode).json({ error, code });
     }

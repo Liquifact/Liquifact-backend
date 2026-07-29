@@ -31,12 +31,6 @@ const { invoiceCreateSchema, invoiceUpdateSchema, parseValidationErrors } = requ
 const { escrowBatchReadSchema } = require('../../schemas/escrowBatchRead');
 const { validatePatchFields, detectLockedFieldChange } = require('../../middleware/patchInvoice');
 const { validateHealthQuery, rejectBodyOnGet } = require('../../schemas/health');
-const { z } = require('zod');
-
-/** Zod schema for GET /v1/escrow/:invoiceId path parameters. */
-const escrowReadParamsSchema = z.object({
-  invoiceId: z.string().min(1, 'invoiceId is required').max(128, 'invoiceId too long'),
-});
 
 // ── Sub-router mounts ────────────────────────────────────────────────────────
 router.use('/invest', investRoutes);
