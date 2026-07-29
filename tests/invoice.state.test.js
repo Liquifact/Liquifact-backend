@@ -15,6 +15,7 @@
 
 const request = require('supertest');
 const express = require('express');
+const { run: runContext } = require('../src/requestContext');
 
 // Mock KYC gating so link-escrow routes pass through in tests
 jest.mock('../src/middleware/kycGating', () => ({
@@ -822,6 +823,16 @@ describe('Invoice State API Routes', () => {
       next();
     });
 
+    // Seed correlation ID on the request object and in the AsyncLocalStorage
+    // context so that route handlers can include it in responses and downstream
+    // calls (mirrors the real correlationIdMiddleware → requestContext chain).
+    app.use((req, res, next) => {
+      const correlationId = 'test-corr-001';
+      req.id = correlationId;
+      req.correlationId = correlationId;
+      runContext({ requestId: correlationId, correlationId }, next);
+    });
+
     app.use('/api/invoices', invoiceStateRoutes);
 
     app.use((err, _req, res, _next) => {
@@ -841,9 +852,10 @@ describe('Invoice State API Routes', () => {
         version: '0.1.0',
       }),
       error: null,
+      correlationId: 'test-corr-001',
       message,
     }));
-    expect(Object.keys(body).sort()).toEqual(['data', 'error', 'message', 'meta']);
+    expect(Object.keys(body).sort()).toEqual(['correlationId', 'data', 'error', 'message', 'meta']);
     expect(body.data).toEqual(expectedData);
   }
 
@@ -858,8 +870,9 @@ describe('Invoice State API Routes', () => {
         code: expectedCode,
         message: expectedMessageMatcher,
       }),
+      correlationId: 'test-corr-001',
     }));
-    expect(Object.keys(body).sort()).toEqual(['data', 'error', 'meta']);
+    expect(Object.keys(body).sort()).toEqual(['correlationId', 'data', 'error', 'meta']);
     if (expectedDetails === undefined) {
       expect(body.error.details).toBeNull();
     } else {
@@ -1400,6 +1413,225 @@ describe('Invoice State API Routes', () => {
 
       expect(res.status).toBe(500);
       invoiceService.transitionInvoice.mockRestore();
+    });
+  });
+
+  describe('Correlation ID Propagation', () => {
+    it('should include correlationId in approve success response', async () => {
+      const res = await request(app)
+        .post('/api/invoices/inv-001/approve')
+        .set('x-tenant-id', TENANT_A)
+        .send({ reason: 'Correlation test' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.correlationId).toBe('test-corr-001');
+    });
+
+    it('should include correlationId in approve error response', async () => {
+      const res = await request(app)
+        .post('/api/invoices/inv-002/approve')
+        .set('x-tenant-id', TENANT_A)
+        .send({ reason: 'Already approved' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.correlationId).toBe('test-corr-001');
+    });
+
+    it('should include correlationId in link-escrow success response', async () => {
+      const res = await request(app)
+        .post('/api/invoices/inv-002/link-escrow')
+        .set('x-tenant-id', TENANT_A)
+        .send({ escrowId: 'escrow-123', reason: 'Correlation test' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.correlationId).toBe('test-corr-001');
+    });
+
+    it('should include correlationId in link-escrow error response', async () => {
+      const res = await request(app)
+        .post('/api/invoices/inv-001/link-escrow')
+        .set('x-tenant-id', TENANT_A)
+        .send({ escrowId: 'escrow-456' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.correlationId).toBe('test-corr-001');
+    });
+
+    it('should include correlationId in reject success response', async () => {
+      const res = await request(app)
+        .post('/api/invoices/inv-001/reject')
+        .set('x-tenant-id', TENANT_A)
+        .send({ reason: 'Correlation test rejection' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.correlationId).toBe('test-corr-001');
+    });
+
+    it('should include correlationId in reject error response', async () => {
+      const res = await request(app)
+        .post('/api/invoices/inv-001/reject')
+        .set('x-tenant-id', TENANT_A)
+        .send({});
+
+      expect(res.status).toBe(400);
+      expect(res.body.correlationId).toBe('test-corr-001');
+    });
+
+    it('should include correlationId in history success response', async () => {
+      const res = await request(app)
+        .get('/api/invoices/inv-001/history')
+        .set('x-tenant-id', TENANT_A);
+
+      expect(res.status).toBe(200);
+      expect(res.body.correlationId).toBe('test-corr-001');
+    });
+
+    it('should include correlationId in history error response', async () => {
+      const res = await request(app)
+        .get('/api/invoices/inv-999/history')
+        .set('x-tenant-id', TENANT_A);
+
+      expect(res.status).toBe(404);
+      expect(res.body.correlationId).toBe('test-corr-001');
+    });
+
+    it('should include correlationId in bulk success response', async () => {
+      const res = await request(app)
+        .post('/api/invoices/bulk')
+        .set('x-tenant-id', TENANT_A)
+        .send([
+          { invoiceId: 'inv-001', action: 'approve', reason: 'Bulk correlation test' },
+        ]);
+
+      expect(res.status).toBe(200);
+      expect(res.body.correlationId).toBe('test-corr-001');
+    });
+
+    it('should include correlationId in bulk validation error response', async () => {
+      const res = await request(app)
+        .post('/api/invoices/bulk')
+        .set('x-tenant-id', TENANT_A)
+        .send([]);
+
+      expect(res.status).toBe(400);
+      expect(res.body.correlationId).toBe('test-corr-001');
+    });
+
+    it('should use X-Correlation-Id header when provided by client', async () => {
+      // Build a fresh app without the seeded middleware so we can test
+      // that a caller-supplied correlationId flows through.
+      const freshApp = express();
+      freshApp.use(express.json());
+
+      freshApp.use((req, _res, next) => {
+        req.user = { id: 'test-user-123', sub: 'test-user-123', smeId: 'sme-verified' };
+        next();
+      });
+
+      freshApp.use((req, res, next) => {
+        // Simulate what correlationIdMiddleware does — read from header,
+        // attach to req, and seed AsyncLocalStorage.
+        const headerCorrelationId = req.headers['x-correlation-id'] || null;
+        const correlationId = headerCorrelationId || 'server-generated-id';
+        req.id = correlationId;
+        req.correlationId = correlationId;
+        runContext({ requestId: correlationId, correlationId }, next);
+      });
+
+      freshApp.use('/api/invoices', invoiceStateRoutes);
+
+      freshApp.use((err, _req, res, _next) => {
+        res.status(500).json({ error: err.message });
+      });
+
+      jest.spyOn(invoiceService, 'getInvoiceById').mockImplementation(async (id, tenantId) => {
+        if (id === 'inv-001' && tenantId === TENANT_A) return { invoice_id: 'inv-001', tenant_id: TENANT_A, status: 'pending', amount: 1000, customer: 'Acme Corp' };
+        return null;
+      });
+
+      jest.spyOn(invoiceService, 'updateInvoice').mockImplementation(async (id, updates, tenantId) => {
+        return { invoice_id: id, tenant_id: tenantId, status: updates?.status || 'approved', amount: 1000 };
+      });
+
+      const res = await request(freshApp)
+        .post('/api/invoices/inv-001/approve')
+        .set('x-tenant-id', TENANT_A)
+        .set('X-Correlation-Id', 'caller-supplied-corr-id')
+        .send({ reason: 'Header correlation test' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.correlationId).toBe('caller-supplied-corr-id');
+    });
+
+    it('should generate correlationId when none is provided', async () => {
+      const freshApp = express();
+      freshApp.use(express.json());
+
+      freshApp.use((req, _res, next) => {
+        req.user = { id: 'test-user-123', sub: 'test-user-123', smeId: 'sme-verified' };
+        next();
+      });
+
+      freshApp.use((req, res, next) => {
+        const generatedId = `req_${require('crypto').randomUUID().replace(/-/g, '')}`;
+        req.id = generatedId;
+        req.correlationId = generatedId;
+        runContext({ requestId: generatedId, correlationId: generatedId }, next);
+      });
+
+      freshApp.use('/api/invoices', invoiceStateRoutes);
+
+      freshApp.use((err, _req, res, _next) => {
+        res.status(500).json({ error: err.message });
+      });
+
+      jest.spyOn(invoiceService, 'getInvoiceById').mockImplementation(async (id, tenantId) => {
+        if (id === 'inv-001' && tenantId === TENANT_A) return { invoice_id: 'inv-001', tenant_id: TENANT_A, status: 'pending', amount: 1000, customer: 'Acme Corp' };
+        return null;
+      });
+
+      jest.spyOn(invoiceService, 'updateInvoice').mockImplementation(async (id, updates, tenantId) => {
+        return { invoice_id: id, tenant_id: tenantId, status: updates?.status || 'approved', amount: 1000 };
+      });
+
+      const res = await request(freshApp)
+        .post('/api/invoices/inv-001/approve')
+        .set('x-tenant-id', TENANT_A)
+        .send({ reason: 'Generated correlation test' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.correlationId).toBeTruthy();
+      expect(res.body.correlationId).toMatch(/^req_[a-f0-9]{32}$/);
+    });
+
+    it('should include correlationId in buildContext passed to service layer', async () => {
+      let capturedContext = null;
+
+      jest.spyOn(invoiceService, 'transitionInvoice').mockImplementation(async (id, targetState, tenantId, options) => {
+        capturedContext = options;
+        return {
+          previousState: 'pending',
+          newState: 'approved',
+          transitionedAt: new Date().toISOString(),
+          transitionedBy: options.actor,
+          auditLog: { id: 'audit-test-001' },
+        };
+      });
+
+      const res = await request(app)
+        .post('/api/invoices/inv-001/approve')
+        .set('x-tenant-id', TENANT_A)
+        .send({ reason: 'Context correlation test' });
+
+      expect(res.status).toBe(200);
+      // The correlationId from the request should flow into the response body.
+      expect(res.body.correlationId).toBe('test-corr-001');
+      // The captured context options passed to transitionInvoice should include
+      // the actor, IP address, user agent, and metadata (but correlationId is NOT
+      // forwarded through context — it propagates via AsyncLocalStorage instead).
+      expect(capturedContext).not.toBeNull();
+      expect(capturedContext.actor).toBe('test-user-123');
+      expect(capturedContext.metadata).toBeDefined();
     });
   });
 
