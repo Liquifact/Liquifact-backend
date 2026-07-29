@@ -61,6 +61,8 @@ const ConfigSchema = z
     // Required in production and must use HTTPS. Falls back to localhost in development/test.
     PUBLIC_API_BASE_URL: z.string().url().optional(),
     INVOICE_FILE_MAX_SIZE: InvoiceFileMaxSizeSchema,
+    // Runtime admin config endpoint feature flag — safe default: enabled
+    CONFIG_RUNTIME_ENABLED: z.enum(['true', 'false']).default('true'),
     INVOICE_STATE_ENABLED: z.enum(['true', 'false']).default('true'),
   })
   .superRefine((data, ctx) => {

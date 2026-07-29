@@ -21,12 +21,11 @@ const { CursorError } = require('../utils/cursorPagination');
 const { adminStack } = require('../middleware/stacks');
 const { indexerLimiter } = require('../middleware/rateLimit');
 const { createCompressionMiddleware } = require('../middleware/compression');
-const { mapQueryToDTO, mapDTOToServiceParams } = require('../dto/indexer');
+const { mapQueryToDTO, mapDTOToServiceParams, mapServiceResultToResponseDTO } = require('../dto/indexer');
 const responseHelper = require('../utils/responseHelper');
 const logger = require('../logger');
 const { validateIndexerQuery } = require('../schemas/indexerQuery');
 const { instrumentIndexer } = require('../middleware/indexerMetrics');
-const { mapQueryToDTO, mapDTOToServiceParams, mapServiceResultToResponseDTO } = require('../dto/indexer');
 
 // Compress indexer responses above the default 1 KB threshold.
 // Respects Accept-Encoding (gzip preferred over deflate); small responses

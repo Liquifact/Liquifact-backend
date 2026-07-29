@@ -232,5 +232,26 @@ describe('Config Validation', () => {
     process.env.ESCROW_READ_PROJECTION_ENABLED = 'invalid';
     expect(() => validate()).toThrow();
   });
+
+  // ── CONFIG_RUNTIME_ENABLED flag ──────────────────────────────────────────
+
+  test('CONFIG_RUNTIME_ENABLED defaults to "true"', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    const config = validate();
+    expect(config.CONFIG_RUNTIME_ENABLED).toBe('true');
+  });
+
+  test('CONFIG_RUNTIME_ENABLED accepts "false"', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    process.env.CONFIG_RUNTIME_ENABLED = 'false';
+    const config = validate();
+    expect(config.CONFIG_RUNTIME_ENABLED).toBe('false');
+  });
+
+  test('CONFIG_RUNTIME_ENABLED rejects invalid value', () => {
+    process.env.JWT_SECRET = '0123456789abcdef0123456789abcdef';
+    process.env.CONFIG_RUNTIME_ENABLED = 'invalid';
+    expect(() => validate()).toThrow();
+  });
 });
 
