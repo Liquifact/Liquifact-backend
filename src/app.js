@@ -312,62 +312,18 @@ function createApp() {
   });
 
   // Escrow — GET by invoiceId (delegates to escrowReadService)
-  app.get('/api/escrow/:invoiceId', async (req, res) => {
+  app.get('/api/escrow/:invoiceId', createCompressionMiddleware(), async (req, res) => {
     const invoiceId = String(req.params.invoiceId || '').trim();
     const { result, escrowAddress, error, code, statusCode } = await getEscrowRead(invoiceId);
 
     if (error) {
       return res.status(statusCode).json({ error, code });
-  // Compression middleware: gzip/deflate for large escrow-read responses (issue #961).
-  // Threshold: 1 KB (DEFAULT_THRESHOLD). Respects Accept-Encoding; small responses
-  // pass through uncompressed. Vary: Accept-Encoding is always set.
-  app.get('/api/escrow/:invoiceId', createCompressionMiddleware(), async (req, res) => {
-    const invoiceId = String(req.params.invoiceId || '')
-      .trim()
-      .replace(/\s+/g, '');
-
-    try {
-      // Resolve escrow contract address using the mapping system
-      const escrowAddress = resolveEscrowAddress(invoiceId);
-
-      if (!escrowAddress) {
-        return next(new AppError({
-          type: 'https://liquifact.com/probs/not-found',
-          title: 'Not Found',
-          status: 404,
-          detail: `No escrow contract mapping found for invoice ID '${invoiceId}'`,
-          code: 'NOT_FOUND',
-          retryable: false,
-        }));
-      }
-
-      // Read from projection, cache, or live read fallback
-      const state = await getEscrowStateWithProjection(invoiceId);
-
-      const derived = computeEscrowDerivedFields(state);
-
-      const data = {
-        ...state,
-        ...derived,
-        escrowAddress
-      };
-
-      // Include escrow address in response headers
-      res.set('X-Escrow-Address', escrowAddress);
-      res.json({
-        data,
-        message: state.fromProjection 
-          ? 'Escrow state read from event projection.'
-          : 'Escrow state read from live Soroban contract.',
-      });
-    } catch (error) {
-      return next(error);
     }
 
     res.set('X-Escrow-Address', escrowAddress);
-    res.json({
+    return res.json({
       data: result,
-      message: result.fromProjection
+      message: result && result.fromProjection
         ? 'Escrow state read from event projection.'
         : 'Escrow state read from live Soroban contract.',
     });

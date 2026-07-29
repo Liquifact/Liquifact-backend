@@ -479,6 +479,7 @@ describe('GET /api/admin/indexer/events route', () => {
   const { createApp } = require('../src/app');
   const db = require('../src/db/knex');
   const { encodeCursor, CursorError } = require('../src/utils/cursorPagination');
+  const { indexerCache } = require('../src/services/indexerCache');
 
   const SECRET = process.env.JWT_SECRET;
   const ISS = process.env.JWT_ISSUER || 'liquifact';
@@ -503,6 +504,7 @@ describe('GET /api/admin/indexer/events route', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    indexerCache.invalidateAll();
     // Default: count returns 0, data returns []
     mockQ.first.mockResolvedValue({ total: 0, 'count(*)': 0 });
     mockQ.then.mockImplementation(function (resolve) {
