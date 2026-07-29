@@ -7,6 +7,7 @@ const { requireKycForFunding, auditKycAccess } = require('../middleware/kycGatin
 const responseHelper = require('../utils/responseHelper');
 const { extractTenant } = require('../middleware/tenant');
 const { createCompressionMiddleware } = require('../middleware/compression');
+const invoiceStateErrorHandler = require('../middleware/invoiceStateErrorHandler');
 
 router.use(extractTenant);
 
@@ -52,58 +53,6 @@ function buildContext(req, additionalMetadata = {}) {
       ...additionalMetadata,
     },
   };
-}
-
-/**
- * Sends a standardized error envelope for state-machine validation failures.
- *
- * @param {import('express').Response} res - Express response object.
- * @param {Error & {code?: string, allowedTransitions?: string[], statusCode?: number}} error - The thrown error.
- * @returns {import('express').Response} The error response.
- */
-function sendTransitionError(res, error) {
-  const status = error.statusCode || 400;
-  const details = error.allowedTransitions ? { allowedTransitions: error.allowedTransitions } : null;
-
-  return res.status(status).json(responseHelper.error(error.message, error.code, details));
-}
-
-/**
- * Classifies an HTTP status code into a coarse status bucket.
- *
- * @param {number} statusCode - HTTP status code.
- * @returns {string} Status class label.
- */
-function _classifyStatus(statusCode) {
-  if (statusCode >= 500) {
-    return '5xx';
-  }
-  if (statusCode >= 400) {
-    return '4xx';
-  }
-  return '2xx';
-}
-
-/**
- * Maps an error object to a coarse telemetry cause label.
- *
- * @param {Error|null|undefined} error - Error raised by a handler.
- * @returns {string} Error cause label.
- */
-function _classifyErrorCause(error) {
-  if (!error) {
-    return 'none';
-  }
-  if (error.code && typeof error.code === 'string') {
-    return error.code;
-  }
-  if (error.statusCode >= 500) {
-    return 'server_error';
-  }
-  if (error.statusCode >= 400) {
-    return 'client_error';
-  }
-  return 'unknown_error';
 }
 
 /**
@@ -168,9 +117,6 @@ router.post('/:id/approve', async (req, res, next) => {
       message: 'Invoice approved successfully',
     });
   } catch (error) {
-    if (error.code) {
-      return sendTransitionError(res, error);
-    }
     return next(error);
   }
 });
@@ -238,9 +184,6 @@ router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, async (req
       message: 'Invoice linked to escrow successfully',
     });
   } catch (error) {
-    if (error.code) {
-      return sendTransitionError(res, error);
-    }
     return next(error);
   }
 });
@@ -304,9 +247,6 @@ router.post('/:id/reject', async (req, res, next) => {
       message: 'Invoice rejected successfully',
     });
   } catch (error) {
-    if (error.code) {
-      return sendTransitionError(res, error);
-    }
     return next(error);
   }
 });
@@ -357,9 +297,6 @@ router.get('/:id/history', async (req, res, next) => {
       message: 'Invoice transition history retrieved successfully',
     });
   } catch (error) {
-    if (error.code) {
-      return sendTransitionError(res, error);
-    }
     return next(error);
   }
 });
@@ -421,7 +358,7 @@ const MAX_BULK_ITEMS = 25;
  *             schema:
  *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
  */
-router.post('/bulk', async (req, res, next) => {
+router.post('/bulk', async (req, res, _next) => {
   const items = req.body;
 
   if (!Array.isArray(items)) {
@@ -510,5 +447,10 @@ router.post('/bulk', async (req, res, next) => {
     message: 'Bulk invoice-state operation completed',
   });
 });
+
+// Mount the shared invoice-state error middleware after all route
+// handlers so StateTransitionErrors from any handler receive a
+// consistent response envelope (issue #968).
+router.use(invoiceStateErrorHandler);
 
 module.exports = router;
