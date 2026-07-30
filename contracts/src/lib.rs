@@ -234,6 +234,30 @@ mod tests {
         assert_eq!(recipient_after - recipient_before,  100_i128, "fee recipient should receive 100");
     }
 
+    // ── sequential IDs ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_sequential_bounty_ids() {
+        let (env, contract_id, _fee_recipient, creator, hunter, token) = setup();
+        let client = BountyContractClient::new(&env, &contract_id);
+
+        let id1 = client.create_bounty(&creator, &hunter, &token, &500_i128, &0u32);
+        let id2 = client.create_bounty(&creator, &hunter, &token, &600_i128, &0u32);
+        let id3 = client.create_bounty(&creator, &hunter, &token, &700_i128, &0u32);
+
+        assert_eq!(id1, 0, "first bounty should have id 0");
+        assert_eq!(id2, 1, "second bounty should have id 1");
+        assert_eq!(id3, 2, "third bounty should have id 2");
+
+        // Also verify that all three are distinct stored bounties.
+        let b1 = client.get_bounty(&id1);
+        let b2 = client.get_bounty(&id2);
+        let b3 = client.get_bounty(&id3);
+        assert_eq!(b1.amount, 500_i128);
+        assert_eq!(b2.amount, 600_i128);
+        assert_eq!(b3.amount, 700_i128);
+    }
+
     // ── double-release guard ─────────────────────────────────────────────────
 
     #[test]
