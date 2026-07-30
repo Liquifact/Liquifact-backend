@@ -6,7 +6,9 @@
  */
 
 const { getKycProviderConfig } = require('./kycService');
-const { escrowIndexerLastCursorAdvanceTimestampSeconds, readinessGauge } = require('../metrics');
+const { escrowIndexerLastCursorAdvanceTimestampSeconds, readinessGauge, isEnabled: isMetricsEnabled, registry: metricsRegistry } = require('../metrics');
+
+const METRICS_HEALTH_TIMEOUT_MS = 1000;
 const db = require('../db/knex');
 const cfg = require('../config');
 
@@ -420,6 +422,56 @@ async function checkStorageHealth() {
 }
 
 /**
+ * Checks whether the metrics subsystem can produce Prometheus output.
+ *
+ * Fast (1 s timeout guard) and deliberately non-blocking: metrics is an
+ * observability concern, not a business-critical dependency, so a slow or
+ * failing scrape is reported for operator visibility but never fails the
+ * overall readiness probe (see `performReadinessChecks`) — a scrape hiccup
+ * must not take healthy business traffic down with it.
+ *
+ * Operator-visible statuses:
+ *
+ * - `'healthy'` — the registry produced output within the timeout.
+ * - `'disabled'` — `METRICS_ENABLED=false`; probe skipped, non-blocking.
+ * - `'unhealthy'` — the registry threw or exceeded the timeout.
+ *
+ * @returns {Promise<{status: string, latency?: number, error?: {code: string, hint: string}}>}
+ */
+async function checkMetricsHealth() {
+  if (!isMetricsEnabled()) {
+    return { status: 'disabled' };
+  }
+
+  const start = Date.now();
+  let timeout;
+  try {
+    await Promise.race([
+      metricsRegistry.metrics(),
+      new Promise((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error('metrics_health_timeout')), METRICS_HEALTH_TIMEOUT_MS);
+        if (timeout.unref) { timeout.unref(); }
+      }),
+    ]);
+    return { status: 'healthy', latency: Date.now() - start };
+  } catch (error) {
+    const timedOut = error.message === 'metrics_health_timeout';
+    return {
+      status: 'unhealthy',
+      latency: Date.now() - start,
+      error: {
+        code: timedOut ? 'TIMEOUT' : 'SCRAPE_FAILED',
+        hint: timedOut
+          ? `Metrics registry did not respond within ${METRICS_HEALTH_TIMEOUT_MS}ms.`
+          : 'The Prometheus registry threw while serializing metrics; check recently registered collectors.',
+      },
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
  * Performs all dependency health checks.
  * @returns {Promise<{healthy: boolean, checks: Object}>}
  */
@@ -466,25 +518,30 @@ async function performHealthChecks() {
  * Updates the `readiness_gauge` Prometheus metric (1 = ready, 0.5 = degraded,
  * 0 = not ready). Degraded Soroban RPC (slow) does NOT block readiness.
  *
+ * The metrics sub-check is included for operator visibility only: it never
+ * contributes to `healthy` (see `checkMetricsHealth`).
+ *
  * @returns {Promise<{
  *   healthy: boolean,
  *   checks: {
  *     database: Object,
  *     soroban: Object,
  *     storage: Object,
- *     reconciliation: Object
+ *     reconciliation: Object,
+ *     metrics: Object
  *   }
  * }>}
  */
 async function performReadinessChecks() {
-  const [database, soroban, storage, reconciliation] = await Promise.all([
+  const [database, soroban, storage, reconciliation, metrics] = await Promise.all([
     checkDatabaseHealth(),
     checkSorobanHealth(),
     checkStorageHealth(),
     checkReconciliationHealth(),
+    checkMetricsHealth(),
   ]);
 
-  const checks = { database, soroban, storage, reconciliation };
+  const checks = { database, soroban, storage, reconciliation, metrics };
   // In-memory and explicitly-disabled probes are treated as readiness-OK.
   // Production deployments missing the bucket or with an unreachable
   // bucket DO block readiness.
@@ -578,6 +635,7 @@ module.exports = {
   checkStorageHealth,
   checkIndexerStaleness,
   checkReconciliationHealth,
+  checkMetricsHealth,
   performHealthChecks,
   performReadinessChecks,
   inspectPoolHealth,

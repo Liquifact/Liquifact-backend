@@ -24,6 +24,7 @@ const { instrumentPersistence } = require('../../middleware/persistenceMetrics')
 const { MAX_FILE_SIZE_BYTES, validatePersistenceBody, presignedUploadBodySchema } = require('../../schemas/persistence');
 const { createPersistenceRateLimiter } = require('../../middleware/persistenceRateLimit');
 const { createCompressionMiddleware } = require('../../middleware/compression');
+const { persistenceErrorHandler } = require('../../middleware/persistenceErrorHandler');
 
 const upload = multer({
   storage: multer.memoryStorage(),
