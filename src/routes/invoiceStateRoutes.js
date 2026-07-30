@@ -469,11 +469,12 @@ router.get('/:id/history', async (req, res, next) => {
   }
 });
 
-const MAX_BULK_ITEMS = 25;
-
 /**
  * POST /api/invoices/bulk
- * Processes a batch of invoice-state operations and returns per-item results.
+ * Thin HTTP wrapper: parses/shape-validates the body, delegates batch-size
+ * validation, per-item validation, and action dispatch to
+ * `invoiceStateService.processBulkOperations` (#1113), then translates the
+ * result (or a thrown `StateTransitionError`) into a response.
  */
 /**
  * @swagger
@@ -526,7 +527,7 @@ const MAX_BULK_ITEMS = 25;
  *             schema:
  *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
  */
-router.post('/bulk', async (req, res, _next) => {
+router.post('/bulk', async (req, res, next) => {
   const items = req.body;
 
   if (!Array.isArray(items)) {
@@ -536,94 +537,21 @@ router.post('/bulk', async (req, res, _next) => {
     });
   }
 
-  if (items.length === 0) {
-    return res.status(400).json({
-      ...responseHelper.error('Batch must contain at least one invoice-state operation', 'EMPTY_BATCH'),
+  try {
+    const baseContext = buildContext(req);
+    const { results, summary } = await invoiceStateService.processBulkOperations(items, req.tenantId, baseContext);
+
+    return res.status(200).json({
+      ...responseHelper.success({ results, summary }),
       correlationId: getCorrelationId(req),
+      message: 'Bulk invoice-state operation completed',
     });
-  }
-
-  if (items.length > MAX_BULK_ITEMS) {
-    return res.status(400).json({
-      ...responseHelper.error(`Batch size exceeds maximum of ${MAX_BULK_ITEMS}`, 'BATCH_OVER_CAP'),
-      correlationId: getCorrelationId(req),
-    });
-  }
-
-  const results = [];
-
-  for (const [index, item] of items.entries()) {
-    let invoiceId;
-    let action;
-    let reason;
-    let escrowId;
-    let targetState;
-
-    try {
-      const payload = item || {};
-      ({ invoiceId, action, reason, escrowId, targetState } = payload);
-
-      if (!invoiceId || typeof invoiceId !== 'string' || invoiceId.trim().length === 0) {
-        throw Object.assign(new Error('invoiceId is required and must be a non-empty string'), { code: 'MISSING_INVOICE_ID' });
-      }
-
-      if (!action || typeof action !== 'string') {
-        throw Object.assign(new Error('action is required and must be a string'), { code: 'MISSING_ACTION' });
-      }
-
-      const context = buildContext(req, { action, bulkIndex: index });
-      let result;
-
-      switch (action) {
-        case 'approve': {
-          result = await invoiceStateService.approve(invoiceId.trim(), req.tenantId, reason, context);
-          results.push({ index, success: true, action, result });
-          break;
-        }
-        case 'reject': {
-          result = await invoiceStateService.reject(invoiceId.trim(), req.tenantId, reason, context);
-          results.push({ index, success: true, action, result });
-          break;
-        }
-        case 'link-escrow': {
-          result = await invoiceStateService.linkEscrow(invoiceId.trim(), req.tenantId, escrowId || null, reason, context);
-          results.push({ index, success: true, action, result });
-          break;
-        }
-        case 'transition': {
-          if (!targetState || typeof targetState !== 'string' || targetState.trim().length === 0) {
-            throw Object.assign(new Error('targetState is required for transition action'), { code: 'MISSING_TARGET_STATE' });
-          }
-          result = await invoiceStateService.transition(invoiceId.trim(), req.tenantId, targetState.trim(), reason, context);
-          results.push({ index, success: true, action, result });
-          break;
-        }
-        default: {
-          throw Object.assign(new Error(`Unknown action: ${action}`), { code: 'INVALID_ACTION' });
-        }
-      }
-    } catch (error) {
-      console.error('BULK ITEM ERROR', { index, action, invoiceId, code: error.code, message: error.message, stack: error.stack });
-      results.push({
-        index,
-        success: false,
-        error: error.message,
-        code: error.code || 'BULK_ITEM_ERROR',
-      });
+  } catch (error) {
+    if (error.code) {
+      return sendTransitionError(res, error, getCorrelationId(req));
     }
+    return next(error);
   }
-
-  const summary = {
-    total: results.length,
-    succeeded: results.filter((item) => item.success).length,
-    failed: results.filter((item) => !item.success).length,
-  };
-
-  return res.status(200).json({
-    ...responseHelper.success({ results, summary }),
-    correlationId: req.correlationId || req.id || null,
-    message: 'Bulk invoice-state operation completed',
-  });
 });
 
 // Mount the shared invoice-state error middleware after all route
