@@ -69,7 +69,11 @@ const {
  *         name: cursor
  *         schema:
  *           type: string
- *         description: Opaque cursor from the previous page's `nextCursor` field.
+ *           minLength: 1
+ *           maxLength: 512
+ *         description: |
+ *           Opaque cursor from the previous page's `nextCursor` field.
+ *           Rejected with `400` when empty or longer than 512 characters.
  *       - in: query
  *         name: limit
  *         schema:
@@ -77,7 +81,10 @@ const {
  *           minimum: 1
  *           maximum: 100
  *           default: 20
- *         description: Items per page (1–100, default 20).
+ *         description: |
+ *           Items per page (1–100, default 20). Must be a bare integer.
+ *           Non-integer (`abc`, `1e5`, `20abc`) or out-of-range (`0`, `101`)
+ *           values are rejected with `400` rather than silently clamped.
  *     responses:
  *       200:
  *         description: Metrics retrieved successfully
@@ -134,7 +141,11 @@ const {
  *                   type: string
  *                   format: date-time
  *       400:
- *         description: Bad Request — missing tenant context, invalid cursor, or invalid query params
+ *         description: |
+ *           Bad Request — missing tenant context, invalid cursor, or invalid
+ *           query params. Query-validation failures are returned as an RFC 7807
+ *           problem document carrying `code: METRICS_VALIDATION_ERROR` and a
+ *           `fieldErrors` map keyed by parameter name.
  *       401:
  *         description: Unauthorized
  */
@@ -153,17 +164,13 @@ router.get(
       const rawMetrics = await invoiceService.getSmeInvoiceCounts(tenantId, userId);
       const data = toSmeMetricsResponse(rawMetrics);
 
-      // Prefer schema-validated (and coerced) query values; fall back to raw
-      // query strings to preserve backward compatibility.
+      // Only schema-validated query values are consumed here. `validateGetMetricsQuery`
+      // runs ahead of this handler and rejects the request outright on malformed
+      // input, so an unvalidated raw query string can never reach the store.
       const validatedQuery = req.validatedQuery || {};
-      const cursor =
-        validatedQuery.cursor !== undefined
-          ? validatedQuery.cursor
-          : req.query.cursor;
+      const { cursor } = validatedQuery;
       const limit =
-        validatedQuery.limit !== undefined
-          ? String(validatedQuery.limit)
-          : req.query.limit;
+        validatedQuery.limit !== undefined ? String(validatedQuery.limit) : undefined;
 
       const usePagination = cursor !== undefined || limit !== undefined;
 
@@ -245,6 +252,7 @@ router.get(
  *           schema:
  *             type: object
  *             required: [operations]
+ *             additionalProperties: false
  *             properties:
  *               operations:
  *                 type: array
@@ -252,13 +260,16 @@ router.get(
  *                 minItems: 1
  *                 items:
  *                   type: object
+ *                   additionalProperties: false
  *                   required: [tenantId, userId]
  *                   properties:
  *                     tenantId:
  *                       type: string
+ *                       minLength: 1
  *                       maxLength: 128
  *                     userId:
  *                       type: string
+ *                       minLength: 1
  *                       maxLength: 128
  *     responses:
  *       200:
@@ -298,7 +309,44 @@ router.get(
  *                     timestamp:
  *                       type: string
  *       400:
- *         description: Validation error (empty array, over-cap, missing fields)
+ *         description: |
+ *           Validation error — empty or over-cap `operations` array, missing or
+ *           wrongly-typed `tenantId`/`userId`, an ID longer than 128 characters,
+ *           or any unknown field at either level.
+ *
+ *           Returned as an RFC 7807 problem document with a machine-readable
+ *           `code` of `METRICS_VALIDATION_ERROR`, a `fieldErrors` map of
+ *           human-readable messages, and a parallel `fieldCodes` map of stable
+ *           per-field codes (`FIELD_REQUIRED`, `FIELD_TYPE_INVALID`,
+ *           `FIELD_TOO_LONG`, `ARRAY_TOO_LARGE`, `UNKNOWN_FIELD`, …).
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 type:
+ *                   type: string
+ *                 title:
+ *                   type: string
+ *                 status:
+ *                   type: integer
+ *                 detail:
+ *                   type: string
+ *                 code:
+ *                   type: string
+ *                   example: METRICS_VALIDATION_ERROR
+ *                 fieldErrors:
+ *                   type: object
+ *                   additionalProperties:
+ *                     type: array
+ *                     items:
+ *                       type: string
+ *                 fieldCodes:
+ *                   type: object
+ *                   additionalProperties:
+ *                     type: array
+ *                     items:
+ *                       type: string
  *       401:
  *         description: Unauthorized
  *       409:

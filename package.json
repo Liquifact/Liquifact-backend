@@ -107,6 +107,12 @@
         "functions": 95,
         "lines": 95,
         "statements": 95
+      },
+      "src/constants/metricsValidationCodes.js": {
+        "branches": 95,
+        "functions": 95,
+        "lines": 95,
+        "statements": 95
       }
     }
   },
