@@ -103,30 +103,28 @@ describe('getMetricsQuerySchema', () => {
     });
   });
 
-  describe('limit clamping and coercion', () => {
-    it('clamps limit above max to 100', () => {
+  describe('limit bounds and coercion', () => {
+    // Input hardening: an out-of-range or malformed `limit` is now rejected
+    // outright. It was previously clamped (999 -> 100) or silently dropped
+    // ('abc' -> undefined), which hid the caller's mistake from them.
+    it('rejects limit above max instead of clamping to 100', () => {
       const result = getMetricsQuerySchema.safeParse({ limit: '999' });
-      expect(result.success).toBe(true);
-      expect(result.data.limit).toBe(100);
+      expect(result.success).toBe(false);
     });
 
-    it('clamps limit below min to 1', () => {
+    it('rejects limit below min instead of clamping to 1', () => {
       const result = getMetricsQuerySchema.safeParse({ limit: '-5' });
-      expect(result.success).toBe(true);
-      expect(result.data.limit).toBe(1);
+      expect(result.success).toBe(false);
     });
 
-    it('treats non-numeric limit as undefined (no error)', () => {
+    it('rejects non-numeric limit instead of treating it as undefined', () => {
       const result = getMetricsQuerySchema.safeParse({ limit: 'abc' });
-      expect(result.success).toBe(true);
-      expect(result.data.limit).toBeUndefined();
+      expect(result.success).toBe(false);
     });
 
-    it('treats limit=0 as 1 after clamping (max(parsed, 1))', () => {
+    it('rejects limit=0 as below the minimum', () => {
       const result = getMetricsQuerySchema.safeParse({ limit: '0' });
-      expect(result.success).toBe(true);
-      // 0 parsed => Math.max(0, 1) = 1
-      expect(result.data.limit).toBe(1);
+      expect(result.success).toBe(false);
     });
 
     it('accepts limit at boundary value 1', () => {
