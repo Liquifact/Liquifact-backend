@@ -4,6 +4,7 @@ const express = require('express');
 const kycWebhookService = require('../services/kycWebhookService');
 const asyncHandler = require('../utils/asyncHandler');
 const kycWebhookErrorHandler = require('../middleware/kycWebhookErrorHandler');
+const { createCompressionMiddleware } = require('../middleware/compression');
 const {
   kycWebhookRequestDurationSeconds,
   kycWebhookRequestsTotal,
@@ -18,6 +19,11 @@ const {
 } = require('../constants/kycWebhooks');
 
 const router = express.Router();
+
+// Compress kyc-webhooks responses above the default 1 KB threshold.
+// Respects Accept-Encoding (gzip preferred over deflate); small responses
+// (e.g. the POST ingestion ack) are always sent as plain JSON.
+router.use(createCompressionMiddleware());
 
 /**
  * Returns true when the KYC webhook endpoint is enabled.
