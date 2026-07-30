@@ -34,6 +34,11 @@ router.use(indexerLimiter);
 // file.
 router.use(...adminStack);
 
+// Compress indexer responses above the default 1 KB threshold.
+// Respects Accept-Encoding (gzip preferred over deflate); small responses
+// are always sent as plain JSON regardless of the client's encoding preference.
+router.use(createCompressionMiddleware());
+
 /**
  * @swagger
  * /api/admin/indexer/events:

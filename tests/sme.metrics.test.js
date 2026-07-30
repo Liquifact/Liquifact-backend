@@ -288,7 +288,7 @@ describe('SME Metrics API', () => {
       expect(res.body.meta.nextCursor).toBeNull();
     });
 
-    test('clamps limit to maximum of 100', async () => {
+    test('accepts limit at the maximum of 100', async () => {
       const invoices = Array.from({ length: 50 }, (_, i) => ({
         invoice_id: `clamp_${i}`,
         sme_id: userId,
@@ -300,13 +300,21 @@ describe('SME Metrics API', () => {
       await db('invoices').insert(invoices);
 
       const res = await request(app)
-        .get('/api/sme/metrics?limit=999')
+        .get('/api/sme/metrics?limit=100')
         .set('Authorization', `Bearer ${token}`);
 
       expect(res.status).toBe(200);
       expect(res.body.meta.limit).toBe(100);
       expect(res.body.meta.invoices).toHaveLength(50);
       expect(res.body.meta.hasMore).toBe(false);
+    });
+
+    test('rejects limit above the maximum instead of clamping it', async () => {
+      const res = await request(app)
+        .get('/api/sme/metrics?limit=999')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(400);
     });
 
     test('rejects malformed cursor with 400', async () => {
@@ -457,40 +465,38 @@ describe('SME Metrics API', () => {
 
   // ── Validation-failure: invalid (non-throwing) limit values ────────────
 
-  describe('validation-failure — invalid limit values are clamped, not rejected', () => {
+  describe('validation-failure — invalid limit values are rejected, not repaired', () => {
     beforeEach(async () => {
       await db('invoices').insert([
         { invoice_id: 'lv1', sme_id: userId, tenant_id: tenantId, status: 'verified', amount: 100, customer: 'LV1' },
       ]);
     });
 
-    test('non-numeric limit falls back to the default page size', async () => {
+    // These previously returned 200 by silently substituting a default or
+    // clamped page size, which hid the bad input from the caller. Malformed and
+    // out-of-range values now fail closed with a structured 400.
+    test('non-numeric limit is rejected rather than falling back to a default', async () => {
       const res = await request(app)
         .get('/api/sme/metrics?limit=not-a-number')
         .set('Authorization', `Bearer ${token}`);
 
-      expect(res.status).toBe(200);
-      expect(res.body.meta.limit).toBe(20);
+      expect(res.status).toBe(400);
     });
 
-    test('zero limit is falsy and falls back to the default page size (not clamped to 1)', async () => {
-      // `parseInt('0', 10) || 20` treats 0 as falsy, so this takes the same
-      // default-fallback path as a non-numeric limit rather than clamping to 1.
+    test('zero limit is rejected as below the minimum', async () => {
       const res = await request(app)
         .get('/api/sme/metrics?limit=0')
         .set('Authorization', `Bearer ${token}`);
 
-      expect(res.status).toBe(200);
-      expect(res.body.meta.limit).toBe(20);
+      expect(res.status).toBe(400);
     });
 
-    test('negative limit is clamped up to the minimum of 1', async () => {
+    test('negative limit is rejected rather than clamped up to 1', async () => {
       const res = await request(app)
         .get('/api/sme/metrics?limit=-5')
         .set('Authorization', `Bearer ${token}`);
 
-      expect(res.status).toBe(200);
-      expect(res.body.meta.limit).toBe(1);
+      expect(res.status).toBe(400);
     });
   });
 
