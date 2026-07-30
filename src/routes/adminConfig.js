@@ -38,19 +38,13 @@ const {
   validateBody,
 } = require('../schemas/config');
 const { adminConfigLimiter } = require('../middleware/rateLimit');
+const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
+const { configErrorHandler } = require('../middleware/configErrorHandler');
 const optionalIdempotency = require('../middleware/optionalIdempotency');
-const {
-  toAdminConfigRequestDto,
-  fromAdminConfigRequestDto,
-} = require('../dto/config');
+const { instrumentConfig } = require('../middleware/configMetrics');
+const { toAdminConfigRequestDto, fromAdminConfigRequestDto } = require('../dto/config');
 const { applyConfig, getConfigSections } = require('../services/configService');
-const {
-  softDeleteConfig,
-  restoreConfig,
-  getConfigDeletionState,
-  purgeExpiredConfigSoftDeletes,
-  SOFT_DELETE_ERRORS,
-} = require('../services/configSoftDelete');
+const { SOFT_DELETE_ERRORS } = require('../services/configSoftDelete');
 const AppError = require('../errors/AppError');
 const logger = require('../logger');
 
@@ -252,70 +246,19 @@ router.get('/sections', (req, res) => {
  *       409:
  *         description: Record is already soft-deleted
  */
-router.delete('/:id', async (req, res, next) => {
+router.post('/', optionalIdempotency, validateBody(runtimeConfigSchema), async (req, res, next) => {
   try {
-    const actor = req.apiClient?.clientId || req.user?.sub || null;
-    const reason = req.body && req.body.reason ? String(req.body.reason).trim() : null;
-    const result = await softDeleteConfig(req.params.id, { actor, reason });
+    const validatedDto = toAdminConfigRequestDto(req.validated);
+    const { section, config: validatedConfig } = fromAdminConfigRequestDto(validatedDto);
 
-    logger.info(
-      { id: result.id, actor, requestId: req.id },
-      'Admin soft-deleted config record'
-    );
-    return res.json(result);
-  } catch (err) {
-    return next(_mapSoftDeleteError(err, req));
-  }
-});
+    const result = await applyConfig(section, validatedConfig, {
+      tenantId: req.tenantId,
+      adminClient: req.apiClient?.clientId || req.user?.sub,
+    });
 
-// ── POST /api/admin/config/:id/restore ─────────────────────────────────────────
-/**
- * @swagger
- * /api/admin/config/{id}/restore:
- *   post:
- *     operationId: restoreConfig
- *     summary: Restore a soft-deleted config record
- *     description: |
- *       Clears the tombstone so the record is served by default reads again.
- *       Only possible while the retention window is open; once it has elapsed the
- *       endpoint returns 410 Gone even if the purge job has not run yet.
- *       Requires admin authentication (JWT or API key).
- *     tags: [AdminConfig]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema: { type: string }
- *     responses:
- *       200:
- *         description: Record restored
- *       400:
- *         $ref: '#/components/responses/Problem400'
- *       401:
- *         $ref: '#/components/responses/Problem401'
- *       403:
- *         $ref: '#/components/responses/Problem403'
- *       404:
- *         description: No config record for the id (possibly purged)
- *       409:
- *         description: Record is not soft-deleted
- *       410:
- *         description: Retention window expired; record can no longer be restored
- */
-router.post('/:id/restore', async (req, res, next) => {
-  try {
-    const actor = req.apiClient?.clientId || req.user?.sub || null;
-    const result = await restoreConfig(req.params.id, { actor });
-
-    logger.info(
-      { id: result.id, actor, requestId: req.id },
-      'Admin restored config record'
-    );
-    return res.json(result);
-  } catch (err) {
-    return next(_mapSoftDeleteError(err, req));
+    return res.status(200).json(result);
+  } catch (error) {
+    return next(error);
   }
 });
 
@@ -407,6 +350,8 @@ router.post('/purge', async (req, res, next) => {
     return next(err);
   }
 });
+
+router.use(configErrorHandler);
 
 module.exports = router;
 

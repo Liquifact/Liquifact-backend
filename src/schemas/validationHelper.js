@@ -55,6 +55,8 @@ const DEFAULT_PROBLEM_TYPE = 'https://liquifact.io/problems/validation-error';
 /** Default error code for validation failures. */
 const DEFAULT_ERROR_CODE = 'VALIDATION_ERROR';
 
+const AppError = require('../errors/AppError');
+
 /**
  * Creates Express middleware that validates `req.body` against a Zod schema
  * and maps errors to an RFC 7807 `application/problem+json` response.
@@ -85,15 +87,17 @@ function createBodyValidator(schema, options = {}) {
     }
 
     const fieldErrors = parseValidationErrors(result.error);
-
-    return res.status(400).json({
+    const err = new AppError({
       type: problemType,
       title,
       status: 400,
       detail,
       code,
+      instance: req.originalUrl,
       fieldErrors,
     });
+
+    return next(err);
   };
 }
 
@@ -127,15 +131,17 @@ function createQueryValidator(schema, options = {}) {
     }
 
     const fieldErrors = parseValidationErrors(result.error);
-
-    return res.status(400).json({
+    const err = new AppError({
       type: problemType,
       title,
       status: 400,
       detail,
       code,
+      instance: req.originalUrl,
       fieldErrors,
     });
+
+    return next(err);
   };
 }
 
