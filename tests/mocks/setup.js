@@ -18,6 +18,13 @@ jest.mock('../../src/metrics', () => {
     kycWebhookErrorsTotal: { inc: jest.fn() },
     normalizeKycWebhookStatusClass: jest.fn().mockReturnValue('4xx'),
     normalizeKycWebhookCause: jest.fn().mockReturnValue('none'),
+
+    // Invoice-state request metrics — needed so
+    // middleware/invoiceStateMetrics.js's res.on('finish') callback (wired
+    // into every invoice-state route) doesn't crash in tests that exercise
+    // those routes without their own local metrics mock.
+    invoiceStateRequestDurationMs: { labels: jest.fn().mockReturnThis(), observe: jest.fn() },
+    invoiceStateRequestCount: { labels: jest.fn().mockReturnThis(), inc: jest.fn() },
   };
 });
 
