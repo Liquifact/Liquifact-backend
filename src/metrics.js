@@ -44,6 +44,10 @@ const registry = new client.Registry();
 
 const logger = require('./logger');
 
+function isEnabled() {
+  return process.env.METRICS_ENABLED !== 'false';
+}
+
 let client;
 try {
   client = require('prom-client');
