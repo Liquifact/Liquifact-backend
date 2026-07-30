@@ -3,6 +3,9 @@
 const express = require('express');
 const router = express.Router();
 const invoiceStateService = require('../services/invoiceStateService');
+const { extractTenant } = require('../middleware/tenant');
+const { createCompressionMiddleware } = require('../middleware/compression');
+const { invoiceStateErrorHandler } = require('../middleware/invoiceStateErrorHandler');
 const { requireKycForFunding, auditKycAccess } = require('../middleware/kycGating');
 const responseHelper = require('../utils/responseHelper');
 const { cacheResponse, makeInvoiceStateKey } = require('../middleware/cache');
