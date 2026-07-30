@@ -125,6 +125,7 @@ const NEUTRAL_BASE_STATE = Object.freeze({
   status: "not_found",
   fundedAmount: 0,
   source: "rpc_stub",
+  latest_event_type: "live_read",
 });
 
 /**
@@ -256,9 +257,6 @@ function _coerceFundedAmount(raw) {
  * Reads the latest projection row for an invoice and normalises it into the
  * base-state envelope used by the rest of the read path.
  *
- * @param {string} safeId - Validated, trimmed invoice ID.
- * @param {import('knex').Knex} [dbClient=db] - Knex instance.
- * @returns {Promise<object|null>} Normalised base state, or null when missing.
  * Security notes:
  *  - We never trust `eventBody.status` / `eventBody.fundedAmount` to override
  *    `latest_event_type` blindly; the envelope (`latest_event_type`) is the
@@ -619,11 +617,6 @@ async function readFundedAmount(invoiceId, options = {}) {
 }
 
 /**
- * Retrieves the escrow state from cache or projection, falling back to a live RPC read.
- *
- * @param {string} invoiceId - Invoice identifier.
- * @param {object} [options={}]
- * @returns {Promise<Object>}
  * Resolves whether the projection/cache-based escrow read path is enabled.
  * Checks the `ESCROW_READ_PROJECTION_ENABLED` environment flag.
  * Defaults to `true` when config is not yet validated (e.g. in tests).
@@ -648,8 +641,16 @@ function isProjectionEnabled() {
  * projection/cache path is skipped entirely and the function falls
  * through directly to a live Soroban contract read.
  *
- * @param {string} invoiceId - Invoice identifier
- * @returns {Promise<Object>} The escrow state
+ * Read ordering (flag enabled): process-local cache → Redis cache →
+ * `escrow_event_projection` row → neutral RPC stub. Every hit is written
+ * back into the process-local cache so a subsequent call in the same
+ * process short-circuits before touching Redis or the DB.
+ *
+ * @param {string} invoiceId - Invoice identifier.
+ * @param {object} [options={}]
+ * @param {import('knex').Knex} [options.dbClient] - Override the default
+ *   Knex instance for tests.
+ * @returns {Promise<Object>} The escrow state.
  */
 async function getEscrowStateWithProjection(invoiceId, options = {}) {
   const safeId = invoiceId.trim();
@@ -661,9 +662,15 @@ async function getEscrowStateWithProjection(invoiceId, options = {}) {
   }
 
   // Gate: if the projection feature flag is disabled, skip cache & DB
-  // and go directly to a live Soroban read.
+  // and go directly to a live Soroban read. Bypasses `_fetchBaseEscrowState`
+  // entirely (rather than calling it with no adapter) because that helper
+  // always falls through to a projection-table read when no adapter is
+  // supplied — which would defeat this gate.
   if (!isProjectionEnabled()) {
-    const baseState = await _fetchBaseEscrowState(safeId);
+    const baseState = await callSorobanContract(async () => ({
+      invoiceId: safeId,
+      ...NEUTRAL_BASE_STATE,
+    }));
     const legalHold = await fetchLegalHold(safeId);
     return {
       ...baseState,

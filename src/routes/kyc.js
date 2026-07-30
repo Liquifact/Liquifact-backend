@@ -4,6 +4,7 @@ const express = require('express');
 const kycWebhookService = require('../services/kycWebhookService');
 const asyncHandler = require('../utils/asyncHandler');
 const kycWebhookErrorHandler = require('../middleware/kycWebhookErrorHandler');
+const { kycWebhookLimiter } = require('../middleware/rateLimit');
 const {
   kycWebhookRequestDurationSeconds,
   kycWebhookRequestsTotal,
@@ -18,6 +19,9 @@ const {
 } = require('../constants/kycWebhooks');
 
 const router = express.Router();
+
+// Per-client (API key / IP) rate limit on the kyc-webhooks endpoints (#729).
+router.use(kycWebhookLimiter);
 
 /**
  * Returns true when the KYC webhook endpoint is enabled.
