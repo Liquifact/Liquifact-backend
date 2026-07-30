@@ -1,3 +1,5 @@
+const client = require("prom-client");
+const registry = new client.Registry();
 'use strict';
 
 /**
@@ -964,19 +966,13 @@ async function metricsHandler(req, res) {
   res.on('close', done);
 
   res.set('Content-Type', registry.contentType);
-  try {
-    // Use the real prom-client registry.metrics() when available (production),
-    // which returns the full Prometheus exposition including ALL registered
-    // counters and gauges. Fall back to cachedMetrics for the shim (tests).
-    const metricsText = typeof client.Gauge !== 'function' || client.Gauge.name === 'GaugeShim'
-      ? cachedMetrics
-      : await registry.metrics();
-    res.end(metricsText);
-  } catch (err) {
-    if (res.locals) { res.locals.metricsError = err; }
-    res.statusCode = 500;
-    res.end('');
-  }
+  res.end(await registry.metrics());
+}
+
+/** Shared registry — exported so tests can reset it between runs. */
+
+if (typeof client.collectDefaultMetrics === 'function') {
+  client.collectDefaultMetrics({ register: registry });
 }
 
 /**

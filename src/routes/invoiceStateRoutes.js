@@ -3,6 +3,9 @@
 const express = require('express');
 const router = express.Router();
 const invoiceStateService = require('../services/invoiceStateService');
+const { extractTenant } = require('../middleware/tenant');
+const { createCompressionMiddleware } = require('../middleware/compression');
+const { invoiceStateErrorHandler } = require('../middleware/invoiceStateErrorHandler');
 const { requireKycForFunding, auditKycAccess } = require('../middleware/kycGating');
 const responseHelper = require('../utils/responseHelper');
 const { cacheResponse, makeInvoiceStateKey } = require('../middleware/cache');
@@ -465,11 +468,12 @@ router.get('/:id/history', instrumentInvoiceState('history', async (req, res, ne
   }
 }));
 
-const MAX_BULK_ITEMS = 25;
-
 /**
  * POST /api/invoices/bulk
- * Processes a batch of invoice-state operations and returns per-item results.
+ * Thin HTTP wrapper: parses/shape-validates the body, delegates batch-size
+ * validation, per-item validation, and action dispatch to
+ * `invoiceStateService.processBulkOperations` (#1113), then translates the
+ * result (or a thrown `StateTransitionError`) into a response.
  */
 /**
  * @swagger
@@ -532,10 +536,14 @@ router.post('/bulk', instrumentInvoiceState('bulk', async (req, res, _next) => {
     });
   }
 
-  if (items.length === 0) {
-    return res.status(400).json({
-      ...responseHelper.error('Batch must contain at least one invoice-state operation', 'EMPTY_BATCH'),
+  try {
+    const baseContext = buildContext(req);
+    const { results, summary } = await invoiceStateService.processBulkOperations(items, req.tenantId, baseContext);
+
+    return res.status(200).json({
+      ...responseHelper.success({ results, summary }),
       correlationId: getCorrelationId(req),
+      message: 'Bulk invoice-state operation completed',
     });
   }
 
@@ -612,6 +620,7 @@ router.post('/bulk', instrumentInvoiceState('bulk', async (req, res, _next) => {
         code: error.code || 'BULK_ITEM_ERROR',
       });
     }
+    return next(error);
   }
 
   const summary = {

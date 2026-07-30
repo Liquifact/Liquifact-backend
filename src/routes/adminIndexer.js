@@ -17,11 +17,10 @@ const express = require('express');
 
 const router = express.Router();
 const { listIndexerEvents, bulkIndexerEvents, validateBulkPayload } = require('../services/indexerService');
-const { mapQueryToDTO, mapDTOToServiceParams } = require('../dto/indexer');
 const { CursorError } = require('../utils/cursorPagination');
 const { adminStack } = require('../middleware/stacks');
 const { indexerLimiter } = require('../middleware/rateLimit');
-const { createCompressionMiddleware } = require('../middleware/compression');
+const { mapQueryToDTO, mapDTOToServiceParams } = require('../dto/indexer');
 const responseHelper = require('../utils/responseHelper');
 const logger = require('../logger');
 const { validateIndexerQuery } = require('../schemas/indexerQuery');
@@ -152,7 +151,7 @@ router.get('/events', instrumentIndexer(async (req, res, next) => {
       });
     }
 
-    // ── 2. Map validated params → request DTO → service options ────────────
+    // ── 2. Map validated params to DTO and service params ──────────────────
     const queryDTO = mapQueryToDTO(params);
     const serviceParams = mapDTOToServiceParams(queryDTO);
 
