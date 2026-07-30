@@ -3,6 +3,9 @@
 const express = require('express');
 const router = express.Router();
 const invoiceStateService = require('../services/invoiceStateService');
+const { extractTenant } = require('../middleware/tenant');
+const { createCompressionMiddleware } = require('../middleware/compression');
+const { invoiceStateErrorHandler } = require('../middleware/invoiceStateErrorHandler');
 const { requireKycForFunding, auditKycAccess } = require('../middleware/kycGating');
 const responseHelper = require('../utils/responseHelper');
 const { cacheResponse, makeInvoiceStateKey } = require('../middleware/cache');
@@ -143,11 +146,7 @@ router.get('/:id/state', cacheState, async (req, res, next) => {
   } catch (error) {
     return next(error);
   }
-  if (statusCode >= 400) {
-    return '4xx';
-  }
-  return '2xx';
-}
+});
 
 /**
  * Maps an error object to a coarse telemetry cause label.
@@ -201,17 +200,7 @@ router.post('/:id/transition', async (req, res, next) => {
     }
     return next(error);
   }
-  if (error.code && typeof error.code === 'string') {
-    return error.code;
-  }
-  if (error.statusCode >= 500) {
-    return 'server_error';
-  }
-  if (error.statusCode >= 400) {
-    return 'client_error';
-  }
-  return 'unknown_error';
-}
+});
 
 /**
  * POST /api/invoices/:id/approve
