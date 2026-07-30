@@ -223,6 +223,10 @@ highest-priority signal, since it silently blinds every other alert in
 
 ## Cross-References
 
+- [`metrics-troubleshooting.md`](./metrics-troubleshooting.md) — quick
+  symptom → code → fix index (cause codes, readiness sub-check statuses).
+- [`metrics-request-logging.md`](./metrics-request-logging.md) — structured
+  log fields emitted on every `/metrics` request.
 - [`src/metrics.js`](../src/metrics.js) — the Prometheus registry, all
   registered metrics, and the `/metrics` auth/handler implementation.
 - [`src/utils/metricsValidation.js`](../src/utils/metricsValidation.js) — the

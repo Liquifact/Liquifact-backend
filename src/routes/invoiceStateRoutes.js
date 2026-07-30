@@ -14,9 +14,7 @@ const { cacheConfig } = require('../config/cache');
 const { invoiceStateCacheEvictionsTotal } = require('../metrics');
 const { extractTenant } = require('../middleware/tenant');
 const { createCompressionMiddleware } = require('../middleware/compression');
-const invoiceStateErrorHandler = require('../middleware/invoiceStateErrorHandler');
-const { instrumentInvoiceState } = require('../middleware/invoiceStateMetrics');
-const logger = require('../logger');
+const { invoiceStateErrorHandler } = require('../middleware/invoiceStateErrorHandler');
 
 router.use(extractTenant);
 
@@ -120,85 +118,53 @@ function sendTransitionError(res, error, correlationId) {
   });
 }
 
-router.get('/:id/state', cacheState, instrumentInvoiceState('state', async (req, res, next) => {
+/**
+ * Classifies an HTTP status code into a coarse status bucket.
+ *
+ * @param {number} statusCode - HTTP status code.
+ * @returns {string} Status class label.
+ */
+router.get('/:id/state', cacheState, async (req, res, next) => {
   try {
     const result = await invoiceStateService.getState(req.params.id, req.tenantId);
 
     return res.json({
       ...responseHelper.success(result),
+      correlationId: getCorrelationId(req),
       message: 'Invoice state retrieved successfully',
     });
   } catch (error) {
+    if (error.code) {
+      return sendTransitionError(res, error, getCorrelationId(req));
+    }
     return next(error);
   }
-}));
+});
 
-/**
- * @swagger
- * /api/invoices/{id}/transition:
- *   post:
- *     operationId: transitionInvoiceState
- *     summary: Transition an invoice to a target state
- *     description: Executes a state-machine transition for an invoice and persists an audit log entry.
- *     tags: [InvoiceState]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema:
- *           type: string
- *         description: Invoice ID
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [targetState]
- *             properties:
- *               targetState:
- *                 type: string
- *               reason:
- *                 type: string
- *     responses:
- *       200:
- *         description: Invoice transitioned successfully
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/InvoiceStateTransitionResponse'
- *       400:
- *         description: Transition error or validation error
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
- *       404:
- *         description: Invoice not found
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
- */
-router.post('/:id/transition', instrumentInvoiceState('transition', async (req, res, next) => {
+router.post('/:id/transition', async (req, res, next) => {
   const { targetState, reason } = req.body || {};
 
   try {
     const context = buildContext(req, { action: 'transition', targetState });
     const result = await invoiceStateService.transition(req.params.id, req.tenantId, targetState, reason, context);
 
+    const context = buildContext(req, { action: 'transition' });
+    const result = await invoiceStateService.transition(req.params.id, req.tenantId, targetState, reason, context);
+
     invalidateInvoiceStateCache(req.tenantId, req.params.id);
 
     return res.status(200).json({
       ...responseHelper.success(result),
+      correlationId: getCorrelationId(req),
       message: `Invoice transitioned from ${result.previousState} to ${result.currentState}`,
     });
   } catch (error) {
+    if (error.code) {
+      return sendTransitionError(res, error, getCorrelationId(req));
+    }
     return next(error);
   }
-}));
+});
 
 /**
  * POST /api/invoices/:id/approve
