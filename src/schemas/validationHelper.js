@@ -13,6 +13,23 @@
  * @module schemas/validationHelper
  */
 
+// ── Shared indexer regex constants ───────────────────────────────────────────
+
+/**
+ * Regex for invoiceId validation: 1-128 alphanumeric/underscore/hyphen characters.
+ */
+const INVOICE_ID_REGEX = /^[a-zA-Z0-9_-]{1,128}$/;
+
+/**
+ * Regex for contractId validation: Stellar contract address (C + 55 base32 chars).
+ */
+const CONTRACT_ID_REGEX = /^C[A-Z2-7]{55}$/;
+
+/**
+ * Regex for transaction hash validation: 64 hexadecimal characters.
+ */
+const TX_HASH_REGEX = /^[0-9a-fA-F]{64}$/;
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
@@ -37,6 +54,8 @@ const DEFAULT_PROBLEM_TYPE = 'https://liquifact.io/problems/validation-error';
 
 /** Default error code for validation failures. */
 const DEFAULT_ERROR_CODE = 'VALIDATION_ERROR';
+
+const AppError = require('../errors/AppError');
 
 /**
  * Creates Express middleware that validates `req.body` against a Zod schema
@@ -68,15 +87,17 @@ function createBodyValidator(schema, options = {}) {
     }
 
     const fieldErrors = parseValidationErrors(result.error);
-
-    return res.status(400).json({
+    const err = new AppError({
       type: problemType,
       title,
       status: 400,
       detail,
       code,
+      instance: req.originalUrl,
       fieldErrors,
     });
+
+    return next(err);
   };
 }
 
@@ -110,15 +131,17 @@ function createQueryValidator(schema, options = {}) {
     }
 
     const fieldErrors = parseValidationErrors(result.error);
-
-    return res.status(400).json({
+    const err = new AppError({
       type: problemType,
       title,
       status: 400,
       detail,
       code,
+      instance: req.originalUrl,
       fieldErrors,
     });
+
+    return next(err);
   };
 }
 
@@ -126,6 +149,9 @@ module.exports = {
   createBodyValidator,
   createQueryValidator,
   parseValidationErrors,
+  INVOICE_ID_REGEX,
+  CONTRACT_ID_REGEX,
+  TX_HASH_REGEX,
   DEFAULT_PROBLEM_TYPE,
   DEFAULT_ERROR_CODE,
 };

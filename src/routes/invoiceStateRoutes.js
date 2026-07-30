@@ -3,10 +3,18 @@
 const express = require('express');
 const router = express.Router();
 const invoiceStateService = require('../services/invoiceStateService');
-const { requireKycForFunding, auditKycAccess } = require('../middleware/kycGating');
-const responseHelper = require('../utils/responseHelper');
 const { extractTenant } = require('../middleware/tenant');
 const { createCompressionMiddleware } = require('../middleware/compression');
+const { invoiceStateErrorHandler } = require('../middleware/invoiceStateErrorHandler');
+const { requireKycForFunding, auditKycAccess } = require('../middleware/kycGating');
+const responseHelper = require('../utils/responseHelper');
+const { cacheResponse, makeInvoiceStateKey } = require('../middleware/cache');
+const { getSharedStore } = require('../services/cacheStore');
+const { cacheConfig } = require('../config/cache');
+const { invoiceStateCacheEvictionsTotal } = require('../metrics');
+const { extractTenant } = require('../middleware/tenant');
+const { createCompressionMiddleware } = require('../middleware/compression');
+const { invoiceStateErrorHandler } = require('../middleware/invoiceStateErrorHandler');
 
 router.use(extractTenant);
 
@@ -18,6 +26,43 @@ router.use(createCompressionMiddleware());
 // Per-client (API key / IP) rate limit on the invoice-state endpoints (#739).
 const { invoiceStateLimiter } = require('../middleware/rateLimit');
 router.use(invoiceStateLimiter);
+
+// Response cache for GET /:id/state — bounded, config-driven TTL (#21).
+const cacheState = cacheResponse({
+  ttl: cacheConfig.invoiceStateTtl,
+  store: getSharedStore(),
+  keyFn: makeInvoiceStateKey,
+});
+
+/**
+ * Invalidates the cached state for a given invoice.
+ *
+ * Deletes the cache entry so subsequent reads fetch fresh data.
+ * The eviction is recorded on the invoiceStateCacheEvictionsTotal
+ * counter with reason="invalidation".
+ *
+ * @param {string} tenantId - Tenant identifier.
+ * @param {string} invoiceId - Invoice identifier.
+ * @returns {void}
+ */
+function invalidateInvoiceStateCache(tenantId, invoiceId) {
+  const store = getSharedStore();
+  const key = 'invoiceState:state:' + tenantId + ':' + invoiceId;
+  store.del(key);
+  invoiceStateCacheEvictionsTotal.labels('invalidation').inc();
+}
+
+/**
+ * Extracts the correlation ID from the request object.
+ * Prefers the explicitly set correlationId, falls back to the request ID,
+ * and returns null when neither is available.
+ *
+ * @param {import('express').Request} req - Express request.
+ * @returns {string|null} Correlation ID.
+ */
+function getCorrelationId(req) {
+  return req.correlationId || req.id || null;
+}
 
 /**
  * Extracts the actor identifier from the request object.
@@ -44,6 +89,7 @@ function getActorFromRequest(req) {
 function buildContext(req, additionalMetadata = {}) {
   return {
     actor: getActorFromRequest(req),
+    correlationId: getCorrelationId(req),
     ipAddress: req.ip || (req.socket && req.socket.remoteAddress) || 'unknown',
     userAgent: req.get('user-agent') || 'unknown',
     metadata: {
@@ -59,13 +105,17 @@ function buildContext(req, additionalMetadata = {}) {
  *
  * @param {import('express').Response} res - Express response object.
  * @param {Error & {code?: string, allowedTransitions?: string[], statusCode?: number}} error - The thrown error.
+ * @param {string} [correlationId] - Correlation ID for traceability.
  * @returns {import('express').Response} The error response.
  */
-function sendTransitionError(res, error) {
+function sendTransitionError(res, error, correlationId) {
   const status = error.statusCode || 400;
   const details = error.allowedTransitions ? { allowedTransitions: error.allowedTransitions } : null;
 
-  return res.status(status).json(responseHelper.error(error.message, error.code, details));
+  return res.status(status).json({
+    ...responseHelper.error(error.message, error.code, details),
+    correlationId: correlationId || null,
+  });
 }
 
 /**
@@ -74,37 +124,47 @@ function sendTransitionError(res, error) {
  * @param {number} statusCode - HTTP status code.
  * @returns {string} Status class label.
  */
-function _classifyStatus(statusCode) {
-  if (statusCode >= 500) {
-    return '5xx';
-  }
-  if (statusCode >= 400) {
-    return '4xx';
-  }
-  return '2xx';
-}
+router.get('/:id/state', cacheState, async (req, res, next) => {
+  try {
+    const result = await invoiceStateService.getState(req.params.id, req.tenantId);
 
-/**
- * Maps an error object to a coarse telemetry cause label.
- *
- * @param {Error|null|undefined} error - Error raised by a handler.
- * @returns {string} Error cause label.
- */
-function _classifyErrorCause(error) {
-  if (!error) {
-    return 'none';
+    return res.json({
+      ...responseHelper.success(result),
+      correlationId: getCorrelationId(req),
+      message: 'Invoice state retrieved successfully',
+    });
+  } catch (error) {
+    if (error.code) {
+      return sendTransitionError(res, error, getCorrelationId(req));
+    }
+    return next(error);
   }
-  if (error.code && typeof error.code === 'string') {
-    return error.code;
+});
+
+router.post('/:id/transition', async (req, res, next) => {
+  const { targetState, reason } = req.body || {};
+
+  try {
+    const context = buildContext(req, { action: 'transition', targetState });
+    const result = await invoiceStateService.transition(req.params.id, req.tenantId, targetState, reason, context);
+
+    const context = buildContext(req, { action: 'transition' });
+    const result = await invoiceStateService.transition(req.params.id, req.tenantId, targetState, reason, context);
+
+    invalidateInvoiceStateCache(req.tenantId, req.params.id);
+
+    return res.status(200).json({
+      ...responseHelper.success(result),
+      correlationId: getCorrelationId(req),
+      message: `Invoice transitioned from ${result.previousState} to ${result.currentState}`,
+    });
+  } catch (error) {
+    if (error.code) {
+      return sendTransitionError(res, error, getCorrelationId(req));
+    }
+    return next(error);
   }
-  if (error.statusCode >= 500) {
-    return 'server_error';
-  }
-  if (error.statusCode >= 400) {
-    return 'client_error';
-  }
-  return 'unknown_error';
-}
+});
 
 /**
  * POST /api/invoices/:id/approve
@@ -156,24 +216,27 @@ function _classifyErrorCause(error) {
  *             schema:
  *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
  */
-router.post('/:id/approve', async (req, res, next) => {
+router.post('/:id/approve', instrumentInvoiceState('approve', async (req, res, next) => {
   const { reason } = req.body || {};
 
   try {
     const context = buildContext(req, { action: 'approve' });
     const result = await invoiceStateService.approve(req.params.id, req.tenantId, reason, context);
 
+    invalidateInvoiceStateCache(req.tenantId, req.params.id);
+
     return res.status(200).json({
       ...responseHelper.success(result),
+      correlationId: getCorrelationId(req),
       message: 'Invoice approved successfully',
     });
   } catch (error) {
     if (error.code) {
-      return sendTransitionError(res, error);
+      return sendTransitionError(res, error, getCorrelationId(req));
     }
     return next(error);
   }
-});
+}));
 
 /**
  * @swagger
@@ -223,7 +286,7 @@ router.post('/:id/approve', async (req, res, next) => {
  *             schema:
  *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
  */
-router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, async (req, res, next) => {
+router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, instrumentInvoiceState('link-escrow', async (req, res, next) => {
   const { escrowId, reason } = req.body || {};
 
   try {
@@ -233,17 +296,20 @@ router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, async (req
     });
     const result = await invoiceStateService.linkEscrow(req.params.id, req.tenantId, escrowId, reason, context);
 
+    invalidateInvoiceStateCache(req.tenantId, req.params.id);
+
     return res.status(200).json({
       ...responseHelper.success(result),
+      correlationId: getCorrelationId(req),
       message: 'Invoice linked to escrow successfully',
     });
   } catch (error) {
     if (error.code) {
-      return sendTransitionError(res, error);
+      return sendTransitionError(res, error, getCorrelationId(req));
     }
     return next(error);
   }
-});
+}));
 
 /**
  * @swagger
@@ -292,24 +358,27 @@ router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, async (req
  *             schema:
  *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
  */
-router.post('/:id/reject', async (req, res, next) => {
+router.post('/:id/reject', instrumentInvoiceState('reject', async (req, res, next) => {
   const { reason } = req.body || {};
 
   try {
     const context = buildContext(req, { action: 'reject' });
     const result = await invoiceStateService.reject(req.params.id, req.tenantId, reason, context);
 
+    invalidateInvoiceStateCache(req.tenantId, req.params.id);
+
     return res.status(200).json({
       ...responseHelper.success(result),
+      correlationId: getCorrelationId(req),
       message: 'Invoice rejected successfully',
     });
   } catch (error) {
     if (error.code) {
-      return sendTransitionError(res, error);
+      return sendTransitionError(res, error, getCorrelationId(req));
     }
     return next(error);
   }
-});
+}));
 
 /**
  * @swagger
@@ -348,27 +417,29 @@ router.post('/:id/reject', async (req, res, next) => {
  *             schema:
  *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
  */
-router.get('/:id/history', async (req, res, next) => {
+router.get('/:id/history', instrumentInvoiceState('history', async (req, res, next) => {
   try {
     const result = await invoiceStateService.getHistory(req.params.id, req.tenantId);
 
     return res.json({
       ...responseHelper.success(result),
+      correlationId: getCorrelationId(req),
       message: 'Invoice transition history retrieved successfully',
     });
   } catch (error) {
     if (error.code) {
-      return sendTransitionError(res, error);
+      return sendTransitionError(res, error, getCorrelationId(req));
     }
     return next(error);
   }
-});
-
-const MAX_BULK_ITEMS = 25;
+}));
 
 /**
  * POST /api/invoices/bulk
- * Processes a batch of invoice-state operations and returns per-item results.
+ * Thin HTTP wrapper: parses/shape-validates the body, delegates batch-size
+ * validation, per-item validation, and action dispatch to
+ * `invoiceStateService.processBulkOperations` (#1113), then translates the
+ * result (or a thrown `StateTransitionError`) into a response.
  */
 /**
  * @swagger
@@ -421,19 +492,32 @@ const MAX_BULK_ITEMS = 25;
  *             schema:
  *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
  */
-router.post('/bulk', async (req, res, next) => {
+router.post('/bulk', instrumentInvoiceState('bulk', async (req, res, _next) => {
   const items = req.body;
 
   if (!Array.isArray(items)) {
-    return res.status(400).json(responseHelper.error('Request body must be a JSON array of invoice-state operations', 'INVALID_BATCH_TYPE'));
+    return res.status(400).json({
+      ...responseHelper.error('Request body must be a JSON array of invoice-state operations', 'INVALID_BATCH_TYPE'),
+      correlationId: getCorrelationId(req),
+    });
   }
 
-  if (items.length === 0) {
-    return res.status(400).json(responseHelper.error('Batch must contain at least one invoice-state operation', 'EMPTY_BATCH'));
+  try {
+    const baseContext = buildContext(req);
+    const { results, summary } = await invoiceStateService.processBulkOperations(items, req.tenantId, baseContext);
+
+    return res.status(200).json({
+      ...responseHelper.success({ results, summary }),
+      correlationId: getCorrelationId(req),
+      message: 'Bulk invoice-state operation completed',
+    });
   }
 
   if (items.length > MAX_BULK_ITEMS) {
-    return res.status(400).json(responseHelper.error(`Batch size exceeds maximum of ${MAX_BULK_ITEMS}`, 'BATCH_OVER_CAP'));
+    return res.status(400).json({
+      ...responseHelper.error(`Batch size exceeds maximum of ${MAX_BULK_ITEMS}`, 'BATCH_OVER_CAP'),
+      correlationId: getCorrelationId(req),
+    });
   }
 
   const results = [];
@@ -489,7 +573,12 @@ router.post('/bulk', async (req, res, next) => {
         }
       }
     } catch (error) {
-      console.error('BULK ITEM ERROR', { index, action, invoiceId, code: error.code, message: error.message, stack: error.stack });
+      // Structured, PII-safe log: bounded action/code only — no invoiceId,
+      // error message, or stack trace (per #1111, never log secrets/PII).
+      logger.warn(
+        { index, action, code: error.code || 'BULK_ITEM_ERROR' },
+        'invoice-state bulk item failed'
+      );
       results.push({
         index,
         success: false,
@@ -497,6 +586,7 @@ router.post('/bulk', async (req, res, next) => {
         code: error.code || 'BULK_ITEM_ERROR',
       });
     }
+    return next(error);
   }
 
   const summary = {
@@ -507,8 +597,14 @@ router.post('/bulk', async (req, res, next) => {
 
   return res.status(200).json({
     ...responseHelper.success({ results, summary }),
+    correlationId: req.correlationId || req.id || null,
     message: 'Bulk invoice-state operation completed',
   });
-});
+}));
+
+// Mount the shared invoice-state error middleware after all route
+// handlers so StateTransitionErrors from any handler receive a
+// consistent response envelope (issue #968).
+router.use(invoiceStateErrorHandler);
 
 module.exports = router;

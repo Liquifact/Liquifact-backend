@@ -1,10 +1,12 @@
 'use strict';
 
 const { z } = require('zod');
-
-const INVOICE_ID_REGEX = /^[a-zA-Z0-9_-]{1,128}$/;
-const CONTRACT_ID_REGEX = /^C[A-Z2-7]{55}$/;
-const TX_HASH_REGEX = /^[0-9a-fA-F]{64}$/;
+const {
+  parseValidationErrors,
+  INVOICE_ID_REGEX,
+  CONTRACT_ID_REGEX,
+  TX_HASH_REGEX,
+} = require('./validationHelper');
 
 const contractIdSchema = z
   .string()
@@ -63,17 +65,6 @@ const indexerEventSchema = z.object({
     .datetime({ message: 'observedAt must be a valid ISO 8601 date string' })
     .optional(),
 }).strict();
-
-function parseValidationErrors(zodError) {
-  const fieldErrors = {};
-  for (const issue of zodError.issues ?? zodError.errors ?? []) {
-    const path = issue.path.join('.') || '_root';
-    if (!fieldErrors[path]) {
-      fieldErrors[path] = issue.message;
-    }
-  }
-  return fieldErrors;
-}
 
 module.exports = {
   indexerEventSchema,

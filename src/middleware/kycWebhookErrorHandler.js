@@ -4,9 +4,8 @@
  * @fileoverview Shared error-handling middleware for KYC webhook routes.
  *
  * Intercepts {@link KycWebhookError} instances thrown by route handlers and
- * produces a consistent structured error response envelope:
- *
- *   { error: { code, message, correlation_id, retryable, retry_hint } }
+ * produces an RFC 7807 application/problem+json response via the canonical
+ * problem-detail builder.
  *
  * Non-KycWebhookError values are forwarded to the next error handler in the
  * Express chain.
@@ -15,6 +14,7 @@
  */
 
 const KycWebhookError = require('../errors/KycWebhookError');
+const formatProblemDetails = require('../utils/problemDetails');
 const logger = require('../logger');
 
 /**
@@ -54,7 +54,10 @@ function resolveRetryHint(err) {
  * Only handles {@link KycWebhookError} instances; all other errors are
  * forwarded to the next error handler.
  *
- * @param {Error}   req  - Express request.
+ * Emits RFC 7807 application/problem+json responses with type, title, status,
+ * detail, instance, code, retryable, and retry_hint fields.
+ *
+ * @param {KycWebhookError} err - The intercepted error.
  * @param {import('express').Request}   req  - Express request.
  * @param {import('express').Response}  res  - Express response.
  * @param {import('express').NextFunction} next - Next error handler.
@@ -81,15 +84,18 @@ function kycWebhookErrorHandler(err, req, res, next) {
   // Store the error code so the post-response metrics hook can read it.
   req._kycErrorCode = err.code;
 
-  res.status(err.status).json({
-    error: {
-      code: err.code,
-      message: err.message,
-      correlation_id: correlationId,
-      retryable,
-      retry_hint: resolveRetryHint(err),
-    },
+  const problem = formatProblemDetails({
+    type: formatProblemDetails.getProblemType(err.status),
+    title: formatProblemDetails.getStandardTitle(err.status),
+    status: err.status,
+    detail: err.message,
+    instance: req.originalUrl || req.url,
+    code: err.code,
+    retryable,
+    retryHint: resolveRetryHint(err),
   });
+
+  res.status(err.status).type('application/problem+json').json(problem);
 }
 
 module.exports = kycWebhookErrorHandler;

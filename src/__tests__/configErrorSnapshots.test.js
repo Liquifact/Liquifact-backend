@@ -24,6 +24,7 @@ const { validateBody } = require('../schemas/config');
 const { runtimeConfigSchema } = require('../schemas/config');
 const { notFoundHandler } = require('../middleware/problemJson');
 const { problemJsonHandler } = require('../middleware/problemJson');
+const { configErrorHandler } = require('../middleware/configErrorHandler');
 const AppError = require('../errors/AppError');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -159,6 +160,32 @@ describe('Config error-response snapshots', () => {
       expect(res._status).toBeNull();
       expect(req.validated).toBeDefined();
       expect(req.validated.section).toBe('webhook');
+    });
+
+    it('routes validation failures through the shared config error middleware', () => {
+      const req = fakeReq({
+        body: {
+          section: 'webhook',
+          config: { url: 'not-a-url', secret: 'short', events: [] },
+        },
+      });
+      const res = fakeRes();
+      const next = jest.fn();
+
+      middleware(req, res, (err) => {
+        configErrorHandler(err, req, res, next);
+      });
+
+      expect(res._status).toBe(400);
+      expect(res._body).toMatchObject({
+        type: expect.stringContaining('validation-error'),
+        title: 'Validation Error',
+        status: 400,
+        detail: expect.any(String),
+        code: 'VALIDATION_ERROR',
+        fieldErrors: expect.any(Object),
+      });
+      expect(next).not.toHaveBeenCalled();
     });
   });
 

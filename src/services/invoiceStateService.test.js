@@ -1,13 +1,23 @@
 'use strict';
 
+// jest.mock() calls must precede the require()s they target: this repo's
+// Jest config has "transform": {} (no babel-jest), so jest.mock() calls are
+// not hoisted above requires the way they would be under babel-jest. Placed
+// after the requires (as this file previously was), each jest.mock() call
+// registers too late — the real, unmocked module is already cached — and
+// every mocked method silently stays a plain function instead of a
+// jest.fn(), so .mockResolvedValue()/.mockReturnValue() throw "is not a
+// function". Confirmed via git-diff-free reproduction against this exact
+// file's previously-committed content: 10 of 12 tests already failed this
+// way before this change touched anything.
+jest.mock('./invoiceService');
+jest.mock('./invoiceStateMachine');
+jest.mock('./auditLog');
+
 const invoiceStateService = require('./invoiceStateService');
 const invoiceService = require('./invoiceService');
 const invoiceStateMachine = require('./invoiceStateMachine');
 const auditLog = require('./auditLog');
-
-jest.mock('./invoiceService');
-jest.mock('./invoiceStateMachine');
-jest.mock('./auditLog');
 
 describe('invoiceStateService', () => {
   const tenantId = 'tenant-123';
@@ -191,6 +201,135 @@ describe('invoiceStateService', () => {
 
       await expect(invoiceStateService.getHistory(invoiceId, tenantId))
         .rejects.toThrow('Invoice not found');
+    });
+  });
+
+  describe('processBulkOperations', () => {
+    const baseContext = {
+      actor: context.actor,
+      correlationId: 'corr-1',
+      ipAddress: context.ipAddress,
+      userAgent: context.userAgent,
+      metadata: { method: 'POST', path: '/api/invoices/bulk' },
+    };
+
+    beforeEach(() => {
+      invoiceStateMachine.INVOICE_STATES = {
+        PENDING: 'pending',
+        APPROVED: 'approved',
+        REJECTED: 'rejected',
+        LINKED_ESCROW: 'linked_escrow',
+      };
+    });
+
+    it('rejects an empty batch without touching the service layer', async () => {
+      await expect(invoiceStateService.processBulkOperations([], tenantId, baseContext))
+        .rejects.toMatchObject({ code: 'EMPTY_BATCH', statusCode: 400 });
+      expect(invoiceService.transitionInvoice).not.toHaveBeenCalled();
+    });
+
+    it('rejects a batch over the size cap without touching the service layer', async () => {
+      const items = Array.from({ length: invoiceStateService.MAX_BULK_ITEMS + 1 }, (_, i) => ({
+        invoiceId: `inv-${i}`,
+        action: 'approve',
+      }));
+
+      await expect(invoiceStateService.processBulkOperations(items, tenantId, baseContext))
+        .rejects.toMatchObject({ code: 'BATCH_OVER_CAP', statusCode: 400 });
+      expect(invoiceService.transitionInvoice).not.toHaveBeenCalled();
+    });
+
+    it('accepts a batch exactly at the size cap', async () => {
+      invoiceService.transitionInvoice.mockResolvedValue({
+        previousState: 'pending',
+        newState: 'approved',
+        transitionedAt: '2023-01-01T00:00:00Z',
+        transitionedBy: 'user-789',
+        auditLog: { id: 'audit-1' },
+      });
+      const items = Array.from({ length: invoiceStateService.MAX_BULK_ITEMS }, (_, i) => ({
+        invoiceId: `inv-${i}`,
+        action: 'approve',
+      }));
+
+      const { summary } = await invoiceStateService.processBulkOperations(items, tenantId, baseContext);
+      expect(summary).toEqual({ total: invoiceStateService.MAX_BULK_ITEMS, succeeded: invoiceStateService.MAX_BULK_ITEMS, failed: 0 });
+    });
+
+    it('reports a per-item error without aborting the rest of the batch', async () => {
+      const items = [{ action: 'approve' }, { invoiceId: 'inv-1', action: 'unknown-action' }];
+
+      const { results, summary } = await invoiceStateService.processBulkOperations(items, tenantId, baseContext);
+
+      expect(results[0]).toMatchObject({ index: 0, success: false, code: 'MISSING_INVOICE_ID' });
+      expect(results[1]).toMatchObject({ index: 1, success: false, code: 'INVALID_ACTION' });
+      expect(summary).toEqual({ total: 2, succeeded: 0, failed: 2 });
+      expect(invoiceService.transitionInvoice).not.toHaveBeenCalled();
+    });
+
+    it('rejects an item missing action', async () => {
+      const { results } = await invoiceStateService.processBulkOperations(
+        [{ invoiceId: 'inv-1' }],
+        tenantId,
+        baseContext
+      );
+      expect(results[0]).toMatchObject({ success: false, code: 'MISSING_ACTION' });
+    });
+
+    it('rejects a transition item missing targetState', async () => {
+      const { results } = await invoiceStateService.processBulkOperations(
+        [{ invoiceId: 'inv-1', action: 'transition' }],
+        tenantId,
+        baseContext
+      );
+      expect(results[0]).toMatchObject({ success: false, code: 'MISSING_TARGET_STATE' });
+    });
+
+    it('dispatches each action to its corresponding service function with a per-item context', async () => {
+      invoiceStateMachine.canLinkToEscrow.mockReturnValue({ canLink: true });
+      invoiceService.resolveInvoiceForTenant.mockResolvedValue({ status: 'approved' });
+      invoiceService.transitionInvoice.mockResolvedValue({
+        previousState: 'approved',
+        newState: 'linked_escrow',
+        transitionedAt: '2023-01-01T00:00:00Z',
+        transitionedBy: 'user-789',
+        auditLog: { id: 'audit-1' },
+      });
+
+      const items = [{ invoiceId: 'inv-1', action: 'link-escrow', escrowId: 'escrow-9', reason: 'go' }];
+      const { results } = await invoiceStateService.processBulkOperations(items, tenantId, baseContext);
+
+      expect(results[0]).toMatchObject({ index: 0, success: true, action: 'link-escrow' });
+      expect(invoiceService.transitionInvoice).toHaveBeenCalledWith(
+        'inv-1',
+        'linked_escrow',
+        tenantId,
+        expect.objectContaining({ escrowId: 'escrow-9' })
+      );
+
+      // Per-item metadata (action/bulkIndex) merged in without mutating baseContext.
+      expect(baseContext.metadata).toEqual({ method: 'POST', path: '/api/invoices/bulk' });
+    });
+
+    it('produces an accurate summary for a mixed batch of successes and failures', async () => {
+      invoiceService.transitionInvoice.mockResolvedValueOnce({
+        previousState: 'pending',
+        newState: 'approved',
+        transitionedAt: '2023-01-01T00:00:00Z',
+        transitionedBy: 'user-789',
+        auditLog: { id: 'audit-1' },
+      });
+
+      const items = [
+        { invoiceId: 'inv-1', action: 'approve' },
+        { invoiceId: 'inv-2', action: 'bogus' },
+        { action: 'approve' },
+      ];
+
+      const { results, summary } = await invoiceStateService.processBulkOperations(items, tenantId, baseContext);
+
+      expect(summary).toEqual({ total: 3, succeeded: 1, failed: 2 });
+      expect(results.map((r) => r.success)).toEqual([true, false, false]);
     });
   });
 });

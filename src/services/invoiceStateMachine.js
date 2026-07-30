@@ -2,6 +2,7 @@
 
 const { createAuditLog } = require('./auditLog');
 const logger = require('../logger');
+const { get: getContext } = require('../requestContext');
 
 /**
  * Canonical invoice status vocabulary shared by invoice-list and marketplace
@@ -255,6 +256,7 @@ function validateTransition(ctx) {
  */
 function buildTransitionError(code, message, statusCode = 400, allowedTransitions) {
   const err = new Error(message);
+  err.name = 'StateTransitionError';
   err.code = code;
   err.statusCode = statusCode;
   if (allowedTransitions) {
@@ -334,12 +336,14 @@ async function executeTransition(ctx) {
 
   const transitionedAt = auditLog.timestamp;
   const event = `invoice.${currentState}_to_${targetState}`;
+  const correlationId = getContext().correlationId || null;
 
   // Fire-and-forget enqueue of signed webhook delivery
   const { enqueueWebhookDelivery } = require('./webhooks');
   enqueueWebhookDelivery({
     invoiceId,
     event,
+    correlationId,
     transition: {
       from: currentState,
       to: targetState,
@@ -417,4 +421,5 @@ module.exports = {
   executeTransition,
   getTransitionHistory,
   canLinkToEscrow,
+  buildTransitionError,
 };

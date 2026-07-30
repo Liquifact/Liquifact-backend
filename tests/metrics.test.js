@@ -2,6 +2,13 @@
 
 const zlib = require('zlib');
 
+// tests/mocks/setup.js globally auto-mocks src/metrics with a tiny stub
+// (only the footprint-cache counters) for every test file. This file
+// exercises the real metrics module directly (metricsAuth, safeEqual,
+// extractClientIp, the real /metrics handler via the app), so it opts back
+// out of that mock for its own require path.
+jest.unmock('../src/metrics');
+
 jest.mock('redis', () => {
   const mockClient = {
     on: jest.fn(),

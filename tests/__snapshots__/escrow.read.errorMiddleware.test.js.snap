@@ -1,0 +1,37 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`escrow-read error handling centralization Legacy GET /api/escrow/:invoiceId error-response body snapshots 400 shape is stable for invalid invoiceId parameter 1`] = `
+{
+  "error": {
+    "code": "BAD_REQUEST",
+    "message": "Invalid invoiceId parameter.",
+  },
+}
+`;
+
+exports[`escrow-read error handling centralization Legacy GET /api/escrow/:invoiceId error-response body snapshots 404 shape is stable when escrow mapping is missing 1`] = `
+{
+  "error": {
+    "code": "NOT_FOUND",
+    "message": "No escrow contract mapping found for invoice ID 'inv-missing'",
+  },
+}
+`;
+
+exports[`escrow-read error handling centralization Legacy GET /api/escrow/:invoiceId error-response body snapshots 409 shape is stable when read conflicts 1`] = `
+{
+  "error": {
+    "code": "CONFLICT",
+    "message": "Escrow state conflict while replaying events",
+  },
+}
+`;
+
+exports[`escrow-read error handling centralization Legacy GET /api/escrow/:invoiceId error-response body snapshots 500 shape is stable when read service throws generic error 1`] = `
+{
+  "error": {
+    "code": "500",
+    "message": "RPC timeout",
+  },
+}
+`;

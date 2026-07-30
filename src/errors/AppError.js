@@ -38,6 +38,7 @@ class AppError extends Error {
     this.code = problem.code;
     this.retryable = problem.retryable;
     this.retryHint = problem.retry_hint;
+    this.fieldErrors = params && Object.prototype.hasOwnProperty.call(params, 'fieldErrors') ? params.fieldErrors : undefined;
     this.context = context || null;
 
     // Capture stack trace, excluding constructor call from it

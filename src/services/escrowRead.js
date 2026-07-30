@@ -42,6 +42,7 @@ const { createRedisEscrowSummaryCache } = require("../cache/redis");
 const { escrowReadCache } = require("./escrowReadCache");
 const { emitEscrowReadWebhook } = require("./webhooks");
 const { get: getConfig } = require("../config");
+const { escrowReadParamsSchema } = require("../schemas/escrowRead");
 
 const cache = createRedisEscrowSummaryCache();
 
@@ -111,14 +112,7 @@ function coerceLegalHoldStatus(raw) {
 // Alias for internal use within this module.
 const _coerceLegalHoldStatus = coerceLegalHoldStatus;
 
-/**
- * Regex that a valid invoice ID must satisfy.
- * Aligned with IDENTIFIER_PATTERN in escrowSubmit.js.
- * Allows alphanumeric start, followed by alphanumeric, underscores, hyphens, dots, or colons, 1–128 chars.
- *
- * @constant {RegExp}
- */
-const INVOICE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
 
 /**
  * Neutral base-state shape returned when neither the projection nor a test
@@ -131,25 +125,35 @@ const NEUTRAL_BASE_STATE = Object.freeze({
   status: "not_found",
   fundedAmount: 0,
   source: "rpc_stub",
+  latest_event_type: "live_read",
 });
 
 /**
- * Validates an invoice ID string.
+ * Validates an invoice ID string using the canonical escrow-read Zod schema.
+ *
+ * Delegates to {@link module:schemas/escrowRead.escrowReadParamsSchema} so
+ * all escrow-read paths share one validation rule. The Zod schema already
+ * enforces:
+ *  - Non-empty string
+ *  - Starts with alphanumeric
+ *  - Contains only alphanumeric, underscore, hyphen, dot, colon
+ *  - Max 128 characters
  *
  * @param {unknown} invoiceId - Value to validate.
  * @returns {{ valid: boolean, reason?: string }}
  */
 function validateInvoiceId(invoiceId) {
-  if (typeof invoiceId !== "string" || invoiceId.trim() === "") {
-    return { valid: false, reason: "invoiceId must be a non-empty string" };
+  const result = escrowReadParamsSchema.safeParse({ invoiceId });
+  if (result.success) {
+    return { valid: true };
   }
-  if (!INVOICE_ID_RE.test(invoiceId.trim())) {
-    return {
-      valid: false,
-      reason: "invoiceId contains invalid characters (allowed: a-z A-Z 0-9 _ -)",
-    };
-  }
-  return { valid: true };
+
+  const firstIssue = result.error.issues && result.error.issues[0];
+  const reason =
+    firstIssue && firstIssue.message
+      ? firstIssue.message
+      : "invoiceId is invalid";
+  return { valid: false, reason };
 }
 
 /**
@@ -253,9 +257,6 @@ function _coerceFundedAmount(raw) {
  * Reads the latest projection row for an invoice and normalises it into the
  * base-state envelope used by the rest of the read path.
  *
- * @param {string} safeId - Validated, trimmed invoice ID.
- * @param {import('knex').Knex} [dbClient=db] - Knex instance.
- * @returns {Promise<object|null>} Normalised base state, or null when missing.
  * Security notes:
  *  - We never trust `eventBody.status` / `eventBody.fundedAmount` to override
  *    `latest_event_type` blindly; the envelope (`latest_event_type`) is the
@@ -616,11 +617,6 @@ async function readFundedAmount(invoiceId, options = {}) {
 }
 
 /**
- * Retrieves the escrow state from cache or projection, falling back to a live RPC read.
- *
- * @param {string} invoiceId - Invoice identifier.
- * @param {object} [options={}]
- * @returns {Promise<Object>}
  * Resolves whether the projection/cache-based escrow read path is enabled.
  * Checks the `ESCROW_READ_PROJECTION_ENABLED` environment flag.
  * Defaults to `true` when config is not yet validated (e.g. in tests).
@@ -645,8 +641,16 @@ function isProjectionEnabled() {
  * projection/cache path is skipped entirely and the function falls
  * through directly to a live Soroban contract read.
  *
- * @param {string} invoiceId - Invoice identifier
- * @returns {Promise<Object>} The escrow state
+ * Read ordering (flag enabled): process-local cache → Redis cache →
+ * `escrow_event_projection` row → neutral RPC stub. Every hit is written
+ * back into the process-local cache so a subsequent call in the same
+ * process short-circuits before touching Redis or the DB.
+ *
+ * @param {string} invoiceId - Invoice identifier.
+ * @param {object} [options={}]
+ * @param {import('knex').Knex} [options.dbClient] - Override the default
+ *   Knex instance for tests.
+ * @returns {Promise<Object>} The escrow state.
  */
 async function getEscrowStateWithProjection(invoiceId, options = {}) {
   const safeId = invoiceId.trim();
@@ -658,9 +662,15 @@ async function getEscrowStateWithProjection(invoiceId, options = {}) {
   }
 
   // Gate: if the projection feature flag is disabled, skip cache & DB
-  // and go directly to a live Soroban read.
+  // and go directly to a live Soroban read. Bypasses `_fetchBaseEscrowState`
+  // entirely (rather than calling it with no adapter) because that helper
+  // always falls through to a projection-table read when no adapter is
+  // supplied — which would defeat this gate.
   if (!isProjectionEnabled()) {
-    const baseState = await _fetchBaseEscrowState(safeId);
+    const baseState = await callSorobanContract(async () => ({
+      invoiceId: safeId,
+      ...NEUTRAL_BASE_STATE,
+    }));
     const legalHold = await fetchLegalHold(safeId);
     return {
       ...baseState,

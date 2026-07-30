@@ -168,7 +168,7 @@ describe('escrowRead attestation service', () => {
     });
 
     it('validates invoiceId', async () => {
-      await expect(readEscrowStateWithAttestations('')).rejects.toThrow('invoiceId must be a non-empty string');
+      await expect(readEscrowStateWithAttestations('')).rejects.toThrow('invoiceId must not be empty');
       await expect(readEscrowStateWithAttestations('invalid@id')).rejects.toThrow('invoiceId contains invalid characters');
     });
 

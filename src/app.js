@@ -71,6 +71,7 @@ const {
   resetFeatureRouterMounts,
 } = require('./utils/routeMountRegistry');
 const { createCompressionMiddleware } = require('./middleware/compression');
+const { configErrorHandler } = require('./middleware/configErrorHandler');
 
 /**
  * Returns a 403 JSON response only for the dedicated blocked-origin CORS error.
@@ -323,13 +324,15 @@ function createApp() {
       .trim()
       .replace(/\s+/g, '');
 
+    const { result, escrowAddress, error, code, statusCode } = await getEscrowRead(invoiceId);
+
     if (error) {
       return res.status(statusCode).json({ error, code });
     }
 
     res.set('X-Escrow-Address', escrowAddress);
     return res.json({
-      data: result,
+      ...responseHelper.success(result),
       message: result && result.fromProjection
         ? 'Escrow state read from event projection.'
         : 'Escrow state read from live Soroban contract.',
@@ -413,6 +416,7 @@ function createApp() {
   // ── 8 – 10. Error handlers (order matters) ───────────────────────────────
   app.use(handleCorsError);
   app.use(payloadTooLargeHandler);
+  app.use(configErrorHandler);
   app.use(handleInternalError);
 
   return app;

@@ -240,11 +240,27 @@ function invalidatePrefix(store, prefix) {
   }
 }
 
+/**
+ * Creates a tenant-isolated cache key for the invoice state endpoint.
+ *
+ * The key includes tenant ID and invoice ID so different invoices and
+ * tenants produce distinct cache entries.
+ *
+ * @param {import('express').Request} req - The Express request.
+ * @returns {string} Cache key, e.g. `invoiceState:state:tenant-abc:inv_123`
+ */
+function makeInvoiceStateKey(req) {
+  const tenantId = req.tenantId || 'unknown';
+  const invoiceId = req.params ? req.params.id : 'unknown';
+  return 'invoiceState:state:' + tenantId + ':' + invoiceId;
+}
+
 module.exports = {
   cacheResponse,
   invalidatePrefix,
   makeMarketplaceKey,
   makeInvestorLocksKey,
   makeInvestorLockKey,
+  makeInvoiceStateKey,
   hashCacheComponent,
 };

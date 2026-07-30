@@ -53,43 +53,25 @@
  * / functions: 95 / lines: 95 / statements: 95.
  */
 
-const request = require('supertest');
-const express = require('express');
-
-// Snapshot tests are about *wire shape*, not internal service behaviour.
-// Mocking kycService / db / metrics keeps every test deterministic and
-// isolated from external state.
-//
-// IMPORTANT: We use a factory mock for `../src/metrics` instead of bare
-// `jest.mock('../src/metrics')`. The bare form causes jest to inspect
-// the real module to derive an automock, but `src/metrics.js` currently
-// references an undefined `recordMetricsEndpointOutcome` symbol in its
-// `module.exports` (a separate, pre-existing bug); a factory mock avoids
-// loading the real module and side-stepping the issue.
-jest.mock('../src/db/knex');
-jest.mock('../src/metrics', () => ({
-  kycWebhookRequestDurationSeconds: {
-    observe: jest.fn(),
-  },
-  kycWebhookRequestsTotal: {
-    inc: jest.fn(),
-  },
-  kycWebhookErrorsTotal: {
-    inc: jest.fn(),
-  },
-  normalizeKycWebhookStatusClass: jest.fn().mockReturnValue('4xx'),
-  normalizeKycWebhookCause: jest.fn().mockReturnValue('none'),
-}));
+/**
+ * Mock kycService before any module loads.
+ * metrics/knex/rate-limit are already mocked in setupFilesAfterEnv (setup.js).
+ */
 jest.mock('../src/services/kycService', () => ({
   getKycProviderConfig: jest.fn(),
   normalizeProviderStatus: jest.fn(),
   persistKycRecord: jest.fn(),
   KYC_STATUSES: { UNKNOWN: 'unknown' },
+  resetMockRecords: jest.fn(),
 }));
 
-const webhooks = require('../src/services/webhooks');
+const request = require('supertest');
+const express = require('express');
+
 const kycService = require('../src/services/kycService');
+const webhooks = require('../src/services/webhooks');
 const kycRoutes = require('../src/routes/kyc');
+const { notFoundHandler, problemJsonHandler } = require('../src/middleware/problemJson');
 
 const TEST_SECRET = 'snapshot-test-secret';
 const TEST_TENANT = 'tenant-a';
@@ -119,55 +101,38 @@ function sign(rawBody) {
   return webhooks.createSignatureHeader(TEST_SECRET, rawBody);
 }
 
-// Spy on `verifySignature` once at suite start. Each test re-points
-// `mockReturnValue` in `beforeEach` so the spy survives across tests
-// (clearAllMocks clears call data, not implementations).
-let verifySignatureSpy;
-beforeAll(() => {
-  verifySignatureSpy = jest.spyOn(webhooks, 'verifySignature');
-});
+describe('kyc-webhook POST /api/kyc/webhook — error response body snapshots', () => {
+  let app;
 
-beforeEach(() => {
-  jest.clearAllMocks();
+  beforeEach(() => {
+    jest.clearAllMocks();
 
-  // Default happy-path mocks; individual tests override as needed.
-  // The route reads the secret via `kycService.getKycProviderConfig()`, so
-  // we deliberately *don't* mutate `process.env.KYC_PROVIDER_SECRET` here
-  // — `--runInBand` would otherwise leak the synthetic secret into every
-  // later test file in the same Jest process.
-  kycService.getKycProviderConfig.mockReturnValue({ apiSecret: TEST_SECRET });
-  kycService.normalizeProviderStatus.mockImplementation((status) => status);
-  kycService.persistKycRecord.mockResolvedValue({
-    smeId: 'sme-001',
-    status: 'verified',
-    recordId: 'rec-001',
-    verifiedAt: null,
-    updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    // Default happy-path mocks; individual tests override as needed.
+    kycService.getKycProviderConfig.mockReturnValue({ apiSecret: TEST_SECRET });
+    kycService.normalizeProviderStatus.mockImplementation((status) => status);
+    kycService.persistKycRecord.mockResolvedValue({
+      smeId: 'sme-001',
+      status: 'verified',
+      recordId: 'rec-001',
+      verifiedAt: null,
+      updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    });
+
+    app = buildApp();
   });
 
-  // Default signature verification: succeed. Tests that specifically
-  // exercise the 401 paths override this with
-  // `verifySignatureSpy.mockReturnValue({valid:false,...})` or omit
-  // the header entirely.
-  verifySignatureSpy.mockReturnValue({ valid: true });
-});
-
-describe('kyc-webhook POST /api/kyc/webhook — error response body snapshots', () => {
   describe('400 Bad Request', () => {
     test('invalid JSON payload (route wraps the SyntaxError as a stable message)', async () => {
-      // The route's `parseJsonPayload` rethrows `JSON.parse` failures as
-      // `Error('Invalid JSON payload')`, so the snapshot body shape is
-      // deterministic across Node versions (not Node's native SyntaxError
-      // message).
       const rawBody = '{ invalid json';
 
-      const res = await request(buildApp())
+      const res = await request(app)
         .post('/api/kyc/webhook')
         .set('Content-Type', 'application/json')
         .set('X-Signature', sign(rawBody))
         .send(rawBody);
 
       expect(res.status).toBe(400);
+      expect(res.headers['content-type']).toContain('application/problem+json');
       expect(res.body).toMatchSnapshot();
     });
 
@@ -175,13 +140,14 @@ describe('kyc-webhook POST /api/kyc/webhook — error response body snapshots', 
       const payload = { status: 'verified' };
       const rawBody = JSON.stringify(payload);
 
-      const res = await request(buildApp())
+      const res = await request(app)
         .post('/api/kyc/webhook')
         .set('Content-Type', 'application/json')
         .set('X-Signature', sign(rawBody))
         .send(rawBody);
 
       expect(res.status).toBe(400);
+      expect(res.headers['content-type']).toContain('application/problem+json');
       expect(res.body).toMatchSnapshot();
     });
 
@@ -189,13 +155,14 @@ describe('kyc-webhook POST /api/kyc/webhook — error response body snapshots', 
       const payload = { smeId: 'sme-001' };
       const rawBody = JSON.stringify(payload);
 
-      const res = await request(buildApp())
+      const res = await request(app)
         .post('/api/kyc/webhook')
         .set('Content-Type', 'application/json')
         .set('X-Signature', sign(rawBody))
         .send(rawBody);
 
       expect(res.status).toBe(400);
+      expect(res.headers['content-type']).toContain('application/problem+json');
       expect(res.body).toMatchSnapshot();
     });
 
@@ -203,16 +170,16 @@ describe('kyc-webhook POST /api/kyc/webhook — error response body snapshots', 
       const payload = { smeId: 'sme-001', status: 'mystery_status' };
       const rawBody = JSON.stringify(payload);
 
-      // Simulate the service mapping an unknown provider status to UNKNOWN.
       kycService.normalizeProviderStatus.mockImplementation(() => 'unknown');
 
-      const res = await request(buildApp())
+      const res = await request(app)
         .post('/api/kyc/webhook')
         .set('Content-Type', 'application/json')
         .set('X-Signature', sign(rawBody))
         .send(rawBody);
 
       expect(res.status).toBe(400);
+      expect(res.headers['content-type']).toContain('application/problem+json');
       expect(res.body).toMatchSnapshot();
     });
 
@@ -224,14 +191,15 @@ describe('kyc-webhook POST /api/kyc/webhook — error response body snapshots', 
       };
       const rawBody = JSON.stringify(payload);
 
-      // No tenant context on the request → route must reject with 400.
-      const res = await request(buildApp({ tenantId: null }))
+      const appNoTenant = buildApp({ tenantId: null });
+      const res = await request(appNoTenant)
         .post('/api/kyc/webhook')
         .set('Content-Type', 'application/json')
         .set('X-Signature', sign(rawBody))
         .send(rawBody);
 
       expect(res.status).toBe(400);
+      expect(res.headers['content-type']).toContain('application/problem+json');
       expect(res.body).toMatchSnapshot();
     });
   });
@@ -240,29 +208,34 @@ describe('kyc-webhook POST /api/kyc/webhook — error response body snapshots', 
     test('missing X-Signature header', async () => {
       const rawBody = JSON.stringify({ smeId: 'sme-001', status: 'verified' });
 
-      const res = await request(buildApp())
+      const res = await request(app)
         .post('/api/kyc/webhook')
         .set('Content-Type', 'application/json')
         .send(rawBody);
 
       expect(res.status).toBe(401);
+      expect(res.headers['content-type']).toContain('application/problem+json');
       expect(res.body).toMatchSnapshot();
     });
 
     test('invalid webhook signature', async () => {
       const rawBody = JSON.stringify({ smeId: 'sme-001', status: 'verified' });
-      verifySignatureSpy.mockReturnValue({
+
+      // Re-point the spy for this test only.
+      const spy = jest.spyOn(webhooks, 'verifySignature');
+      spy.mockReturnValue({
         valid: false,
         error: 'Signature mismatch',
       });
 
-      const res = await request(buildApp())
+      const res = await request(app)
         .post('/api/kyc/webhook')
         .set('Content-Type', 'application/json')
         .set('X-Signature', 't=1700000000,v1=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef')
         .send(rawBody);
 
       expect(res.status).toBe(401);
+      expect(res.headers['content-type']).toContain('application/problem+json');
       expect(res.body).toMatchSnapshot();
     });
   });
@@ -276,13 +249,15 @@ describe('kyc-webhook POST /api/kyc/webhook — error response body snapshots', 
       };
       const rawBody = JSON.stringify(payload);
 
-      const res = await request(buildApp({ tenantId: TEST_TENANT }))
+      const appWithTenant = buildApp({ tenantId: TEST_TENANT });
+      const res = await request(appWithTenant)
         .post('/api/kyc/webhook')
         .set('Content-Type', 'application/json')
         .set('X-Signature', sign(rawBody))
         .send(rawBody);
 
       expect(res.status).toBe(403);
+      expect(res.headers['content-type']).toContain('application/problem+json');
       expect(res.body).toMatchSnapshot();
     });
   });
@@ -296,13 +271,14 @@ describe('kyc-webhook POST /api/kyc/webhook — error response body snapshots', 
         new Error('Simulated DB write failure')
       );
 
-      const res = await request(buildApp())
+      const res = await request(app)
         .post('/api/kyc/webhook')
         .set('Content-Type', 'application/json')
         .set('X-Signature', sign(rawBody))
         .send(rawBody);
 
       expect(res.status).toBe(500);
+      expect(res.headers['content-type']).toContain('application/problem+json');
       expect(res.body).toMatchSnapshot();
     });
   });
@@ -312,12 +288,13 @@ describe('kyc-webhook POST /api/kyc/webhook — error response body snapshots', 
       kycService.getKycProviderConfig.mockReturnValue({ apiSecret: null });
       const rawBody = JSON.stringify({ smeId: 'sme-001', status: 'verified' });
 
-      const res = await request(buildApp())
+      const res = await request(app)
         .post('/api/kyc/webhook')
         .set('Content-Type', 'application/json')
         .send(rawBody);
 
       expect(res.status).toBe(503);
+      expect(res.headers['content-type']).toContain('application/problem+json');
       expect(res.body).toMatchSnapshot();
     });
   });
@@ -336,7 +313,7 @@ describe('kyc-webhook POST /api/kyc/webhook — error response body snapshots', 
         updatedAt: new Date('2026-01-01T00:00:00.000Z'),
       });
 
-      const res = await request(buildApp())
+      const res = await request(app)
         .post('/api/kyc/webhook')
         .set('Content-Type', 'application/json')
         .set('X-Signature', sign(rawBody))
@@ -350,39 +327,19 @@ describe('kyc-webhook POST /api/kyc/webhook — error response body snapshots', 
 
 describe('kyc-webhook 404 / 409 response shape locks', () => {
   test('404 Not Found — unknown sub-route forwards to problemJson notFoundHandler', async () => {
-    // Mount the kyc router plus the project's standard 404 + problemJson
-    // handlers so any unknown sub-path under /api/kyc/ renders the stable
-    // RFC 7807 `application/problem+json` shape.
-    const { notFoundHandler, problemJsonHandler } = require('../src/middleware/problemJson');
-    const app = express();
-    app.use(express.raw({ type: 'application/json' }));
-    app.use('/api/kyc', kycRoutes);
-    app.use(notFoundHandler);
-    app.use(problemJsonHandler);
+    const app404 = express();
+    app404.use(express.raw({ type: 'application/json' }));
+    app404.use('/api/kyc', kycRoutes);
+    app404.use(notFoundHandler);
+    app404.use(problemJsonHandler);
 
-    const res = await request(app).get('/api/kyc/no-such-hook').expect(404);
+    const res = await request(app404).get('/api/kyc/no-such-hook').expect(404);
 
     expect(res.headers['content-type']).toContain('application/problem+json');
     expect(res.body).toMatchSnapshot();
   });
 
   test.skip('409 Conflict — kyc-webhook POST/GET do not currently emit 409', () => {
-    /**
-     * The `POST /api/kyc/webhook` handler is **fail-closed** on unknown
-     * provider statuses (returns 400) and surfaces persistence failures as
-     * 500 — it never returns a 409 Conflict. Duplicate deliveries are
-     * intentionally idempotent (each delivery upserts the same KYC record;
-     * see `tests/kyc.provider.test.js` "accepts repeated webhook deliveries
-     * without failing").
-     *
-     * The `GET /api/kyc/webhooks` listing endpoint likewise does not
-     * return 409 — it returns 200 (paginated data) or 400 (validation).
-     *
-     * Snapshotting a 409 here would be misleading: there is no current wire
-     * shape to lock. If a future change introduces an explicit
-     * version / record-state conflict branch (e.g. optimistic concurrency
-     * on the kyc_records row), add the new 409-emitting test alongside the
-     * other cases in this file and run `jest -u` to record its shape.
-     */
+    /* intentionally skipped — see inline comment */
   });
 });

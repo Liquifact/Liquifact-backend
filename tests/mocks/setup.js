@@ -1,3 +1,33 @@
+jest.mock('../../src/metrics', () => {
+  const makeCounter = () => ({
+    inc: jest.fn(),
+    reset: jest.fn(),
+    val: 0,
+  });
+
+  return {
+    footprintCacheHitsTotal: makeCounter(),
+    footprintCacheMissesTotal: makeCounter(),
+    footprintCacheEvictionsTotal: makeCounter(),
+
+    // KYC webhook metrics — needed so route handlers can call
+    // normalizeKycWebhookStatusClass / normalizeKycWebhookCause
+    // in their res.on('finish') callbacks without crashing.
+    kycWebhookRequestDurationSeconds: { observe: jest.fn() },
+    kycWebhookRequestsTotal: { inc: jest.fn() },
+    kycWebhookErrorsTotal: { inc: jest.fn() },
+    normalizeKycWebhookStatusClass: jest.fn().mockReturnValue('4xx'),
+    normalizeKycWebhookCause: jest.fn().mockReturnValue('none'),
+
+    // Invoice-state request metrics — needed so
+    // middleware/invoiceStateMetrics.js's res.on('finish') callback (wired
+    // into every invoice-state route) doesn't crash in tests that exercise
+    // those routes without their own local metrics mock.
+    invoiceStateRequestDurationMs: { labels: jest.fn().mockReturnThis(), observe: jest.fn() },
+    invoiceStateRequestCount: { labels: jest.fn().mockReturnThis(), inc: jest.fn() },
+  };
+});
+
 const { CircuitBreaker: _CircuitBreaker } = require('../../src/utils/circuitBreaker');
 const { MemoryCacheStore: _MemoryCacheStore } = require('../../src/services/cacheStore');
 globalThis.CircuitBreaker = _CircuitBreaker;
