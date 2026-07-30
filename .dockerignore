@@ -1,0 +1,59 @@
+# .dockerignore
+# ─────────────────────────────────────────────────────────────────────────────
+# Files listed here are excluded from the Docker build context sent to the
+# daemon.  Excluding large / sensitive directories:
+#   • Speeds up every `docker build` (less data uploaded).
+#   • Prevents secrets and dev-only files from leaking into any image layer,
+#     even as intermediaries.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Dependencies — the deps stage re-installs from package-lock.json via npm ci.
+# Sending the host's node_modules would bloat the context and could smuggle
+# dev dependencies into the production image.
+node_modules
+
+# Test artefacts — never needed at runtime.
+tests/
+coverage/
+.nyc_output/
+*.lcov
+
+# Development configuration
+docker-compose*.yml
+.env
+.env.*
+!.env.example
+
+# Git history and GitHub metadata
+.git
+.github
+
+# Editor / IDE configs
+.idea/
+.vscode/
+*.swp
+
+# Local databases — runtime data, not part of the app image.
+*.sqlite3
+*.sqlite
+data/
+
+# OS artefacts
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# TypeScript build output (we ship source, not compiled dist)
+dist/
+
+# CI / tooling caches
+.cache/
+.parcel-cache/
+.eslintcache
+.codex/
+
+# Load-test reports
+tests/load/reports/

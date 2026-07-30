@@ -40,6 +40,42 @@ The escrow submission module consumes the following environment variables:
     4.  The server signs the prepared transaction and transmits it directly to the Soroban RPC.
     5.  Returns the status `submitted`, transaction hash (`txHash`), and the submission ledger to the client.
 
+### Contract Existence Preflight (issue #436, cross-cutting)
+
+Applies to **Delegated** and **Custodial** modes only; Stubbed mode bypasses
+the network entirely.
+
+In **Delegated** and **Custodial** modes `submitFundEscrow` issues a single
+`getLedgerEntry` call against the escrow contract's `contractCode` ledger
+entry before any further RPC or sequence-number work happens. If the
+entry has no on-ledger `val`, the submission is **rejected at preflight**
+with `EscrowSubmitError` (`code: CONTRACT_NOT_FOUND`, HTTP `404`) and the
+metric `escrow_preflight_rejected_total{reason="not_found"}` is
+incremented. This protects operators from paying the cost of `getAccount`
++ `simulateTransaction` against a wrong / stale / undeployed contract
+address.
+
+Preflight additionally rejects with `code: PREFLIGHT_RPC_ERROR` on RPC
+faults and `code: INVALID_CONTRACT_ADDRESS` on unparseable addresses.
+In every rejection path the user-facing message is fixed; raw SDK / RPC
+text is **never** echoed to the caller or to the metric label set, so
+secret material in upstream error strings cannot leak.
+
+The Stubbed mode bypasses the preflight entirely (it never touches the
+network).
+
+#### Rejection log / metric surface
+
+| Reason           | Trigger condition                                          | Metric label                       | Error code             | Status |
+| ---------------- | ---------------------------------------------------------- | ---------------------------------- | ---------------------- | ------ |
+| `not_found`      | `getLedgerEntry` returned a response with empty `val`     | `escrow_preflight_rejected_total`  | `CONTRACT_NOT_FOUND`   | 404    |
+| `rpc_error`      | `getLedgerEntry` rejected / network fault                  | `escrow_preflight_rejected_total`  | `PREFLIGHT_RPC_ERROR`  | 503    |
+| `invalid_address`| Address cannot be parsed or XDR-construction failed        | `escrow_preflight_rejected_total`  | `INVALID_CONTRACT_ADDRESS` | 400 |
+
+In every branch a structured `logger.warn(...)` line is emitted with
+fields `escrowAddress`, `errCode`, `errStatus`. The raw SDK message is
+never logged.
+
 ### 3. Stubbed Mode (`stubbed`)
 *   **Status:** `stubbed`
 *   **Overview:** A test and staging fallback mode. It completely bypasses all Soroban RPC calls, cryptographic operations, and platform address/secret requirements.

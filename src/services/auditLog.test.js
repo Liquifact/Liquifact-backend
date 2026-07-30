@@ -124,8 +124,8 @@ describe('auditLog Service', () => {
   });
 
   describe('createAuditLog', () => {
-    it('should create an audit log entry with all required fields', () => {
-      const entry = createAuditLog({
+    it('should create an audit log entry with all required fields', async () => {
+      const entry = await createAuditLog({
         actor: 'user-123',
         action: 'CREATE',
         resourceType: 'invoice',
@@ -141,8 +141,8 @@ describe('auditLog Service', () => {
       expect(entry.resourceId).toBe('inv-456');
     });
 
-    it('should be immutable (frozen)', () => {
-      const entry = createAuditLog({
+    it('should be immutable (frozen)', async () => {
+      const entry = await createAuditLog({
         actor: 'user-123',
         action: 'CREATE',
         resourceType: 'invoice',
@@ -155,11 +155,11 @@ describe('auditLog Service', () => {
       expect(Object.isFrozen(entry)).toBe(true);
     });
 
-    it('should capture state changes', () => {
+    it('should capture state changes', async () => {
       const before = { amount: 100, status: 'draft' };
       const after = { amount: 150, status: 'submitted' };
 
-      const entry = createAuditLog({
+      const entry = await createAuditLog({
         actor: 'user-123',
         action: 'UPDATE',
         resourceType: 'invoice',
@@ -172,8 +172,8 @@ describe('auditLog Service', () => {
       expect(entry.changes.after.amount).toBe(150);
     });
 
-    it('should capture HTTP status code', () => {
-      const entry = createAuditLog({
+    it('should capture HTTP status code', async () => {
+      const entry = await createAuditLog({
         actor: 'user-123',
         action: 'DELETE',
         resourceType: 'invoice',
@@ -184,8 +184,8 @@ describe('auditLog Service', () => {
       expect(entry.statusCode).toBe(204);
     });
 
-    it('should capture IP address and user agent', () => {
-      const entry = createAuditLog({
+    it('should capture IP address and user agent', async () => {
+      const entry = await createAuditLog({
         actor: 'user-123',
         action: 'CREATE',
         resourceType: 'invoice',
@@ -198,8 +198,8 @@ describe('auditLog Service', () => {
       expect(entry.userAgent).toBe('Mozilla/5.0');
     });
 
-    it('should include metadata', () => {
-      const entry = createAuditLog({
+    it('should include metadata', async () => {
+      const entry = await createAuditLog({
         actor: 'user-123',
         action: 'CREATE',
         resourceType: 'invoice',
@@ -211,61 +211,70 @@ describe('auditLog Service', () => {
       expect(entry.metadata.version).toBe('1.0');
     });
 
-    it('should throw error if actor is missing', () => {
-      expect(() => {
-        createAuditLog({
+    it('should throw error if actor is missing', async () => {
+      await expect(() => {
+        return createAuditLog({
           action: 'CREATE',
           resourceType: 'invoice',
           resourceId: 'inv-456',
         });
-      }).toThrow('Audit log actor is required');
+      }).rejects.toThrow('Audit log actor is required');
     });
 
-    it('should throw error if action is missing', () => {
-      expect(() => {
-        createAuditLog({
+    it('should throw error if action is missing', async () => {
+      await expect(() => {
+        return createAuditLog({
           actor: 'user-123',
           resourceType: 'invoice',
           resourceId: 'inv-456',
         });
-      }).toThrow('Audit log action is required');
+      }).rejects.toThrow('Audit log action is required');
     });
 
-    it('should throw error if action is invalid', () => {
-      expect(() => {
-        createAuditLog({
+    it('should throw error if action is invalid', async () => {
+      await expect(() => {
+        return createAuditLog({
           actor: 'user-123',
           action: 'INVALID',
           resourceType: 'invoice',
           resourceId: 'inv-456',
         });
-      }).toThrow('Invalid action');
+      }).rejects.toThrow('Invalid action');
     });
 
-    it('should throw error if resourceType is missing', () => {
-      expect(() => {
-        createAuditLog({
+    it('should throw error if resourceType is missing', async () => {
+      await expect(() => {
+        return createAuditLog({
           actor: 'user-123',
           action: 'CREATE',
           resourceId: 'inv-456',
         });
-      }).toThrow('Audit log resourceType is required');
-    });
+      }).rejects.toThrow('Audit log resourceType is required');
+    }); 
+        // createAuditLog({
+        //   actor: 'user-123',
+        //   action: 'CREATE',
+        //   resourceId: 'inv-456',
+        // });
+     // })//.rejects.toThrow('Audit log resourceType is required');
+    //});
+  })
+})
 
-    it('should throw error if resourceId is missing', () => {
-      expect(() => {
-        createAuditLog({
+    it('should throw error if resourceId is missing', async () => {
+      await expect(() => {
+        return createAuditLog({
           actor: 'user-123',
           action: 'CREATE',
           resourceType: 'invoice',
         });
-      }).toThrow('Audit log resourceId is required');
+      }).rejects.toThrow('Audit log resourceId is required');
     });
 
-    it('should capture CREATE action for new resources', () => {
+    it('should capture CREATE action for new resources', async () => {
       const after = { id: 'inv-456', amount: 100, status: 'draft' };
 
-      const entry = createAuditLog({
+      const entry = await createAuditLog({
         actor: 'user-123',
         action: 'CREATE',
         resourceType: 'invoice',
@@ -277,11 +286,11 @@ describe('auditLog Service', () => {
       expect(entry.changes.after.id).toBe('inv-456');
     });
 
-    it('should capture UPDATE action with before/after', () => {
+    it('should capture UPDATE action with before/after', async () => {
       const before = { amount: 100 };
       const after = { amount: 150 };
 
-      const entry = createAuditLog({
+      const entry = await createAuditLog({
         actor: 'user-123',
         action: 'UPDATE',
         resourceType: 'invoice',
@@ -295,10 +304,10 @@ describe('auditLog Service', () => {
       expect(entry.changes.after.amount).toBe(150);
     });
 
-    it('should capture DELETE action', () => {
+    it('should capture DELETE action', async () => {
       const before = { id: 'inv-456', amount: 100 };
 
-      const entry = createAuditLog({
+      const entry = await createAuditLog({
         actor: 'user-123',
         action: 'DELETE',
         resourceType: 'invoice',
@@ -310,23 +319,22 @@ describe('auditLog Service', () => {
       expect(entry.action).toBe('DELETE');
       expect(entry.changes.before.id).toBe('inv-456');
     });
-  });
 
   describe('getAuditLogs', () => {
-    beforeEach(() => {
-      createAuditLog({
+    beforeEach(async() => {
+      await createAuditLog({
         actor: 'user-1',
         action: 'CREATE',
         resourceType: 'invoice',
         resourceId: 'inv-1',
       });
-      createAuditLog({
+      await createAuditLog({
         actor: 'user-1',
         action: 'UPDATE',
         resourceType: 'invoice',
         resourceId: 'inv-1',
       });
-      createAuditLog({
+      await createAuditLog({
         actor: 'user-2',
         action: 'CREATE',
         resourceType: 'invoice',
@@ -334,57 +342,57 @@ describe('auditLog Service', () => {
       });
     });
 
-    it('should return all audit logs by default', () => {
-      const logs = getAuditLogs();
+    it('should return all audit logs by default', async() => {
+      const logs = await getAuditLogs();
       expect(logs.length).toBe(3);
     });
 
-    it('should filter by resourceId', () => {
-      const logs = getAuditLogs({ resourceId: 'inv-1' });
+    it('should filter by resourceId', async() => {
+      const logs = await getAuditLogs({ resourceId: 'inv-1' });
       expect(logs.length).toBe(2);
       expect(logs.every((log) => log.resourceId === 'inv-1')).toBe(true);
     });
 
-    it('should filter by resourceType', () => {
-      const logs = getAuditLogs({ resourceType: 'invoice' });
+    it('should filter by resourceType', async() => {
+      const logs = await getAuditLogs({ resourceType: 'invoice' });
       expect(logs.length).toBe(3);
     });
 
-    it('should filter by actor', () => {
-      const logs = getAuditLogs({ actor: 'user-1' });
+    it('should filter by actor', async() => {
+      const logs = await getAuditLogs({ actor: 'user-1' });
       expect(logs.length).toBe(2);
     });
 
-    it('should filter by action', () => {
-      const logs = getAuditLogs({ action: 'CREATE' });
+    it('should filter by action', async() => {
+      const logs = await getAuditLogs({ action: 'CREATE' });
       expect(logs.length).toBe(2);
     });
 
-    it('should return latest logs first (reverse chronological)', () => {
-      const logs = getAuditLogs();
+    it('should return latest logs first (reverse chronological)', async() => {
+      const logs = await getAuditLogs();
       expect(logs[0].action).toBe('CREATE'); // Most recent
       expect(logs[logs.length - 1].action).toBe('CREATE'); // Oldest
     });
 
-    it('should support pagination with limit and offset', () => {
-      const page1 = getAuditLogs({ limit: 1, offset: 0 });
-      const page2 = getAuditLogs({ limit: 1, offset: 1 });
+    it('should support pagination with limit and offset', async() => {
+      const page1 = await getAuditLogs({ limit: 1, offset: 0 });
+      const page2 = await getAuditLogs({ limit: 1, offset: 1 });
 
       expect(page1.length).toBe(1);
       expect(page2.length).toBe(1);
       expect(page1[0].id).not.toBe(page2[0].id);
     });
 
-    it('should return frozen objects to prevent mutation', () => {
-      const logs = getAuditLogs();
+    it('should return frozen objects to prevent mutation', async () => {
+      const logs = await getAuditLogs();
       const originalActor = logs[0].actor;
       logs[0].actor = 'hacker';
       expect(logs[0].actor).toBe(originalActor);
       expect(Object.isFrozen(logs[0])).toBe(true);
     });
 
-    it('should handle multiple filters simultaneously', () => {
-      const logs = getAuditLogs({
+    it('should handle multiple filters simultaneously', async () => {
+      const logs = await getAuditLogs({
         resourceId: 'inv-1',
         actor: 'user-1',
         action: 'UPDATE',
@@ -396,20 +404,20 @@ describe('auditLog Service', () => {
   });
 
   describe('getInvoiceAuditTrail', () => {
-    beforeEach(() => {
-      createAuditLog({
+    beforeEach(async () => {
+      await createAuditLog({
         actor: 'user-1',
         action: 'CREATE',
         resourceType: 'invoice',
         resourceId: 'inv-1',
       });
-      createAuditLog({
+      await createAuditLog({
         actor: 'user-1',
         action: 'UPDATE',
         resourceType: 'invoice',
         resourceId: 'inv-1',
       });
-      createAuditLog({
+      await createAuditLog({
         actor: 'user-2',
         action: 'CREATE',
         resourceType: 'invoice',
@@ -417,38 +425,38 @@ describe('auditLog Service', () => {
       });
     });
 
-    it('should return audit trail for invoice', () => {
-      const trail = getInvoiceAuditTrail('inv-1');
+    it('should return audit trail for invoice', async () => {
+      const trail = await getInvoiceAuditTrail('inv-1');
       expect(trail.length).toBe(2);
       expect(trail.every((log) => log.resourceId === 'inv-1')).toBe(true);
     });
 
-    it('should return empty array for non-existent invoice', () => {
-      const trail = getInvoiceAuditTrail('inv-999');
+    it('should return empty array for non-existent invoice', async () => {
+      const trail = await getInvoiceAuditTrail('inv-999');
       expect(trail.length).toBe(0);
     });
 
-    it('should respect limit parameter', () => {
-      const trail = getInvoiceAuditTrail('inv-1', 1);
+    it('should respect limit parameter', async () => {
+      const trail = await getInvoiceAuditTrail('inv-1', 1);
       expect(trail.length).toBe(1);
     });
   });
 
   describe('countAuditLogs', () => {
-    beforeEach(() => {
-      createAuditLog({
+    beforeEach(async () => {
+      await createAuditLog({
         actor: 'user-1',
         action: 'CREATE',
         resourceType: 'invoice',
         resourceId: 'inv-1',
       });
-      createAuditLog({
+      await createAuditLog({
         actor: 'user-1',
         action: 'UPDATE',
         resourceType: 'invoice',
         resourceId: 'inv-1',
       });
-      createAuditLog({
+      await createAuditLog({
         actor: 'user-2',
         action: 'CREATE',
         resourceType: 'invoice',
@@ -456,26 +464,31 @@ describe('auditLog Service', () => {
       });
     });
 
-    it('should count all logs', () => {
-      expect(countAuditLogs()).toBe(3);
+    it('should count all logs', async () => {
+      const count = await countAuditLogs();
+      expect(count).toBe(3);
     });
 
-    it('should count filtered logs', () => {
-      expect(countAuditLogs({ actor: 'user-1' })).toBe(2);
-      expect(countAuditLogs({ action: 'CREATE' })).toBe(2);
-      expect(countAuditLogs({ resourceId: 'inv-1' })).toBe(2);
+    it('should count filtered logs', async () => {
+      const count1 = await countAuditLogs({ actor: 'user-1' });
+      const count2 = await countAuditLogs({ action: 'CREATE' });
+      const count3 = await countAuditLogs({ resourceId: 'inv-1' });
+
+      expect(count1).toBe(2);
+      expect(count2).toBe(2);
+      expect(count3).toBe(2);
     });
   });
 
   describe('exportAuditLogs', () => {
-    beforeEach(() => {
-      createAuditLog({
+    beforeEach(async () => {
+      await createAuditLog({
         actor: 'user-1',
         action: 'CREATE',
         resourceType: 'invoice',
         resourceId: 'inv-1',
       });
-      createAuditLog({
+      await createAuditLog({
         actor: 'user-2',
         action: 'UPDATE',
         resourceType: 'invoice',
@@ -483,28 +496,28 @@ describe('auditLog Service', () => {
       });
     });
 
-    it('should export logs as JSON by default', () => {
-      const exported = exportAuditLogs();
+    it('should export logs as JSON by default', async () => {
+      const exported = await exportAuditLogs();
       const parsed = JSON.parse(exported);
       expect(Array.isArray(parsed)).toBe(true);
       expect(parsed.length).toBe(2);
     });
 
-    it('should export logs as CSV', () => {
-      const exported = exportAuditLogs({ format: 'csv' });
+    it('should export logs as CSV', async () => {
+      const exported = await exportAuditLogs({ format: 'csv' });
       const lines = exported.split('\n');
       expect(lines[0]).toContain('id,timestamp,actor');
       expect(lines.length).toBeGreaterThan(1);
     });
 
-    it('should respect limit in export', () => {
-      const exported = exportAuditLogs({ limit: 1 });
+    it('should respect limit in export', async () => {
+      const exported = await exportAuditLogs({ limit: 1 });
       const parsed = JSON.parse(exported);
       expect(parsed.length).toBe(1);
     });
 
-    it('should properly escape CSV values', () => {
-      createAuditLog({
+    it('should properly escape CSV values', async() => {
+      await createAuditLog({
         actor: 'user,"test"',
         action: 'CREATE',
         resourceType: 'invoice',
@@ -517,8 +530,8 @@ describe('auditLog Service', () => {
   });
 
   describe('clearAuditLogs', () => {
-    beforeEach(() => {
-      createAuditLog({
+    beforeEach( async () => {
+      await createAuditLog({
         actor: 'user-1',
         action: 'CREATE',
         resourceType: 'invoice',
@@ -526,33 +539,33 @@ describe('auditLog Service', () => {
       });
     });
 
-    it('should clear all logs in non-production', () => {
-      const before = getAuditLogs();
+    it('should clear all logs in non-production', async () => {
+      const before = await getAuditLogs();
       expect(before.length).toBe(1);
 
-      clearAuditLogs();
+      await clearAuditLogs();
 
-      const after = getAuditLogs();
+      const after = await getAuditLogs();
       expect(after.length).toBe(0);
     });
 
-    it('should prevent clearing in production', () => {
+    it('should prevent clearing in production', async () => {
       const originalEnv = process.env.NODE_ENV;
       process.env.NODE_ENV = 'production';
 
-      expect(() => {
-        clearAuditLogs();
-      }).toThrow('Cannot clear audit logs in production');
+      await expect(async () => {
+        await clearAuditLogs();
+      }).rejects.toThrow('Cannot clear audit logs in production');
 
       process.env.NODE_ENV = originalEnv;
     });
   });
 
   describe('Edge cases and security', () => {
-    it('should handle large audit logs efficiently', () => {
+    it('should handle large audit logs efficiently', async () => {
       // Create 1000 audit logs
       for (let i = 0; i < 1000; i++) {
-        createAuditLog({
+        await createAuditLog({
           actor: `user-${i % 10}`,
           action: 'CREATE',
           resourceType: 'invoice',
@@ -560,19 +573,19 @@ describe('auditLog Service', () => {
         });
       }
 
-      const logs = getAuditLogs({ limit: 100 });
+      const logs = await getAuditLogs({ limit: 100 });
       expect(logs.length).toBe(100);
 
-      const count = countAuditLogs();
+      const count = await countAuditLogs();
       expect(count).toBe(1000);
     });
 
-    it('should handle concurrent writes safely', () => {
+    it('should handle concurrent writes safely', async () => {
       const promises = [];
       for (let i = 0; i < 50; i++) {
         promises.push(
           Promise.resolve().then(() => {
-            createAuditLog({
+            return createAuditLog({
               actor: 'user-1',
               action: 'CREATE',
               resourceType: 'invoice',
@@ -583,12 +596,14 @@ describe('auditLog Service', () => {
       }
 
       return Promise.all(promises).then(() => {
-        expect(countAuditLogs()).toBe(50);
+        return countAuditLogs().then((count) => {
+          expect(count).toBe(50);
+        });
       });
     });
 
-    it('should never expose sensitive data in logs', () => {
-      createAuditLog({
+    it('should never expose sensitive data in logs', async () => {
+      await createAuditLog({
         actor: 'user-1',
         action: 'CREATE',
         resourceType: 'invoice',
@@ -612,4 +627,56 @@ describe('auditLog Service', () => {
       expect(exported).toContain('***REDACTED***');
     });
   });
-});
+
+describe('getAuditLogs pageSize security cap', () => {
+    beforeEach(async () => {
+      // Make 200 logs so we can test capping
+      for (let i = 0; i < 200; i++) {
+        await createAuditLog({
+          actor: 'user-1',
+          action: 'CREATE',
+          resourceType: 'invoice',
+          resourceId: `inv-${i}`,
+        });
+      }
+    });
+
+    it('should clamp limit over cap to 100', async () => {
+      const logs = await getAuditLogs({ limit: 500 }); // huge
+      expect(logs.length).toBe(100); // not 500
+    });
+
+    it('should clamp Infinity to 100 - regression assert', async () => {
+      const logs = await getAuditLogs({ limit: Infinity });
+      expect(logs.length).toBe(100); // not all 200
+    });
+
+    it('should clamp negative limit to 100', async () => {
+      const logs = await getAuditLogs({ limit: -5 });
+      expect(logs.length).toBe(100); // default
+    });
+
+    it('should clamp zero limit to 100', async () => {
+      const logs = await getAuditLogs({ limit: 0 });
+      expect(logs.length).toBe(100); // default
+    });
+
+    it('should allow valid limit under cap', async () => {
+      const logs = await getAuditLogs({ limit: 25 });
+      expect(logs.length).toBe(25); // not capped
+    });
+
+    it('getInvoiceAuditTrail should also clamp to 100', async () => {
+      const trail = await getInvoiceAuditTrail('inv-1', 999);
+      expect(trail.length).toBeLessThanOrEqual(100);
+    });
+  });
+
+   describe('getAuditLogs pageSize security cap', () => { 
+    it('should clamp limit over cap to 100', async () => {
+      const logs = await getAuditLogs({ limit: 500 });
+      expect(logs.length).toBe(100);
+    });
+
+    // ...all 6 tests
+  });

@@ -6,6 +6,11 @@
 
 const crypto = require('crypto');
 const metrics = require('../metrics');
+const logger = require('../logger');
+
+const REDACTED = '[REDACTED]';
+const SECRET_KEY_PATTERN = /(secret|token|password|api[_-]?key|authorization|credential)/i;
+const NON_TERMINAL_STATUSES = ['pending', 'processing', 'retrying'];
 
 const JOB_STATUS = {
   PENDING:    'pending',
@@ -25,6 +30,7 @@ class JobQueue {
   constructor(options = {}) {
     this.maxRetries   = Math.min(options.maxRetries ?? 3, 10);
     this.maxQueueSize = options.maxQueueSize || 10000;
+    this._persistence = options.persistence || null;
     
     // Using Map for efficient O(1) lookups
     this.jobs = new Map();
@@ -209,12 +215,23 @@ class JobQueue {
   async restoreFromPersistence() {
     if (!this._persistence) { return 0; }
 
-    const recovered = await this._persistence.recoverUnackedJobs();
+    let recovered;
+    try {
+      recovered = await this._persistence.recoverUnackedJobs();
+    } catch (err) {
+      logger.error({ err }, '[jobQueue] Failed to recover persisted jobs; starting empty');
+      return 0;
+    }
     let count = 0;
 
     for (const job of recovered) {
       if (this.jobs.has(job.id)) { continue; }
       if (this.queue.length + this.retryQueue.length >= this.maxQueueSize) { break; }
+
+      if (job.status === JOB_STATUS.PROCESSING) {
+        job.status = JOB_STATUS.PENDING;
+        job.startedAt = null;
+      }
 
       this.jobs.set(job.id, job);
       // Jobs that already had attempts go to the retry queue; fresh ones to main.

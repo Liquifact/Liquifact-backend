@@ -88,10 +88,25 @@ async function appendAuditEvent(event, options = {}) {
 }
 
 /**
- * Escapes a single CSV field value to prevent formula-injection attacks
- * (cells beginning with =, +, -, @, TAB, or CR are prefixed with a single
- * quote so that spreadsheet software treats them as plain text) and to
- * conform to RFC 4180 quoting rules.
+ * Escapes a single CSV field value to prevent formula-injection attacks and
+ * to conform to RFC 4180 quoting rules.
+ *
+ * Formula-injection neutralisation (OWASP CSV Injection guidance):
+ *   - Leading whitespace is stripped before the dangerous-character check so
+ *     that values like " =HYPERLINK(...)" or "\t=cmd" are not overlooked.
+ *   - Any field whose leading non-whitespace character is one of
+ *     = + - @ | \t \r is prefixed with a single quote (') on the *original*
+ *     string so that spreadsheet software treats the cell as plain text.
+ *
+ * Covered cases:
+ *   "=SUM(...)"          → "'=SUM(...)"
+ *   " =HYPERLINK(...)"   → "' =HYPERLINK(...)"  (leading space + =)
+ *   "\t=cmd"             → "'\t=cmd"            (leading tab + =)
+ *   "+cmd|..."           → "'+cmd|..."
+ *   "-2+3"               → "'-2+3"
+ *   "@SUM(1)"            → "'@SUM(1)"
+ *   "|calc.exe"          → "'|calc.exe"
+ *   "\r=evil"            → "'\r=evil"           (leading CR)
  *
  * @param {*} val - Raw field value (any type; will be coerced to string).
  * @returns {string} Safely-escaped CSV field, quoted when necessary.
@@ -99,10 +114,11 @@ async function appendAuditEvent(event, options = {}) {
 function escapeCsvField(val) {
   const str = val == null ? '' : String(val);
 
-  // Neutralise formula-injection: prefix dangerous leading characters.
-  // Covers the OWASP-recommended set: = + - @ \t \r
+  // Neutralise formula-injection: inspect the first non-whitespace character.
+  // Covers the OWASP-recommended set: = + - @ | \t \r
+  const trimmedFirst = str.trimStart();
   const injectionSafe =
-    str.length > 0 && /^[=+\-@\t\r]/.test(str) ? `'${str}` : str;
+    trimmedFirst.length > 0 && /^[=+\-@|\t\r]/.test(trimmedFirst) ? `'${str}` : str;
 
   // RFC 4180 quoting: wrap in double-quotes if the value contains a
   // comma, double-quote, or newline; escape embedded double-quotes by
@@ -247,6 +263,7 @@ function createCsvTransform() {
 module.exports = {
   appendAuditEvent,
   redactValue,
+  normalizeMetadata,
   REDACTED,
   escapeCsvField,
   CSV_HEADERS,

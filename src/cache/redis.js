@@ -10,13 +10,18 @@ const MAX_TTL_SECONDS = 300;
 const DEFAULT_LEDGER_GAP_THRESHOLD = 3;
 const MAX_LEDGER_GAP_THRESHOLD = 1000;
 
-const redis = require('redis');
+let redis;
+try {
+  redis = require('redis');
+} catch (_e) {
+  redis = null;
+}
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 let redisClient = null;
 let isRedisConnected = false;
 
-if (process.env.NODE_ENV !== 'test' || process.env.USE_REDIS_TEST === 'true') {
+if (redis && (process.env.NODE_ENV !== 'test' || process.env.USE_REDIS_TEST === 'true')) {
   redisClient = redis.createClient({ url: REDIS_URL });
 
   redisClient.on('connect', () => {
@@ -36,14 +41,16 @@ if (process.env.NODE_ENV !== 'test' || process.env.USE_REDIS_TEST === 'true') {
 
 /**
  * Returns the active Redis client context along with its real-time health availability flag.
+ *
+ * Used by [`src/middleware/rateLimit.js`](../middleware/rateLimit.js) to share
+ * the cache-layer Redis client for distributed counters when the operator has
+ * not passed an explicit `redisClient` to createRateLimiter(...).
+ *
+ * @returns {{client: object|null, isAvailable: boolean}} Active client + liveness.
  */
 function getRedisClient() {
   return { client: redisClient, isAvailable: isRedisConnected };
 }
-
-module.exports = {
-  getRedisClient,
-};
 const DEFAULT_TIMEOUT_MS = 500;
 const MIN_TIMEOUT_MS = 50;
 const MAX_TIMEOUT_MS = 5000;
@@ -268,6 +275,27 @@ class RedisEscrowSummaryCache {
       return false;
     }
   }
+
+  /**
+   * Deletes an invoice summary after a successful escrow write.
+   * Failures are non-fatal because callers can still invalidate their local cache.
+   * @param {string} invoiceId The invoice ID.
+   * @returns {Promise<boolean>} Whether Redis accepted the deletion.
+   */
+  async deleteSummary(invoiceId) {
+    if (!this.client || !isValidInvoiceId(invoiceId)) {
+      return false;
+    }
+    try {
+      const result = await this.circuitBreaker.execute(() =>
+        withTimeout(this.client.del(this.key(invoiceId)), this.timeoutMs)
+      );
+      return result !== null;
+    } catch {
+      redisCacheFailOpenTotal.inc();
+      return false;
+    }
+  }
 }
 
 /**
@@ -295,6 +323,10 @@ function createRedisEscrowSummaryCache({ env = process.env, client, RedisCtor } 
 }
 
 module.exports = {
+  // Primary public surface — kept at top of exports so existing callers that
+  // imported the cache module from an older snapshot continue to work.
+  getRedisClient,
+  // Cache layer API.
   RedisEscrowSummaryCache,
   createRedisClient,
   createRedisEscrowSummaryCache,

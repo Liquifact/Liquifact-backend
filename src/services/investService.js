@@ -26,6 +26,41 @@ const { resolveEscrowAddress } = require('../config/escrowMap');
 const logger = require('../logger');
 
 /**
+ * Re-validates invoice ownership before any tenant-sensitive batch escrow read.
+ *
+ * The caller's tenant comes from authenticated request context. IDs that are
+ * foreign, deleted, or unknown are filtered out and recorded as a security
+ * warning so a malformed query result cannot leak their on-chain state.
+ *
+ * @param {string[]} invoiceIds - Candidate invoice IDs from the opportunity query.
+ * @param {string} tenantId - Resolved requesting tenant identifier.
+ * @returns {Promise<string[]>} IDs confirmed to belong to the requesting tenant.
+ */
+async function filterTenantOwnedInvoiceIds(invoiceIds, tenantId) {
+  if (invoiceIds.length === 0) {
+    return [];
+  }
+
+  const uniqueInvoiceIds = [...new Set(invoiceIds)];
+  const ownedRows = await db('invoices')
+    .select('id')
+    .whereIn('id', uniqueInvoiceIds)
+    .where('tenant_id', tenantId)
+    .whereNull('deleted_at');
+  const ownedInvoiceIds = new Set(ownedRows.map(row => row.id));
+  const deniedInvoiceIds = uniqueInvoiceIds.filter(id => !ownedInvoiceIds.has(id));
+
+  if (deniedInvoiceIds.length > 0) {
+    logger.warn(
+      { tenantId, invoiceIds: deniedInvoiceIds, count: deniedInvoiceIds.length },
+      'Invest batch escrow read blocked cross-tenant or unknown invoice IDs',
+    );
+  }
+
+  return invoiceIds.filter(id => ownedInvoiceIds.has(id));
+}
+
+/**
  * Map a raw invoice row to an InvestmentOpportunity DTO.
  * @param {Object} invoiceRow - Raw invoice row from the database.
  * @returns {InvestmentOpportunity} DTO with camelCase fields and default on-chain pointers.
@@ -136,11 +171,14 @@ async function listInvestments({ tenantId, cursor, limit = 10 } = {}) {
     'maturity_date'
   );
 
-  const paginatedItems = rows.map(toOpportunityDto);
-  const invoiceIds = paginatedItems.map(o => o.invoiceId);
+  const candidateItems = rows.map(toOpportunityDto);
+  const invoiceIds = candidateItems.map(o => o.invoiceId);
+  const tenantOwnedInvoiceIds = await filterTenantOwnedInvoiceIds(invoiceIds, tenantId);
+  const tenantOwnedInvoiceIdSet = new Set(tenantOwnedInvoiceIds);
+  const paginatedItems = candidateItems.filter(item => tenantOwnedInvoiceIdSet.has(item.invoiceId));
   
   // Batch read on-chain state for the current page
-  const { results, errors } = await batchReadEscrowStates(invoiceIds);
+  const { results, errors } = await batchReadEscrowStates(tenantOwnedInvoiceIds);
   
   // Merge on-chain state into the opportunity objects
   const data = paginatedItems.map(item => {
@@ -217,11 +255,14 @@ async function listOpportunities({ tenantId, page = 1, limit = 20 } = {}) {
     .limit(limitSize)
     .offset(offset);
 
-  const data = rows.map(toOpportunityDto);
-  const invoiceIds = data.map(o => o.invoiceId);
+  const candidateData = rows.map(toOpportunityDto);
+  const invoiceIds = candidateData.map(o => o.invoiceId);
+  const tenantOwnedInvoiceIds = await filterTenantOwnedInvoiceIds(invoiceIds, tenantId);
+  const tenantOwnedInvoiceIdSet = new Set(tenantOwnedInvoiceIds);
+  const data = candidateData.filter(item => tenantOwnedInvoiceIdSet.has(item.invoiceId));
 
   // Batch-read on-chain state; failures are isolated per invoice.
-  const { results, errors } = await batchReadEscrowStates(invoiceIds);
+  const { results, errors } = await batchReadEscrowStates(tenantOwnedInvoiceIds);
 
   if (errors.length > 0) {
     logger.warn(

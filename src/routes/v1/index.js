@@ -19,23 +19,27 @@ const express = require('express');
 const router = express.Router();
 const investRoutes = require('../invest');
 const smeRouter = require('../sme');
+const apiKeysRoutes = require('../apiKeys');
 const { extractTenant } = require('../../middleware/tenant');
 const { authenticateToken } = require('../../middleware/auth');
 const invoiceService = require('../../services/invoiceService');
-const { resolveEscrowAddress } = require('../../config/escrowMap');
-const { readEscrowState } = require('../../services/escrowRead');
-const { computeEscrowDerivedFields } = require('../../services/escrowDerived');
+const { getEscrowRead, getEscrowReadBatch } = require('../../services/escrowReadService');
+const { escrowReadLimiter } = require('../../middleware/rateLimit');
+const { recordEscrowRead } = require('../../services/escrowReadMetrics');
 const AppError = require('../../errors/AppError');
 const { invoiceCreateSchema, invoiceUpdateSchema, parseValidationErrors } = require('../../schemas/invoice');
+const { escrowBatchReadSchema } = require('../../schemas/escrowBatchRead');
 const { validatePatchFields, detectLockedFieldChange } = require('../../middleware/patchInvoice');
+const { validateHealthQuery, rejectBodyOnGet } = require('../../schemas/health');
 
 // ── Sub-router mounts ────────────────────────────────────────────────────────
 router.use('/invest', investRoutes);
 router.use('/sme', smeRouter);
+router.use('/api-keys', apiKeysRoutes); // ← Added
 
 // ── Utility routes ───────────────────────────────────────────────────────────
 
-router.get('/health', (req, res) => {
+router.get('/health', rejectBodyOnGet, validateHealthQuery, (req, res) => {
   return res.json({
     status: 'ok',
     service: 'liquifact-api',
@@ -53,7 +57,9 @@ router.get('/', (req, res) => {
       health: 'GET /v1/health',
       invoices: 'GET/POST /v1/invoices',
       escrow: 'GET/POST /v1/escrow',
+      'escrow-batch': 'POST /v1/escrow/batch',
       sme: 'POST /v1/sme/invoice',
+      'api-keys': 'GET /v1/api-keys',
     },
   });
 });
@@ -126,7 +132,6 @@ router.post('/invoices', extractTenant, async (req, res, next) => {
           code: 'VALIDATION_ERROR',
           retryable: false,
           retryHint: 'Correct the highlighted fields and retry.',
-          // Attach extra field-level detail for clients
           fieldErrors,
         }),
       );
@@ -164,34 +169,65 @@ router.post('/invoices', extractTenant, async (req, res, next) => {
  * Returns escrow state with derived display fields.
  * Authentication is required for versioned escrow reads.
  */
-router.get('/escrow/:invoiceId', authenticateToken, async (req, res, next) => {
+router.get('/escrow/:invoiceId', escrowReadLimiter, authenticateToken, async (req, res, next) => {
+  const startTime = Date.now();
   try {
-    const invoiceId = String(req.params.invoiceId || '').trim().replace(/\s+/g, '');
+    const invoiceId = req.params.invoiceId;
+    const { result, escrowAddress, error, code, statusCode } = await getEscrowRead(invoiceId);
 
-    const escrowAddress = resolveEscrowAddress(invoiceId);
-    if (!escrowAddress) {
-      return res.status(404).json({
-        error: `No escrow contract mapping found for invoice ID '${invoiceId}'`,
-      });
+    if (error) {
+      res.status(statusCode).json({ error, code });
+      return;
     }
 
-    const state = await readEscrowState(invoiceId);
-    const derived = computeEscrowDerivedFields(state, {
-      ledgerCloseTime: state ? state.ledgerCloseTime : undefined,
-    });
-
-    const data = {
-      ...state,
-      ...derived,
-      escrowAddress,
-    };
-
     res.set('X-Escrow-Address', escrowAddress);
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * POST /v1/escrow/batch
+ *
+ * Reads escrow state for a bounded batch of invoice IDs in a single request.
+ * Each ID is resolved and read independently: an unmapped invoice ID or a
+ * failed on-chain read is reported per-item in `errors` rather than failing
+ * the whole batch (mirrors the failure-isolation semantics already used by
+ * {@link module:services/escrowBatchRead}).
+ *
+ * Body:
+ *   invoiceIds  {string[]}  1–100 invoice identifiers (required)
+ *
+ * Response 200:
+ *   { data: { results: object[], errors: object[] }, message: string }
+ */
+router.post('/escrow/batch', authenticateToken, async (req, res, next) => {
+  try {
+    const parsed = escrowBatchReadSchema.safeParse(req.body);
+    if (!parsed.success) {
+      const fieldErrors = parseValidationErrors(parsed.error);
+      return next(
+        new AppError({
+          type: 'https://liquifact.com/probs/validation-error',
+          title: 'Validation Error',
+          status: 422,
+          detail: 'Request body contains invalid or missing fields.',
+          instance: req.originalUrl,
+          code: 'VALIDATION_ERROR',
+          retryable: false,
+          retryHint: 'Correct the highlighted fields and retry.',
+          fieldErrors,
+        }),
+      );
+    }
+
+    const { invoiceIds } = parsed.data;
+    const { results, errors } = await getEscrowReadBatch(invoiceIds);
+
     return res.json({
-      data,
-      message: state.fromProjection
-        ? 'Escrow state read from event projection.'
-        : 'Escrow state read from live Soroban contract.',
+      data: { results, errors },
+      message: `Processed ${invoiceIds.length} invoice ID(s): ${results.length} succeeded, ${errors.length} failed.`,
     });
   } catch (err) {
     return next(err);
@@ -242,7 +278,7 @@ router.patch('/invoices/:id', extractTenant, validatePatchFields, async (req, re
           type: 'https://liquifact.com/probs/validation-error',
           title: 'Validation Error',
           status: 422,
-          detail: `Field '${field}' cannot be modified when invoice status is '${existing.status}'.`,
+          detail: `Field '\( {field}' cannot be modified when invoice status is ' \){existing.status}'.`,
           instance: req.originalUrl,
           code: 'LOCKED_FIELD',
           retryable: false,

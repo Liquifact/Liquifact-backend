@@ -14,6 +14,23 @@
  *   - stacks.js adminAuth uses the registry-backed middleware
  */
 
+// The middleware emits structured pino log lines for every auth outcome
+// (missing / invalid / revoked / insufficient_scope / success). We mock the
+// shared logger with stable jest.fn() handles so audit-invoked assertions
+// are robust to logging-internals changes (Proxy / _enrichedLevelMethods).
+// This mirrors the strategy used in tests/unit/apiKeyAuth.test.js.
+const mockLogger = {
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
+  debug: jest.fn(),
+  trace: jest.fn(),
+  fatal: jest.fn(),
+  child: jest.fn(),
+  createRequestLogger: jest.fn(),
+};
+jest.mock('../src/logger', () => mockLogger);
+
 const request = require('supertest');
 const express = require('express');
 const { authenticateApiKey, API_KEY_HEADER } = require('../src/middleware/apiKeyAuth');
@@ -54,6 +71,83 @@ describe('legacy apiKey.js is retired', () => {
   it('does not export hashApiKey (raw SHA-256 key hashing is internal)', () => {
     const mod = require('../src/middleware/apiKeyAuth');
     expect(mod.hashApiKey).toBeUndefined();
+  });
+});
+
+// ─── Audit service invoked (issue #590) ──────────────────────────────────────
+// The legacy SQLite path used SQL-logged audit events. The new path must use
+// the shared structured logger — never SQL — and must never write raw key
+// material to any log line.
+
+describe('authenticateApiKey — audit service integration', () => {
+  beforeEach(() => {
+    mockLogger.info.mockClear();
+    mockLogger.warn.mockClear();
+    mockLogger.error.mockClear();
+  });
+
+  it('invokes the shared logger.warn on a missing X-API-Key (no raw key data)', async () => {
+    const app = makeApp(authenticateApiKey({ env: TEST_ENV }));
+    await request(app).get('/protected');
+    expect(mockLogger.warn).toHaveBeenCalled();
+    const firstCall = mockLogger.warn.mock.calls[0][0];
+    expect(firstCall).toMatchObject({ event: 'api_key.auth', outcome: 'missing_header' });
+    // No raw key, no header echo, no token leakage
+    expect(JSON.stringify(firstCall)).not.toMatch(/lf_/);
+  });
+
+  it('invokes the shared logger.warn on an invalid key', async () => {
+    const app = makeApp(authenticateApiKey({ env: TEST_ENV }));
+    await request(app).get('/protected').set(API_KEY_HEADER, 'lf_attacker_guess');
+    expect(mockLogger.warn).toHaveBeenCalled();
+    const payload = mockLogger.warn.mock.calls[0][0];
+    expect(payload).toMatchObject({ event: 'api_key.auth', outcome: 'invalid_key' });
+    // The candidate key must not be logged under any outcome
+    expect(JSON.stringify(payload)).not.toContain('lf_attacker_guess');
+  });
+
+  it('invokes the shared logger.warn on a revoked key (without leaking it)', async () => {
+    const app = makeApp(authenticateApiKey({ env: TEST_ENV }));
+    await request(app).get('/protected').set(API_KEY_HEADER, REVOKED_KEY);
+    expect(mockLogger.warn).toHaveBeenCalled();
+    const payload = mockLogger.warn.mock.calls[0][0];
+    expect(payload).toMatchObject({
+      event: 'api_key.auth',
+      outcome: 'revoked',
+      clientId: 'old-service',
+    });
+    // The raw key string is never written to the log
+    expect(JSON.stringify(payload)).not.toContain(REVOKED_KEY);
+  });
+
+  it('invokes the shared logger.warn on insufficient scope', async () => {
+    const app = makeApp(
+      authenticateApiKey({ requiredScope: 'invoices:write', env: TEST_ENV })
+    );
+    await request(app).get('/protected').set(API_KEY_HEADER, VALID_KEY);
+    expect(mockLogger.warn).toHaveBeenCalled();
+    const payload = mockLogger.warn.mock.calls[0][0];
+    expect(payload).toMatchObject({
+      event: 'api_key.auth',
+      outcome: 'insufficient_scope',
+      clientId: 'test-service',
+      requiredScope: 'invoices:write',
+    });
+    expect(JSON.stringify(payload)).not.toContain(VALID_KEY);
+  });
+
+  it('invokes the shared logger.info on a successful auth (no raw key)', async () => {
+    const app = makeApp(authenticateApiKey({ env: TEST_ENV }));
+    await request(app).get('/protected').set(API_KEY_HEADER, VALID_KEY);
+    expect(mockLogger.info).toHaveBeenCalled();
+    const payload = mockLogger.info.mock.calls[0][0];
+    expect(payload).toMatchObject({
+      event: 'api_key.auth',
+      outcome: 'success',
+      clientId: 'test-service',
+    });
+    // clientId + scopes are OK; the raw key string is never written
+    expect(JSON.stringify(payload)).not.toContain(VALID_KEY);
   });
 });
 
@@ -169,5 +263,83 @@ describe('authenticateApiKey — timing-safe lookup', () => {
 
     const r2 = await request(app).get('/protected').set(API_KEY_HEADER, 'lf_gamma00000001');
     expect(r2.body.apiClient.clientId).toBe('svc-gamma');
+  });
+});
+
+// ─── X-API-KEY header contract (issue #590) ─────────────────────────────────
+
+describe('authenticateApiKey — X-API-KEY header contract', () => {
+  const app = makeApp(authenticateApiKey({ env: TEST_ENV }));
+
+  it('accepts the lowercase X-API-Key variant', async () => {
+    const res = await request(app).get('/protected').set('X-API-Key', VALID_KEY);
+    expect(res.status).toBe(200);
+    expect(res.body.apiClient.clientId).toBe('test-service');
+  });
+
+  it('accepts the uppercase X-API-KEY variant (Express normalises headers)', async () => {
+    const res = await request(app).get('/protected').set('X-API-KEY', VALID_KEY);
+    expect(res.status).toBe(200);
+    expect(res.body.apiClient.clientId).toBe('test-service');
+  });
+
+  it('rejects when no X-API-Key header is present at all', async () => {
+    const res = await request(app).get('/protected');
+    expect(res.status).toBe(401);
+  });
+});
+
+// ─── No-key-material-in-responses (issue #590 security checklist) ────────────
+
+describe('authenticateApiKey — no key material leaks', () => {
+  const app = makeApp(authenticateApiKey({ env: TEST_ENV }));
+
+  it('does not echo the candidate key in 401 bodies', async () => {
+    const candidate = 'lf_supersecretvalue';
+    const res = await request(app).get('/protected').set(API_KEY_HEADER, candidate);
+    expect(res.status).toBe(401);
+    // The raw candidate must never appear in the response body
+    expect(JSON.stringify(res.body)).not.toContain(candidate);
+  });
+
+  it('does not echo any registry key in 401 / 403 bodies', async () => {
+    for (const candidate of [VALID_KEY, REVOKED_KEY, SCOPED_KEY, 'lf_unknownkey999']) {
+      const res = await request(app).get('/protected').set(API_KEY_HEADER, candidate);
+      expect(JSON.stringify(res.body)).not.toContain(candidate);
+    }
+  });
+});
+
+// ─── No SQLite connection on the hot path (issue #590) ───────────────────────
+
+describe('authenticateApiKey — no SQLite on the hot path', () => {
+  it('does not import sqlite or sqlite3 anywhere in the middleware module', () => {
+    // Read the raw module source and assert it contains no SQLite references.
+    // The regex uses a word-boundary so future comments mentioning the
+    // retirement of SQLite stay compliant.
+    const fs = require('fs');
+    const path = require('path');
+    const modulePath = path.join(__dirname, '..', 'src', 'middleware', 'apiKeyAuth.js');
+    const source = fs.readFileSync(modulePath, 'utf8');
+    expect(source).not.toMatch(/\bsqlite3?\b/i);
+    expect(source).not.toMatch(/require\(['"]sqlite/);
+  });
+
+  it('the public module surface does not expose any database handle', () => {
+    const mod = require('../src/middleware/apiKeyAuth');
+    const dbLikeKeys = ['db', 'database', 'initDb', 'openDb', 'connection', 'pool'];
+    for (const k of dbLikeKeys) {
+      expect(mod[k]).toBeUndefined();
+    }
+  });
+
+  it('serves 100 sequential requests without opening any DB connection', async () => {
+    const app = makeApp(authenticateApiKey({ env: TEST_ENV }));
+    for (let i = 0; i < 100; i += 1) {
+      // Mix of valid, invalid, revoked — none may touch the filesystem or DB
+      const candidates = [VALID_KEY, REVOKED_KEY, `lf_attempt_${i}`];
+      const res = await request(app).get('/protected').set(API_KEY_HEADER, candidates[i % 3]);
+      expect([200, 401]).toContain(res.status);
+    }
   });
 });

@@ -28,12 +28,16 @@ exports.up = async function up(knex) {
     table.timestamp('updated_at').defaultTo(knex.fn.now());
     table.timestamp('deleted_at').nullable();
     table.string('tenant_id').notNullable();
+    table.string('sme_id').nullable();
+    table.string('currency', 3).nullable();
+    table.date('due_date').nullable();
+    table.text('description').nullable();
     table.json('metadata').nullable();
   });
 
   await knex.raw(`
-    INSERT INTO invoices_new (id, invoice_id, amount, customer, status, created_at, updated_at, deleted_at, tenant_id, metadata)
-    SELECT id, invoice_id, amount, customer, status, created_at, updated_at, deleted_at, tenant_id, metadata FROM invoices
+    INSERT INTO invoices_new (id, invoice_id, amount, customer, status, created_at, updated_at, deleted_at, tenant_id, sme_id, currency, due_date, description, metadata)
+    SELECT id, invoice_id, amount, customer, status, created_at, updated_at, deleted_at, tenant_id, sme_id, currency, due_date, description, metadata FROM invoices
   `);
 
   await knex.schema.dropTable('invoices');
@@ -60,12 +64,16 @@ exports.down = async function down(knex) {
     table.timestamp('updated_at').defaultTo(knex.fn.now());
     table.timestamp('deleted_at').nullable();
     table.string('tenant_id').notNullable();
+    table.string('sme_id').nullable();
+    table.string('currency', 3).nullable();
+    table.date('due_date').nullable();
+    table.text('description').nullable();
     table.json('metadata').nullable();
   });
 
   await knex.raw(`
-    INSERT INTO invoices_old (id, invoice_id, amount, customer, status, created_at, updated_at, deleted_at, tenant_id, metadata)
-    SELECT id, invoice_id, amount, customer, status, created_at, updated_at, deleted_at, tenant_id, metadata FROM invoices
+    INSERT INTO invoices_old (id, invoice_id, amount, customer, status, created_at, updated_at, deleted_at, tenant_id, sme_id, currency, due_date, description, metadata)
+    SELECT id, invoice_id, amount, customer, status, created_at, updated_at, deleted_at, tenant_id, sme_id, currency, due_date, description, metadata FROM invoices
   `);
 
   await knex.schema.dropTable('invoices');

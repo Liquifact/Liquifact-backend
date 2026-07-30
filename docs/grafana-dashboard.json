@@ -1,0 +1,1713 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "Prometheus data source for LiquiFact metrics",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "9.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "prometheus",
+      "name": "Prometheus",
+      "version": "5.0.0"
+    },
+    {
+      "type": "panel",
+      "id": "timeseries",
+      "name": "Time series",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "stat",
+      "name": "Stat",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "bargauge",
+      "name": "Bar gauge",
+      "version": ""
+    }
+  ],
+  "id": null,
+  "title": "LiquiFact — Unified Observability",
+  "description": "Unified observability dashboard for LiquiFact API: DoS detection (body-size limit rejections), escrow indexer health, and escrow reconciliation drift monitoring. All panels powered by prom-client counters and gauges scraped via /metrics.",
+  "tags": ["liquifact", "observability", "dos-detection", "escrow", "reconciliation", "indexer"],
+  "timezone": "browser",
+  "schemaVersion": 36,
+  "version": 4,
+  "refresh": "30s",
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "enable": true,
+        "expr": "ALERTS{alertname=\"BodySizeLimitRejectionRateHigh\"}",
+        "iconColor": "rgba(237, 129, 40, 0.89)",
+        "name": "BodySizeLimitRejectionRateHigh",
+        "showIn": 0,
+        "titleFormat": "Warning alert firing",
+        "tagKeys": "alertname,severity",
+        "textFormat": "Severity: {{ $labels.severity }} — alertname: {{ $labels.alertname }}"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "enable": true,
+        "expr": "ALERTS{alertname=\"BodySizeLimitRejectionRateCritical\"}",
+        "iconColor": "rgba(245, 54, 54, 0.9)",
+        "name": "BodySizeLimitRejectionRateCritical",
+        "showIn": 0,
+        "titleFormat": "Critical alert firing",
+        "tagKeys": "alertname,severity",
+        "textFormat": "Severity: {{ $labels.severity }} — alertname: {{ $labels.alertname }}"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "enable": true,
+        "expr": "ALERTS{alertname=~\"BodySize.*\"}",
+        "iconColor": "pink",
+        "name": "Any DoS Alert Firing",
+        "showIn": 0,
+        "titleFormat": "DoS alert: {{ $labels.alertname }}",
+        "tagKeys": "alertname,severity",
+        "textFormat": "Severity: {{ $labels.severity }} — {{ $labels.alertname }}"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "enable": true,
+        "expr": "ALERTS{alertname=\"EscrowReconciliationDrift\"}",
+        "iconColor": "rgba(237, 129, 40, 0.89)",
+        "name": "EscrowReconciliationDrift",
+        "showIn": 0,
+        "titleFormat": "Reconciliation drift alert",
+        "tagKeys": "alertname,severity",
+        "textFormat": "Drift detected — {{ $labels.severity }} severity"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "enable": true,
+        "expr": "ALERTS{alertname=\"EscrowIndexerStalled\"}",
+        "iconColor": "rgba(245, 54, 54, 0.9)",
+        "name": "EscrowIndexerStalled",
+        "showIn": 0,
+        "titleFormat": "Indexer stalled",
+        "tagKeys": "alertname,severity",
+        "textFormat": "Cursor not advancing — {{ $labels.severity }} severity"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "enable": true,
+        "expr": "ALERTS{alertname=\"EscrowIndexerHighFailureRate\"}",
+        "iconColor": "rgba(245, 54, 54, 0.9)",
+        "name": "EscrowIndexerHighFailureRate",
+        "showIn": 0,
+        "titleFormat": "Indexer high failure rate",
+        "tagKeys": "alertname,severity",
+        "textFormat": "Critical — indexer failing"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "enable": true,
+        "expr": "ALERTS{alertname=~\"Escrow.*\"}",
+        "iconColor": "rgba(255, 153, 0, 0.8)",
+        "name": "Any Escrow Alert Firing",
+        "showIn": 0,
+        "titleFormat": "Escrow alert: {{ $labels.alertname }}",
+        "tagKeys": "alertname,severity",
+        "textFormat": "Severity: {{ $labels.severity }} — {{ $labels.alertname }}"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "5s",
+      "10s",
+      "30s",
+      "1m",
+      "5m",
+      "15m",
+      "30m",
+      "1h",
+      "2h",
+      "1d"
+    ],
+    "time_options": [
+      "5m",
+      "15m",
+      "1h",
+      "6h",
+      "12h",
+      "24h",
+      "2d",
+      "7d",
+      "30d"
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Rejection Rate by Type",
+      "description": "Rate of body-size limit rejections per second, broken down by parser type (json, urlencoded, invoice, unknown). A rate > 0.167 (10/min) sustained for 2m triggers the warning alert.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["mean", "max", "lastNotNull"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.167
+              },
+              {
+                "color": "red",
+                "value": 0.5
+              }
+            ]
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineInterpolation": "smooth",
+            "showPoints": "never",
+            "fillOpacity": 20,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "rate(body_size_limit_rejections_total{type=\"json\"}[5m])",
+          "legendFormat": "json",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(body_size_limit_rejections_total{type=\"urlencoded\"}[5m])",
+          "legendFormat": "urlencoded",
+          "refId": "B"
+        },
+        {
+          "expr": "rate(body_size_limit_rejections_total{type=\"invoice\"}[5m])",
+          "legendFormat": "invoice",
+          "refId": "C"
+        },
+        {
+          "expr": "rate(body_size_limit_rejections_total{type=\"unknown\"}[5m])",
+          "legendFormat": "unknown",
+          "refId": "D"
+        },
+        {
+          "expr": "sum(rate(body_size_limit_rejections_total[5m]))",
+          "legendFormat": "total (all types)",
+          "refId": "E"
+        }
+      ],
+      "thresholds": [
+        {
+          "value": 0.167,
+          "color": "yellow",
+          "label": "Warning threshold (10/min)"
+        },
+        {
+          "value": 0.5,
+          "color": "red",
+          "label": "Critical threshold (30/min)"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Current Rejection Rate",
+      "description": "Current per-second rate of body-size rejections across all types. Green = normal, Yellow = warning zone, Red = critical (active DoS).",
+      "type": "stat",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": ["lastNotNull"]
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.167
+              },
+              {
+                "color": "red",
+                "value": 0.5
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(body_size_limit_rejections_total[5m]))",
+          "legendFormat": "Total rejection rate",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Rejections by Type (Current)",
+      "description": "Current per-type rejection rates. Each bar shows the rate for one parser type. Type 'unknown' is especially suspicious — it indicates requests with unrecognized or missing Content-Type headers.",
+      "type": "bargauge",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "values": false,
+          "calcs": ["lastNotNull"]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.167
+              },
+              {
+                "color": "red",
+                "value": 0.5
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(body_size_limit_rejections_total{type=\"json\"}[5m])) by (type)",
+          "legendFormat": "{{ type }}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Cumulative Rejections (Last Hour)",
+      "description": "Total number of body-size rejections in the last hour, broken down by type. A value exceeding 600 (~10/min) sustained suggests misconfiguration or sustained probing.",
+      "type": "bargauge",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "values": false,
+          "calcs": ["lastNotNull"]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 100
+              },
+              {
+                "color": "red",
+                "value": 600
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(body_size_limit_rejections_total[1h])) by (type)",
+          "legendFormat": "{{ type }}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Cumulative Rejections Over Time",
+      "description": "Running total of body-size rejections in the last hour, showing how the cumulative count grows over the selected time window.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["mean", "max", "lastNotNull"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 100
+              },
+              {
+                "color": "red",
+                "value": 600
+              }
+            ]
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineInterpolation": "smooth",
+            "showPoints": "never",
+            "fillOpacity": 20,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "increase(body_size_limit_rejections_total{type=\"json\"}[1h])",
+          "legendFormat": "json",
+          "refId": "A"
+        },
+        {
+          "expr": "increase(body_size_limit_rejections_total{type=\"urlencoded\"}[1h])",
+          "legendFormat": "urlencoded",
+          "refId": "B"
+        },
+        {
+          "expr": "increase(body_size_limit_rejections_total{type=\"invoice\"}[1h])",
+          "legendFormat": "invoice",
+          "refId": "C"
+        },
+        {
+          "expr": "increase(body_size_limit_rejections_total{type=\"unknown\"}[1h])",
+          "legendFormat": "unknown",
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Alert Threshold Reference",
+      "description": "Key alert thresholds for the DoS detection rules defined in docs/prometheus-rules.yml.",
+      "type": "bargauge",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "options": {
+        "orientation": "vertical",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "values": false,
+          "calcs": ["lastNotNull"]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.167
+              },
+              {
+                "color": "red",
+                "value": 0.5
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "displayMode": "basic"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(body_size_limit_rejections_total[5m]))",
+          "legendFormat": "Current rate",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Historical Rejection Heatmap",
+      "description": "Heatmap showing body-size rejection events over time. Each cell represents the number of rejections in a 5-minute bucket. Helps identify attack patterns (sustained, burst, or distributed).",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "rgba(50, 172, 45, 0.97)",
+                "value": null
+              },
+              {
+                "color": "rgba(237, 129, 40, 0.89)",
+                "value": 0.167
+              },
+              {
+                "color": "rgba(245, 54, 54, 0.9)",
+                "value": 0.5
+              }
+            ]
+          },
+          "custom": {
+            "lineInterpolation": "stepAfter",
+            "showPoints": "always",
+            "fillOpacity": 70,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(body_size_limit_rejections_total[5m]))",
+          "legendFormat": "All types",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "DoS Incidents (24h)",
+      "description": "Total number of distinct DoS alert events in the last 24 hours. Each event is a complete alert firing cycle (trigger → resolve). A non-zero value means an alert threshold was breached.",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 0,
+        "y": 26
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": ["lastNotNull"]
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "floor(clamp_min(changes(ALERTS{alertname=~\"BodySize.*\"}[24h]) / 2, 0))",
+          "legendFormat": "Total incidents",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "DoS Incidents by Pattern (24h)",
+      "description": "Attack pattern classification over the last 24h: 'Sustained' = only the High/Warning alert fired (rate > 10/min for >= 2 min, indicating prolonged moderate elevation). 'Burst' = the Critical alert fired (rate > 30/min for >= 1 min, indicating a short high-rate spike). A high burst-to-sustained ratio suggests an active volumetric attack.",
+      "type": "bargauge",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 4,
+        "y": 26
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "values": false,
+          "calcs": ["lastNotNull"]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Burst"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Sustained"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "expr": "floor(clamp_min(changes(ALERTS{alertname=\"BodySizeLimitRejectionRateCritical\"}[24h]) / 2, 0))",
+          "legendFormat": "Burst",
+          "refId": "A"
+        },
+        {
+          "expr": "floor(clamp_min((changes(ALERTS{alertname=\"BodySizeLimitRejectionRateHigh\"}[24h]) - changes(ALERTS{alertname=\"BodySizeLimitRejectionRateCritical\"}[24h])) / 2, 0))",
+          "legendFormat": "Sustained",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "DoS Incident Timeline (24h)",
+      "description": "Alert firing activity over the last 24 hours. Each spike indicates a DoS alert trigger. Compare the timeline with the Rejection Rate panel above to correlate alert firings with rate patterns.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 26
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["mean", "max", "lastNotNull"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.5
+              }
+            ]
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineInterpolation": "stepAfter",
+            "showPoints": "always",
+            "fillOpacity": 50,
+            "spanNulls": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Critical alert"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 80
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Warning alert"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 50
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "expr": "ALERTS{alertname=\"BodySizeLimitRejectionRateHigh\"}",
+          "legendFormat": "Warning alert",
+          "refId": "A"
+        },
+        {
+          "expr": "ALERTS{alertname=\"BodySizeLimitRejectionRateCritical\"}",
+          "legendFormat": "Critical alert",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "Indexer Events Rate",
+      "description": "Rate of escrow indexer events per second, broken down by outcome (processed vs skipped vs failure). A sustained non-zero failure or skipped rate indicates problems with event ingestion from Horizon.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["mean", "max", "lastNotNull"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.05
+              },
+              {
+                "color": "red",
+                "value": 0.1
+              }
+            ]
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineInterpolation": "smooth",
+            "showPoints": "never",
+            "fillOpacity": 20,
+            "spanNulls": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "failures"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "skipped"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "processed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "expr": "rate(escrow_indexer_events_processed_total[5m])",
+          "legendFormat": "processed",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(escrow_indexer_events_skipped_total[5m])",
+          "legendFormat": "skipped",
+          "refId": "B"
+        },
+        {
+          "expr": "rate(escrow_indexer_cycle_failures_total[5m])",
+          "legendFormat": "failures",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Indexer Cursor Staleness",
+      "description": "Seconds since the escrow indexer cursor last advanced. Green = advancing (< 10 min). Yellow = not advancing for 10+ min (EscrowIndexerStalled alert threshold). Red = stalled > 15 min.",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 32
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": ["lastNotNull"]
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 600
+              },
+              {
+                "color": "red",
+                "value": 900
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "clamp_min(time() - escrow_indexer_last_cursor_advance_timestamp_seconds, 0)",
+          "legendFormat": "Seconds since last advance",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "Indexer Event Volume (1h)",
+      "description": "Total escrow indexer events in the last hour, broken down by outcome. A high skipped-to-processed ratio indicates data quality problems.",
+      "type": "bargauge",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 32
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "values": false,
+          "calcs": ["lastNotNull"]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 100
+              },
+              {
+                "color": "red",
+                "value": 1000
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "skipped"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "failures"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(escrow_indexer_events_processed_total[1h]))",
+          "legendFormat": "processed",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(increase(escrow_indexer_events_skipped_total[1h]))",
+          "legendFormat": "skipped",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(increase(escrow_indexer_cycle_failures_total[1h]))",
+          "legendFormat": "failures",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "title": "Indexer Events Timeline (24h)",
+      "description": "Escrow indexer event volume over 24h, showing the running increase of processed/skipped/failed events. Use this to spot patterns in event ingestion (e.g., batch activity from Horizon).",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["mean", "max", "lastNotNull"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 100
+              },
+              {
+                "color": "red",
+                "value": 1000
+              }
+            ]
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineInterpolation": "smooth",
+            "showPoints": "never",
+            "fillOpacity": 20,
+            "spanNulls": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "failures"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "skipped"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "expr": "increase(escrow_indexer_events_processed_total[24h])",
+          "legendFormat": "processed",
+          "refId": "A"
+        },
+        {
+          "expr": "increase(escrow_indexer_events_skipped_total[24h])",
+          "legendFormat": "skipped",
+          "refId": "B"
+        },
+        {
+          "expr": "increase(escrow_indexer_cycle_failures_total[24h])",
+          "legendFormat": "failures",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "title": "Indexer Cycle Failure Rate",
+      "description": "Current rate of indexer cycle failures. Any non-zero value indicates cycles throwing unhandled exceptions. A rate > 0.1 (EscrowIndexerHighFailureRate alert threshold) is critical.",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 12,
+        "y": 36
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": ["lastNotNull"]
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.01
+              },
+              {
+                "color": "red",
+                "value": 0.1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 4
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "rate(escrow_indexer_cycle_failures_total[5m])",
+          "legendFormat": "Failure rate",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "title": "Indexer Processed Events (24h)",
+      "description": "Total number of escrow events processed by the indexer in the last 24 hours. A sharp drop from baseline may indicate the indexer has stalled.",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 18,
+        "y": 36
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": ["lastNotNull"]
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "increase(escrow_indexer_events_processed_total[24h])",
+          "legendFormat": "Processed events",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "title": "Reconciliation Mismatches (26h)",
+      "description": "Total escrow reconciliation mismatches detected in the last 26 hours (covers cross-nightly-run window). Each increment = one invoice where DB fundedTotal ≠ on-chain fundedAmount. Any mismatch triggers EscrowReconciliationDrift alert.",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 42
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": ["lastNotNull"]
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "increase(escrow_reconciliation_mismatches_total[26h])",
+          "legendFormat": "Mismatches",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "title": "Reconciliation Drift Alerts (26h)",
+      "description": "Number of reconciliation runs in the last 26 hours that breached the drift threshold. Each increment = one run where mismatches >= RECONCILIATION_DRIFT_THRESHOLD.",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 6,
+        "y": 42
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": ["lastNotNull"]
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 3
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "increase(escrow_reconciliation_drift_alerts_total[26h])",
+          "legendFormat": "Drift alerts",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "title": "Reconciliation Mismatched Invoices",
+      "description": "Current gauge value of mismatched invoices from the most recent reconciliation run. Represents detected drift that has not yet been resolved.",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 12,
+        "y": 42
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": ["lastNotNull"]
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "escrow_reconciliation_mismatched_invoices",
+          "legendFormat": "Mismatched invoices",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "title": "Reconciliation Drift Magnitude",
+      "description": "Gauge showing the total absolute drift magnitude (sum of |DB − onChain|) from the most recent reconciliation run. Higher values indicate larger financial discrepancies.",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 18,
+        "y": 42
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": ["lastNotNull"]
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 100
+              },
+              {
+                "color": "red",
+                "value": 10000
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "escrow_reconciliation_drift_magnitude",
+          "legendFormat": "Drift magnitude",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

@@ -16,11 +16,11 @@
 'use strict';
 
 const db = require('../db/knex');
+const { isValidStellarAddress } = require('../utils/validators');
 
 const TABLE = 'investor_commitments';
-
-// Stellar public key: G or C followed by exactly 55 base-32 characters (A-Z2-7)
-const STELLAR_ADDRESS_RE = /^[CG][A-Z2-7]{55}$/;
+const LOCK_TABLE = 'investor_locks';
+const DEFAULT_TENANT_ID = 'default';
 
 // Sane upper bound: 10^18 stroops (≈ 10 billion XLM — exceeds total supply)
 const MAX_STROOP_AMOUNT = 10n ** 18n;
@@ -42,6 +42,44 @@ class CommitmentValidationError extends Error {
     this.code = code;
     Error.captureStackTrace(this, this.constructor);
   }
+}
+
+/**
+ * Normalize and validate amountStroops from route input (number or string).
+ * Returns the canonical decimal string used by persistence and Soroban calls.
+ *
+ * @param {unknown} value
+ * @returns {string}
+ * @throws {CommitmentValidationError}
+ */
+function normalizeAmountStroopsInput(value) {
+  let candidate;
+
+  if (typeof value === 'number') {
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new CommitmentValidationError(
+        'amountStroops must be a positive integer representing the fund amount in stroops.',
+        'INVALID_AMOUNT_RANGE'
+      );
+    }
+    if (value > Number.MAX_SAFE_INTEGER) {
+      throw new CommitmentValidationError(
+        'amountStroops exceeds JavaScript safe integer range; pass a decimal string instead.',
+        'INVALID_AMOUNT_TYPE'
+      );
+    }
+    candidate = String(value);
+  } else if (typeof value === 'string') {
+    candidate = value;
+  } else {
+    throw new CommitmentValidationError(
+      `amountStroops must be a string or safe integer, got ${value === null ? 'null' : typeof value}`,
+      'INVALID_AMOUNT_TYPE'
+    );
+  }
+
+  validateAmountStroops(candidate);
+  return candidate;
 }
 
 /**
@@ -100,7 +138,7 @@ function validateAmountStroops(value) {
 }
 
 /**
- * Validate a Stellar public key (G... or C..., 56 characters total).
+ * Validate a Stellar StrKey address (G... account or C... contract).
  *
  * @param {string} address - The candidate Stellar address.
  * @returns {{ valid: boolean, reason: string }} Result object.
@@ -109,7 +147,7 @@ function validateAddress(address) {
   if (!address || typeof address !== 'string') {
     return { valid: false, reason: 'invalid Stellar address: must be a non-empty string' };
   }
-  if (!STELLAR_ADDRESS_RE.test(address)) {
+  if (!isValidStellarAddress(address)) {
     return {
       valid: false,
       reason: 'invalid Stellar address: must start with G or C and be 56 base-32 characters',
@@ -226,70 +264,111 @@ async function updateCommitment(id, fields) {
   return row;
 }
 
-  /**
-   * Find commitments for a given investor and invoice.
-   *
-   * @param {string} investorAddress
-   * @param {string} invoiceId
-   * @returns {Promise<CommitmentRecord[]>}
-   */
-  async function findCommitments(investorAddress, invoiceId) {
-    return db(TABLE).where({ investor_address: investorAddress, invoice_id: invoiceId }).orderBy('created_at', 'desc');
-  }
-
-// ── In-memory investor lock store ─────────────────────────────────────────────
-// Keys are "${invoiceId}:${funderAddress}" for O(1) lookup.
-
-/** @type {Map<string, Object>} */
-const _lockStore = new Map();
-
 /**
- * Upsert a lock record into the in-memory store.
+ * Find commitments for a given investor and invoice.
  *
- * @param {Object} params
- * @param {string} params.funderAddress
- * @param {string} params.claimNotBefore
- * @param {number} params.investorEffectiveYieldBps
- * @param {string} params.invoiceId
- * @returns {Object} The stored lock record.
- */
-function setInvestorLock({ funderAddress, claimNotBefore, investorEffectiveYieldBps, invoiceId }) {
-  const key = `${invoiceId}:${funderAddress}`;
-  const record = { funderAddress, claimNotBefore, investorEffectiveYieldBps, invoiceId, stale: true };
-  _lockStore.set(key, record);
-  return record;
-}
-
-/**
- * Retrieve a single lock by invoiceId and funderAddress.
- *
+ * @param {string} investorAddress
  * @param {string} invoiceId
- * @param {string} funderAddress
- * @returns {Object|undefined}
+ * @returns {Promise<CommitmentRecord[]>}
  */
-function getInvestorLock(invoiceId, funderAddress) {
-  return _lockStore.get(`${invoiceId}:${funderAddress}`);
+async function findCommitments(investorAddress, invoiceId) {
+  return db(TABLE)
+    .where({ investor_address: investorAddress, invoice_id: invoiceId })
+    .orderBy('created_at', 'desc');
+}
+
+// ── Durable investor lock store ───────────────────────────────────────────────
+// Records are keyed by tenant_id + invoice_id + funder_address.
+
+/**
+ * Normalises an optional tenant ID while keeping the legacy helper surface usable.
+ *
+ * @param {string|undefined|null} tenantId - Tenant identifier from the request context.
+ * @returns {string} Sanitised tenant identifier.
+ */
+function normalizeTenantId(tenantId) {
+  if (typeof tenantId !== 'string') {
+    return DEFAULT_TENANT_ID;
+  }
+  const trimmed = tenantId.trim();
+  return trimmed || DEFAULT_TENANT_ID;
 }
 
 /**
- * Returns all locks, optionally filtered by invoiceId, with offset pagination.
+ * Converts an arbitrary value to a bounded integer.
  *
- * @param {Object} [opts]
- * @param {string} [opts.invoiceId]  - Optional invoiceId filter.
- * @param {number} [opts.limit=20]   - Page size (1–100).
- * @param {number} [opts.page=1]     - 1-based page number.
- * @returns {{ data: Object[], meta: { total: number, page: number, limit: number, totalPages: number, hasMore: boolean } }}
+ * @param {number|string|undefined} value - Candidate pagination value.
+ * @param {number} fallback - Value to use when candidate is invalid.
+ * @param {number} min - Minimum allowed value.
+ * @param {number} max - Maximum allowed value.
+ * @returns {number} Clamped integer.
  */
-function getAllInvestorLocks({ invoiceId, limit = 20, page = 1 } = {}) {
-  const safeLimit = Math.max(1, Math.min(100, limit));
-  const safePage = Math.max(1, page);
-  let items = [..._lockStore.values()];
-  if (invoiceId) {
-    items = items.filter((l) => l.invoiceId === invoiceId);
+function clampInteger(value, fallback, min, max) {
+  const parsed = typeof value === 'number' ? value : parseInt(value, 10);
+  const safe = Number.isInteger(parsed) ? parsed : fallback;
+  return Math.max(min, Math.min(max, safe));
+}
+
+/**
+ * Converts a DB timestamp value to the public ISO string shape.
+ *
+ * @param {Date|string|number|null|undefined} value - Stored timestamp value.
+ * @returns {string|null} ISO timestamp string, or null when absent.
+ */
+function toIsoTimestamp(value) {
+  if (!value) {
+    return null;
   }
-  const total = items.length;
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+  return date.toISOString();
+}
+
+/**
+ * Maps an investor_locks row to the public camelCase API shape.
+ *
+ * @param {Object} row - Database row.
+ * @returns {Object} Public investor lock record.
+ */
+function toInvestorLockRecord(row) {
+  return {
+    funderAddress: row.funder_address,
+    claimNotBefore: toIsoTimestamp(row.claim_not_before),
+    investorEffectiveYieldBps: row.investor_effective_yield_bps,
+    invoiceId: row.invoice_id,
+    stale: !row.last_refreshed_at,
+  };
+}
+
+/**
+ * Builds a paginated response object from a query builder.
+ *
+ * @param {import('knex').Knex.QueryBuilder} baseQuery - Query with all filters applied.
+ * @param {Object} opts - Pagination options.
+ * @param {number|string} [opts.limit=20] - Requested page size.
+ * @param {number|string} [opts.page=1] - Requested one-based page number.
+ * @returns {Promise<{ data: Object[], meta: { total: number, page: number, limit: number, totalPages: number, hasMore: boolean } }>}
+ */
+async function paginateInvestorLocks(baseQuery, { limit = 20, page = 1 } = {}) {
+  const safeLimit = clampInteger(limit, 20, 1, 100);
+  const safePage = clampInteger(page, 1, 1, Number.MAX_SAFE_INTEGER);
   const offset = (safePage - 1) * safeLimit;
-  const data = items.slice(offset, offset + safeLimit);
+  const countRows = await baseQuery.clone().clearSelect().clearOrder().count({ count: '*' });
+  const total = Number(countRows[0] && countRows[0].count) || 0;
+  const rows = await baseQuery
+    .clone()
+    .select('*')
+    .orderBy('created_at', 'asc')
+    .orderBy('invoice_id', 'asc')
+    .limit(safeLimit)
+    .offset(offset);
+  const data = rows.map(toInvestorLockRecord);
+
   return {
     data,
     meta: {
@@ -300,6 +379,89 @@ function getAllInvestorLocks({ invoiceId, limit = 20, page = 1 } = {}) {
       hasMore: offset + data.length < total,
     },
   };
+}
+
+/**
+ * Upsert a tenant-scoped investor lock record into durable storage.
+ *
+ * @param {Object} params
+ * @param {string} params.funderAddress
+ * @param {string} params.claimNotBefore
+ * @param {number} params.investorEffectiveYieldBps
+ * @param {string} params.invoiceId
+ * @param {string} [params.tenantId]
+ * @returns {Promise<Object>} The stored lock record.
+ */
+async function setInvestorLock({ funderAddress, claimNotBefore, investorEffectiveYieldBps, invoiceId, tenantId }) {
+  const resolvedTenantId = normalizeTenantId(tenantId);
+  const payload = {
+    tenant_id: resolvedTenantId,
+    invoice_id: invoiceId,
+    funder_address: funderAddress,
+    claim_not_before: claimNotBefore,
+    investor_effective_yield_bps: investorEffectiveYieldBps,
+    last_refreshed_at: db.fn.now(),
+    updated_at: db.fn.now(),
+  };
+
+  await db(LOCK_TABLE)
+    .insert(payload)
+    .onConflict(['tenant_id', 'invoice_id', 'funder_address'])
+    .merge({
+      claim_not_before: payload.claim_not_before,
+      investor_effective_yield_bps: payload.investor_effective_yield_bps,
+      last_refreshed_at: db.fn.now(),
+      updated_at: db.fn.now(),
+    });
+
+  const row = await db(LOCK_TABLE)
+    .where({
+      tenant_id: resolvedTenantId,
+      invoice_id: invoiceId,
+      funder_address: funderAddress,
+    })
+    .first();
+
+  return toInvestorLockRecord(row);
+}
+
+/**
+ * Retrieve a single lock by invoiceId and funderAddress.
+ *
+ * @param {string} invoiceId
+ * @param {string} funderAddress
+ * @param {Object} [opts]
+ * @param {string} [opts.tenantId]
+ * @returns {Promise<Object|undefined>}
+ */
+async function getInvestorLock(invoiceId, funderAddress, { tenantId } = {}) {
+  const row = await db(LOCK_TABLE)
+    .where({
+      tenant_id: normalizeTenantId(tenantId),
+      invoice_id: invoiceId,
+      funder_address: funderAddress,
+    })
+    .first();
+
+  return row ? toInvestorLockRecord(row) : undefined;
+}
+
+/**
+ * Returns all locks, optionally filtered by invoiceId, with offset pagination.
+ *
+ * @param {Object} [opts]
+ * @param {string} [opts.invoiceId]  - Optional invoiceId filter.
+ * @param {string} [opts.tenantId]   - Tenant scope.
+ * @param {number} [opts.limit=20]   - Page size (1–100).
+ * @param {number} [opts.page=1]     - 1-based page number.
+ * @returns {Promise<{ data: Object[], meta: { total: number, page: number, limit: number, totalPages: number, hasMore: boolean } }>}
+ */
+async function getAllInvestorLocks({ tenantId, invoiceId, limit = 20, page = 1 } = {}) {
+  const query = db(LOCK_TABLE).where({ tenant_id: normalizeTenantId(tenantId) });
+  if (invoiceId) {
+    query.andWhere({ invoice_id: invoiceId });
+  }
+  return paginateInvestorLocks(query, { limit, page });
 }
 
 /**
@@ -309,53 +471,75 @@ function getAllInvestorLocks({ invoiceId, limit = 20, page = 1 } = {}) {
  * @param {string} funderAddress
  * @param {Object} [opts]
  * @param {string} [opts.invoiceId]  - Optional invoiceId filter.
+ * @param {string} [opts.tenantId]   - Tenant scope.
  * @param {number} [opts.limit=20]   - Page size (1–100).
  * @param {number} [opts.page=1]     - 1-based page number.
- * @returns {{ data: Object[], meta: { total: number, page: number, limit: number, totalPages: number, hasMore: boolean } }}
+ * @returns {Promise<{ data: Object[], meta: { total: number, page: number, limit: number, totalPages: number, hasMore: boolean } }>}
  */
-function getInvestorLocksByAddress(funderAddress, { invoiceId, limit = 20, page = 1 } = {}) {
-  const safeLimit = Math.max(1, Math.min(100, limit));
-  const safePage = Math.max(1, page);
-  let items = [..._lockStore.values()].filter((l) => l.funderAddress === funderAddress);
+async function getInvestorLocksByAddress(funderAddress, { tenantId, invoiceId, limit = 20, page = 1 } = {}) {
+  const query = db(LOCK_TABLE).where({
+    tenant_id: normalizeTenantId(tenantId),
+    funder_address: funderAddress,
+  });
   if (invoiceId) {
-    items = items.filter((l) => l.invoiceId === invoiceId);
+    query.andWhere({ invoice_id: invoiceId });
   }
-  const total = items.length;
-  const offset = (safePage - 1) * safeLimit;
-  const data = items.slice(offset, offset + safeLimit);
-  return {
-    data,
-    meta: {
-      total,
-      page: safePage,
-      limit: safeLimit,
-      totalPages: Math.ceil(total / safeLimit) || 1,
-      hasMore: offset + data.length < total,
-    },
-  };
+  return paginateInvestorLocks(query, { limit, page });
 }
 
-/** Clear all locks (test helper). */
-function clearInvestorLocks() {
-  _lockStore.clear();
+/**
+ * Clears investor lock rows, optionally scoped to one tenant.
+ *
+ * @param {Object} [opts]
+ * @param {string} [opts.tenantId] - Optional tenant to clear.
+ * @returns {Promise<void>}
+ */
+async function clearInvestorLocks({ tenantId } = {}) {
+  const query = db(LOCK_TABLE);
+  if (tenantId) {
+    query.where({ tenant_id: normalizeTenantId(tenantId) });
+  }
+  await query.delete();
 }
 
-/** Seed representative test fixtures (test helper). */
-function seedInvestorLocks() {
+/**
+ * Seeds representative investor lock rows for tests and local development.
+ *
+ * @param {Object} [opts]
+ * @param {string} [opts.tenantId] - Tenant to receive the seeded rows.
+ * @returns {Promise<void>}
+ */
+async function seedInvestorLocks({ tenantId = DEFAULT_TENANT_ID } = {}) {
   const addr1 = 'GDRXE2BQUC3AZNPVFSCEZ76NJ3WWL25FYFK6RGZGIEKWE4SOUJ3LNLRK';
-  const addr2 = 'GDGQVOKHW4VEJRU2TETD8G6RWJ3TVM3VROMV7I3ESNITIBLL6QL6RAIL';
+  const addr2 = 'GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA';
 
   for (let i = 1; i <= 5; i++) {
-    setInvestorLock({ funderAddress: addr1, claimNotBefore: `2026-0${i}-01T00:00:00Z`, investorEffectiveYieldBps: 500 + i * 50, invoiceId: `inv_${7788 + i - 1}` });
+    await setInvestorLock({
+      tenantId,
+      funderAddress: addr1,
+      claimNotBefore: `2026-0${i}-01T00:00:00Z`,
+      investorEffectiveYieldBps: 500 + i * 50,
+      invoiceId: `inv_${7788 + i - 1}`,
+    });
   }
-  setInvestorLock({ funderAddress: addr2, claimNotBefore: '2026-06-01T00:00:00Z', investorEffectiveYieldBps: 800, invoiceId: 'inv_9900' });
+  await setInvestorLock({
+    tenantId,
+    funderAddress: addr2,
+    claimNotBefore: '2026-06-01T00:00:00Z',
+    investorEffectiveYieldBps: 800,
+    invoiceId: 'inv_9900',
+  });
 }
 
 module.exports = {
+  CommitmentValidationError,
+  MAX_STROOP_AMOUNT,
   persistCommitment,
   updateCommitment,
+  validateAmountStroops,
   findCommitments,
   validateAddress,
+  normalizeAmountStroopsInput,
   setInvestorLock,
   getInvestorLock,
   getAllInvestorLocks,

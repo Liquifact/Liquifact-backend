@@ -3,13 +3,19 @@
 const nodemailer = require('nodemailer');
 const JobQueue = require('../workers/jobQueue');
 const BackgroundWorker = require('../workers/worker');
-const { sendMailWithRetry, isPermanentSmtpError } = require('../utils/retry');
+const db = require('../db/knex');
 const logger = require('../logger');
+const { sendMailWithRetry } = require('../utils/retry');
 const {
   maturityReminderDeliveryAttemptsTotal,
   maturityReminderDeliverySuccessTotal,
   maturityReminderDeadLetterTotal,
+  normalizeReminderReason,
+  normalizeJobType,
 } = require('../metrics');
+
+const DEAD_LETTER_TABLE = 'maturity_reminder_dead_letters';
+const MAX_LIST_LIMIT = 200;
 
 /**
  * The internal mapping of invoice IDs to job IDs.
@@ -18,20 +24,13 @@ const {
  */
 const invoiceJobs = new Map();
 
-/**
- * Dead-letter queue for reminders that failed after max retries.
- * Stores { invoiceId, email, error, timestamp, attempts } for debugging/alerting.
- * @type {Array<Object>}
- */
-const deadLetterQueue = [];
-
 const emailQueue = new JobQueue();
 const emailWorker = new BackgroundWorker({ jobQueue: emailQueue });
 
 /**
- * Nodemailer transport setup.
- * If no real SMTP config is provided, it returns a mock transport (dry-run).
- * @returns {Object} A simulated or real nodemailer transport object.
+ * Creates the configured Nodemailer transport, or a dry-run transport when SMTP is disabled.
+ *
+ * @returns {Object} A simulated or real Nodemailer transport object.
  */
 function getTransport() {
   if (process.env.SMTP_HOST) {
@@ -45,18 +44,16 @@ function getTransport() {
     });
   }
 
-  // Dry-run / mock transport
   return {
     sendMail: async (mailOptions) => {
       console.log(`[DRY RUN] Sending email to: ${mailOptions.to}`);
       console.log(`[DRY RUN] Subject: ${mailOptions.subject}`);
       console.log(`[DRY RUN] Text: ${mailOptions.text}`);
       return { messageId: 'mock-id-12345', response: '250 OK Mock' };
-    }
+    },
   };
 }
 
-// Templates externalized
 const templates = {
   maturityReminder: (customer, amount, targetDate) => `
 Dear ${customer},
@@ -70,114 +67,175 @@ LiquiFact Settlement Team
 };
 
 /**
- * Handle sending the email with retry and dead-lettering.
+ * Returns a bounded SMTP attempt count from configuration.
+ *
+ * @returns {number} Attempt count between one and ten.
  */
-emailWorker.registerHandler('maturity_reminder', async (job) => {
-  const { invoiceId, customer, amount, email, targetDate } = job.payload;
-  
-  const transport = getTransport();
-  const text = templates.maturityReminder(customer, amount, targetDate);
-
-  const mailOptions = {
-    from: process.env.SMTP_FROM || 'noreply@liquifact.com',
-    to: email,
-    subject: `Settlement Reminder: Invoice ${invoiceId}`,
-    text,
-  };
-
-  const maxAttempts = Number(process.env.SMTP_MAX_RETRIES) || 3;
-
-  try {
-    // Track attempt
-    maturityReminderDeliveryAttemptsTotal.inc({ job_type: 'maturity_reminder' });
-
-    // Send with retry and backoff
-    await sendMailWithRetry(transport, mailOptions, {
-      maxAttempts,
-      baseDelayMs: 1000,
-      onRetry: ({ attempt, error }) => {
-        logger.warn({
-          msg: 'Maturity reminder delivery retry',
-          invoiceId,
-          email,
-          attempt,
-          errorCode: error.code,
-          errorMessage: error.message,
-        });
-        
-        // Count each retry attempt
-        maturityReminderDeliveryAttemptsTotal.inc({ job_type: 'maturity_reminder' });
-      },
-    });
-
-    // Success
-    maturityReminderDeliverySuccessTotal.inc({ job_type: 'maturity_reminder' });
-    logger.info({
-      msg: 'Maturity reminder delivered successfully',
-      invoiceId,
-      email,
-    });
-
-    // Clean up job mapping
-    invoiceJobs.delete(invoiceId);
-
-  } catch (error) {
-    const isPermanent = isPermanentSmtpError(error);
-    const reason = isPermanent ? 'permanent_error' : 'max_retries_exceeded';
-
-    logger.error({
-      msg: 'Maturity reminder delivery failed',
-      invoiceId,
-      email,
-      errorCode: error.code,
-      errorMessage: error.message,
-      isPermanent,
-      reason,
-    });
-
-    // Record dead-letter
-    maturityReminderDeadLetterTotal.inc({ 
-      job_type: 'maturity_reminder',
-      reason,
-    });
-
-    // Store in dead-letter queue for manual recovery
-    deadLetterQueue.push({
-      invoiceId,
-      email,
-      error: {
-        code: error.code,
-        message: error.message,
-        response: error.response,
-        isPermanent,
-      },
-      timestamp: new Date().toISOString(),
-      maxAttempts,
-    });
-
-    // Limit dead-letter queue size to prevent memory leak
-    if (deadLetterQueue.length > 1000) {
-      deadLetterQueue.shift();
-    }
-
-    // Clean up job mapping
-    invoiceJobs.delete(invoiceId);
-
-    // Re-throw so job queue marks job as failed
-    throw error;
+function getMaxAttempts() {
+  const configured = Number(process.env.SMTP_MAX_RETRIES);
+  if (!Number.isFinite(configured)) {
+    return 3;
   }
-});
+  return Math.max(1, Math.min(Math.trunc(configured), 10));
+}
 
 /**
- * Schedule a pre-maturity reminder for an invoice.
- * @param {Object} invoice - The invoice metadata.
- * @param {Date} targetDate - When the reminder should actually run.
+ * Persists a sanitized maturity-reminder dead letter.
+ *
+ * Only operational metadata is copied into `payload_metadata`; recipient email,
+ * customer name, amount, generated subject/body, and raw SMTP errors are never stored.
+ *
+ * @param {Object} deadLetter - Sanitized failure metadata.
+ * @param {string} deadLetter.jobId - Background job identifier.
+ * @param {string} deadLetter.invoiceId - Invoice identifier.
+ * @param {string} deadLetter.jobType - Bounded reminder job type.
+ * @param {string} deadLetter.reason - Bounded failure reason.
+ * @param {number} deadLetter.attempts - Number of SMTP attempts made.
+ * @param {string} deadLetter.targetDate - Scheduled maturity timestamp.
+ * @param {import('knex').Knex} [dbClient=db] - Injectable Knex client.
+ * @returns {Promise<void>} Resolves after the row is inserted.
+ */
+async function persistReminderDeadLetter(deadLetter, dbClient = db) {
+  const payloadMetadata = {
+    jobType: deadLetter.jobType,
+    targetDate: deadLetter.targetDate,
+  };
+
+  await dbClient(DEAD_LETTER_TABLE).insert({
+    job_id: deadLetter.jobId,
+    invoice_id: deadLetter.invoiceId,
+    reason: deadLetter.reason,
+    attempts: deadLetter.attempts,
+    payload_metadata: JSON.stringify(payloadMetadata),
+    created_at: new Date(),
+  });
+}
+
+/**
+ * Starts dead-letter persistence without making the reminder handler wait for the database.
+ *
+ * @param {Object} deadLetter - Sanitized dead-letter record.
+ * @param {Function} persist - Persistence function.
+ * @returns {void}
+ */
+function persistReminderDeadLetterInBackground(deadLetter, persist) {
+  Promise.resolve()
+    .then(() => persist(deadLetter))
+    .catch((err) => {
+      logger.warn(
+        { err: err && err.message ? err.message : String(err), jobId: deadLetter.jobId },
+        'Failed to persist maturity-reminder dead letter'
+      );
+    });
+}
+
+/**
+ * Lists persisted maturity-reminder dead letters for operator inspection.
+ *
+ * @param {Object} [options={}] - Query options.
+ * @param {number} [options.limit=50] - Maximum rows to return, capped at 200.
+ * @param {string} [options.reason] - Optional bounded reason filter.
+ * @param {import('knex').Knex} [dbClient=db] - Injectable Knex client.
+ * @returns {Promise<Array<Object>>} Newest dead-letter rows first.
+ */
+async function listReminderDeadLetters(options = {}, dbClient = db) {
+  const requestedLimit = Number(options.limit);
+  const limit = Number.isFinite(requestedLimit)
+    ? Math.max(1, Math.min(Math.trunc(requestedLimit), MAX_LIST_LIMIT))
+    : 50;
+
+  const query = dbClient(DEAD_LETTER_TABLE)
+    .select(
+      'id',
+      'job_id',
+      'invoice_id',
+      'reason',
+      'attempts',
+      'payload_metadata',
+      'created_at'
+    )
+    .orderBy('created_at', 'desc')
+    .limit(limit);
+
+  if (options.reason) {
+    query.where('reason', options.reason);
+  }
+
+  return query;
+}
+
+/**
+ * Creates the maturity-reminder job handler with injectable delivery dependencies.
+ *
+ * @param {Object} [dependencies={}] - Handler dependencies.
+ * @param {Function} [dependencies.transportFactory=getTransport] - SMTP transport factory.
+ * @param {Function} [dependencies.persistDeadLetter=persistReminderDeadLetter] - Dead-letter writer.
+ * @returns {Function} Async background-job handler.
+ */
+function createMaturityReminderHandler(dependencies = {}) {
+  const transportFactory = dependencies.transportFactory || getTransport;
+  const persistDeadLetter = dependencies.persistDeadLetter || persistReminderDeadLetter;
+
+  return async function maturityReminderHandler(job) {
+    const { invoiceId, customer, amount, email, targetDate } = job.payload;
+    const jobType = normalizeJobType(job.type);
+    let attempts = 0;
+
+    try {
+      const transport = transportFactory();
+      const countedTransport = {
+        sendMail: (mailOptions) => {
+          attempts += 1;
+          maturityReminderDeliveryAttemptsTotal.inc({ reason: 'unknown', job_type: jobType });
+          return transport.sendMail(mailOptions);
+        },
+      };
+
+      await sendMailWithRetry(
+        countedTransport,
+        {
+          from: process.env.SMTP_FROM || 'noreply@liquifact.com',
+          to: email,
+          subject: `Settlement Reminder: Invoice ${invoiceId}`,
+          text: templates.maturityReminder(customer, amount, targetDate),
+        },
+        { maxAttempts: getMaxAttempts() }
+      );
+
+      // Increment success counter only after a confirmed successful delivery.
+      maturityReminderDeliverySuccessTotal.inc({ job_type: jobType });
+    } catch (err) {
+      const reason = normalizeReminderReason(err);
+      maturityReminderDeadLetterTotal.inc({ reason, job_type: jobType });
+      persistReminderDeadLetterInBackground(
+        {
+          jobId: job.id,
+          invoiceId,
+          jobType,
+          reason,
+          attempts,
+          targetDate,
+        },
+        persistDeadLetter
+      );
+    } finally {
+      invoiceJobs.delete(invoiceId);
+    }
+  };
+}
+
+emailWorker.registerHandler('maturity_reminder', createMaturityReminderHandler());
+
+/**
+ * Schedules a pre-maturity reminder for an invoice.
+ *
+ * @param {Object} invoice - Invoice metadata.
+ * @param {Date} targetDate - When the reminder should run.
  * @param {string} email - Destination email.
- * @returns {string} The scheduled job ID.
+ * @returns {string} Scheduled job ID.
  */
 function scheduleReminder(invoice, targetDate, email) {
   const delayMs = Math.max(targetDate.getTime() - Date.now(), 0);
-
   const payload = {
     invoiceId: invoice.id,
     customer: invoice.customer,
@@ -187,8 +245,7 @@ function scheduleReminder(invoice, targetDate, email) {
   };
 
   const jobId = emailQueue.enqueue('maturity_reminder', payload, { delayMs });
-  
-  // Clean up any existing job memory for this invoice first
+
   if (invoiceJobs.has(invoice.id)) {
     cancelReminder(invoice.id);
   }
@@ -199,8 +256,9 @@ function scheduleReminder(invoice, targetDate, email) {
 
 /**
  * Cancels a previously scheduled reminder for an invoice.
- * @param {string} invoiceId - The invoice ID.
- * @returns {boolean} True if successfully canceled, false if not found.
+ *
+ * @param {string} invoiceId - Invoice ID.
+ * @returns {boolean} True when a pending reminder was cancelled.
  */
 function cancelReminder(invoiceId) {
   const jobId = invoiceJobs.get(invoiceId);
@@ -208,42 +266,30 @@ function cancelReminder(invoiceId) {
     return false;
   }
 
-  const canceled = emailQueue.cancel(jobId);
+  const cancelled = emailQueue.cancel(jobId);
   invoiceJobs.delete(invoiceId);
-  return canceled;
+  return cancelled;
 }
 
 /**
- * Starts the internal email worker queue processing.
+ * Starts internal email queue processing.
+ *
+ * @returns {void}
  */
 function startQueueProcessing() {
   if (!emailWorker.isRunning) {
-    emailWorker.start();
+    void emailWorker.start();
   }
 }
 
 /**
- * Stops the internal email worker queue processing gracefully.
+ * Stops internal email queue processing gracefully.
+ *
  * @param {number} [timeoutMs=5000] - Grace period for pending jobs.
  * @returns {Promise<void>} Resolves when stopped.
  */
 async function stopQueueProcessing(timeoutMs = 5000) {
   await emailWorker.stop(timeoutMs);
-}
-
-/**
- * Retrieve the dead-letter queue for debugging and manual recovery.
- * @returns {Array<Object>} Copy of dead-lettered reminder entries.
- */
-function getDeadLetterQueue() {
-  return [...deadLetterQueue];
-}
-
-/**
- * Clear the dead-letter queue (after manual recovery/investigation).
- */
-function clearDeadLetterQueue() {
-  deadLetterQueue.length = 0;
 }
 
 module.exports = {
@@ -253,8 +299,11 @@ module.exports = {
   stopQueueProcessing,
   invoiceJobs,
   emailQueue,
+  emailWorker,
   templates,
   getTransport,
-  getDeadLetterQueue,
-  clearDeadLetterQueue,
+  getMaxAttempts,
+  createMaturityReminderHandler,
+  persistReminderDeadLetter,
+  listReminderDeadLetters,
 };

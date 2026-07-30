@@ -1,10 +1,26 @@
+/**
+ * @fileoverview Canonical RFC 7807 Problem Details builder.
+ *
+ * This module is the **single canonical builder** for RFC 7807 problem+json
+ * objects across the entire application. Every error response flows through
+ * `formatProblemDetails` to guarantee a consistent wire format for type,
+ * title, status, detail, instance, and extension fields.
+ *
+ * Consumers (AppError, problemJson middleware, etc.) MUST call
+ * `formatProblemDetails` rather than assembling problem objects inline.
+ *
+ * @see https://tools.ietf.org/html/rfc7807
+ * @module utils/problemDetails
+ */
+
+"use strict";
+
 const DEFAULT_PROBLEM_TYPE = "about:blank";
 const LIQUifact_PROBLEM_BASE = "https://liquifact.com/probs";
 
 /**
  * Maps HTTP status codes to standard problem type URIs.
  *
- * @description Resolves problem type URI based on status code.
  * @param {number} status - HTTP status code.
  * @returns {string} Problem type URI.
  */

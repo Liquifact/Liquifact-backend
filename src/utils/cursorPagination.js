@@ -2,70 +2,60 @@
 
 /**
  * @fileoverview Opaque cursor encoding/decoding for marketplace keyset pagination.
- *
- * Cursors are base64url-encoded JSON objects containing the last-seen value for
- * the active sort field and the row `id` tiebreaker. They are HMAC-signed so
- * that any modification — or reuse with a different sort field — is detected
- * and rejected with a 400 before it reaches the database layer.
- *
- * Cursor payload shape:
- * ```json
- * { "sortField": "yield_bps", "sortValue": 450, "id": "inv_abc123", "iat": 1719187200 }
- * ```
- *
- * Security properties:
- * - Opaque to the client (base64url, not human-readable without decoding).
- * - HMAC-SHA-256 signed; any tampering invalidates the signature.
- * - `sortField` is validated against `MARKETPLACE_QUERY_CONFIG.allowedSortFields`
- *   so a client cannot switch sort fields mid-page silently.
- * - Does not embed tenant ID or filter values — the service layer always re-applies
- *   tenant scoping and filter constraints independently, so a cursor cannot be used
- *   to bypass them.
- * - `iat` (issued-at epoch seconds) is stored for auditability; cursors do not
- *   expire by default but the field is available for future TTL enforcement.
- *
  * @module utils/cursorPagination
  */
 
 const crypto = require('crypto');
 
-/**
- * Secret used to sign cursors.  Falls back to a dev-only default when
- * `CURSOR_SECRET` is not set so tests work without environment setup.
- * Production deployments MUST set `CURSOR_SECRET` to a strong random value.
- *
- * @type {string}
- */
-const CURSOR_SECRET = process.env.CURSOR_SECRET || process.env.JWT_SECRET || 'dev-cursor-secret-change-in-prod';
+const DEV_CURSOR_SECRET = 'dev-cursor-secret-change-in-prod';
+
+const ALLOWED_SORT_FIELDS = Object.freeze([
+  // Marketplace / invoice fields
+  'yield_bps', 'maturity_date', 'funded_ratio', 'amount', 'created_at', 'updated_at',
+  // Indexer (escrow_events) fields
+  'ledger_sequence', 'observed_at',
+]);
 
 /**
- * Allowed sort fields for marketplace queries (must mirror MARKETPLACE_QUERY_CONFIG).
- * @type {ReadonlyArray<string>}
+ * Resolves the HMAC secret used to sign and verify opaque cursors.
+ * Production must use a real CURSOR_SECRET or JWT_SECRET. The public dev
+ * fallback is available only for local development and test runs.
+ *
+ * @returns {string} Cursor signing secret.
+ * @throws {Error} When no real secret is configured outside development/test.
  */
-const ALLOWED_SORT_FIELDS = Object.freeze(['yield_bps', 'maturity_date', 'funded_ratio', 'amount', 'created_at']);
+function _resolveCursorSecret() {
+  const configuredSecret = process.env.CURSOR_SECRET || process.env.JWT_SECRET;
+  if (configuredSecret) {
+    return configuredSecret;
+  }
+
+  const nodeEnv = process.env.NODE_ENV || 'development';
+  if (nodeEnv === 'development' || nodeEnv === 'test') {
+    return DEV_CURSOR_SECRET;
+  }
+
+  throw new Error('CURSOR_SECRET or JWT_SECRET must be configured for cursor pagination outside development/test');
+}
 
 /**
- * Computes an HMAC-SHA-256 hex digest over `payload`.
+ * Signs a base64url cursor payload with the resolved HMAC secret.
  *
- * @param {string} payload - The string to sign.
- * @returns {string} Hex-encoded HMAC digest.
+ * @param {string} payload
+ * @returns {string}
  */
 function _sign(payload) {
-  return crypto.createHmac('sha256', CURSOR_SECRET).update(payload).digest('hex');
+  return crypto.createHmac('sha256', _resolveCursorSecret()).update(payload).digest('hex');
 }
 
 /**
  * Encodes a cursor from the last row returned in a page.
  *
  * @param {Object} params
- * @param {string} params.sortField - The active sort column (e.g. `'yield_bps'`).
- * @param {*}      params.sortValue - The sort-column value from the last row.
- * @param {string} params.id        - The `id` of the last row (tiebreaker).
- * @returns {string} Opaque base64url cursor string.
- *
- * @example
- * const cursor = encodeCursor({ sortField: 'yield_bps', sortValue: 450, id: 'inv_abc' });
- * // → 'eyJzb3J0RmllbGQiOiJ5aWVsZF9icHMiLCJzb3J0VmFsdWUiOjQ1MCwiaWQiOiJpbnZfYWJjIiwiaWF0IjoxNzE5MTg3MjAwfQ.3f9a...'
+ * @param {string} params.sortField
+ * @param {*}      params.sortValue
+ * @param {string} params.id
+ * @returns {string}
  */
 function encodeCursor({ sortField, sortValue, id }) {
   if (!ALLOWED_SORT_FIELDS.includes(sortField)) {
@@ -90,11 +80,10 @@ function encodeCursor({ sortField, sortValue, id }) {
 /**
  * Decodes and validates an opaque cursor string.
  *
- * @param {string} cursor            - The opaque cursor from the client.
- * @param {string} expectedSortField - The sort field in the current request.
- *   If the cursor encodes a different field the decode is rejected.
+ * @param {string} cursor
+ * @param {string} expectedSortField
  * @returns {{ sortField: string, sortValue: *, id: string, iat: number }}
- * @throws {CursorError} When the cursor is malformed, tampered, or mismatched.
+ * @throws {CursorError}
  */
 function decodeCursor(cursor, expectedSortField) {
   if (typeof cursor !== 'string' || !cursor.includes('.')) {
@@ -105,7 +94,6 @@ function decodeCursor(cursor, expectedSortField) {
   const b64 = cursor.slice(0, dotIdx);
   const sig = cursor.slice(dotIdx + 1);
 
-  // Constant-time comparison to prevent timing attacks
   const expectedSig = _sign(b64);
   const sigBuf = Buffer.from(sig, 'hex');
   const expectedBuf = Buffer.from(expectedSig, 'hex');
@@ -136,9 +124,15 @@ function decodeCursor(cursor, expectedSortField) {
     throw new CursorError('Cursor is missing issued-at timestamp');
   }
 
-  // Reject sort-field mismatch — prevents silent page corruption when the
-  // client sends a cursor from a previous sort context.
-  if (sortField !== expectedSortField) {
+  if (process.env.CURSOR_TTL_ENABLED === 'true') {
+    const ttl = parseInt(process.env.CURSOR_TTL_SECONDS || '3600', 10);
+    const now = Math.floor(Date.now() / 1000);
+    if (iat && (now - iat) > ttl) {
+      throw new CursorError('Cursor has expired');
+    }
+  }
+
+  if (expectedSortField !== undefined && sortField !== expectedSortField) {
     throw new CursorError(
       `Cursor sort field "${sortField}" does not match requested sort field "${expectedSortField}"`
     );
@@ -148,13 +142,13 @@ function decodeCursor(cursor, expectedSortField) {
 }
 
 /**
- * Domain error for cursor-related failures.  The route layer maps this to
- * HTTP 400 so internal details never leak to the client.
+ * Domain error for cursor-related failures.
  */
 class CursorError extends Error {
   /**
-   * Creates an instance of CursorError.
-   * @param {string} message The error message.
+   * Create a cursor domain error.
+   *
+   * @param {string} message
    */
   constructor(message) {
     super(message);

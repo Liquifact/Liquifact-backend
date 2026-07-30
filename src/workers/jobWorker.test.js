@@ -298,7 +298,8 @@ describe('JobQueue (in-memory)', () => {
     it('counts each status correctly', () => {
       const id1 = queue.enqueue('t', {});
       const id2 = queue.enqueue('t', {});
-      queue.dequeue();
+      queue.dequeue(); // id1 → processing
+      queue.dequeue(); // id2 → processing
       queue.ack(id1);
       const stats = queue.getStats();
       expect(stats.completed).toBe(1);
@@ -773,18 +774,27 @@ describe('BackgroundWorker', () => {
       });
       await worker.start();
       worker.enqueue('t', {});
-      await new Promise(r => setTimeout(r, 30));
+      // Wait past the 50ms poll interval so the job is actually in flight.
+      await new Promise(r => setTimeout(r, 70));
       await worker.stop(500);
       expect(done).toBe(true);
     });
 
     it('times out if jobs take too long', async () => {
-      worker.registerHandler('t', async () => new Promise(r => setTimeout(r, 2000)));
+      worker.registerHandler('t', async () => new Promise(r => setTimeout(r, 300)));
       await worker.start();
       worker.enqueue('t', {});
-      await new Promise(r => setTimeout(r, 30));
+      // Wait past the 50ms poll interval so the job is actually in flight.
+      await new Promise(r => setTimeout(r, 70));
       await worker.stop(80);
       expect(worker.processingCount).toBeGreaterThan(0);
+
+      // Drain the in-flight job before the queue is cleared, so its late
+      // ack does not fire against a cleared queue and leak error logs
+      // into subsequent tests.
+      while (worker.processingCount > 0) {
+        await new Promise(r => setTimeout(r, 25));
+      }
     });
 
     it('resolves cleanly when not running', async () => {
@@ -869,7 +879,8 @@ describe('BackgroundWorker', () => {
       worker.registerHandler('t', jest.fn(async () => new Promise(r => setTimeout(r, 100))));
       await worker.start();
       worker.enqueue('t', {});
-      await new Promise(r => setTimeout(r, 40));
+      // Wait past the 50ms poll interval so the job is actually in flight.
+      await new Promise(r => setTimeout(r, 70));
 
       const stats = worker.getStats();
       expect(stats.isRunning).toBe(true);
@@ -994,6 +1005,36 @@ describe('buildJobContext', () => {
     const ctx = buildJobContext({ ...base, payload: 'string-payload' });
     expect(ctx).toEqual({ jobId: 'job-abc', jobType: 'webhook_delivery', attempt: 2 });
   });
+
+  it('returns an empty object for null or non-object jobs', () => {
+    expect(buildJobContext(null)).toEqual({});
+    expect(buildJobContext(undefined)).toEqual({});
+    expect(buildJobContext('job-as-string')).toEqual({});
+  });
+
+  it('excludes allow-listed keys whose values are not primitives', () => {
+    const ctx = buildJobContext({
+      ...base,
+      payload: {
+        tenantId: { nested: 'object-not-allowed' },
+        invoiceId: ['array-not-allowed'],
+        correlationId: 'req_ok',
+      },
+    });
+    expect(ctx.tenantId).toBeUndefined();
+    expect(ctx.invoiceId).toBeUndefined();
+    expect(ctx.correlationId).toBe('req_ok');
+  });
+
+  it('keeps null values for allow-listed keys', () => {
+    const ctx = buildJobContext({ ...base, payload: { tenantId: null } });
+    expect(ctx.tenantId).toBeNull();
+  });
+
+  it('falls back to job.attempt then 1 when attempts is absent', () => {
+    expect(buildJobContext({ id: 'j', type: 't', attempt: 4 }).attempt).toBe(4);
+    expect(buildJobContext({ id: 'j', type: 't' }).attempt).toBe(1);
+  });
 });
 
 describe('BackgroundWorker – error log enrichment', () => {
@@ -1091,5 +1132,146 @@ describe('BackgroundWorker – error log enrichment', () => {
 
     const call = loggerErrorSpy.mock.calls.find((c) => c[1] === 'Job handler failed');
     expect(call[0]).toMatchObject({ jobId: expect.any(String), jobType: 'test_job', attempt: 1 });
+  });
+
+  it('includes the thrown error object in the log call', async () => {
+    const boom = new Error('kaboom');
+    worker.registerHandler('test_job', jest.fn().mockRejectedValue(boom));
+    worker.start();
+    worker.enqueue('test_job', { tenantId: 't-err' });
+
+    await new Promise((r) => setTimeout(r, 200));
+    await worker.stop();
+
+    const call = loggerErrorSpy.mock.calls.find((c) => c[1] === 'Job handler failed');
+    expect(call[0].err).toBe(boom);
+  });
+
+  it('still schedules a retry via the queue after logging (behaviour unchanged)', async () => {
+    worker.registerHandler('test_job', jest.fn().mockRejectedValue(new Error('boom')));
+    worker.start();
+    const id = worker.enqueue('test_job', { tenantId: 't-retry' });
+
+    await new Promise((r) => setTimeout(r, 200));
+    await worker.stop();
+
+    // The failure is logged AND the job is queued for retry — not dropped.
+    const call = loggerErrorSpy.mock.calls.find((c) => c[1] === 'Job handler failed');
+    expect(call).toBeDefined();
+    expect(queue.getJob(id).status).toBe(JOB_STATUS.RETRYING);
+    expect(queue.retryQueue).toContain(id);
+  });
+
+  it('logs increasing attempt counts across retries', async () => {
+    // Force immediate retries by neutralising the backoff delay.
+    worker.registerHandler('test_job', jest.fn().mockRejectedValue(new Error('always fails')));
+    worker.start();
+    const id = worker.enqueue('test_job', { tenantId: 't-attempts' });
+
+    // Wait for first failure, then rewind the backoff so the retry is ready.
+    await new Promise((r) => setTimeout(r, 150));
+    queue.getJob(id).delayMs = 0;
+    await new Promise((r) => setTimeout(r, 150));
+    await worker.stop();
+
+    const attempts = loggerErrorSpy.mock.calls
+      .filter((c) => c[1] === 'Job handler failed' && c[0].jobId === id)
+      .map((c) => c[0].attempt);
+    expect(attempts.length).toBeGreaterThanOrEqual(2);
+    expect(attempts[1]).toBeGreaterThan(attempts[0]);
+  });
+
+  it('scrubs the context through auditLogStore.redactValue (defence in depth)', async () => {
+    const auditLogStore = require('../services/auditLogStore');
+    const redactSpy = jest.spyOn(auditLogStore, 'redactValue');
+
+    const ctx = buildJobContext({
+      id: 'job-scrub', type: 'test_job', attempts: 1,
+      payload: { tenantId: 't-scrub', invoiceId: 'inv-scrub' },
+    });
+
+    expect(redactSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ jobId: 'job-scrub', tenantId: 't-scrub', invoiceId: 'inv-scrub' })
+    );
+    expect(ctx).toMatchObject({ jobId: 'job-scrub', tenantId: 't-scrub' });
+    redactSpy.mockRestore();
+  });
+
+  it('logs enriched context when a dequeued job has no registered handler', async () => {
+    worker.registerHandler('known_type', jest.fn());
+    worker.start();
+    // Bypass worker.enqueue's guard by enqueuing directly on the queue.
+    queue.enqueue('unknown_type', { tenantId: 't-unknown' });
+
+    await new Promise((r) => setTimeout(r, 150));
+    await worker.stop();
+
+    const call = loggerErrorSpy.mock.calls.find((c) => c[1] === 'Job handler failed');
+    expect(call).toBeDefined();
+    expect(call[0]).toMatchObject({ jobType: 'unknown_type', tenantId: 't-unknown' });
+  });
+
+  it('logs and rejects defensively on an invalid job structure', async () => {
+    worker.registerHandler('t', jest.fn());
+    // Job with no id/type: the guard throws, the failure is logged, and the
+    // retry call then rejects because the job is unknown to the queue.
+    await expect(worker._processJob({ payload: {} })).rejects.toThrow('not found');
+
+    const call = loggerErrorSpy.mock.calls.find((c) => c[1] === 'Job handler failed');
+    expect(call).toBeDefined();
+    expect(call[0].err).toBeInstanceOf(Error);
+  });
+
+  it('starts and logs when queue-level crash recovery itself throws', async () => {
+    const q = new JobQueue({ persistence: makePersistence() });
+    q.restoreFromPersistence = jest.fn().mockRejectedValue(new Error('catastrophic'));
+    const w = new BackgroundWorker({ jobQueue: q, pollIntervalMs: 20 });
+    w.registerHandler('t', jest.fn());
+
+    await expect(w.start()).resolves.toBeUndefined();
+    expect(w.isRunning).toBe(true);
+    await w.stop();
+
+    const call = loggerErrorSpy.mock.calls.find(
+      (c) => c[1] === '[worker] Crash recovery failed; starting with empty queue'
+    );
+    expect(call).toBeDefined();
+  });
+
+  it('logs through the poll-loop fallback when the retry itself fails', async () => {
+    // Handler cancels its own job then throws: the retry inside _processJob
+    // cannot find the job, so the rejection surfaces via _poll's catch.
+    worker.registerHandler('test_job', async (job) => {
+      queue.cancel(job.id);
+      throw new Error('handler failed after cancel');
+    });
+    worker.start();
+    const id = worker.enqueue('test_job', { tenantId: 't-fallback' });
+
+    await new Promise((r) => setTimeout(r, 150));
+    await worker.stop();
+
+    const call = loggerErrorSpy.mock.calls.find((c) => c[1] === 'Unexpected error processing job');
+    expect(call).toBeDefined();
+    expect(call[0]).toMatchObject({ jobId: id, jobType: 'test_job', tenantId: 't-fallback' });
+  });
+
+  it('stops gracefully while a failing handler is in flight', async () => {
+    worker.registerHandler('test_job', async () => {
+      await new Promise((r) => setTimeout(r, 80));
+      throw new Error('late failure');
+    });
+    worker.start();
+    const id = worker.enqueue('test_job', { tenantId: 't-stop' });
+
+    // Wait past the poll interval so the job is in flight, then stop.
+    await new Promise((r) => setTimeout(r, 40));
+    await worker.stop(1000);
+
+    expect(worker.isRunning).toBe(false);
+    expect(worker.processingCount).toBe(0);
+    expect(queue.getJob(id).status).toBe(JOB_STATUS.RETRYING);
+    const call = loggerErrorSpy.mock.calls.find((c) => c[1] === 'Job handler failed');
+    expect(call[0]).toMatchObject({ jobId: id, tenantId: 't-stop' });
   });
 });

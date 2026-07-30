@@ -1,97 +1,122 @@
 'use strict';
 
 const express = require('express');
-const { verifySignature } = require('../services/webhooks');
-const kycService = require('../services/kycService');
-const logger = require('../logger');
+const kycWebhookService = require('../services/kycWebhookService');
+const asyncHandler = require('../utils/asyncHandler');
+const kycWebhookErrorHandler = require('../middleware/kycWebhookErrorHandler');
+const { kycWebhookLimiter } = require('../middleware/rateLimit');
+const {
+  kycWebhookRequestDurationSeconds,
+  kycWebhookRequestsTotal,
+  kycWebhookErrorsTotal,
+  normalizeKycWebhookStatusClass,
+  normalizeKycWebhookCause,
+} = require('../metrics');
+const {
+  HTTP_HEADERS,
+  KYC_WEBHOOK_ROUTES,
+  KYC_WEBHOOK_METRICS,
+} = require('../constants/kycWebhooks');
 
 const router = express.Router();
 
+// Per-client (API key / IP) rate limit on the kyc-webhooks endpoints (#729).
+router.use(kycWebhookLimiter);
+
 /**
- * Parse JSON from a raw request body.
+ * Returns true when the KYC webhook endpoint is enabled.
+ * Reads KYC_WEBHOOK_ENABLED at call-time so the flag can be toggled
+ * without a process restart.
  *
- * @param {string} rawBody
- * @returns {Object}
+ * Safe default: disabled — any value other than the exact string "true"
+ * leaves the endpoint off.
+ *
+ * @returns {boolean}
  */
-function parseJsonPayload(rawBody) {
-  try {
-    return JSON.parse(rawBody);
-  } catch (error) {
-    throw new Error('Invalid JSON payload');
-  }
+function isKycWebhookEnabled() {
+  return process.env.KYC_WEBHOOK_ENABLED === 'true';
 }
 
 /**
  * POST /api/kyc/webhook
- *
- * Ingests signed KYC status updates from the external provider.
- * Verifies the webhook signature using the configured provider secret,
- * maps provider-specific statuses to internal KYC statuses, and persists
- * the result to the KYC record store.
+ * Inbound KYC webhook ingestion endpoint.
  */
-router.post('/webhook', async (req, res) => {
-  const config = kycService.getKycProviderConfig();
-  const secret = config.apiSecret;
-  const signatureHeader = req.header('X-Signature');
+router.post(KYC_WEBHOOK_ROUTES.WEBHOOK, asyncHandler(async (req, res) => {
+  const startTime = process.hrtime.bigint();
+  let statusClass = KYC_WEBHOOK_METRICS.STATUS_CLASS_2XX;
+  let cause = KYC_WEBHOOK_METRICS.CAUSE_NONE;
+
+  const finish = (httpStatus, errorCode) => {
+    const elapsed = Number(process.hrtime.bigint() - startTime) / 1e9;
+    statusClass = normalizeKycWebhookStatusClass(httpStatus);
+    cause = normalizeKycWebhookCause({ status: httpStatus, errorCode });
+    kycWebhookRequestDurationSeconds.observe({ status_class: statusClass }, elapsed);
+    kycWebhookRequestsTotal.inc({ status_class: statusClass });
+    if (cause !== KYC_WEBHOOK_METRICS.CAUSE_NONE) {
+      kycWebhookErrorsTotal.inc({ cause });
+    }
+  };
+
+  res.on('finish', () => {
+    finish(res.statusCode, req._kycErrorCode || null);
+  });
+
+  const signatureHeader = req.header(HTTP_HEADERS.X_SIGNATURE) || '';
   const rawBody = req.body instanceof Buffer ? req.body.toString('utf8') : String(req.body || '');
+  const actor = req.user?.sub || req.user?.userId || req.user?.id || (req.apiClient && req.apiClient.clientId ? `api-key:${req.apiClient.clientId}` : 'kyc-provider');
 
-  if (!secret) {
-    logger.warn({ route: '/api/kyc/webhook' }, 'KYC webhook secret is not configured');
-    return res.status(503).json({ error: 'KYC webhook ingestion is not configured' });
-  }
+  const result = await kycWebhookService.processWebhookIngestion({
+    rawBody,
+    signatureHeader,
+    requestTenantId: req.tenantId,
+    actor,
+    ipAddress: req.ip || 'unknown',
+    userAgent: req.get('user-agent') || 'unknown',
+  });
 
-  if (!signatureHeader) {
-    return res.status(401).json({ error: 'Missing X-Signature header' });
-  }
+  return res.status(200).json(result);
+}));
 
-  const verification = verifySignature(secret, rawBody, signatureHeader);
-  if (!verification.valid) {
-    logger.warn({ error: verification.error }, 'Invalid KYC webhook signature');
-    return res.status(401).json({ error: 'Invalid webhook signature' });
-  }
+/**
+ * GET /api/kyc/webhooks/audit
+ *
+ * Bounded read view of audit trail logs for KYC webhooks.
+ * Secrets are automatically redacted via redactValue.
+ */
+router.get('/webhooks/audit', asyncHandler(async (req, res) => {
+  const rawLimit = req.query.limit;
+  const rawOffset = req.query.offset;
+  const smeId = req.query.smeId || req.query.resourceId || null;
+  const action = req.query.action || null;
 
-  let payload;
-  try {
-    payload = parseJsonPayload(rawBody);
-  } catch (error) {
-    return res.status(400).json({ error: error.message });
-  }
+  const result = await kycWebhookService.getWebhookAuditLogs({
+    rawLimit,
+    rawOffset,
+    smeId,
+    action,
+  });
 
-  const smeId = payload.smeId || payload.sme_id;
-  const status = payload.status || payload.kycStatus || payload.kyc_status;
-  const providerRecordId = payload.recordId || payload.providerRecordId || payload.provider_record_id || null;
-  const verifiedAt = payload.verifiedAt || payload.verified_at || null;
+  return res.status(200).json(result);
+}));
 
-  if (!smeId || typeof smeId !== 'string') {
-    return res.status(400).json({ error: 'Missing or invalid smeId' });
-  }
+/**
+ * GET /api/kyc/webhooks
+ *
+ * Cursor-paginated listing of KYC records (the kyc-webhooks listing endpoint).
+ */
+router.get(KYC_WEBHOOK_ROUTES.WEBHOOKS, asyncHandler(async (req, res) => {
+  const { cursor, status, limit: rawLimit } = req.query;
 
-  if (!status || typeof status !== 'string') {
-    return res.status(400).json({ error: 'Missing or invalid status' });
-  }
+  const result = await kycWebhookService.listWebhooks({
+    cursor,
+    status,
+    rawLimit,
+  });
 
-  try {
-    const record = await kycService.persistKycRecord({
-      smeId,
-      status,
-      providerRecordId,
-      verifiedAt,
-    });
+  return res.status(200).json(result);
+}));
 
-    logger.info(
-      {
-        smeId: record.smeId,
-        status: record.status,
-        providerRecordId: record.recordId,
-      },
-      'KYC webhook ingested successfully'
-    );
-
-    return res.status(200).json({ success: true, smeId: record.smeId, status: record.status });
-  } catch (error) {
-    logger.error({ smeId, error: error.message }, 'Failed to process KYC webhook');
-    return res.status(400).json({ error: error.message });
-  }
-});
+router.use(kycWebhookErrorHandler);
 
 module.exports = router;
+module.exports.isKycWebhookEnabled = isKycWebhookEnabled;

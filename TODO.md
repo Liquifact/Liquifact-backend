@@ -1,15 +1,12 @@
-# TODO
+# Task: #908 — Gate escrow-read behind a feature flag
 
-## Invoice state machine exhaustive transition matrix tests
-- [ ] Read current invoice.state.test.js and understand existing coverage gaps.
-- [ ] Implement a data-driven Cartesian matrix test for every (fromState, targetState) pair across INVOICE_STATES.
-  - [ ] Assert isTransitionAllowed outcome matches VALID_TRANSITIONS, including silent-jump prevention (pending → linked_escrow) and self transitions.
-  - [ ] Assert validateTransition returns exact error codes: INVALID_TRANSITION, TERMINAL_STATE, ALREADY_IN_TARGET_STATE.
-  - [ ] Ensure terminal states reject all outgoing transitions.
-- [ ] Add executeTransition assertions:
-  - [ ] For each allowed transition, ensure it writes an audit log entry (action=STATE_TRANSITION) with correct before/after states and metadata reason/transitionType.
-  - [ ] For each disallowed transition, ensure executeTransition throws an error with correct error.code.
-- [ ] Add executeTransition/canLinkToEscrow coverage for business rule: must be approved to link.
-- [x] Run test suite and confirm invoiceStateMachine.js hits 100% branch coverage (cannot be executed here due to missing `npm` in terminal).
+## Steps
 
+- [x] Plan created and approved
+- [x] Step 1: Edit `src/config/index.js` — add `ESCROW_READ_PROJECTION_ENABLED` to Zod schema
+- [x] Step 2: Edit `src/services/escrowRead.js` — gate `getEscrowStateWithProjection()` with feature flag
+- [x] Step 3: Edit `src/config/index.test.js` — add config validation tests for new flag
+- [x] Step 4: Edit `tests/escrow.read.test.js` — add feature flag tests covering flag on, flag off, default
+- [x] Step 5: Edit `README.md` — document the new env flag
+- [x] Step 6: Cannot run `npm run lint` and `npm test` — Node.js is not available in this environment
 

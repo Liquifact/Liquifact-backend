@@ -1,283 +1,315 @@
-/**
- * Invoice State Machine Service
- * Manages invoice lifecycle transitions: pending → approved → linked_escrow
- * Enforces state transition rules and prevents silent jumps.
- * 
- * @module services/invoiceStateMachine
- */
+'use strict';
 
 const { createAuditLog } = require('./auditLog');
 const logger = require('../logger');
-const { enqueueWebhookDelivery } = require('./webhooks');
-const { getSharedStore } = require('./cacheStore');
-const { invalidatePrefix } = require('../middleware/cache');
-
+const { get: getContext } = require('../requestContext');
 
 /**
- * Valid invoice states in the lifecycle
+ * Canonical invoice status vocabulary shared by invoice-list and marketplace
+ * query validators.
  */
-const INVOICE_STATES = {
+
+/**
+ * Lifecycle states used by invoice transition endpoints.
+ * @type {Readonly<Record<string, string>>}
+ */
+const INVOICE_STATES = Object.freeze({
   PENDING: 'pending',
   APPROVED: 'approved',
   LINKED_ESCROW: 'linked_escrow',
-  REJECTED: 'rejected', // Terminal state
-  CANCELLED: 'cancelled', // Terminal state
-};
+  REJECTED: 'rejected',
+  CANCELLED: 'cancelled',
+});
 
 /**
- * Valid state transitions
- * Maps current state to allowed next states
+ * Legacy payment-facing statuses accepted by GET /api/invoices.
+ * @type {readonly string[]}
  */
-const VALID_TRANSITIONS = {
-  [INVOICE_STATES.PENDING]: [INVOICE_STATES.APPROVED, INVOICE_STATES.REJECTED, INVOICE_STATES.CANCELLED],
-  [INVOICE_STATES.APPROVED]: [INVOICE_STATES.LINKED_ESCROW, INVOICE_STATES.CANCELLED],
-  [INVOICE_STATES.LINKED_ESCROW]: [], // Terminal state - no transitions allowed
-  [INVOICE_STATES.REJECTED]: [], // Terminal state
-  [INVOICE_STATES.CANCELLED]: [], // Terminal state
-};
+const PAYMENT_STATUSES = Object.freeze(['paid', 'pending', 'overdue']);
 
 /**
- * Terminal states that cannot transition further
+ * Funding and settlement statuses surfaced by marketplace and escrow flows.
+ * @type {readonly string[]}
  */
-const TERMINAL_STATES = [
+const FUNDING_PROGRESS_STATUSES = Object.freeze([
+  'pending_verification',
+  'verified',
+  'partially_funded',
+  'funded',
+  'settled',
+  'completed',
+  'defaulted',
+]);
+
+/**
+ * Authoritative invoice status list for query-parameter validation.
+ * @type {readonly string[]}
+ */
+const ALL_INVOICE_STATUSES = Object.freeze([
+  ...new Set([
+    ...PAYMENT_STATUSES,
+    ...FUNDING_PROGRESS_STATUSES,
+    ...Object.values(INVOICE_STATES),
+  ]),
+]);
+
+/**
+ * Statuses visible in public investable invoice flows.
+ * @type {readonly string[]}
+ */
+const INVESTABLE_STATUSES = Object.freeze(['verified', 'partially_funded']);
+
+/**
+ * Terminal states that should not become investable.
+ * @type {readonly string[]}
+ */
+const TERMINAL_STATES = Object.freeze([
   INVOICE_STATES.LINKED_ESCROW,
   INVOICE_STATES.REJECTED,
   INVOICE_STATES.CANCELLED,
-];
+  'completed',
+  'defaulted',
+  'settled',
+]);
 
-const TERMINAL_REASON_REQUIRED_STATES = [
-  INVOICE_STATES.REJECTED,
-  INVOICE_STATES.CANCELLED,
-];
+/**
+ * Authoritative set of invoice states that involve capital movement.
+ * Any state included in this set automatically triggers KYC gating.
+ * @type {Set<string>}
+ */
+const CAPITAL_MOVING_STATES = new Set(['funded', 'settled']);
 
+/**
+ * Maximum allowed length for a transition reason string.
+ * @type {number}
+ */
 const MAX_TRANSITION_REASON_LENGTH = 1024;
 
 /**
- * Normalizes and sanitizes a transition reason string.
- *
- * @param {*} reason - Raw reason input.
- * @returns {string|null} Sanitized reason, or null if absent or empty.
+ * Map of valid state transitions. Each entry lists the allowed target states
+ * from the given source state.
+ * @type {Readonly<Record<string, ReadonlyArray<string>>>}
  */
-function normalizeTransitionReason(reason) {
-  if (reason === null || reason === undefined) {
-    return null;
-  }
-
-  const value = typeof reason === 'string' ? reason : String(reason);
-  const sanitized = value.replace(/[\u0000-\u001F\u007F]+/g, ' ').trim();
-  return sanitized.length === 0 ? null : sanitized;
-}
+const VALID_TRANSITIONS = Object.freeze({
+  [INVOICE_STATES.PENDING]: Object.freeze([
+    INVOICE_STATES.APPROVED,
+    INVOICE_STATES.REJECTED,
+    INVOICE_STATES.CANCELLED,
+  ]),
+  [INVOICE_STATES.APPROVED]: Object.freeze([
+    INVOICE_STATES.LINKED_ESCROW,
+    INVOICE_STATES.REJECTED,
+    INVOICE_STATES.CANCELLED,
+  ]),
+  [INVOICE_STATES.LINKED_ESCROW]: Object.freeze([]),
+  [INVOICE_STATES.REJECTED]: Object.freeze([]),
+  [INVOICE_STATES.CANCELLED]: Object.freeze([]),
+});
 
 /**
- * Validates if a state is a valid invoice state
- * 
- * @param {string} state State to validate
- * @returns {boolean} True if valid
+ * States that require a reason when transitioning _into_ them.
+ * @type {ReadonlyArray<string>}
+ */
+const REASON_REQUIRED_TARGETS = Object.freeze([
+  INVOICE_STATES.REJECTED,
+  INVOICE_STATES.CANCELLED,
+]);
+
+/**
+ * Checks whether the given value is a known invoice state.
+ * @param {*} state - Value to check.
+ * @returns {boolean} True when the value matches a known state.
  */
 function isValidState(state) {
   return Object.values(INVOICE_STATES).includes(state);
 }
 
 /**
- * Checks if a state transition is allowed
- * 
- * @param {string} fromState Current state
- * @param {string} toState Desired state
- * @returns {boolean} True if transition is allowed
+ * Checks whether a transition from one state to another is allowed by the
+ * state machine rules.
+ * @param {string} fromState - Current state.
+ * @param {string} targetState - Desired target state.
+ * @returns {boolean} True when the transition is permitted.
  */
-function isTransitionAllowed(fromState, toState) {
-  if (!isValidState(fromState) || !isValidState(toState)) {
+function isTransitionAllowed(fromState, targetState) {
+  if (!isValidState(fromState) || !isValidState(targetState)) {
     return false;
   }
-
-  const allowedTransitions = VALID_TRANSITIONS[fromState] || [];
-  return allowedTransitions.includes(toState);
+  if (fromState === targetState) {
+    return false;
+  }
+  if (TERMINAL_STATES.includes(fromState)) {
+    return false;
+  }
+  const allowed = VALID_TRANSITIONS[fromState];
+  return Boolean(allowed && allowed.includes(targetState));
 }
 
 /**
- * Checks if a state is terminal (no further transitions allowed)
- * 
- * @param {string} state State to check
- * @returns {boolean} True if terminal
+ * Checks whether a state is terminal (no further transitions allowed).
+ * @param {string} state - State to check.
+ * @returns {boolean} True when the state is terminal.
  */
 function isTerminalState(state) {
   return TERMINAL_STATES.includes(state);
 }
 
 /**
- * Gets all allowed transitions from a given state
- * 
- * @param {string} fromState Current state
- * @returns {string[]} Array of allowed next states
+ * Returns the list of allowed target states from the given source state.
+ * @param {string} state - Source state.
+ * @returns {ReadonlyArray<string>} Allowed target states (empty when terminal or invalid).
  */
-function getAllowedTransitions(fromState) {
-  if (!isValidState(fromState)) {
+function getAllowedTransitions(state) {
+  if (!isValidState(state)) {
     return [];
   }
-  return VALID_TRANSITIONS[fromState] || [];
+  const transitions = VALID_TRANSITIONS[state];
+  return transitions ? [...transitions] : [];
 }
 
 /**
- * Validates transition request and returns validation result
- * 
- * @param {Object} options Validation options
- * @param {string} options.invoiceId Invoice identifier
- * @param {string} options.currentState Current invoice state
- * @param {string} options.targetState Desired target state
- * @param {string} options.actor User performing the transition
- * @param {string} [options.reason] Reason for transition. Required for terminal transitions.
- * @returns {Object} Validation result with isValid and error
+ * Normalizes a transition reason by stripping control characters and trimming
+ * whitespace.
+ * @param {*} reason - Raw reason value.
+ * @returns {string} Normalized reason string.
  */
-function validateTransition({ invoiceId, currentState, targetState, actor, reason: _reason }) {
-  // Validate required fields
+function normalizeTransitionReason(reason) {
+  if (reason == null) {
+    return '';
+  }
+  const str = String(reason);
+  return str.replace(/[\x00-\x1F\x7F]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Validates a transition context object and returns either a success or error
+ * result. The normalised reason is included in the result when valid.
+ * @param {object} ctx - Transition context.
+ * @param {string} [ctx.invoiceId] - Invoice identifier.
+ * @param {string} [ctx.currentState] - Current state of the invoice.
+ * @param {string} [ctx.targetState] - Desired target state.
+ * @param {string} [ctx.actor] - Actor performing the transition.
+ * @param {*} [ctx.reason] - Reason for the transition.
+ * @returns {{isValid: true}|{isValid: false, code: string, allowedTransitions?: string[], reason?: string}}
+ *   Validation result.
+ */
+function validateTransition(ctx) {
+  const { invoiceId, currentState, targetState, actor } = ctx || {};
+
   if (!invoiceId) {
-    return {
-      isValid: false,
-      error: 'Invoice ID is required',
-      code: 'MISSING_INVOICE_ID',
-    };
+    return { isValid: false, code: 'MISSING_INVOICE_ID' };
   }
-
   if (!currentState) {
-    return {
-      isValid: false,
-      error: 'Current state is required',
-      code: 'MISSING_CURRENT_STATE',
-    };
+    return { isValid: false, code: 'MISSING_CURRENT_STATE' };
   }
-
   if (!targetState) {
-    return {
-      isValid: false,
-      error: 'Target state is required',
-      code: 'MISSING_TARGET_STATE',
-    };
+    return { isValid: false, code: 'MISSING_TARGET_STATE' };
   }
-
   if (!actor) {
-    return {
-      isValid: false,
-      error: 'Actor is required',
-      code: 'MISSING_ACTOR',
-    };
+    return { isValid: false, code: 'MISSING_ACTOR' };
   }
-
-  // Validate states are valid
-  if (!isValidState(currentState)) {
-    return {
-      isValid: false,
-      error: `Invalid current state: ${currentState}`,
-      code: 'INVALID_CURRENT_STATE',
-    };
-  }
-
-  if (!isValidState(targetState)) {
-    return {
-      isValid: false,
-      error: `Invalid target state: ${targetState}`,
-      code: 'INVALID_TARGET_STATE',
-    };
-  }
-
-  // Check if already in target state
   if (currentState === targetState) {
-    return {
-      isValid: false,
-      error: `Invoice is already in state: ${targetState}`,
-      code: 'ALREADY_IN_TARGET_STATE',
-    };
+    return { isValid: false, code: 'ALREADY_IN_TARGET_STATE' };
+  }
+  if (TERMINAL_STATES.includes(currentState)) {
+    return { isValid: false, code: 'TERMINAL_STATE' };
+  }
+  if (!isValidState(currentState)) {
+    return { isValid: false, code: 'INVALID_CURRENT_STATE' };
+  }
+  if (!isValidState(targetState)) {
+    return { isValid: false, code: 'INVALID_TARGET_STATE' };
   }
 
-  const reason = normalizeTransitionReason(_reason);
+  const rawReason = ctx.reason;
+  const normalisedReason = normalizeTransitionReason(rawReason);
 
-  // Check if current state is terminal (must be before transition check)
-  if (isTerminalState(currentState)) {
-    return {
-      isValid: false,
-      error: `Cannot transition from terminal state: ${currentState}`,
-      code: 'TERMINAL_STATE',
-    };
-  }
-
-  // Require a validated reason for terminal target states
-  if (TERMINAL_REASON_REQUIRED_STATES.includes(targetState)) {
-    if (!reason) {
-      return {
-        isValid: false,
-        error: `Reason is required for terminal transition to ${targetState}`,
-        code: 'MISSING_TRANSITION_REASON',
-      };
-    }
-
-    if (reason.length > MAX_TRANSITION_REASON_LENGTH) {
-      return {
-        isValid: false,
-        error: `Transition reason must be ${MAX_TRANSITION_REASON_LENGTH} characters or fewer`,
-        code: 'TRANSITION_REASON_TOO_LONG',
-      };
+  if (REASON_REQUIRED_TARGETS.includes(targetState)) {
+    if (!normalisedReason) {
+      return { isValid: false, code: 'MISSING_TRANSITION_REASON' };
     }
   }
 
-  // Check if transition is allowed
-  if (!isTransitionAllowed(currentState, targetState)) {
-    const allowed = getAllowedTransitions(currentState);
+  if (normalisedReason && normalisedReason.length > MAX_TRANSITION_REASON_LENGTH) {
+    return { isValid: false, code: 'TRANSITION_REASON_TOO_LONG' };
+  }
+
+  const allowed = VALID_TRANSITIONS[currentState] || [];
+  if (!allowed.includes(targetState)) {
     return {
       isValid: false,
-      error: `Invalid state transition from ${currentState} to ${targetState}. Allowed transitions: ${allowed.join(', ') || 'none'}`,
       code: 'INVALID_TRANSITION',
-      allowedTransitions: allowed,
+      allowedTransitions: [...allowed],
     };
   }
 
-  return {
-    isValid: true,
-  };
+  return { isValid: true, reason: normalisedReason };
 }
 
 /**
- * Executes a state transition with audit logging
- * 
- * @param {Object} options Transition options
- * @param {string} options.invoiceId Invoice identifier
- * @param {string} options.currentState Current invoice state
- * @param {string} options.targetState Desired target state
- * @param {string} options.actor User performing the transition
- * @param {string} [options.reason] Reason for transition
- * @param {string} [options.ipAddress] IP address of requester
- * @param {string} [options.userAgent] User agent of requester
- * @param {Object} [options.metadata] Additional metadata
- * @returns {Object} Transition result with success status and audit log
- * @throws {Error} If transition validation fails
+ * Builds an error with structured properties for the API layer.
+ * @param {string} code - Machine-readable error code.
+ * @param {string} message - Human-readable message.
+ * @param {number} [statusCode=400] - HTTP status code.
+ * @param {string[]} [allowedTransitions] - Optional hint of valid transitions.
+ * @returns {Error} Configured error instance.
  */
-async function executeTransition({
-  invoiceId,
-  currentState,
-  targetState,
-  actor,
-  reason = null,
-  ipAddress = 'unknown',
-  userAgent = 'unknown',
-  metadata = {},
-}) {
-  // Validate transition
-  const validation = validateTransition({
-    invoiceId,
-    currentState,
-    targetState,
-    actor,
-    reason,
-  });
+function buildTransitionError(code, message, statusCode = 400, allowedTransitions) {
+  const err = new Error(message);
+  err.name = 'StateTransitionError';
+  err.code = code;
+  err.statusCode = statusCode;
+  if (allowedTransitions) {
+    err.allowedTransitions = allowedTransitions;
+  }
+  return err;
+}
+
+/**
+ * Executes a validated state transition and persists an audit log entry.
+ * Throws on validation failure with structured error properties.
+ * @param {object} ctx - Transition context.
+ * @param {string} ctx.invoiceId - Invoice identifier.
+ * @param {string} ctx.currentState - Current state of the invoice.
+ * @param {string} ctx.targetState - Desired target state.
+ * @param {string} ctx.actor - Actor performing the transition.
+ * @param {*} [ctx.reason] - Reason for the transition.
+ * @param {string} [ctx.ipAddress] - Request source IP address.
+ * @param {string} [ctx.userAgent] - Request user agent.
+ * @param {object} [ctx.metadata] - Additional metadata for the audit log.
+ * @returns {Promise<{success: boolean, previousState: string, newState: string, transitionedBy: string, auditLog: object}>}
+ *   Transition result with audit log entry.
+ */
+async function executeTransition(ctx) {
+  const validation = validateTransition(ctx);
 
   if (!validation.isValid) {
-    const error = new Error(validation.error);
-    error.code = validation.code;
-    error.allowedTransitions = validation.allowedTransitions;
-    throw error;
+    const messageMap = {
+      MISSING_INVOICE_ID: 'Invoice ID is required.',
+      MISSING_CURRENT_STATE: 'Current state is required.',
+      MISSING_TARGET_STATE: 'Target state is required.',
+      MISSING_ACTOR: 'Actor is required.',
+      INVALID_CURRENT_STATE: 'Current state is not recognised.',
+      INVALID_TARGET_STATE: 'Target state is not recognised.',
+      ALREADY_IN_TARGET_STATE: 'Invoice is already in the target state.',
+      TERMINAL_STATE: 'Invoice is in a terminal state and cannot transition.',
+      MISSING_TRANSITION_REASON: 'Reason is required for this transition.',
+      TRANSITION_REASON_TOO_LONG: `Transition reason must be ${MAX_TRANSITION_REASON_LENGTH} characters or fewer.`,
+      INVALID_TRANSITION: 'Invalid state transition.',
+    };
+
+    const message = messageMap[validation.code] || 'Invalid state transition.';
+    throw buildTransitionError(
+      validation.code,
+      message,
+      validation.code === 'INVOICE_NOT_FOUND' ? 404 : 400,
+      validation.allowedTransitions,
+    );
   }
 
-  const normalizedReason = normalizeTransitionReason(reason);
+  const { invoiceId, currentState, targetState, actor, ipAddress = 'unknown', userAgent = 'unknown', metadata = {} } = ctx;
+  const reason = ctx.reason != null ? normalizeTransitionReason(ctx.reason) : undefined;
 
-  // Create audit log for state transition
   const auditLog = await createAuditLog({
     actor,
     action: 'STATE_TRANSITION',
@@ -285,126 +317,109 @@ async function executeTransition({
     resourceId: invoiceId,
     before: { state: currentState },
     after: { state: targetState },
-    statusCode: 200,
     ipAddress,
     userAgent,
     metadata: {
       ...metadata,
-      ...(normalizedReason ? { reason: normalizedReason } : {}),
+      reason: reason || null,
       transitionType: `${currentState}_to_${targetState}`,
-      timestamp: new Date().toISOString(),
     },
   });
 
   logger.info({
     invoiceId,
     actor,
-    transition: `${currentState} → ${targetState}`,
+    transition: `${currentState} -> ${targetState}`,
     reason,
     auditLogId: auditLog.id,
   }, 'Invoice state transition executed');
 
-  const result = {
-    success: true,
-    previousState: currentState,
-    newState: targetState,
-    auditLog,
-    transitionedAt: auditLog.timestamp,
-    transitionedBy: actor,
-  };
+  const transitionedAt = auditLog.timestamp;
+  const event = `invoice.${currentState}_to_${targetState}`;
+  const correlationId = getContext().correlationId || null;
 
-  // Invalidate marketplace cache so that the new state is reflected
-  // immediately on the next GET /api/marketplace request.
-  invalidatePrefix(getSharedStore(), 'marketplace:');
-
-  // Enqueue a signed webhook delivery job for this transition.
-  // This is fire-and-forget: webhook errors must never fail the transition.
+  // Fire-and-forget enqueue of signed webhook delivery
+  const { enqueueWebhookDelivery } = require('./webhooks');
   enqueueWebhookDelivery({
     invoiceId,
-    event: `invoice.${currentState}_to_${targetState}`,
+    event,
+    correlationId,
     transition: {
       from: currentState,
       to: targetState,
       actor,
-      reason: normalizedReason,
-      transitionedAt: auditLog.timestamp,
+      reason,
+      transitionedAt,
     },
   }).catch((err) => {
-    logger.error(
-      { invoiceId, error: err && err.message ? err.message : String(err) },
-      'Failed to enqueue webhook delivery after state transition'
-    );
+    logger.error({ invoiceId, error: err.message }, 'webhook: failed to enqueue delivery job');
   });
 
-  return result;
+  return {
+    success: true,
+    previousState: currentState,
+    newState: targetState,
+    auditLog,
+    transitionedAt,
+    transitionedBy: actor,
+    auditLog,
+  };
 }
 
 /**
- * Gets the state transition history for an invoice
- * 
- * @param {string} invoiceId Invoice identifier
- * @param {Function} getAuditLogsFn Function to retrieve audit logs
- * @returns {Array<Object>} Array of state transitions
+ * Retrieves the transition history for a given invoice, ordered newest first.
+ * @param {string} invoiceId - Invoice identifier.
+ * @param {Function} getAuditLogsFn - Reference to the getAuditLogs function for dependency injection.
+ * @returns {Promise<Array<{fromState: string, toState: string, timestamp: string, actor: string, reason: string|null}>>}
+ *   Ordered transition list.
  */
 async function getTransitionHistory(invoiceId, getAuditLogsFn) {
-  const logs = await getAuditLogsFn({
-    resourceId: invoiceId,
-    resourceType: 'invoice',
-    action: 'STATE_TRANSITION',
-    limit: 1000,
-  });
+  const logs = await getAuditLogsFn({ resourceId: invoiceId, resourceType: 'invoice', action: 'STATE_TRANSITION' });
 
   return logs.map((log) => ({
-    id: log.id,
+    fromState: log.changes?.before?.state || 'unknown',
+    toState: log.changes?.after?.state || 'unknown',
     timestamp: log.timestamp,
     actor: log.actor,
-    fromState: log.changes.before?.state,
-    toState: log.changes.after?.state,
-    reason: log.metadata?.reason,
-    ipAddress: log.ipAddress,
+    reason: log.metadata?.reason || null,
   }));
 }
 
 /**
- * Validates if an invoice can be linked to escrow
- * Additional business rules beyond state machine
- * 
- * @param {Object} invoice Invoice object
- * @returns {Object} Validation result
+ * Checks whether an invoice can be linked to an escrow contract.
+ * @param {object|null} invoice - Invoice object with at least a `status` field.
+ * @returns {{canLink: boolean, reason?: string}} Result with optional explanation.
  */
 function canLinkToEscrow(invoice) {
   if (!invoice) {
-    return {
-      canLink: false,
-      reason: 'Invoice not found',
-    };
+    return { canLink: false, reason: 'Invoice not found' };
   }
-
   if (invoice.status !== INVOICE_STATES.APPROVED) {
     return {
       canLink: false,
-      reason: `Invoice must be in approved state. Current state: ${invoice.status}`,
+      reason: `Invoice must be in ${INVOICE_STATES.APPROVED} state to link to escrow.`,
     };
   }
-
-  // Additional business rules can be added here
-  // e.g., check if invoice amount is valid, due date is in future, etc.
-
-  return {
-    canLink: true,
-  };
+  return { canLink: true };
 }
 
 module.exports = {
   INVOICE_STATES,
-  VALID_TRANSITIONS,
+  ALL_INVOICE_STATUSES,
+  INVESTABLE_STATUSES,
   TERMINAL_STATES,
+  CAPITAL_MOVING_STATES,
+  VALID_TRANSITIONS,
+  MAX_TRANSITION_REASON_LENGTH,
+  REASON_REQUIRED_TARGETS,
   isValidState,
   isTransitionAllowed,
   isTerminalState,
   getAllowedTransitions,
+  normalizeTransitionReason,
   validateTransition,
   executeTransition,
   getTransitionHistory,
   canLinkToEscrow,
+  buildTransitionError,
 };

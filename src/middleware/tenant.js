@@ -24,6 +24,7 @@
 'use strict';
 
 const { MAX_TENANT_ID_LENGTH = 128 } = process.env;
+const { set: setContext } = require('../requestContext');
 
 /**
  * Sanitise a raw tenant-ID string.
@@ -55,6 +56,7 @@ function extractTenant(req, res, next) {
   const headerTenant = sanitiseTenantId(req.headers['x-tenant-id']);
   if (headerTenant) {
     req.tenantId = headerTenant;
+    setContext({ tenantId: headerTenant });
     return next();
   }
 
@@ -63,6 +65,7 @@ function extractTenant(req, res, next) {
     const jwtTenant = sanitiseTenantId(req.user.tenantId);
     if (jwtTenant) {
       req.tenantId = jwtTenant;
+      setContext({ tenantId: jwtTenant });
       return next();
     }
   }

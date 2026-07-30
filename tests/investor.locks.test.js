@@ -1,28 +1,75 @@
 'use strict';
 
+const makeMetricStub = () => {
+  const fn = jest.fn();
+  fn.inc = jest.fn();
+  fn.set = jest.fn();
+  fn.observe = jest.fn();
+  fn.labels = jest.fn(() => fn);
+  return fn;
+};
+
+jest.mock('../src/metrics', () => new Proxy({}, {
+  get(target, prop) {
+    if (!target[prop]) {
+      target[prop] = makeMetricStub();
+    }
+    return target[prop];
+  },
+}));
+
+jest.mock('../src/middleware/kycGating', () => ({
+  requireKycForFunding: (_req, _res, next) => next(),
+}));
+
+jest.mock('../src/middleware/requestId', () => (req, _res, next) => {
+  req.id = 'test-request-id';
+  next();
+});
+
+jest.mock('../src/middleware/correlationId', () => ({
+  correlationIdMiddleware: (_req, _res, next) => next(),
+}));
+
+jest.mock('../src/routes/sme', () => {
+  const express = require('express');
+  return express.Router();
+});
+
+jest.mock('../src/routes/invest', () => {
+  const express = require('express');
+  return express.Router();
+});
+
 const request = require('supertest');
 const { createApp, resetStore } = require('../src/index');
 const jwt = require('jsonwebtoken');
 const investorCommitmentService = require('../src/services/investorCommitment');
+const db = require('../src/db/knex');
 
 const TEST_SECRET = process.env.JWT_SECRET || 'test-secret';
-const validToken = jwt.sign({ id: 'user_investor', role: 'investor', tenantId: 'test-tenant' }, TEST_SECRET, { expiresIn: '1h' });
-
 const ADDR1 = 'GDRXE2BQUC3AZNPVFSCEZ76NJ3WWL25FYFK6RGZGIEKWE4SOUJ3LNLRK';
-const ADDR2 = 'GDGQVOKHW4VEJRU2TETD8G6RWJ3TVM3VROMV7I3ESNITIBLL6QL6RAIL';
+const ADDR2 = 'GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA';
+const tokenFor = (payload) => jwt.sign(payload, TEST_SECRET, { expiresIn: '1h' });
+const validToken = tokenFor({ id: 'user_investor', role: 'investor', tenantId: 'test-tenant', funderAddress: ADDR1 });
+const secondInvestorToken = tokenFor({ id: 'user_investor_2', role: 'investor', tenantId: 'test-tenant', funderAddress: ADDR2 });
+const adminToken = tokenFor({ id: 'admin_user', role: 'admin', tenantId: 'test-tenant' });
+const unboundInvestorToken = tokenFor({ id: 'user_unbound', role: 'investor', tenantId: 'test-tenant' });
 
 describe('Investor Locks API', () => {
   let app;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     resetStore();
-    investorCommitmentService.clearInvestorLocks();
-    investorCommitmentService.seedInvestorLocks();
+    await db.migrate.latest({ directory: './migrations' });
+    await investorCommitmentService.clearInvestorLocks();
+    await investorCommitmentService.seedInvestorLocks({ tenantId: 'test-tenant' });
     app = createApp({ enableTestRoutes: true });
   });
 
-  afterAll(() => {
-    investorCommitmentService.clearInvestorLocks();
+  afterAll(async () => {
+    await investorCommitmentService.clearInvestorLocks();
+    await db.destroy();
   });
 
   describe('GET /api/investor/locks', () => {
@@ -31,7 +78,7 @@ describe('Investor Locks API', () => {
       expect(response.status).toBe(401);
     });
 
-    it('should return 200 with all locks when authenticated without filters', async () => {
+    it('should scope omitted funderAddress to the authenticated investor', async () => {
       const response = await request(app)
         .get('/api/investor/locks')
         .set('Authorization', `Bearer ${validToken}`);
@@ -40,7 +87,20 @@ describe('Investor Locks API', () => {
       expect(response.body.data).toBeDefined();
       expect(Array.isArray(response.body.data)).toBe(true);
       expect(response.body.data.length).toBeGreaterThan(0);
-      expect(response.body.meta.stale).toBe(true);
+      expect(response.body.data.every((lock) => lock.funderAddress === ADDR1)).toBe(true);
+      expect(response.body.data.some((lock) => lock.funderAddress === ADDR2)).toBe(false);
+      expect(response.body.meta.stale).toBe(false);
+    });
+
+    it('allows admin callers to list all tenant locks when funderAddress is omitted', async () => {
+      const response = await request(app)
+        .get('/api/investor/locks')
+        .set('Authorization', `Bearer ${adminToken}`);
+
+      expect(response.status).toBe(200);
+      expect(response.body.data.length).toBe(6);
+      expect(response.body.data.some((lock) => lock.funderAddress === ADDR1)).toBe(true);
+      expect(response.body.data.some((lock) => lock.funderAddress === ADDR2)).toBe(true);
     });
 
     it('should include pagination meta fields', async () => {
@@ -59,12 +119,12 @@ describe('Investor Locks API', () => {
       });
     });
 
-    it('should return stale=true in meta when DB mirror data exists', async () => {
+    it('should return stale=false in meta for fresh DB-backed reads', async () => {
       const response = await request(app)
         .get('/api/investor/locks')
         .set('Authorization', `Bearer ${validToken}`);
 
-      expect(response.body.meta.stale).toBe(true);
+      expect(response.body.meta.stale).toBe(false);
     });
 
     it('should filter by funderAddress when provided', async () => {
@@ -75,6 +135,34 @@ describe('Investor Locks API', () => {
       expect(response.status).toBe(200);
       expect(response.body.data.length).toBeGreaterThan(0);
       expect(response.body.data.every((l) => l.funderAddress === ADDR1)).toBe(true);
+    });
+
+    it('denies a non-admin caller that requests another funderAddress', async () => {
+      const response = await request(app)
+        .get(`/api/investor/locks?funderAddress=${ADDR2}`)
+        .set('Authorization', `Bearer ${validToken}`);
+
+      expect(response.status).toBe(403);
+      expect(response.body.error).toContain('not authorized');
+    });
+
+    it('allows an admin caller to request another funderAddress', async () => {
+      const response = await request(app)
+        .get(`/api/investor/locks?funderAddress=${ADDR2}`)
+        .set('Authorization', `Bearer ${adminToken}`);
+
+      expect(response.status).toBe(200);
+      expect(response.body.data.length).toBe(1);
+      expect(response.body.data.every((lock) => lock.funderAddress === ADDR2)).toBe(true);
+    });
+
+    it('denies non-admin callers that have no bound funderAddress', async () => {
+      const response = await request(app)
+        .get('/api/investor/locks')
+        .set('Authorization', `Bearer ${unboundInvestorToken}`);
+
+      expect(response.status).toBe(403);
+      expect(response.body.error).toContain('not bound');
     });
 
     it('should return 400 for invalid address format', async () => {
@@ -221,8 +309,26 @@ describe('Investor Locks API', () => {
         page++;
       }
 
-      // All 6 seeded locks must have been seen
-      expect(seen.size).toBe(6);
+      // The non-admin caller sees only the 5 seeded locks for their bound address.
+      expect(seen.size).toBe(5);
+      expect([...seen].every((key) => key.endsWith(`:${ADDR1}`))).toBe(true);
+    });
+
+    it('does not reuse cached list responses across different bound funders', async () => {
+      resetStore();
+
+      const first = await request(app)
+        .get('/api/investor/locks?limit=100')
+        .set('Authorization', `Bearer ${validToken}`);
+      const second = await request(app)
+        .get('/api/investor/locks?limit=100')
+        .set('Authorization', `Bearer ${secondInvestorToken}`);
+
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(first.body.data.every((lock) => lock.funderAddress === ADDR1)).toBe(true);
+      expect(second.body.data.every((lock) => lock.funderAddress === ADDR2)).toBe(true);
+      expect(second.body.data).toHaveLength(1);
     });
   });
 
@@ -266,12 +372,36 @@ describe('Investor Locks API', () => {
       expect(response.body.data).toHaveProperty('investorEffectiveYieldBps');
       expect(response.body.data).toHaveProperty('stale');
     });
+
+    it('denies a single-lock lookup for another funderAddress', async () => {
+      const response = await request(app)
+        .get(`/api/investor/locks/inv_9900?funderAddress=${ADDR2}`)
+        .set('Authorization', `Bearer ${validToken}`);
+
+      expect(response.status).toBe(403);
+      expect(response.body.error).toContain('not authorized');
+    });
+
+    it('does not reuse cached single-lock responses across different bound funders', async () => {
+      resetStore();
+
+      const first = await request(app)
+        .get(`/api/investor/locks/inv_9900?funderAddress=${ADDR2}`)
+        .set('Authorization', `Bearer ${adminToken}`);
+      const second = await request(app)
+        .get(`/api/investor/locks/inv_9900?funderAddress=${ADDR2}`)
+        .set('Authorization', `Bearer ${validToken}`);
+
+      expect(first.status).toBe(200);
+      expect(first.body.data.funderAddress).toBe(ADDR2);
+      expect(second.status).toBe(403);
+    });
   });
 });
 
 describe('Investor Commitment Service', () => {
-  beforeEach(() => {
-    investorCommitmentService.clearInvestorLocks();
+  beforeEach(async () => {
+    await investorCommitmentService.clearInvestorLocks();
   });
 
   describe('validateAddress', () => {
@@ -304,8 +434,8 @@ describe('Investor Commitment Service', () => {
   });
 
   describe('setInvestorLock', () => {
-    it('should create a new lock record', () => {
-      const lock = investorCommitmentService.setInvestorLock({
+    it('should create a new lock record', async () => {
+      const lock = await investorCommitmentService.setInvestorLock({
         funderAddress: ADDR1,
         claimNotBefore: '2026-03-01T00:00:00Z',
         investorEffectiveYieldBps: 900,
@@ -313,58 +443,58 @@ describe('Investor Commitment Service', () => {
       });
 
       expect(lock.funderAddress).toBe(ADDR1);
-      expect(lock.claimNotBefore).toBe('2026-03-01T00:00:00Z');
+      expect(lock.claimNotBefore).toBe('2026-03-01T00:00:00.000Z');
       expect(lock.investorEffectiveYieldBps).toBe(900);
       expect(lock.invoiceId).toBe('inv_test');
-      expect(lock.stale).toBe(true);
+      expect(lock.stale).toBe(false);
     });
 
-    it('should update existing lock', () => {
-      investorCommitmentService.setInvestorLock({
+    it('should update existing lock', async () => {
+      await investorCommitmentService.setInvestorLock({
         funderAddress: ADDR1,
         claimNotBefore: '2026-01-01T00:00:00Z',
         investorEffectiveYieldBps: 500,
         invoiceId: 'inv_upd',
       });
 
-      investorCommitmentService.setInvestorLock({
+      await investorCommitmentService.setInvestorLock({
         funderAddress: ADDR1,
         claimNotBefore: '2026-02-01T00:00:00Z',
         investorEffectiveYieldBps: 600,
         invoiceId: 'inv_upd',
       });
 
-      const result = investorCommitmentService.getInvestorLocksByAddress(ADDR1, { invoiceId: 'inv_upd' });
+      const result = await investorCommitmentService.getInvestorLocksByAddress(ADDR1, { invoiceId: 'inv_upd' });
       expect(result.data.length).toBe(1);
       expect(result.data[0].investorEffectiveYieldBps).toBe(600);
     });
   });
 
   describe('getInvestorLock', () => {
-    it('should retrieve lock by invoiceId and funderAddress', () => {
-      investorCommitmentService.setInvestorLock({
+    it('should retrieve lock by invoiceId and funderAddress', async () => {
+      await investorCommitmentService.setInvestorLock({
         funderAddress: ADDR2,
         claimNotBefore: '2026-04-01T00:00:00Z',
         investorEffectiveYieldBps: 750,
         invoiceId: 'inv_find',
       });
 
-      const lock = investorCommitmentService.getInvestorLock('inv_find', ADDR2);
+      const lock = await investorCommitmentService.getInvestorLock('inv_find', ADDR2);
       expect(lock).toBeDefined();
       expect(lock.investorEffectiveYieldBps).toBe(750);
     });
 
-    it('should return undefined for non-existent lock', () => {
-      const lock = investorCommitmentService.getInvestorLock('inv_none', ADDR1);
+    it('should return undefined for non-existent lock', async () => {
+      const lock = await investorCommitmentService.getInvestorLock('inv_none', ADDR1);
       expect(lock).toBeUndefined();
     });
   });
 
   describe('getAllInvestorLocks pagination', () => {
-    beforeEach(() => {
+    beforeEach(async () => {
       // Seed 5 locks for ADDR1
       for (let i = 1; i <= 5; i++) {
-        investorCommitmentService.setInvestorLock({
+        await investorCommitmentService.setInvestorLock({
           funderAddress: ADDR1,
           claimNotBefore: `2026-0${i}-01T00:00:00Z`,
           investorEffectiveYieldBps: 500 + i * 10,
@@ -373,8 +503,8 @@ describe('Investor Commitment Service', () => {
       }
     });
 
-    it('should return first page', () => {
-      const result = investorCommitmentService.getAllInvestorLocks({ limit: 2, page: 1 });
+    it('should return first page', async () => {
+      const result = await investorCommitmentService.getAllInvestorLocks({ limit: 2, page: 1 });
       expect(result.data.length).toBe(2);
       expect(result.meta.page).toBe(1);
       expect(result.meta.total).toBe(5);
@@ -382,37 +512,37 @@ describe('Investor Commitment Service', () => {
       expect(result.meta.totalPages).toBe(3);
     });
 
-    it('should return last page (partial)', () => {
-      const result = investorCommitmentService.getAllInvestorLocks({ limit: 2, page: 3 });
+    it('should return last page (partial)', async () => {
+      const result = await investorCommitmentService.getAllInvestorLocks({ limit: 2, page: 3 });
       expect(result.data.length).toBe(1);
       expect(result.meta.hasMore).toBe(false);
     });
 
-    it('should return empty data for out-of-range page', () => {
-      const result = investorCommitmentService.getAllInvestorLocks({ limit: 10, page: 99 });
+    it('should return empty data for out-of-range page', async () => {
+      const result = await investorCommitmentService.getAllInvestorLocks({ limit: 10, page: 99 });
       expect(result.data).toEqual([]);
       expect(result.meta.hasMore).toBe(false);
     });
 
-    it('should filter by invoiceId', () => {
-      const result = investorCommitmentService.getAllInvestorLocks({ invoiceId: 'inv_p3' });
+    it('should filter by invoiceId', async () => {
+      const result = await investorCommitmentService.getAllInvestorLocks({ invoiceId: 'inv_p3' });
       expect(result.data.length).toBe(1);
       expect(result.data[0].invoiceId).toBe('inv_p3');
     });
 
-    it('should clamp limit to 1..100', () => {
-      const low = investorCommitmentService.getAllInvestorLocks({ limit: 0 });
+    it('should clamp limit to 1..100', async () => {
+      const low = await investorCommitmentService.getAllInvestorLocks({ limit: 0 });
       expect(low.meta.limit).toBe(1);
 
-      const high = investorCommitmentService.getAllInvestorLocks({ limit: 999 });
+      const high = await investorCommitmentService.getAllInvestorLocks({ limit: 999 });
       expect(high.meta.limit).toBe(100);
     });
   });
 
   describe('getInvestorLocksByAddress pagination', () => {
-    beforeEach(() => {
+    beforeEach(async () => {
       for (let i = 1; i <= 4; i++) {
-        investorCommitmentService.setInvestorLock({
+        await investorCommitmentService.setInvestorLock({
           funderAddress: ADDR1,
           claimNotBefore: `2026-0${i}-01T00:00:00Z`,
           investorEffectiveYieldBps: 500 + i * 10,
@@ -420,7 +550,7 @@ describe('Investor Commitment Service', () => {
         });
       }
       // ADDR2 lock — must never appear in ADDR1 results
-      investorCommitmentService.setInvestorLock({
+      await investorCommitmentService.setInvestorLock({
         funderAddress: ADDR2,
         claimNotBefore: '2026-06-01T00:00:00Z',
         investorEffectiveYieldBps: 700,
@@ -428,15 +558,15 @@ describe('Investor Commitment Service', () => {
       });
     });
 
-    it('should only return locks for the specified funder', () => {
-      const result = investorCommitmentService.getInvestorLocksByAddress(ADDR1);
+    it('should only return locks for the specified funder', async () => {
+      const result = await investorCommitmentService.getInvestorLocksByAddress(ADDR1);
       expect(result.data.every((l) => l.funderAddress === ADDR1)).toBe(true);
       expect(result.meta.total).toBe(4);
     });
 
-    it('should paginate correctly for funderAddress scope', () => {
-      const p1 = investorCommitmentService.getInvestorLocksByAddress(ADDR1, { limit: 2, page: 1 });
-      const p2 = investorCommitmentService.getInvestorLocksByAddress(ADDR1, { limit: 2, page: 2 });
+    it('should paginate correctly for funderAddress scope', async () => {
+      const p1 = await investorCommitmentService.getInvestorLocksByAddress(ADDR1, { limit: 2, page: 1 });
+      const p2 = await investorCommitmentService.getInvestorLocksByAddress(ADDR1, { limit: 2, page: 2 });
 
       expect(p1.data.length).toBe(2);
       expect(p1.meta.hasMore).toBe(true);
@@ -444,9 +574,38 @@ describe('Investor Commitment Service', () => {
       expect(p2.meta.hasMore).toBe(false);
     });
 
-    it('should not include ADDR2 locks when querying ADDR1', () => {
-      const result = investorCommitmentService.getInvestorLocksByAddress(ADDR1);
+    it('should not include ADDR2 locks when querying ADDR1', async () => {
+      const result = await investorCommitmentService.getInvestorLocksByAddress(ADDR1);
       expect(result.data.some((l) => l.funderAddress === ADDR2)).toBe(false);
+    });
+  });
+
+  describe('tenant persistence', () => {
+    it('stores the same invoice/funder independently per tenant', async () => {
+      await investorCommitmentService.setInvestorLock({
+        tenantId: 'tenant-a',
+        funderAddress: ADDR1,
+        claimNotBefore: '2026-07-01T00:00:00Z',
+        investorEffectiveYieldBps: 710,
+        invoiceId: 'inv_shared',
+      });
+      await investorCommitmentService.setInvestorLock({
+        tenantId: 'tenant-b',
+        funderAddress: ADDR1,
+        claimNotBefore: '2026-08-01T00:00:00Z',
+        investorEffectiveYieldBps: 820,
+        invoiceId: 'inv_shared',
+      });
+
+      const tenantA = await investorCommitmentService.getInvestorLock('inv_shared', ADDR1, { tenantId: 'tenant-a' });
+      const tenantB = await investorCommitmentService.getInvestorLock('inv_shared', ADDR1, { tenantId: 'tenant-b' });
+      const rows = await db('investor_locks')
+        .where({ invoice_id: 'inv_shared', funder_address: ADDR1 })
+        .orderBy('tenant_id', 'asc');
+
+      expect(tenantA.investorEffectiveYieldBps).toBe(710);
+      expect(tenantB.investorEffectiveYieldBps).toBe(820);
+      expect(rows).toHaveLength(2);
     });
   });
 });

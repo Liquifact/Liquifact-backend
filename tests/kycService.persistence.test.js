@@ -128,4 +128,187 @@ describe('KYC Service Database Persistence', () => {
     expect(dbRecord2.sme_id).toBe(dbRecord1.sme_id);
     expect(dbRecord2.status).toBe(dbRecord1.status);
   });
+
+  /**
+   * Short-TTL cache for external KYC provider status lookups (issue #440).
+   *
+   * These tests run against the real (delegated) database configured by the
+   * surrounding suite. The external provider is exercised via a mocked
+   * `global.fetch`; cache behaviour is asserted by counting provider calls.
+   */
+  describe('short-TTL provider status cache (issue #440)', () => {
+    const originalFetch = global.fetch;
+
+    const enableProvider = () => {
+      process.env.KYC_PROVIDER_URL = 'https://kyc.example.com';
+      process.env.KYC_PROVIDER_API_KEY = 'test-api-key';
+    };
+
+    /**
+     * Builds a fetch mock that resolves with a Response-shaped object carrying
+     * the fields {@link kycService.verifyWithExternalProvider} actually reads:
+     *   - `text()` — used as the raw body for response-signature verification
+     *     and as the source for JSON.parse
+     *   - `headers.get(name)` — used to read X-KYC-Signature / X-KYC-Response-Signature
+     *   - `ok`, `status` — used to short-circuit non-2xx and to populate KycProviderError
+     *
+     * The previous version of this helper omitted `text()` and `headers.get()`,
+     * which silently broke once issue #592 wired the real upstream call into
+     * `verifyWithExternalProvider` (the call now reads the raw body and looks
+     * for an `X-KYC-Signature` header).
+     */
+    const mockProvider = (status) => {
+      const body = { status, recordId: `rec_${status}`, verifiedAt: null };
+      return jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: () => Promise.resolve(JSON.stringify(body)),
+        json: () => Promise.resolve(body),
+        headers: { get: () => null },
+      });
+    };
+
+    afterEach(() => {
+      global.fetch = originalFetch;
+      delete process.env.KYC_PROVIDER_URL;
+      delete process.env.KYC_PROVIDER_API_KEY;
+      delete process.env.KYC_PROVIDER_SECRET;
+      delete process.env.KYC_STATUS_CACHE_TTL_SECONDS;
+    });
+
+    it('cache miss: the first read calls the external provider', async () => {
+      enableProvider();
+      global.fetch = mockProvider('verified');
+
+      const res = await kycService.getKycStatus('sme_cache_miss');
+
+      expect(res.status).toBe(kycService.KYC_STATUSES.VERIFIED);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('cache hit within TTL: the second read reuses cache and skips the provider', async () => {
+      enableProvider();
+      // Capture the first fetch mock by reference so we can assert on it after
+      // `global.fetch` is replaced for the second read. Asserting on
+      // `global.fetch` directly would silently check the NEW mock (0 calls).
+      const firstFetchMock = mockProvider('verified');
+      global.fetch = firstFetchMock;
+      const smeId = 'sme_cache_hit';
+
+      const first = await kycService.getKycStatus(smeId);
+      expect(first.status).toBe(kycService.KYC_STATUSES.VERIFIED);
+      expect(firstFetchMock).toHaveBeenCalledTimes(1);
+
+      // The provider would now report a different status, but within the TTL the
+      // cached value must win and the provider must not be called again.
+      // Route through the helper so the Response shape (text/headers) is always
+      // in lockstep with mockProvider — a future cache regression that lets the
+      // second call reach the provider must surface as a real assertion failure,
+      // not as a silently swallowed PENDING fallback.
+      const secondFetchMock = mockProvider('rejected');
+      global.fetch = secondFetchMock;
+
+      const second = await kycService.getKycStatus(smeId);
+
+      // The first mock was called exactly once (cache miss); the second mock
+      // must not be invoked at all (cache hit on the second read).
+      expect(firstFetchMock).toHaveBeenCalledTimes(1);
+      expect(secondFetchMock).toHaveBeenCalledTimes(0);
+      expect(second.status).toBe(kycService.KYC_STATUSES.VERIFIED);
+    });
+
+    it('webhook invalidation: a persisted status change drops the cached approval', async () => {
+      enableProvider();
+      global.fetch = mockProvider('verified');
+      const smeId = 'sme_cache_webhook';
+
+      const first = await kycService.getKycStatus(smeId);
+      expect(first.status).toBe(kycService.KYC_STATUSES.VERIFIED);
+
+      // Simulate the KYC webhook persisting a revocation. The webhook route calls
+      // persistKycRecord, which invalidates the cache entry.
+      await kycService.persistKycRecord({
+        smeId,
+        status: 'rejected',
+        providerRecordId: 'rec_revoked',
+      });
+
+      // Provider now reports the revocation too; because the cache was invalidated,
+      // it is consulted again rather than serving the stale 'verified' value.
+      global.fetch = mockProvider('rejected');
+      const second = await kycService.getKycStatus(smeId);
+
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      expect(second.status).toBe(kycService.KYC_STATUSES.REJECTED);
+    });
+
+    it('security: a cached approval never survives a revocation event', async () => {
+      enableProvider();
+      global.fetch = mockProvider('verified');
+      const smeId = 'sme_revoke_wins';
+
+      await kycService.getKycStatus(smeId); // caches 'verified'
+
+      // Revocation arrives via webhook/persisted write.
+      await kycService.persistKycRecord({
+        smeId,
+        status: 'rejected',
+        providerRecordId: 'rec_revoked',
+      });
+
+      // Even if the provider is now unreachable, the read must NOT serve the
+      // cached approval — it falls back to the persisted revoked record.
+      global.fetch = jest.fn().mockRejectedValue(new Error('provider down'));
+      const after = await kycService.getKycStatus(smeId);
+
+      expect(after.status).toBe(kycService.KYC_STATUSES.REJECTED);
+    });
+
+    it('TTL expiry: the provider is consulted again after the entry expires', async () => {
+      enableProvider();
+      process.env.KYC_STATUS_CACHE_TTL_SECONDS = '0.05'; // 50ms
+      global.fetch = mockProvider('verified');
+      const smeId = 'sme_ttl_expiry';
+
+      await kycService.getKycStatus(smeId);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+
+      await new Promise((resolve) => setTimeout(resolve, 120));
+
+      await kycService.getKycStatus(smeId);
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('caching disabled (TTL=0): the provider is consulted on every read', async () => {
+      enableProvider();
+      process.env.KYC_STATUS_CACHE_TTL_SECONDS = '0';
+      global.fetch = mockProvider('verified');
+      const smeId = 'sme_no_cache';
+
+      await kycService.getKycStatus(smeId);
+      await kycService.getKycStatus(smeId);
+
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('getStatusCacheTtlMs honours configuration and rejects invalid values', () => {
+      delete process.env.KYC_STATUS_CACHE_TTL_SECONDS;
+      expect(kycService.getStatusCacheTtlMs()).toBe(30000);
+
+      process.env.KYC_STATUS_CACHE_TTL_SECONDS = '5';
+      expect(kycService.getStatusCacheTtlMs()).toBe(5000);
+
+      process.env.KYC_STATUS_CACHE_TTL_SECONDS = '0';
+      expect(kycService.getStatusCacheTtlMs()).toBe(0);
+
+      process.env.KYC_STATUS_CACHE_TTL_SECONDS = 'not-a-number';
+      expect(kycService.getStatusCacheTtlMs()).toBe(0);
+    });
+
+    it('invalidateKycStatusCache ignores invalid smeId values without throwing', () => {
+      expect(() => kycService.invalidateKycStatusCache('')).not.toThrow();
+      expect(() => kycService.invalidateKycStatusCache(null)).not.toThrow();
+      expect(() => kycService.invalidateKycStatusCache(123)).not.toThrow();
+    });
+  });
 });

@@ -14,8 +14,90 @@
  * state machine, investor commitment) flush groups of related cache entries
  * without knowing the exact keys.
  *
+ * Cache store read/write failures are reported through the structured logger
+ * (`req.log` when available, falling back to the root application logger) and
+ * recorded on the `cache_store_errors_total` Prometheus counter — the request
+ * always falls through so a cache outage never blocks the caller.
+ *
+ * Cached payloads are never included in log output.
+ *
  * @module middleware/cache
  */
+
+const crypto = require('crypto');
+const logger = require('../logger');
+const { cacheStoreErrorsTotal } = require('../metrics');
+const { getInvestorLockPrincipalScope } = require('../utils/investorLockScope');
+
+const SENSITIVE_QUERY_PARAMS = new Set(['funderAddress']);
+
+/**
+ * Hashes cache-key components that can contain wallet or funder identifiers.
+ *
+ * @param {unknown} value - Sensitive cache key component.
+ * @returns {string} Stable SHA-256 cache-key segment.
+ */
+function hashCacheComponent(value) {
+  return crypto
+    .createHash('sha256')
+    .update(String(value || ''), 'utf8')
+    .digest('hex');
+}
+
+/**
+ * Converts an Express query value into deterministic key segments.
+ *
+ * @param {string} name - Query parameter name.
+ * @param {unknown} value - Query parameter value.
+ * @returns {string[]} Encoded query segments.
+ */
+function encodeQueryValue(name, value) {
+  const values = Array.isArray(value) ? value : [value];
+  return values
+    .map((entry) => {
+      const safeValue = SENSITIVE_QUERY_PARAMS.has(name)
+        ? `sha256:${hashCacheComponent(entry)}`
+        : String(entry);
+      return `${encodeURIComponent(name)}=${encodeURIComponent(safeValue)}`;
+    })
+    .sort();
+}
+
+/**
+ * Builds a deterministic path+query segment for investor lock cache keys.
+ *
+ * Sensitive query values are hashed, and query parameters are sorted so
+ * equivalent requests produce one cache key regardless of query-string order.
+ *
+ * @param {import('express').Request} req - The Express request.
+ * @returns {string} Stable request target key.
+ */
+function makeInvestorRequestTargetKey(req) {
+  const originalUrl = req.originalUrl || '';
+  const path = req.path || originalUrl.split('?')[0] || '';
+  const query = req.query && typeof req.query === 'object' ? req.query : {};
+  const queryKeys = Object.keys(query).sort();
+
+  if (queryKeys.length === 0) {
+    return path;
+  }
+
+  const queryString = queryKeys
+    .flatMap((name) => encodeQueryValue(name, query[name]))
+    .join('&');
+
+  return `${path}?${queryString}`;
+}
+
+/**
+ * Builds a hashed principal scope for investor-lock cache isolation.
+ *
+ * @param {import('express').Request} req - The Express request.
+ * @returns {string} Principal scope safe for cache keys.
+ */
+function makeInvestorPrincipalScopeKey(req) {
+  return `sha256:${hashCacheComponent(getInvestorLockPrincipalScope(req))}`;
+}
 
 /**
  * Creates an Express middleware that caches JSON responses with a TTL.
@@ -27,8 +109,10 @@
  * The cache is bypassed when the request carries a `Cache-Control: no-cache`
  * header, allowing clients to always fetch fresh data.
  *
- * Cache store errors are caught and logged — the request always falls through
- * to the next handler so the cache never blocks a request.
+ * Cache store errors are caught and reported through the structured logger
+ * with request context (requestId, correlationId) — the request always falls
+ * through to the next handler so the cache never blocks a request. Cached
+ * values are never written to log output.
  *
  * @param {object}    options          - Middleware configuration.
  * @param {number}    options.ttl      - Cache TTL in milliseconds.
@@ -59,7 +143,8 @@ function cacheResponse({ ttl, store, keyFn }) {
     try {
       cached = store.get(key);
     } catch (err) {
-      console.warn('Cache store get error, falling through:', err.message);
+      cacheStoreErrorsTotal.inc();
+      (req.log || logger).warn({ err, component: 'cache' }, 'Cache store get error, falling through');
       return next();
     }
 
@@ -83,7 +168,8 @@ function cacheResponse({ ttl, store, keyFn }) {
         try {
           store.set(key, body, ttl);
         } catch (err) {
-          console.warn('Cache store set error:', err.message);
+          cacheStoreErrorsTotal.inc();
+          (req.log || logger).warn({ err, component: 'cache' }, 'Cache store set error');
         }
       }
       return originalJson(body);
@@ -116,7 +202,7 @@ function makeMarketplaceKey(req) {
  */
 function makeInvestorLocksKey(req) {
   const tenantId = req.tenantId || 'unknown';
-  return 'investor:locks:' + tenantId + ':' + req.originalUrl;
+  return 'investor:locks:' + tenantId + ':' + makeInvestorPrincipalScopeKey(req) + ':' + makeInvestorRequestTargetKey(req);
 }
 
 /**
@@ -128,7 +214,7 @@ function makeInvestorLocksKey(req) {
  */
 function makeInvestorLockKey(req) {
   const tenantId = req.tenantId || 'unknown';
-  return 'investor:lock:' + tenantId + ':' + req.params.invoiceId + ':' + req.query.funderAddress;
+  return 'investor:lock:' + tenantId + ':' + makeInvestorPrincipalScopeKey(req) + ':' + req.params.invoiceId + ':sha256:' + hashCacheComponent(req.query.funderAddress);
 }
 
 /**
@@ -137,7 +223,8 @@ function makeInvestorLockKey(req) {
  * This is called by write-side services (invoice state machine, investor
  * commitment) so that subsequent reads return fresh data.
  *
- * Errors from the store are caught and logged — invalidation failures never
+ * Errors from the store are caught and reported through the structured logger
+ * and the `cache_store_errors_total` counter — invalidation failures never
  * propagate to the caller.
  *
  * @param {object} store  - Cache store instance with a `delByPrefix` method.
@@ -148,8 +235,24 @@ function invalidatePrefix(store, prefix) {
   try {
     store.delByPrefix(prefix);
   } catch (err) {
-    console.warn('Cache invalidation error:', err.message);
+    cacheStoreErrorsTotal.inc();
+    logger.warn({ err, component: 'cache', cachePrefix: prefix }, 'Cache invalidation error');
   }
+}
+
+/**
+ * Creates a tenant-isolated cache key for the invoice state endpoint.
+ *
+ * The key includes tenant ID and invoice ID so different invoices and
+ * tenants produce distinct cache entries.
+ *
+ * @param {import('express').Request} req - The Express request.
+ * @returns {string} Cache key, e.g. `invoiceState:state:tenant-abc:inv_123`
+ */
+function makeInvoiceStateKey(req) {
+  const tenantId = req.tenantId || 'unknown';
+  const invoiceId = req.params ? req.params.id : 'unknown';
+  return 'invoiceState:state:' + tenantId + ':' + invoiceId;
 }
 
 module.exports = {
@@ -158,4 +261,6 @@ module.exports = {
   makeMarketplaceKey,
   makeInvestorLocksKey,
   makeInvestorLockKey,
+  makeInvoiceStateKey,
+  hashCacheComponent,
 };

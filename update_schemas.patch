@@ -1,0 +1,47 @@
+--- src/schemas/config.js
++++ src/schemas/config.js
+@@ -491,6 +491,33 @@
+   })
+   .strict();
+ 
++// -- Response schemas ---------------------------------------------------------
++
++/**
++ * Schema for the POST /api/admin/config response body.
++ *
++ * @type {import('zod').ZodObject}
++ */
++const adminConfigResponseSchema = z
++  .object({
++    section: z.string({ invalid_type_error: 'section must be a string' }),
++    config: z.record(z.unknown(), { invalid_type_error: 'config must be an object' }),
++    message: z.string({ invalid_type_error: 'message must be a string' }),
++  })
++  .strict();
++
++/**
++ * Schema for the GET /api/admin/config/sections response body.
++ *
++ * @type {import('zod').ZodObject}
++ */
++const configSectionsResponseSchema = z
++  .object({
++    sections: z.array(z.string({ invalid_type_error: 'each section must be a string' }), {
++      invalid_type_error: 'sections must be an array',
++    }),
++  })
++  .strict();
++
+ // ── Exports ──────────────────────────────────────────────────────────────────
+ 
+ const validateBody = (schema, options) => createBodyValidator(schema, options);
+@@ -512,6 +539,9 @@
+   bulkConfigSchema,
+   bulkConfigItemSchema,
+   BULK_CONFIG_MAX_ITEMS,
+ 
++  // Response schemas
++  adminConfigResponseSchema,
++  configSectionsResponseSchema,
++
+   // Re-exported helpers

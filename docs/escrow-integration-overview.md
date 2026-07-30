@@ -19,7 +19,7 @@
 |------|--------|----------------------|----------------------------|
 | Event ingest | [`src/jobs/escrowIndexer.js`](../src/jobs/escrowIndexer.js) | Horizon poll → `escrow_events` / `escrow_event_projection` | Same; optional Captive Core later |
 | Escrow read (service) | [`src/services/escrowRead.js`](../src/services/escrowRead.js) | **Projection-first** SQL read (`escrow_event_projection`) → neutral RPC stub for `get_escrow_state`; `get_legal_hold` stub | Real `LiquifactEscrow` contract reads |
-| Escrow read (minimal app) | [`src/app.js`](../src/app.js) | `GET /api/escrow/:invoiceId` via `resolveEscrowAddress` + placeholder Soroban op | Wire to `readEscrowState` + projection/cache |
+| Escrow read (minimal app) | [`src/app.js`](../src/app.js) | `GET /api/escrow/:invoiceId` via `escrowReadService.getEscrowRead()` → `resolveEscrowAddress` + **projection-first** `readEscrowState()` (no fabricated funded/settled stubs) | Migrate onto the cache-aware `getEscrowStateWithProjection()` entry point |
 | Funding | [`src/services/escrowSubmit.js`](../src/services/escrowSubmit.js) | Validates payload; **`submitted: false`**; optional simulation | Build/sign/submit `fund_escrow` (delegated or custodial) |
 | Reconciliation | [`src/jobs/reconcileEscrow.js`](../src/jobs/reconcileEscrow.js) | Mock invoices + mock on-chain amounts | Real DB + contract `funded_amount` |
 | On-chain contract | [`contracts/src/lib.rs`](../contracts/src/lib.rs) | `create_bounty` / `release_bounty` | `LiquifactEscrow` invoice escrow API |
@@ -64,8 +64,16 @@ const derived = computeEscrowDerivedFields(state, {
 ```
 
 When `ledgerCloseTime` is absent (e.g. the Soroban stub does not return it),
-the function falls back transparently to the server wall clock with a warn-level
-log, preserving the existing behaviour.
+the function falls back transparently to the server wall clock, preserving the
+existing behaviour.
+
+Validation anomalies are emitted through the shared structured logger at
+`warn` level with `component: "escrowDerived"`. These warnings cover
+milliseconds accidentally passed as epoch seconds, non-numeric or negative
+ledger close times, absurd future maturity dates, and stale overdue maturity
+dates beyond the grace window. Logs include bounded numeric context such as
+`ledgerCloseTime`, `daysDiff`, and the relevant threshold, but do not include
+raw unbounded caller-supplied strings.
 
 ### Rounding
 
@@ -83,7 +91,7 @@ avoid IEEE 754 drift in UI rendering.
 | Stellar network | [`src/config/stellar.js`](../src/config/stellar.js), [`src/config/index.js`](../src/config/index.js) | `getStellarConfig`, Zod `validate()` |
 | Soroban wrapper | [`src/services/soroban.js`](../src/services/soroban.js) | `callSorobanContract` (retries) |
 | Read + legal hold | [`src/services/escrowRead.js`](../src/services/escrowRead.js) | `readEscrowState`, `fetchLegalHold` |
-| Batch read | [`src/services/escrowBatchRead.js`](../src/services/escrowBatchRead.js) | Uses `readEscrowState` with concurrency limits |
+| Batch read | [`src/services/escrowBatchRead.js`](../src/services/escrowBatchRead.js) | Uses `readEscrowState` with concurrency limits and per-invoice transient error retry |
 | Funding stub | [`src/services/escrowSubmit.js`](../src/services/escrowSubmit.js) | `submitEscrowFunding`, `FUND_OPERATION = 'fund_escrow'` |
 | Simulation | [`src/services/sorobanSim.js`](../src/services/sorobanSim.js) | `simulateOrThrowSync` (when signed XDR present) |
 | Indexer job | [`src/jobs/escrowIndexer.js`](../src/jobs/escrowIndexer.js) | `createEscrowIndexer`, `runEscrowIndexerCycle`, `persistEscrowEvent` |
@@ -166,7 +174,8 @@ adapter (if injected)  →  projection row  →  neutral RPC stub
 
 **Current minimal app** ([`src/app.js`](../src/app.js))
 
-- `GET /api/escrow/:invoiceId` trims `invoiceId`, calls `resolveEscrowAddress`, delegates to [`getEscrowStateWithProjection()`](../src/services/escrowRead.js) which orchestrates the cache → projection → RPC chain, and sets header **`X-Escrow-Address`**.
+- `GET /api/escrow/:invoiceId` trims `invoiceId`, then delegates to [`getEscrowRead()`](../src/services/escrowReadService.js) (`services/escrowReadService.js`), which resolves the address via `resolveEscrowAddress`, calls [`readEscrowState()`](../src/services/escrowRead.js) (**projection → neutral RPC stub**, no Redis layer on this endpoint), computes derived display fields, and sets header **`X-Escrow-Address`**.
+- [`getEscrowStateWithProjection()`](../src/services/escrowRead.js) additionally layers the **Redis cache** (`REDIS_ESCROW_CACHE_ENABLED=true`) and the process-local `escrowReadCache` in front of the same projection → RPC chain. It is exported for future/direct consumers (e.g. batch jobs, an admin cache-warm path) but is not currently called by any HTTP route — the legacy `/api/escrow/:invoiceId` handler predates it and has not been migrated onto the cache-aware entry point.
 - Full-feature routes/tests often mount [`escrowRead.js`](../src/services/escrowRead.js) directly (see `tests/escrow.read.test.js`, `tests/escrow.legalhold.test.js`).
 
 **`readEscrowState` return shape (target):** `invoiceId`, `status`, `fundedAmount`, `legal_hold`, `funding_token`, `source`, `latest_ledger_sequence`, `latest_event_type`, `latest_event_id`, `latest_observed_at`.
@@ -265,7 +274,7 @@ Documented in [README](../README.md) and asserted in [`src/config/stellar.test.j
 | `ESCROW_INDEXER_BATCH_SIZE` | `100` | `runEscrowIndexerCycle` |
 | `STELLAR_HORIZON_URL` | testnet Horizon | `fetchEscrowEventsFromHorizon` |
 | `REDIS_ESCROW_CACHE_ENABLED` | `false` | Optional read cache |
-| `SOROBAN_MAX_RETRIES` / `SOROBAN_BASE_DELAY` / `SOROBAN_MAX_DELAY` | 3 / 200 / 5000 | [`soroban.js`](../src/services/soroban.js) |
+| `SOROBAN_MAX_RETRIES` / `SOROBAN_BASE_DELAY` / `SOROBAN_MAX_DELAY` / `SOROBAN_MAX_ELAPSED_MS` | 3 / 200 / 5000 / 10000 | [`soroban.js`](../src/services/soroban.js), [Resilience Guide](soroban-resilience.md) |
 
 Never commit secrets; use `.env` locally and deployment secret stores.
 
@@ -316,7 +325,7 @@ Assume testnet configuration and a mapping entry in `ESCROW_ADDR_BY_INVOICE`.
 - **Escrow read** — projection-first lookup, never fabricated state. The legacy `funded_invoice` / `settled_invoice` stub fixtures have been removed because they misled investors and the reconciler into believing invoices had funded when the indexer had not yet recorded them. A missing projection now returns `status: 'not_found', fundedAmount: 0` (warn log on DB failure, fall through to RPC).
 - **No decimals for math** — Cached/projected decimals are never used to scale on-chain principal values. Reconciliation compares equal-unit amounts only. See [`TOKEN_METADATA.md`](./TOKEN_METADATA.md).
 - **Input validation** — strict patterns in `escrowSubmit` and `escrowRead`; oversized metadata rejected.
-- **Legal hold** — RPC failure defaults to **`legal_hold: false`** in `fetchLegalHold` (warn log); callers needing strict blocking should override via adapter.
+- **Legal hold** — fails **closed**, not open: `fetchLegalHoldStatus()` returns the tri-state `held` / `not_held` / `unknown` (issue #424), and every read path (`readEscrowState`, `readEscrowStateWithAttestations`, `getEscrowStateWithProjection`) maps `unknown` to `legal_hold: true` so an RPC failure can never silently unblock a held invoice (warn log with `legalHoldReason`/`legalHoldErrorCode` on the response). Only the deprecated `fetchLegalHold()` boolean wrapper collapses `unknown` to `false`; new callers should use `fetchLegalHoldStatus()` or read `legal_hold`/`legalHoldStatus` off the state object instead.
 - **Idempotency** — required for live submit; stub accepts key for forward compatibility.
 - **Rate limiting** — sensitive routes (e.g. `POST /api/escrow`) covered in middleware tests (`src/__tests__/rateLimit.test.js`).
 - **Allowlist** — `ESCROW_ADDR_BY_INVOICE` with `allowlistEnabled` prevents arbitrary invoice→address resolution.

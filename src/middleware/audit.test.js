@@ -8,11 +8,99 @@ const request = require('supertest');
 const { auditMiddleware } = require('../../src/middleware/audit');
 const { clearAuditLogs, getAuditLogs } = require('../../src/services/auditLog');
 
+/** Flush pending microtasks so async writes (e.g. createAuditLog) complete. */
+function flush() {
+  return new Promise(resolve => setImmediate(resolve));
+}
+
+// ── Knex mock ─────────────────────────────────────────────────────────────
+// Stores audit log rows in memory so getAuditLogs / clearAuditLogs work
+// without a real database.
+//
+// NOTE: The jest.mock factory below runs at hoist time, so it cannot reference
+// any const/let variables defined later. We use `var` for the storage array and
+// assign the mock implementation in a beforeAll hook.
+
+/** @type {Array<object>} In-memory audit log rows. */
+var auditRows = []; // eslint-disable-line no-var
+
+/**
+ * Creates a chainable mock query builder for the audit_log_events table.
+ * @returns {object} Mock Knex query builder.
+ */
+function makeAuditBuilder() {
+  const builder = {
+    _wheres: [],
+    _limit: null,
+    _offset: 0,
+
+    select() { return this; },
+    orderBy() { return this; },
+    limit(n) { this._limit = n; return this; },
+    offset(n) { this._offset = n; return this; },
+    where(col, val) {
+      if (val !== undefined) { this._wheres.push({ col, val }); }
+      return this;
+    },
+    then(resolve) {
+      let filtered = [...auditRows];
+      for (const w of this._wheres) {
+        filtered = filtered.filter(r => r[w.col] === w.val);
+      }
+      if (this._limit !== null) {
+        filtered = filtered.slice(this._offset, this._offset + this._limit);
+      }
+      return Promise.resolve(filtered).then(resolve);
+    },
+    async del() {
+      auditRows.length = 0;
+      return 0;
+    },
+    async insert(payload) {
+      const row = {
+        id: payload.id || `audit-${auditRows.length + 1}`,
+        created_at: payload.created_at || new Date().toISOString(),
+        actor_id: payload.actor_id || payload.actorId,
+        action: payload.action,
+        target_type: payload.target_type || payload.targetType,
+        target_id: payload.target_id || payload.targetId,
+        status_code: payload.status_code || payload.statusCode,
+        ip_address: payload.ip_address || payload.ipAddress,
+        user_agent: payload.user_agent || payload.userAgent,
+        metadata: typeof payload.metadata === 'string' ? payload.metadata : JSON.stringify(payload.metadata || {}),
+        event_type: payload.event_type || payload.eventType,
+      };
+      auditRows.push(row);
+      return [1];
+    },
+  };
+  return builder;
+}
+
+// Hoisted mock — factory runs at module-evaluation time, so it returns a bare
+// jest.fn(). The implementation is assigned in beforeAll below.
+jest.mock('../../src/db/knex', () => jest.fn(), { virtual: true });
+
+let mockDb;
+
+beforeAll(() => {
+  mockDb = require('../../src/db/knex');
+  mockDb.mockImplementation((tableName) => {
+    if (tableName !== 'audit_log_events') {
+      throw new Error(`unexpected table: ${tableName}`);
+    }
+    return makeAuditBuilder();
+  });
+  mockDb.raw = jest.fn().mockResolvedValue([{ command: 'OK' }]);
+});
+
+// ── Tests ─────────────────────────────────────────────────────────────────
+
 describe('auditMiddleware', () => {
   let app;
 
   beforeEach(() => {
-    clearAuditLogs();
+    auditRows.length = 0;
     app = express();
     app.use(express.json());
     
@@ -108,7 +196,8 @@ describe('auditMiddleware', () => {
         .send({ amount: 100, status: 'draft' });
 
       expect(response.status).toBe(201);
-      const logs = getAuditLogs();
+      await flush();
+      const logs = await getAuditLogs();
       expect(logs.length).toBeGreaterThanOrEqual(1);
       expect(logs[0].action).toBe('CREATE');
       expect(logs[0].resourceType).toBe('invoices');
@@ -122,7 +211,8 @@ describe('auditMiddleware', () => {
         .send({ amount: 150, status: 'approved' });
 
       expect(response.status).toBe(200);
-      const logs = getAuditLogs();
+      await flush();
+      const logs = await getAuditLogs();
       expect(logs.length).toBeGreaterThanOrEqual(1);
       expect(logs[0].action).toBe('UPDATE');
       expect(logs[0].resourceId).toBe('inv-123');
@@ -135,7 +225,8 @@ describe('auditMiddleware', () => {
         .send({ status: 'approved' });
 
       expect(response.status).toBe(200);
-      const logs = getAuditLogs();
+      await flush();
+      const logs = await getAuditLogs();
       expect(logs.length).toBeGreaterThanOrEqual(1);
       expect(logs[0].action).toBe('UPDATE');
     });
@@ -146,7 +237,8 @@ describe('auditMiddleware', () => {
         .set('X-Forwarded-For', '192.168.1.4');
 
       expect(response.status).toBe(204);
-      const logs = getAuditLogs();
+      await flush();
+      const logs = await getAuditLogs();
       // DELETE with 204 No Content might not create audit log if body check is too strict
       if (logs.length > 0) {
         expect(logs[0].action).toBe('DELETE');
@@ -162,7 +254,7 @@ describe('auditMiddleware', () => {
         .set('X-Forwarded-For', '192.168.1.5');
 
       expect(response.status).toBe(200);
-      const logs = getAuditLogs();
+      const logs = await getAuditLogs();
       expect(logs.length).toBe(0);
     });
 
@@ -172,7 +264,7 @@ describe('auditMiddleware', () => {
         .set('X-Forwarded-For', '192.168.1.6');
 
       expect(response.status).toBe(200);
-      const logs = getAuditLogs();
+      const logs = await getAuditLogs();
       expect(logs.length).toBe(0);
     });
 
@@ -181,7 +273,7 @@ describe('auditMiddleware', () => {
         .options('/api/invoices/inv-123')
         .set('X-Forwarded-For', '192.168.1.7');
 
-      const logs = getAuditLogs();
+      const logs = await getAuditLogs();
       expect(logs.length).toBe(0);
     });
   });
@@ -194,7 +286,7 @@ describe('auditMiddleware', () => {
         .send({ data: 'test' });
 
       expect(response.status).toBe(200);
-      const logs = getAuditLogs();
+      const logs = await getAuditLogs();
       expect(logs.length).toBe(0);
     });
   });
@@ -207,7 +299,7 @@ describe('auditMiddleware', () => {
         .send({ data: 'test' });
 
       expect(response.status).toBe(400);
-      const logs = getAuditLogs();
+      const logs = await getAuditLogs();
       expect(logs.length).toBe(0);
     });
 
@@ -221,7 +313,7 @@ describe('auditMiddleware', () => {
         .send();
 
       expect(response.status).toBe(500);
-      const logs = getAuditLogs();
+      const logs = await getAuditLogs();
       expect(logs.length).toBe(0);
     });
   });
@@ -235,7 +327,8 @@ describe('auditMiddleware', () => {
         .send({ amount: 100 });
 
       expect(response.status).toBe(201);
-      const logs = getAuditLogs().filter((l) => l.actor === 'auth-user-123');
+      await flush();
+      const logs = (await getAuditLogs()).filter((l) => l.actor === 'auth-user-123');
       expect(logs.length).toBeGreaterThanOrEqual(1);
       expect(logs[0].actor).toBe('auth-user-123');
     });
@@ -247,7 +340,8 @@ describe('auditMiddleware', () => {
         .send({ amount: 100 });
 
       expect(response.status).toBe(201);
-      const logs = getAuditLogs().filter((l) =>
+      await flush();
+      const logs = (await getAuditLogs()).filter((l) =>
         /^(203\.0\.113\.42|::1|127\.0\.0\.1|::ffff:127\.0\.0\.1)/.test(l.actor),
       );
       expect(logs.length).toBeGreaterThanOrEqual(1);
@@ -261,7 +355,8 @@ describe('auditMiddleware', () => {
         .send({ amount: 200 });
 
       expect(response.status).toBe(201);
-      const logs = getAuditLogs().filter((l) => l.actor === 'subject-user-789');
+      await flush();
+      const logs = (await getAuditLogs()).filter((l) => l.actor === 'subject-user-789');
       expect(logs.length).toBeGreaterThanOrEqual(1);
       expect(logs[0].actor).toBe('subject-user-789');
     });
@@ -275,7 +370,8 @@ describe('auditMiddleware', () => {
         .send({ amount: 100 });
 
       expect(response.status).toBe(201);
-      const logs = getAuditLogs();
+      await flush();
+      const logs = await getAuditLogs();
       expect(logs[0].resourceType).toBe('invoices');
     });
 
@@ -285,7 +381,8 @@ describe('auditMiddleware', () => {
         .send({ status: 'approved' });
 
       expect(response.status).toBe(200);
-      const logs = getAuditLogs();
+      await flush();
+      const logs = await getAuditLogs();
       expect(logs[0].resourceId).toBe('inv-2024-001');
     });
 
@@ -295,7 +392,8 @@ describe('auditMiddleware', () => {
         .send({ amount: 100 });
 
       expect(response.status).toBe(201);
-      const logs = getAuditLogs();
+      await flush();
+      const logs = await getAuditLogs();
       expect(logs[0].resourceId).toBe('new');
     });
   });
@@ -309,7 +407,8 @@ describe('auditMiddleware', () => {
         .send(requestData);
 
       expect(response.status).toBe(201);
-      const logs = getAuditLogs();
+      await flush();
+      const logs = await getAuditLogs();
       expect(logs.length).toBeGreaterThanOrEqual(1);
       // Verify before state captured data
       expect(logs[0].changes.before).toBeDefined();
@@ -321,7 +420,8 @@ describe('auditMiddleware', () => {
         .send({ amount: 100, status: 'draft' });
 
       expect(response.status).toBe(201);
-      const logs = getAuditLogs();
+      await flush();
+      const logs = await getAuditLogs();
       expect(logs.length).toBeGreaterThanOrEqual(1);
       // Response should be captured
       expect(logs[0].changes.after).toBeDefined();
@@ -334,7 +434,8 @@ describe('auditMiddleware', () => {
         .send({ amount: 100 });
 
       expect(response.status).toBe(201);
-      const logs = getAuditLogs();
+      await flush();
+      const logs = await getAuditLogs();
       expect(logs.length).toBeGreaterThanOrEqual(1);
       expect(logs[0].statusCode).toBe(201);
     });
@@ -347,7 +448,8 @@ describe('auditMiddleware', () => {
         .send({ amount: 100 });
 
       expect(response.status).toBe(201);
-      const logs = getAuditLogs();
+      await flush();
+      const logs = await getAuditLogs();
       expect(logs[0].metadata.method).toBe('POST');
     });
 
@@ -357,7 +459,8 @@ describe('auditMiddleware', () => {
         .send({ amount: 100 });
 
       expect(response.status).toBe(201);
-      const logs = getAuditLogs();
+      await flush();
+      const logs = await getAuditLogs();
       expect(logs[0].metadata.path).toBe('/api/invoices');
     });
 
@@ -368,7 +471,8 @@ describe('auditMiddleware', () => {
         .send({ amount: 100 });
 
       expect(response.status).toBe(201);
-      const logs = getAuditLogs();
+      await flush();
+      const logs = await getAuditLogs();
       expect(logs[0].userAgent).toBe('Mozilla/5.0 Test');
     });
 
@@ -379,7 +483,8 @@ describe('auditMiddleware', () => {
         .send({ amount: 100 });
 
       expect(response.status).toBe(201);
-      const logs = getAuditLogs();
+      await flush();
+      const logs = await getAuditLogs();
       expect(logs[0].ipAddress).toMatch(/192\.0\.2\.123|::1|127\.0\.0\.1/);
     });
   });
@@ -394,7 +499,8 @@ describe('auditMiddleware', () => {
           invoiceNumber: 'INV-2024-001',
         });
 
-      const logs = getAuditLogs();
+      await flush();
+      const logs = await getAuditLogs();
       // Should have at least one CREATE audit log
       const createLog = logs.find(log => log.action === 'CREATE');
       expect(createLog).toBeDefined();
@@ -414,7 +520,8 @@ describe('auditMiddleware', () => {
         .put('/api/invoices/inv-12345')
         .send({ status: 'approved' });
 
-      const trail = getAuditLogs();
+      await flush();
+      const trail = await getAuditLogs();
       expect(trail.length).toBeGreaterThanOrEqual(1);
       // Should have both CREATE and UPDATE actions
       const actions = trail.map(log => log.action);
@@ -433,7 +540,7 @@ describe('auditMiddleware', () => {
         .send({ test: 'data' });
 
       // Should not throw error
-      const logs = getAuditLogs();
+      const logs = await getAuditLogs();
       expect(logs.length).toBe(0); // Empty body shouldn't create audit log
     });
 
@@ -465,7 +572,8 @@ describe('auditMiddleware', () => {
         .send(largePayload);
 
       expect(response.status).toBe(201);
-      const logs = getAuditLogs();
+      await flush();
+      const logs = await getAuditLogs();
       // Should create audit logs for large payloads
       expect(logs.length).toBeGreaterThanOrEqual(1);
     });
@@ -481,7 +589,8 @@ describe('auditMiddleware', () => {
       }
 
       await Promise.all(promises);
-      const logs = getAuditLogs();
+      await flush();
+      const logs = await getAuditLogs();
       // Should create audit logs for concurrent requests
       expect(logs.length).toBeGreaterThanOrEqual(1);
     });
@@ -495,7 +604,8 @@ describe('auditMiddleware', () => {
         });
 
       expect(response.status).toBe(201);
-      const logs = getAuditLogs();
+      await flush();
+      const logs = await getAuditLogs();
       expect(logs.length).toBeGreaterThanOrEqual(1);
     });
   });
@@ -509,7 +619,8 @@ describe('auditMiddleware', () => {
         .send({ amount: 100 });
 
       const after = new Date();
-      const logs = getAuditLogs();
+      await flush();
+      const logs = await getAuditLogs();
       const timestamp = new Date(logs[0].timestamp);
 
       expect(timestamp.getTime()).toBeGreaterThanOrEqual(before.getTime());

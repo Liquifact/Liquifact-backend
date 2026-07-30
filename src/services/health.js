@@ -10,6 +10,30 @@ const { escrowIndexerLastCursorAdvanceTimestampSeconds, readinessGauge } = requi
 const db = require('../db/knex');
 const cfg = require('../config');
 
+const DEFAULT_SOROBAN_HEALTH_TIMEOUT_MS = 5000;
+const MIN_SOROBAN_HEALTH_TIMEOUT_MS = 250;
+const MAX_SOROBAN_HEALTH_TIMEOUT_MS = 10000;
+
+/**
+ * Resolves the Soroban RPC health-probe timeout from environment variables.
+ * Values are clamped so a typo cannot disable the timeout or make readiness
+ * probes wait indefinitely.
+ *
+ * @param {NodeJS.ProcessEnv} [env=process.env] Environment source.
+ * @returns {number} Timeout in milliseconds.
+ */
+function resolveSorobanHealthTimeoutMs(env = process.env) {
+  const configuredTimeoutMs = parseInt(env.SOROBAN_HEALTH_TIMEOUT_MS, 10);
+  if (Number.isNaN(configuredTimeoutMs)) {
+    return DEFAULT_SOROBAN_HEALTH_TIMEOUT_MS;
+  }
+
+  return Math.min(
+    Math.max(configuredTimeoutMs, MIN_SOROBAN_HEALTH_TIMEOUT_MS),
+    MAX_SOROBAN_HEALTH_TIMEOUT_MS
+  );
+}
+
 /**
  * Classify Soroban RPC latency against configurable thresholds.
  * Returns "healthy" for latency <= warn, "degraded" for latency > warn && <= fail,
@@ -20,8 +44,12 @@ const cfg = require('../config');
 function classifySorobanLatency(latencyMs) {
   const warnMs = parseInt(process.env.SOROBAN_LATENCY_WARN_MS, 10) || 200;
   const failMs = parseInt(process.env.SOROBAN_LATENCY_FAIL_MS, 10) || 500;
-  if (latencyMs <= warnMs) return 'healthy';
-  if (latencyMs <= failMs) return 'degraded';
+  if (latencyMs <= warnMs) {
+    return 'healthy';
+  }
+  if (latencyMs <= failMs) {
+    return 'degraded';
+  }
   return 'unhealthy';
 }
 
@@ -36,9 +64,15 @@ async function checkSorobanHealth() {
   }
 
   const start = Date.now();
+  let timeout;
+
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
+    const timeoutMs = resolveSorobanHealthTimeoutMs();
+    timeout = setTimeout(() => controller.abort(), timeoutMs);
+    if (timeout.unref) {
+      timeout.unref();
+    }
 
     const response = await fetch(url, {
       method: 'POST',
@@ -47,7 +81,6 @@ async function checkSorobanHealth() {
       signal: controller.signal,
     });
 
-    clearTimeout(timeout);
     const latency = Date.now() - start;
 
     if (response.ok) {
@@ -58,39 +91,163 @@ async function checkSorobanHealth() {
   } catch (error) {
     const latency = Date.now() - start;
     return { status: 'unhealthy', latency, error: error.message };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
 /**
- * Checks if the database is reachable via a raw query.
- * Uses knex to run `SELECT 1` and measures latency.
- * Does not expose connection strings or hostnames in the response.
- * @returns {Promise<{status: string, latency?: number, error?: string}>}
+ * @typedef {Object} PoolMetrics
+ * @property {number} used - Connections currently checked out by active queries.
+ * @property {number} free - Idle connections available for acquisition.
+ * @property {number} pending - Requests queued waiting for a free connection.
+ * @property {number} max - Configured pool maximum size.
+ */
+
+/**
+ * Reads safe-to-expose connection-pool counters from a Knex instance.
+ *
+ * Accesses the underlying tarn pool object exposed at `knexInstance.client.pool`.
+ * Returns `null` when the pool is inaccessible (e.g. in-memory SQLite test mode
+ * where no real pool is initialised).
+ *
+ * Security note: only numeric counts are returned. Connection strings, host
+ * names, credentials, and raw pool-object internals are never included.
+ *
+ * @param {import('knex').Knex} knexInstance - Knex database instance to inspect.
+ * @returns {PoolMetrics|null} Current pool counters, or null when unavailable.
+ */
+function inspectPoolHealth(knexInstance) {
+  const pool = knexInstance && knexInstance.client && knexInstance.client.pool;
+  if (!pool) {
+    return null;
+  }
+
+  const used = typeof pool.numUsed === 'function' ? pool.numUsed() : 0;
+  const free = typeof pool.numFree === 'function' ? pool.numFree() : 0;
+  const pending = typeof pool.numPendingAcquires === 'function' ? pool.numPendingAcquires() : 0;
+  const max = (
+    knexInstance.client &&
+    knexInstance.client.config &&
+    knexInstance.client.config.pool &&
+    knexInstance.client.config.pool.max
+  ) || 10;
+
+  return { used, free, pending, max };
+}
+
+/**
+ * Checks database reachability and connection-pool saturation.
+ *
+ * Runs `SELECT 1` inside a short bounded timeout so the health probe never
+ * hangs on an exhausted pool. Pool metrics (used/free/pending/max) are
+ * captured before the query and returned alongside reachability status.
+ *
+ * Status values:
+ * - `'healthy'`       — DB is reachable and pool is within normal bounds.
+ * - `'degraded'`      — DB is reachable but pool is saturated (pending > 0
+ *                       or used connections at or above the saturation ratio).
+ * - `'unhealthy'`     — DB is unreachable or pool acquisition timed out.
+ * - `'not_configured'`— `DATABASE_URL` env var is absent.
+ *
+ * Tuning env vars:
+ * - `DB_HEALTH_PROBE_TIMEOUT_MS`  — milliseconds before the probe times out
+ *                                   (default 2000).
+ * - `DB_POOL_SATURATION_RATIO`    — fraction of `max` at which `used`
+ *                                   connections trigger `degraded` (default 0.8).
+ *
+ * Does not expose connection strings, host names, or credentials in the response.
+ *
+ * @returns {Promise<{
+ *   status: 'healthy'|'degraded'|'unhealthy'|'not_configured',
+ *   latency?: number,
+ *   pool?: PoolMetrics,
+ *   error?: string
+ * }>}
  */
 async function checkDatabaseHealth() {
   if (!process.env.DATABASE_URL) {
     return { status: 'not_configured' };
   }
 
+  const poolMetrics = inspectPoolHealth(db);
+  const probeTimeoutMs = parseInt(process.env.DB_HEALTH_PROBE_TIMEOUT_MS, 10) || 2000;
+  const saturationRatio = parseFloat(process.env.DB_POOL_SATURATION_RATIO) || 0.8;
+
   const start = Date.now();
+  let timedOut = false;
+  let timeoutId;
+
   try {
-    await db.raw('SELECT 1');
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        timedOut = true;
+        reject(new Error('POOL_ACQUIRE_TIMEOUT'));
+      }, probeTimeoutMs);
+      if (timeoutId.unref) {
+        timeoutId.unref();
+      }
+    });
+
+    await Promise.race([db.raw('SELECT 1'), timeoutPromise]);
+    clearTimeout(timeoutId);
+
     const latency = Date.now() - start;
-    return { status: 'healthy', latency };
+
+    const hasPending = poolMetrics && poolMetrics.pending > 0;
+    const atSaturation = poolMetrics && poolMetrics.used >= Math.ceil(poolMetrics.max * saturationRatio);
+    const status = (hasPending || atSaturation) ? 'degraded' : 'healthy';
+
+    const result = { status, latency };
+    if (poolMetrics) {
+      result.pool = poolMetrics;
+    }
+    return result;
   } catch (_error) {
+    clearTimeout(timeoutId);
     const latency = Date.now() - start;
-    return { status: 'unhealthy', latency, error: 'Database unreachable' };
+    const result = {
+      status: 'unhealthy',
+      latency,
+      error: timedOut ? 'Connection pool acquire timeout' : 'Database unreachable',
+    };
+    if (poolMetrics) {
+      result.pool = poolMetrics;
+    }
+    return result;
   }
 }
 
 /**
  * Checks escrow reconciliation status.
- * 
- * @returns {Promise<{status: string, lastRun?: string, mismatches?: number, error?: string}>} Reconciliation health status.
+ *
+ * Returns a structured summary that includes mismatch count and drift data so
+ * the `/ready` probe can degrade when funded-amount drift exceeds the configured
+ * threshold (`RECONCILIATION_DRIFT_THRESHOLD`, default `1`).
+ *
+ * Status values:
+ * - `'healthy'`     — Last run is recent and has zero mismatches.
+ * - `'degraded'`    — Last run has mismatches but count is below the drift
+ *                     threshold; drift is present but within tolerance.
+ * - `'mismatch_threshold_breached'` — Mismatch count meets or exceeds
+ *                     `RECONCILIATION_DRIFT_THRESHOLD`; readiness should degrade.
+ * - `'stale'`       — Last run was more than 25 hours ago.
+ * - `'not_run'`     — Reconciliation has never been executed.
+ * - `'error'`       — Lookup failed.
+ *
+ * @returns {Promise<{
+ *   status: string,
+ *   lastRun?: string,
+ *   mismatches?: number,
+ *   totalDrift?: number,
+ *   threshold?: number,
+ *   thresholdBreached?: boolean,
+ *   error?: string
+ * }>} Reconciliation health status.
  */
 async function checkReconciliationHealth() {
   try {
-    const { getReconciliationSummary } = require('../jobs/reconcileEscrow');
+    const { getReconciliationSummary, getDriftThreshold } = require('../jobs/reconcileEscrow');
     const summary = await getReconciliationSummary();
 
     if (!summary) {
@@ -100,17 +257,43 @@ async function checkReconciliationHealth() {
     const lastRun = new Date(summary.reconciledAt);
     const hoursSinceLastRun = (Date.now() - lastRun.getTime()) / (1000 * 60 * 60);
 
-    // Consider unhealthy if last run was more than 25 hours ago (allowing 1 hour grace)
+    // Consider stale if last run was more than 25 hours ago (1-hour grace).
     if (hoursSinceLastRun > 25) {
-      return { status: 'stale', lastRun: summary.reconciledAt, error: 'Reconciliation not run recently' };
+      return {
+        status: 'stale',
+        lastRun: summary.reconciledAt,
+        error: 'Reconciliation not run recently',
+      };
     }
 
-    // Unhealthy if there are mismatches
-    if (summary.mismatches > 0) {
-      return { status: 'mismatches', lastRun: summary.reconciledAt, mismatches: summary.mismatches };
+    const threshold = typeof getDriftThreshold === 'function' ? getDriftThreshold() : 5;
+    const mismatches = summary.mismatches || 0;
+
+    // Calculate total drift from results if available.
+    const totalDrift = Array.isArray(summary.results)
+      ? summary.results.reduce((acc, r) => acc + (r.driftMagnitude || 0), 0)
+      : 0;
+
+    if (mismatches > 0) {
+      return {
+        status: 'mismatches',
+        lastRun: summary.reconciledAt,
+        mismatches,
+        totalDrift,
+        threshold,
+        thresholdBreached: mismatches >= threshold,
+      };
     }
 
-    return { status: 'healthy', lastRun: summary.reconciledAt };
+
+    return {
+      status: 'healthy',
+      lastRun: summary.reconciledAt,
+      mismatches: 0,
+      totalDrift: 0,
+      threshold,
+      thresholdBreached: false,
+    };
   } catch (error) {
     return { status: 'error', error: error.message };
   }
@@ -129,9 +312,14 @@ async function checkKycHealth() {
   }
 
   const start = Date.now();
+  let timeout;
+
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
+    timeout = setTimeout(() => controller.abort(), 5000);
+    if (timeout.unref) {
+      timeout.unref();
+    }
 
     const response = await fetch(kycCfg.baseUrl, {
       method: 'HEAD',
@@ -139,7 +327,6 @@ async function checkKycHealth() {
       signal: controller.signal,
     });
 
-    clearTimeout(timeout);
     const latency = Date.now() - start;
 
     // Any HTTP response (even 4xx) means the host is reachable
@@ -149,6 +336,8 @@ async function checkKycHealth() {
   } catch (error) {
     const latency = Date.now() - start;
     return { status: 'unhealthy', latency, error: error.message };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -203,52 +392,128 @@ async function checkIndexerStaleness() {
 }
 
 /**
+ * Checks if the configured S3 bucket is reachable using the connectivity
+ * probe defined by the storage service. The result is the raw probe output:
+ * status plus optional latency and a sanitized error descriptor. Credentials,
+ * endpoint URLs, and signed request headers are stripped before the result
+ * is returned.
+ *
+ * Operator-visible statuses:
+ *
+ * - `'healthy'` — bucket is reachable and credentials authorize access.
+ * - `'in_memory'` — in-memory fallback active; probe skipped.
+ * - `'disabled'` — operator opted out via `S3_HEALTHCHECK_ENABLED=false`.
+ * - `'not_configured'` — bucket name or credentials are missing.
+ * - `'unhealthy'` — `HeadBucket` failed; `error.code` is an AWS error name.
+ *
+ * @returns {Promise<{
+ *   status: string,
+ *   latency?: number,
+ *   error?: {code: string, hint: string},
+ *   bucketConfigured?: boolean,
+ *   credentialsConfigured?: boolean
+ * }>}
+ */
+async function checkStorageHealth() {
+  const storage = require('./storage');
+  return storage.probeS3Connectivity();
+}
+
+/**
  * Performs all dependency health checks.
  * @returns {Promise<{healthy: boolean, checks: Object}>}
  */
 async function performHealthChecks() {
-  const [soroban, database, kyc, indexerStaleness] = await Promise.all([
+  const [soroban, database, kyc, indexerStaleness, storage] = await Promise.all([
     checkSorobanHealth(),
     checkDatabaseHealth(),
     checkKycHealth(),
     checkIndexerStaleness(),
+    checkStorageHealth(),
   ]);
 
-  const checks = { soroban, database, kyc, indexerStaleness };
+  const checks = { soroban, database, kyc, indexerStaleness, storage };
   const healthy =
     (soroban.status === 'healthy' || soroban.status === 'unknown') &&
     (kyc.status === 'healthy' || kyc.status === 'disabled') &&
-    (indexerStaleness.status === 'healthy' || indexerStaleness.status === 'disabled');
+    (indexerStaleness.status === 'healthy' || indexerStaleness.status === 'disabled') &&
+    // Storage is in-memory or opted out → non-blocking. Missing config or
+    // unreachable buckets → blocking for `/ready` because uploads will fail.
+    storage.status !== 'not_configured' &&
+    storage.status !== 'unhealthy';
 
   return { healthy, checks };
 }
 
 /**
- * Performs critical-dependency readiness checks (DB, Soroban RPC).
- * The KYC and indexer checks are omitted because they are not required
- * for the process to serve traffic — only critical upstream dependencies
- * that would prevent any request from completing are included.
+ * Performs critical-dependency readiness checks (DB, Soroban RPC, storage,
+ * reconciliation).
+ * The KYC and indexer staleness checks are omitted because they are not
+ * required for the process to serve *most* traffic — only critical
+ * upstream dependencies that would prevent any business request from
+ * completing are included.
  *
- * Updates the `readiness_gauge` Prometheus metric (1 = ready, 0 = not ready).
+ * The S3 storage probe is included so a misconfigured bucket (wrong
+ * endpoint, bad credentials, deleted bucket) is surfaced on the readiness
+ * probe rather than at the first invoice upload.
  *
- * @returns {Promise<{healthy: boolean, checks: {database: Object, soroban: Object}}>}
+ * The reconciliation check degrades readiness when the most recent run has
+ * a mismatch count that meets or exceeds `RECONCILIATION_DRIFT_THRESHOLD`.
+ * The probe is non-blocking when reconciliation has never run (`not_run`)
+ * or when the lookup fails (`error`), so a fresh deployment is never held
+ * back by the absence of a historical run.
+ *
+ * Updates the `readiness_gauge` Prometheus metric (1 = ready, 0.5 = degraded,
+ * 0 = not ready). Degraded Soroban RPC (slow) does NOT block readiness.
+ *
+ * @returns {Promise<{
+ *   healthy: boolean,
+ *   checks: {
+ *     database: Object,
+ *     soroban: Object,
+ *     storage: Object,
+ *     reconciliation: Object
+ *   }
+ * }>}
  */
 async function performReadinessChecks() {
-  const [database, soroban] = await Promise.all([
+  const [database, soroban, storage, reconciliation] = await Promise.all([
     checkDatabaseHealth(),
     checkSorobanHealth(),
+    checkStorageHealth(),
+    checkReconciliationHealth(),
   ]);
 
-  const checks = { database, soroban };
-  // Determine overall readiness. Degraded Soroban RPC (slow) does NOT block readiness.
-  const healthy =
-    database.status === 'healthy' &&
-    (soroban.status === 'healthy' || soroban.status === 'degraded' || soroban.status === 'unknown');
+  const checks = { database, soroban, storage, reconciliation };
+  // In-memory and explicitly-disabled probes are treated as readiness-OK.
+  // Production deployments missing the bucket or with an unreachable
+  // bucket DO block readiness.
+  const storageOk =
+    storage.status === 'healthy' ||
+    storage.status === 'in_memory' ||
+    storage.status === 'disabled';
+
+  // Determine overall readiness.
+  // - DB degraded (pool saturated) still allows traffic but signals pressure → ready.
+  // - DB unhealthy/not_configured → not ready.
+  // - Soroban degraded (slow) does NOT block readiness.
+  // - Reconciliation threshold breach → degrades readiness.
+  // - Reconciliation not_run / error → non-blocking (fresh deployments).
+  const dbReady = database.status === 'healthy' || database.status === 'degraded';
+  const sorobanReady = soroban.status === 'healthy' || soroban.status === 'degraded' || soroban.status === 'unknown';
+  const reconciliationOk = reconciliation.status !== 'mismatch_threshold_breached';
+
+  const healthy = dbReady && sorobanReady && storageOk && reconciliationOk;
 
   // Set gauge: 1 = ready, 0.5 = degraded, 0 = not ready
-  if (database.status !== 'healthy') {
+  if (!dbReady || !storageOk) {
     readinessGauge.set(0);
-  } else if (soroban.status === 'degraded') {
+  } else if (
+    database.status === 'degraded' ||
+    soroban.status === 'degraded' ||
+    reconciliation.status === 'mismatch_threshold_breached' ||
+    reconciliation.status === 'degraded'
+  ) {
     readinessGauge.set(0.5);
   } else {
     readinessGauge.set(healthy ? 1 : 0);
@@ -257,11 +522,65 @@ async function performReadinessChecks() {
   return { healthy, checks };
 }
 
+/**
+ * @typedef {Object} HealthCheckRecord
+ * @property {string} id        Deterministic identifier for this check name (e.g. "soroban").
+ * @property {string} name      Human-readable check name.
+ * @property {string} status    Current check status string.
+ * @property {string} timestamp ISO 8601 timestamp at which the snapshot was taken.
+ * @property {Object} detail    Raw result from the individual check function.
+ */
+
+/**
+ * Collects all named dependency health checks into a flat, deterministically-
+ * ordered array of {@link HealthCheckRecord} objects.
+ *
+ * Each record has a stable `id` (the check name) and a `timestamp` derived
+ * from the caller-supplied `snapshotTime` argument (defaults to `Date.now()`).
+ * This makes the list stable and sortable for cursor-based pagination.
+ *
+ * The check order is fixed to: soroban → database → kyc → indexerStaleness →
+ * storage → reconciliation, which matches `performHealthChecks` /
+ * `performReadinessChecks`.
+ *
+ * @param {Object}  [options]
+ * @param {number}  [options.snapshotTime=Date.now()]  Override for unit-test
+ *   determinism; milliseconds since epoch.
+ * @returns {Promise<HealthCheckRecord[]>}
+ */
+async function listHealthChecks({ snapshotTime } = {}) {
+  const ts = snapshotTime !== undefined ? snapshotTime : Date.now();
+  const timestamp = new Date(ts).toISOString();
+
+  const [soroban, database, kyc, indexerStaleness, storage, reconciliation] = await Promise.all([
+    checkSorobanHealth(),
+    checkDatabaseHealth(),
+    checkKycHealth(),
+    checkIndexerStaleness(),
+    checkStorageHealth(),
+    checkReconciliationHealth(),
+  ]);
+
+  return [
+    { id: 'soroban', name: 'Soroban RPC', status: soroban.status, timestamp, detail: soroban },
+    { id: 'database', name: 'Database', status: database.status, timestamp, detail: database },
+    { id: 'kyc', name: 'KYC Provider', status: kyc.status, timestamp, detail: kyc },
+    { id: 'indexerStaleness', name: 'Escrow Indexer Staleness', status: indexerStaleness.status, timestamp, detail: indexerStaleness },
+    { id: 'storage', name: 'Storage (S3)', status: storage.status, timestamp, detail: storage },
+    { id: 'reconciliation', name: 'Escrow Reconciliation', status: reconciliation.status, timestamp, detail: reconciliation },
+  ];
+}
+
 module.exports = {
   checkSorobanHealth,
   checkDatabaseHealth,
   checkKycHealth,
+  checkStorageHealth,
   checkIndexerStaleness,
+  checkReconciliationHealth,
   performHealthChecks,
   performReadinessChecks,
+  inspectPoolHealth,
+  resolveSorobanHealthTimeoutMs,
+  listHealthChecks,
 };

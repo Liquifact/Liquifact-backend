@@ -191,6 +191,11 @@ const invoiceUpdateSchema = z
 
     currency: currencySchema.optional(),
 
+    notes: z
+      .string({ invalid_type_error: 'notes must be a string' })
+      .max(2000, { message: 'notes must not exceed 2000 characters' })
+      .optional(),
+
     description: z
       .string()
       .max(1000, { message: 'description must not exceed 1000 characters' })
@@ -256,21 +261,19 @@ const paginationQuerySchema = z.object({
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+const validationHelper = require('./validationHelper');
+
 /**
  * Flattens a ZodError into a `{ [fieldPath]: firstMessage }` object.
+ *
+ * This is a re-export from the shared validation helper module,
+ * preserving backward compatibility for existing callers.
  *
  * @param {import('zod').ZodError} zodError
  * @returns {Record<string, string>}
  */
 function parseValidationErrors(zodError) {
-  const fieldErrors = {};
-  for (const issue of zodError.issues ?? zodError.errors ?? []) {
-    const path = issue.path.join('.') || '_root';
-    if (!fieldErrors[path]) {
-      fieldErrors[path] = issue.message;
-    }
-  }
-  return fieldErrors;
+  return validationHelper.parseValidationErrors(zodError);
 }
 
 // ── validateInvoicePayload adapter ───────────────────────────────────────────
@@ -323,27 +326,15 @@ function validateInvoicePayload(body) {
  *
  * On success, attaches the parsed (and transformed) value to `req.validated`.
  *
+ * This is a thin wrapper around `createBodyValidator` from the shared
+ * validation helper module, preserving the original API for backward
+ * compatibility.
+ *
  * @param {import('zod').ZodTypeAny} schema
  * @returns {import('express').RequestHandler}
  */
 function validateBody(schema) {
-  return (req, res, next) => {
-    const result = schema.safeParse(req.body);
-    if (result.success) {
-      req.validated = result.data;
-      return next();
-    }
-
-    const fieldErrors = parseValidationErrors(result.error);
-
-    return res.status(400).json({
-      type: 'https://liquifact.io/problems/validation-error',
-      title: 'Validation Error',
-      status: 400,
-      detail: 'Request body contains invalid or missing fields.',
-      fieldErrors,
-    });
-  };
+  return validationHelper.createBodyValidator(schema);
 }
 
 /**
@@ -352,27 +343,15 @@ function validateBody(schema) {
  *
  * On success, attaches the parsed value to `req.validatedQuery`.
  *
+ * This is a thin wrapper around `createQueryValidator` from the shared
+ * validation helper module, preserving the original API for backward
+ * compatibility.
+ *
  * @param {import('zod').ZodTypeAny} schema
  * @returns {import('express').RequestHandler}
  */
 function validateQuery(schema) {
-  return (req, res, next) => {
-    const result = schema.safeParse(req.query);
-    if (result.success) {
-      req.validatedQuery = result.data;
-      return next();
-    }
-
-    const fieldErrors = parseValidationErrors(result.error);
-
-    return res.status(400).json({
-      type: 'https://liquifact.io/problems/validation-error',
-      title: 'Validation Error',
-      status: 400,
-      detail: 'Query parameters contain invalid values.',
-      fieldErrors,
-    });
-  };
+  return validationHelper.createQueryValidator(schema);
 }
 
 // ── Exports ──────────────────────────────────────────────────────────────────

@@ -44,10 +44,10 @@ describe('Observability Integration', () => {
       .set('x-correlation-id', 'corr-123');
 
     expect(response.status).toBe(200);
-    expect(response.body.requestId).toBeDefined();
+    expect(response.body.requestId).toBe('corr-123');
     expect(response.body.correlationId).toBe('corr-123');
     expect(response.body.loggerBindings).toMatchObject({
-      requestId: response.body.requestId,
+      requestId: 'corr-123',
       correlationId: 'corr-123',
     });
   });

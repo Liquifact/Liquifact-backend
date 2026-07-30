@@ -2,6 +2,7 @@
 
 const db = require('../db/knex');
 const { encodeCursor, decodeCursor, CursorError } = require('../utils/cursorPagination');
+const { INVESTABLE_STATUSES } = require('./invoiceStateMachine');
 
 /**
  * Marketplace Service
@@ -61,13 +62,20 @@ const MARKETPLACE_QUERY_CONFIG = {
 };
 
 /**
- * Explicit visibility rules for marketplace listings.
+ * Public investable invoice statuses — derived from the authoritative
+ * {@link INVESTABLE_STATUSES} constant in `invoiceStateMachine`.
  *
- * Only these invoice statuses are considered publicly investable (i.e. appear
- * in the marketplace/invest listings).  Other statuses are tenant-private and
- * MUST NOT be exposed via read/list endpoints.
+ * Only invoices in one of these states are surfaced through the marketplace
+ * and invest endpoints.  All other states are tenant-private.
+ *
+ * **Do not add values here.**  To expand or change the investable set, update
+ * `INVESTABLE_STATUSES` in `src/services/invoiceStateMachine.js`.  This alias
+ * exists solely for backward-compatible named exports consumed by routes and
+ * other services.
+ *
+ * @type {readonly string[]}
  */
-const PUBLIC_INVESTABLE_INVOICE_STATUSES = Object.freeze(['verified', 'partially_funded']);
+const PUBLIC_INVESTABLE_INVOICE_STATUSES = INVESTABLE_STATUSES;
 
 /**
  * Applies shared filter conditions to a Knex query builder.

@@ -333,7 +333,8 @@ describe('Sentry observability module - Enhanced Scrubbing', () => {
     it('returns original event if scrubbing fails', () => {
       const circularEvent = { get circular() { return this; } };
       const result = sentry.scrubEvent(circularEvent);
-      expect(result).toBe(circularEvent);
+      // Spread creates a new object, so use toEqual instead of toBe
+      expect(result).toEqual(circularEvent);
     });
   });
 

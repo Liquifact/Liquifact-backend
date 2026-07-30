@@ -20,8 +20,11 @@
  */
 
 const JobQueue = require('./jobQueue');
+const { createJobPersistence } = require('./jobPersistence');
+const { assertJobStructure } = require('./persistenceValidation');
 const logger = require('../logger');
 const metrics = require('../metrics');
+const auditLogStore = require('../services/auditLogStore');
 
 /**
  * Background worker that processes queued jobs.
@@ -36,6 +39,31 @@ const metrics = require('../metrics');
  *
  * @class BackgroundWorker
  */
+function isPersistenceEnabled() {
+  return String(process.env.JOB_QUEUE_PERSISTENCE_ENABLED || '').toLowerCase() === 'true';
+}
+
+function getMaxRecoveryRows() {
+  const parsed = parseInt(process.env.JOB_QUEUE_MAX_RECOVERY_ROWS || '1000', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1000;
+}
+
+/**
+ * Creates the default queue, enabling durable backing only when the feature flag is set.
+ *
+ * @returns {JobQueue} Queue instance.
+ */
+function createDefaultJobQueue() {
+  if (!isPersistenceEnabled()) {
+    return new JobQueue();
+  }
+
+  const db = require('../db/knex');
+  return new JobQueue({
+    persistence: createJobPersistence(db, { maxRecoveryRows: getMaxRecoveryRows() }),
+  });
+}
+
 class BackgroundWorker {
   /**
    * Creates a new BackgroundWorker instance.
@@ -46,7 +74,7 @@ class BackgroundWorker {
    * @param {number}   [options.maxConcurrency=2]    - Max concurrent job processing
    */
   constructor(options = {}) {
-    this.jobQueue = options.jobQueue || new JobQueue();
+    this.jobQueue = options.jobQueue || createDefaultJobQueue();
 
     // Security: bound poll interval to prevent CPU spinning
     this.pollIntervalMs = Math.max(options.pollIntervalMs ?? 1000, 10);
@@ -206,7 +234,7 @@ class BackgroundWorker {
       this.processingCount += 1;
 
       this._processJob(job).catch((err) => {
-        logger.error({ err, jobId: job.id }, 'Unexpected error processing job');
+        logger.error({ err, ...buildJobContext(job) }, 'Unexpected error processing job');
       });
     }
 
@@ -224,9 +252,7 @@ class BackgroundWorker {
    */
   async _processJob(job) {
     try {
-      if (!job || !job.id || !job.type) {
-        throw new Error('Invalid job structure');
-      }
+      assertJobStructure(job);
 
       const handler = this.handlers.get(job.type);
       if (!handler) {
@@ -237,6 +263,7 @@ class BackgroundWorker {
 
       this.jobQueue.ack(job.id);
     } catch (err) {
+      logger.error({ err, ...buildJobContext(job) }, 'Job handler failed');
       this.jobQueue.retry(job.id, err);
     } finally {
       this.processingCount -= 1;
@@ -246,21 +273,41 @@ class BackgroundWorker {
 
 
 /**
- * Build a compact execution context object for logging from a job record.
- * Only a safe subset of payload keys are copied to avoid leaking secrets.
+ * Allow-listed payload keys that are safe to surface in error logs.
+ * Everything else in the payload (webhook secrets, signing tokens, full
+ * invoice bodies, …) is deliberately dropped.
+ *
+ * @type {Set<string>}
+ */
+const CONTEXT_KEYS = new Set([
+  'tenantId', 'invoiceId', 'correlationId', 'performedBy', 'policyId', 'batchSize',
+]);
+
+/**
+ * Build a compact, log-safe execution context object from a job record.
+ *
+ * The context always carries `jobId`, `jobType`, and `attempt` (the attempt
+ * count at the time of failure). From the job payload, only the allow-listed
+ * {@link CONTEXT_KEYS} are copied — and only when their values are primitives
+ * (string/number/boolean/null), so nested objects can never smuggle secrets
+ * into logs. When present, `correlationId` links the failure back to the
+ * request that enqueued the job.
+ *
+ * As defence in depth, the assembled context is passed through the shared
+ * `redactValue` scrubber from `services/auditLogStore`, which masks any value
+ * whose key matches a sensitive pattern (password, secret, token, apiKey, …).
  *
  * @param {Object} job - Job record from the queue
- * @returns {Object} Context with jobId, jobType, attempt, and allowed payload keys
+ * @returns {Object} Redacted context with jobId, jobType, attempt, and allowed payload keys
  */
 function buildJobContext(job) {
-  if (!job || typeof job !== 'object') return {};
+  if (!job || typeof job !== 'object') { return {}; }
   const ctx = {
     jobId: job.id,
     jobType: job.type,
     attempt: job.attempts ?? job.attempt ?? 1,
   };
 
-  const CONTEXT_KEYS = new Set(['tenantId', 'invoiceId', 'correlationId', 'performedBy', 'policyId', 'batchSize']);
   const payload = job.payload || {};
   if (payload && typeof payload === 'object') {
     for (const k of CONTEXT_KEYS) {
@@ -273,8 +320,11 @@ function buildJobContext(job) {
       }
     }
   }
-  return ctx;
+  return auditLogStore.redactValue(ctx);
 }
 
 module.exports = BackgroundWorker;
+module.exports.createDefaultJobQueue = createDefaultJobQueue;
+module.exports.isPersistenceEnabled = isPersistenceEnabled;
+module.exports.getMaxRecoveryRows = getMaxRecoveryRows;
 module.exports.buildJobContext = buildJobContext;

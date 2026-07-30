@@ -6,6 +6,15 @@
 
 const z = require('zod');
 
+/** Express-compatible request size string. @type {z.ZodDefault<z.ZodString>} */
+const InvoiceFileMaxSizeSchema = z
+  .string()
+  .trim()
+  .regex(/^\d+(?:\.\d+)?(?:b|kb|mb|gb)$/i, {
+    message: 'INVOICE_FILE_MAX_SIZE must be a size such as 512kb or 5mb.',
+  })
+  .default('5mb');
+
 /**
  * Complete configuration schema with defaults and validation.
  * Secrets have no defaults - must be provided.
@@ -19,6 +28,9 @@ const ConfigSchema = z
     JWT_ALGORITHMS: z.string().optional().default('HS256'), // Comma-separated allowlist, e.g. HS256,RS256
     JWT_ISSUER: z.string().optional(), // Optional issuer claim to enforce
     JWT_AUDIENCE: z.string().optional(), // Optional audience claim to enforce
+    CURSOR_SECRET: z.string().min(32).optional(), // Dedicated marketplace cursor HMAC secret
+    CURSOR_TTL_ENABLED: z.enum(['true', 'false']).default('false'),
+    CURSOR_TTL_SECONDS: z.coerce.number().int().min(1).default(3600),
     CORS_ALLOWED_ORIGINS: z.string().optional(), // Comma-separated, optional for dev fallbacks
     SOROBAN_RPC_URL: z.string().url().default('https://soroban-testnet.stellar.org'),
     NETWORK_PASSPHRASE: z.string().default('Test SDF Network ; September 2015'),
@@ -27,13 +39,51 @@ const ConfigSchema = z
     // Escrow indexer configuration
     ESCROW_INDEXER_ENABLED: z.enum(['true', 'false']).default('false'),
     ESCROW_INDEXER_STALE_THRESHOLD_SECONDS: z.coerce.number().min(1).default(300),
+    // Escrow read projection — gates the new projection/cache-based escrow read path
+    ESCROW_READ_PROJECTION_ENABLED: z.enum(['true', 'false']).default('true'),
+    // Invoice state machine — gates /api/invoices state-transition endpoints.
+    // When 'false', the invoice state routes are not mounted so requests return 404.
+    // Defaults to 'true' (enabled) to preserve existing behaviour.
+    INVOICE_STATE_ENABLED: z.enum(['true', 'false']).default('true'),
+    // Runtime admin config surface — gates POST /api/admin/config and
+    // GET /api/admin/config/sections. When 'false' the router is not mounted
+    // so requests return 404, allowing the surface to be disabled without a
+    // deploy. Defaults to 'true' (enabled).
+    CONFIG_RUNTIME_ENABLED: z.enum(['true', 'false']).default('true'),
     // KYC provider — all optional, but URL+key must be provided together in non-test envs
     KYC_PROVIDER_URL: z.string().url().optional(),
     KYC_PROVIDER_API_KEY: z.string().min(1).optional(),
     KYC_PROVIDER_SECRET: z.string().min(1).optional(),
+    // Issue #592 — KYC provider transport hardening. Numeric knobs are clamped
+    // so a typo cannot disable the timeout, exhaust retries, or hang the breaker.
+    KYC_PROVIDER_TIMEOUT_MS: z.coerce.number().min(100).max(30000).default(5000),
+    KYC_PROVIDER_MAX_RETRIES: z.coerce.number().min(0).max(10).default(3),
+    KYC_PROVIDER_BASE_DELAY_MS: z.coerce.number().min(0).max(10000).default(200),
+    KYC_PROVIDER_MAX_DELAY_MS: z.coerce.number().min(0).max(60000).default(5000),
+    KYC_PROVIDER_SIGN_REQUESTS: z.enum(['true', 'false']).default('false'),
+    KYC_PROVIDER_VERIFY_RESPONSE_SIGNATURE: z.enum(['true', 'false']).default('false'),
+    KYC_PROVIDER_CB_FAILURE_THRESHOLD: z.coerce.number().min(1).max(100).default(5),
+    KYC_PROVIDER_CB_RECOVERY_TIMEOUT_MS: z.coerce.number().min(100).max(60000).default(10000),
+    // KYC webhook ingestion feature flag — safe default: disabled
+    KYC_WEBHOOK_ENABLED: z.enum(['true', 'false']).default('false'),
+    // Public base URL for the API, used in the OpenAPI spec servers array.
+    // Required in production and must use HTTPS. Falls back to localhost in development/test.
+    PUBLIC_API_BASE_URL: z.string().url().optional(),
+    INVOICE_FILE_MAX_SIZE: InvoiceFileMaxSizeSchema,
+    // Feature flag: gates Prometheus metrics collection and the /metrics endpoint.
+    // When 'false', all metric recording becomes a silent no-op and GET /metrics
+    // returns 503. Default 'true' preserves existing behaviour.
+    METRICS_ENABLED: z.enum(['true', 'false']).default('true'),
   })
   .superRefine((data, ctx) => {
     if (data.NODE_ENV === 'test') { return; }
+    if (data.NODE_ENV === 'production' && !data.CURSOR_SECRET && !data.JWT_SECRET) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'CURSOR_SECRET or JWT_SECRET must be configured in production.',
+        path: ['CURSOR_SECRET'],
+      });
+    }
     const hasUrl = Boolean(data.KYC_PROVIDER_URL);
     const hasKey = Boolean(data.KYC_PROVIDER_API_KEY);
     if (hasUrl !== hasKey) {
@@ -43,6 +93,41 @@ const ConfigSchema = z
           'KYC_PROVIDER_URL and KYC_PROVIDER_API_KEY must both be set or both be absent.',
         path: hasUrl ? ['KYC_PROVIDER_API_KEY'] : ['KYC_PROVIDER_URL'],
       });
+    }
+    if (data.NODE_ENV === 'production') {
+      const baseUrl = data.PUBLIC_API_BASE_URL;
+      // Require the variable to be present in production
+      if (!baseUrl) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            'PUBLIC_API_BASE_URL must be set in production. It is used in the OpenAPI spec servers array.',
+          path: ['PUBLIC_API_BASE_URL'],
+        });
+        return;
+      }
+      // Require HTTPS — never allow plaintext in production
+      let parsed;
+      try { parsed = new URL(baseUrl); } catch (_) { parsed = null; }
+      if (!parsed || parsed.protocol !== 'https:') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            'PUBLIC_API_BASE_URL must use HTTPS in production.',
+          path: ['PUBLIC_API_BASE_URL'],
+        });
+        return;
+      }
+      // Reject loopback addresses (127.x.x.x, ::1, [::1], localhost)
+      const loopbackPattern = /^(localhost|127(?:\.\d+){3}|::1|\[::1\])$/i;
+      if (loopbackPattern.test(parsed.hostname)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            'PUBLIC_API_BASE_URL must not be a loopback address in production.',
+          path: ['PUBLIC_API_BASE_URL'],
+        });
+      }
     }
   });
 
@@ -96,6 +181,27 @@ function get() {
   return config;
 }
 
+/**
+ * Returns a value from the validated configuration with key-aware JSDoc types.
+ * @template {keyof z.infer<typeof ConfigSchema>} K
+ * @param {K} key - Validated configuration key.
+ * @returns {z.infer<typeof ConfigSchema>[K]} The validated value for the key.
+ */
+function getValue(key) {
+  return get()[key];
+}
+
+/**
+ * Returns the validated invoice PDF upload limit used when routes are built.
+ * @returns {string} Express-compatible request size limit.
+ */
+function getInvoiceFileMaxSize() {
+  if (config) {
+    return config.INVOICE_FILE_MAX_SIZE;
+  }
+  return InvoiceFileMaxSizeSchema.parse(process.env.INVOICE_FILE_MAX_SIZE);
+}
+
 const securityHeaders = {
   contentSecurityPolicy: {
     directives: {
@@ -135,7 +241,10 @@ const securityHeaders = {
 module.exports = {
   validate,
   get,
+  getValue,
+  getInvoiceFileMaxSize,
   logRedactedSummary,
   ConfigSchema,
+  InvoiceFileMaxSizeSchema,
   securityHeaders,
 };

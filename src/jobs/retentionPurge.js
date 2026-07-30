@@ -132,6 +132,33 @@ function hashPiiValue(value, salt) {
 }
 
 /**
+ * Builds a forensic before-state snapshot for PII fields that are about to be
+ * destructively purged. The snapshot intentionally stores only field names and
+ * salted hashes of non-null prior values; it never returns clear-text PII.
+ *
+ * @param {Object|null} invoice - Invoice row before destructive purge
+ * @param {string[]} piiFields - Validated PII field names to snapshot
+ * @returns {{fieldHashes: Object, fieldCount: number, valueHashCount: number}} Minimal hashed snapshot
+ */
+function buildPiiBeforeStateSnapshot(invoice, piiFields) {
+  const fieldHashes = {};
+
+  if (invoice) {
+    piiFields.forEach(field => {
+      if (invoice[field] !== null && invoice[field] !== undefined) {
+        fieldHashes[field] = hashPiiValue(invoice[field], invoice.id);
+      }
+    });
+  }
+
+  return {
+    fieldHashes,
+    fieldCount: piiFields.length,
+    valueHashCount: Object.keys(fieldHashes).length
+  };
+}
+
+/**
  * Purges PII from an invoice (or simulates for dry run)
  * @param {string} invoiceId - Invoice UUID
  * @param {string[]} piiFields - PII fields to purge
@@ -140,18 +167,17 @@ function hashPiiValue(value, salt) {
  */
 async function purgeInvoicePii(invoiceId, piiFields, dryRun = false) {
   const updateData = {};
-  const oldValues = {};
+  let beforeStateSnapshot = {
+    fieldHashes: {},
+    fieldCount: piiFields.length,
+    valueHashCount: 0
+  };
 
-  // Get current values for audit
+  // Capture a hashed before-state only for destructive purges. Dry-run audit
+  // behavior remains unchanged and does not fetch or persist additional values.
   if (!dryRun) {
     const current = await db('invoices').where('id', invoiceId).first();
-    if (current) {
-      piiFields.forEach(field => {
-        if (current[field] !== null) {
-          oldValues[field] = hashPiiValue(current[field], invoiceId);
-        }
-      });
-    }
+    beforeStateSnapshot = buildPiiBeforeStateSnapshot(current, piiFields);
   }
 
   // Prepare update data (set to null for purging)
@@ -164,7 +190,8 @@ async function purgeInvoicePii(invoiceId, piiFields, dryRun = false) {
       success: true,
       dryRun: true,
       purgedFields: piiFields,
-      oldValues
+      oldValues: beforeStateSnapshot.fieldHashes,
+      beforeStateSnapshot
     };
   }
 
@@ -176,7 +203,8 @@ async function purgeInvoicePii(invoiceId, piiFields, dryRun = false) {
     success: result > 0,
     dryRun: false,
     purgedFields: result > 0 ? piiFields : [],
-    oldValues
+    oldValues: beforeStateSnapshot.fieldHashes,
+    beforeStateSnapshot
   };
 }
 
@@ -354,7 +382,12 @@ retentionWorker.registerHandler('retention_purge', async (job) => {
                 policyId: policy.id,
                 dryRun: result.dryRun,
                 invoiceNumber: invoice.invoice_number,
-                purgedFieldsCount: result.purgedFields.length
+                purgedFieldsCount: result.purgedFields.length,
+                beforeStateSnapshot: dryRun ? undefined : {
+                  fieldNames: result.purgedFields,
+                  fieldCount: result.beforeStateSnapshot.fieldCount,
+                  valueHashCount: result.beforeStateSnapshot.valueHashCount
+                }
               }
             });
 
@@ -538,6 +571,7 @@ module.exports = {
   createJobExecution,
   updateJobExecution,
   hashPiiValue,
+  buildPiiBeforeStateSnapshot,
   jobExecutions,
   retentionQueue,
   retentionWorker

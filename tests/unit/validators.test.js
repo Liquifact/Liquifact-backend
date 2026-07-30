@@ -1,4 +1,7 @@
 const { validateInvoiceQueryParams } = require('../../src/utils/validators');
+const { ALL_INVOICE_STATUSES } = require('../../src/services/invoiceStateMachine');
+
+const statusErrorMessage = `Invalid status. Must be one of: ${ALL_INVOICE_STATUSES.join(', ')}`;
 
 describe('Validators Utility', () => {
   describe('validateInvoiceQueryParams', () => {
@@ -13,7 +16,7 @@ describe('Validators Utility', () => {
       const query = { status: 'invalid' };
       const result = validateInvoiceQueryParams(query);
       expect(result.isValid).toBe(false);
-      expect(result.fieldErrors.status).toBe('Invalid status. Must be one of: paid, pending, overdue');
+      expect(result.fieldErrors.status).toBe(statusErrorMessage);
     });
 
     it('should validate valid SME ID', () => {

@@ -100,6 +100,10 @@ const {
   handleReconciliationJob,
   scheduleNightlyReconciliation,
   getReconciliationSummary,
+  raiseReconciliationMismatchAlert,
+  getMismatchAlertChannel,
+  getMismatchAlertThreshold,
+  getDriftThreshold,
   RECONCILE_STATUS,
   RECONCILABLE_STATUSES,
   DRIFT_THRESHOLD,
@@ -593,7 +597,674 @@ describe('drift alerting metrics', () => {
   });
 });
 
+
+// ── raiseReconciliationMismatchAlert ──────────────────────────────────────
+
+describe('raiseReconciliationMismatchAlert', () => {
+  describe('alert channel: log', () => {
+    let origChannel;
+    beforeEach(() => {
+      origChannel = process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL;
+      process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL = 'log';
+      delete process.env.RECONCILIATION_MISMATCH_ALERT_THRESHOLD;
+    });
+    afterEach(() => {
+      if (origChannel === undefined) {
+        delete process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL;
+      } else {
+        process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL = origChannel;
+      }
+    });
+
+    it('emits a warn log with all required structured fields', () => {
+      raiseReconciliationMismatchAlert({
+        invoiceId: 'inv_log_1',
+        expected: 5000,
+        actual: 4800,
+        driftMagnitude: 200,
+        runMismatches: 1,
+      });
+
+      expect(mockLogger.warn).toHaveBeenCalledTimes(1);
+      const [meta, msg] = mockLogger.warn.mock.calls[0];
+      expect(meta).toMatchObject({
+        alert: 'reconciliation_mismatch',
+        invoiceId: 'inv_log_1',
+        expected: 5000,
+        actual: 4800,
+        driftMagnitude: 200,
+        runMismatches: 1,
+      });
+      expect(msg).toMatch(/mismatch/i);
+    });
+
+    it('does NOT emit a warn when runMismatches is below threshold', () => {
+      process.env.RECONCILIATION_MISMATCH_ALERT_THRESHOLD = '3';
+      raiseReconciliationMismatchAlert({
+        invoiceId: 'inv_below',
+        expected: 100,
+        actual: 90,
+        driftMagnitude: 10,
+        runMismatches: 2, // below threshold of 3
+      });
+      expect(mockLogger.warn).not.toHaveBeenCalled();
+      delete process.env.RECONCILIATION_MISMATCH_ALERT_THRESHOLD;
+    });
+
+    it('emits a warn exactly at the threshold boundary', () => {
+      process.env.RECONCILIATION_MISMATCH_ALERT_THRESHOLD = '2';
+      raiseReconciliationMismatchAlert({
+        invoiceId: 'inv_boundary',
+        expected: 100,
+        actual: 90,
+        driftMagnitude: 10,
+        runMismatches: 2, // exactly at threshold
+      });
+      expect(mockLogger.warn).toHaveBeenCalledTimes(1);
+      delete process.env.RECONCILIATION_MISMATCH_ALERT_THRESHOLD;
+    });
+  });
+
+  describe('alert channel: sentry (Sentry disabled)', () => {
+    let origChannel;
+    beforeEach(() => {
+      origChannel = process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL;
+      process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL = 'sentry';
+    });
+    afterEach(() => {
+      if (origChannel === undefined) {
+        delete process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL;
+      } else {
+        process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL = origChannel;
+      }
+    });
+
+    it('does not throw when Sentry is disabled', () => {
+      // Sentry is not enabled in test environment (no SENTRY_DSN)
+      expect(() => {
+        raiseReconciliationMismatchAlert({
+          invoiceId: 'inv_sentry_off',
+          expected: 500,
+          actual: 450,
+          driftMagnitude: 50,
+          runMismatches: 1,
+        });
+      }).not.toThrow();
+      // No warn log on sentry-only channel
+      expect(mockLogger.warn).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('alert channel: sentry+log (default)', () => {
+    let origChannel;
+    beforeEach(() => {
+      origChannel = process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL;
+      process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL = 'sentry+log';
+      delete process.env.RECONCILIATION_MISMATCH_ALERT_THRESHOLD;
+    });
+    afterEach(() => {
+      if (origChannel === undefined) {
+        delete process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL;
+      } else {
+        process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL = origChannel;
+      }
+    });
+
+    it('always emits a warn log on sentry+log channel', () => {
+      raiseReconciliationMismatchAlert({
+        invoiceId: 'inv_sl',
+        expected: 300,
+        actual: 200,
+        driftMagnitude: 100,
+        runMismatches: 1,
+      });
+      expect(mockLogger.warn).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not throw when Sentry is disabled (graceful fallback)', () => {
+      expect(() => {
+        raiseReconciliationMismatchAlert({
+          invoiceId: 'inv_sl2',
+          expected: 300,
+          actual: 200,
+          driftMagnitude: 100,
+          runMismatches: 1,
+        });
+      }).not.toThrow();
+    });
+  });
+
+  describe('invalid/unknown channel falls back to sentry+log', () => {
+    let origChannel;
+    beforeEach(() => {
+      origChannel = process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL;
+      process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL = 'unknown_channel';
+    });
+    afterEach(() => {
+      if (origChannel === undefined) {
+        delete process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL;
+      } else {
+        process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL = origChannel;
+      }
+    });
+
+    it('treats unknown channel as sentry+log and emits warn', () => {
+      raiseReconciliationMismatchAlert({
+        invoiceId: 'inv_unk',
+        expected: 100,
+        actual: 80,
+        driftMagnitude: 20,
+        runMismatches: 1,
+      });
+      expect(mockLogger.warn).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('default runMismatches=1 behavior', () => {
+    let origChannel;
+    beforeEach(() => {
+      origChannel = process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL;
+      process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL = 'log';
+      delete process.env.RECONCILIATION_MISMATCH_ALERT_THRESHOLD;
+    });
+    afterEach(() => {
+      if (origChannel === undefined) {
+        delete process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL;
+      } else {
+        process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL = origChannel;
+      }
+    });
+
+    it('fires with default runMismatches=1 when threshold is 1 (default)', () => {
+      // Called without runMismatches; defaults to 1, threshold defaults to 1 → fires
+      raiseReconciliationMismatchAlert({
+        invoiceId: 'inv_def',
+        expected: 1000,
+        actual: 900,
+        driftMagnitude: 100,
+      });
+      expect(mockLogger.warn).toHaveBeenCalledTimes(1);
+    });
+  });
+});
+
+// ── getMismatchAlertChannel / getMismatchAlertThreshold / getDriftThreshold ─
+
+describe('getMismatchAlertChannel', () => {
+  const origEnv = process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL;
+  afterEach(() => {
+    if (origEnv === undefined) {
+      delete process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL;
+    } else {
+      process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL = origEnv;
+    }
+  });
+
+  it('defaults to sentry+log when unset', () => {
+    delete process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL;
+    expect(getMismatchAlertChannel()).toBe('sentry+log');
+  });
+
+  it('returns log when set to log', () => {
+    process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL = 'log';
+    expect(getMismatchAlertChannel()).toBe('log');
+  });
+
+  it('returns sentry when set to sentry', () => {
+    process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL = 'sentry';
+    expect(getMismatchAlertChannel()).toBe('sentry');
+  });
+
+  it('falls back to sentry+log for unknown values', () => {
+    process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL = 'pagerduty';
+    expect(getMismatchAlertChannel()).toBe('sentry+log');
+  });
+});
+
+describe('getMismatchAlertThreshold', () => {
+  const origEnv = process.env.RECONCILIATION_MISMATCH_ALERT_THRESHOLD;
+  afterEach(() => {
+    if (origEnv === undefined) {
+      delete process.env.RECONCILIATION_MISMATCH_ALERT_THRESHOLD;
+    } else {
+      process.env.RECONCILIATION_MISMATCH_ALERT_THRESHOLD = origEnv;
+    }
+  });
+
+  it('defaults to 1 when unset', () => {
+    delete process.env.RECONCILIATION_MISMATCH_ALERT_THRESHOLD;
+    expect(getMismatchAlertThreshold()).toBe(1);
+  });
+
+  it('parses a valid integer', () => {
+    process.env.RECONCILIATION_MISMATCH_ALERT_THRESHOLD = '5';
+    expect(getMismatchAlertThreshold()).toBe(5);
+  });
+
+  it('clamps below 1 to 1', () => {
+    process.env.RECONCILIATION_MISMATCH_ALERT_THRESHOLD = '0';
+    expect(getMismatchAlertThreshold()).toBe(1);
+  });
+
+  it('returns 1 for non-numeric value', () => {
+    process.env.RECONCILIATION_MISMATCH_ALERT_THRESHOLD = 'abc';
+    expect(getMismatchAlertThreshold()).toBe(1);
+  });
+});
+
+describe('getDriftThreshold', () => {
+  const origEnv = process.env.RECONCILIATION_DRIFT_THRESHOLD;
+  afterEach(() => {
+    if (origEnv === undefined) {
+      delete process.env.RECONCILIATION_DRIFT_THRESHOLD;
+    } else {
+      process.env.RECONCILIATION_DRIFT_THRESHOLD = origEnv;
+    }
+  });
+
+  it('defaults to 1 when unset', () => {
+    delete process.env.RECONCILIATION_DRIFT_THRESHOLD;
+    expect(getDriftThreshold()).toBe(1);
+  });
+
+  it('parses a valid integer', () => {
+    process.env.RECONCILIATION_DRIFT_THRESHOLD = '3';
+    expect(getDriftThreshold()).toBe(3);
+  });
+
+  it('clamps below 1 to 1', () => {
+    process.env.RECONCILIATION_DRIFT_THRESHOLD = '-5';
+    expect(getDriftThreshold()).toBe(1);
+  });
+});
+
+// ── performReconciliation: per-invoice alert integration ──────────────────
+
+describe('performReconciliation: per-invoice alert via raiseReconciliationMismatchAlert', () => {
+  let origThreshold;
+  let origChannel;
+
+  beforeEach(() => {
+    origThreshold = process.env.RECONCILIATION_DRIFT_THRESHOLD;
+    origChannel = process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL;
+    process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL = 'log';
+  });
+
+  afterEach(() => {
+    if (origThreshold === undefined) {
+      delete process.env.RECONCILIATION_DRIFT_THRESHOLD;
+    } else {
+      process.env.RECONCILIATION_DRIFT_THRESHOLD = origThreshold;
+    }
+    if (origChannel === undefined) {
+      delete process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL;
+    } else {
+      process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL = origChannel;
+    }
+  });
+
+  it('raises per-invoice alert when threshold is breached', async () => {
+    process.env.RECONCILIATION_DRIFT_THRESHOLD = '1';
+    dbState.selectResults = [[
+      { id: 'inv_a', fundedTotal: 1000 },
+      { id: 'inv_b', fundedTotal: 2000 },
+    ]];
+
+    await performReconciliation({
+      dbClient: mockDb,
+      escrowAdapter: adapterFor({ inv_a: 800, inv_b: 2000 }), // inv_a mismatches
+    });
+
+    // mockLogger.warn should have been called for both the mismatch warning AND the alert
+    const warnCalls = mockLogger.warn.mock.calls;
+    const alertCall = warnCalls.find(([meta]) => meta && meta.alert === 'reconciliation_mismatch');
+    expect(alertCall).toBeDefined();
+    expect(alertCall[0]).toMatchObject({
+      alert: 'reconciliation_mismatch',
+      invoiceId: 'inv_a',
+      expected: 1000,
+      actual: 800,
+      driftMagnitude: 200,
+    });
+  });
+
+  it('raises per-invoice alerts for ALL mismatched invoices when threshold is breached', async () => {
+    process.env.RECONCILIATION_DRIFT_THRESHOLD = '1';
+    dbState.selectResults = [[
+      { id: 'inv_x', fundedTotal: 100 },
+      { id: 'inv_y', fundedTotal: 200 },
+      { id: 'inv_z', fundedTotal: 300 },
+    ]];
+
+    await performReconciliation({
+      dbClient: mockDb,
+      escrowAdapter: adapterFor({ inv_x: 90, inv_y: 180, inv_z: 300 }), // inv_x and inv_y mismatch
+    });
+
+    const warnCalls = mockLogger.warn.mock.calls;
+    const alertCalls = warnCalls.filter(([meta]) => meta && meta.alert === 'reconciliation_mismatch');
+    expect(alertCalls).toHaveLength(2);
+    const alertedIds = alertCalls.map(([meta]) => meta.invoiceId).sort();
+    expect(alertedIds).toEqual(['inv_x', 'inv_y']);
+  });
+
+  it('does NOT raise per-invoice alerts when mismatches are below threshold', async () => {
+    process.env.RECONCILIATION_DRIFT_THRESHOLD = '5';
+    process.env.RECONCILIATION_MISMATCH_ALERT_THRESHOLD = '5';
+    dbState.selectResults = [[
+      { id: 'inv_low', fundedTotal: 1000 },
+    ]];
+
+    await performReconciliation({
+      dbClient: mockDb,
+      escrowAdapter: adapterFor({ inv_low: 999 }), // 1 mismatch < threshold of 5
+    });
+
+    const warnCalls = mockLogger.warn.mock.calls;
+    const alertCall = warnCalls.find(([meta]) => meta && meta.alert === 'reconciliation_mismatch');
+    expect(alertCall).toBeUndefined();
+    delete process.env.RECONCILIATION_MISMATCH_ALERT_THRESHOLD;
+  });
+
+  it('does NOT raise per-invoice alerts when there are no mismatches', async () => {
+    process.env.RECONCILIATION_DRIFT_THRESHOLD = '1';
+    dbState.selectResults = [[
+      { id: 'inv_ok', fundedTotal: 500 },
+    ]];
+
+    await performReconciliation({
+      dbClient: mockDb,
+      escrowAdapter: adapterFor({ inv_ok: 500 }),
+    });
+
+    const warnCalls = mockLogger.warn.mock.calls;
+    const alertCall = warnCalls.find(([meta]) => meta && meta.alert === 'reconciliation_mismatch');
+    expect(alertCall).toBeUndefined();
+  });
+
+  it('does NOT raise alerts for ERROR status invoices', async () => {
+    process.env.RECONCILIATION_DRIFT_THRESHOLD = '1';
+    dbState.selectResults = [[
+      { id: 'inv_err', fundedTotal: 1000 },
+    ]];
+
+    await performReconciliation({
+      dbClient: mockDb,
+      // escrowAdapter throws for inv_err — this is an ERROR not a MISMATCH
+      escrowAdapter: () => Promise.reject(new Error('RPC fail')),
+    });
+
+    const warnCalls = mockLogger.warn.mock.calls;
+    const alertCall = warnCalls.find(([meta]) => meta && meta.alert === 'reconciliation_mismatch');
+    expect(alertCall).toBeUndefined();
+  });
+});
+
+// ── checkReconciliationHealth ─────────────────────────────────────────────
+
+describe('checkReconciliationHealth', () => {
+  const { checkReconciliationHealth } = require('../src/services/health');
+
+  beforeEach(() => {
+    // Reset dbState for health lookups that go through getReconciliationSummary
+    dbState.firstResult = null;
+    dbState.failFirst = false;
+  });
+
+  it('returns not_run when no reconciliation has ever run', async () => {
+    dbState.firstResult = null;
+    const result = await checkReconciliationHealth();
+    expect(result.status).toBe('not_run');
+    expect(result.error).toMatch(/not been run/i);
+  });
+
+  it('returns healthy with mismatch summary fields when last run is clean', async () => {
+    dbState.firstResult = {
+      total: 10,
+      matches: 10,
+      mismatches: 0,
+      errors: 0,
+      reconciled_at: new Date().toISOString(),
+      results: JSON.stringify([]),
+    };
+    const result = await checkReconciliationHealth();
+    expect(result.status).toBe('healthy');
+    expect(result.mismatches).toBe(0);
+    expect(result.totalDrift).toBe(0);
+    expect(result.thresholdBreached).toBe(false);
+    expect(typeof result.threshold).toBe('number');
+    expect(result.lastRun).toBeDefined();
+  });
+
+  it('returns degraded when mismatches are present but below threshold', async () => {
+    const originalThreshold = process.env.RECONCILIATION_DRIFT_THRESHOLD;
+    process.env.RECONCILIATION_DRIFT_THRESHOLD = '5';
+
+    dbState.firstResult = {
+      total: 10,
+      matches: 8,
+      mismatches: 2, // below threshold of 5
+      errors: 0,
+      reconciled_at: new Date().toISOString(),
+      results: JSON.stringify([
+        { invoiceId: 'inv_1', status: 'mismatch', driftMagnitude: 100 },
+        { invoiceId: 'inv_2', status: 'mismatch', driftMagnitude: 50 },
+      ]),
+    };
+
+    const result = await checkReconciliationHealth();
+    expect(result.status).toBe('degraded');
+    expect(result.mismatches).toBe(2);
+    expect(result.totalDrift).toBe(150);
+    expect(result.threshold).toBe(5);
+    expect(result.thresholdBreached).toBe(false);
+    expect(result.lastRun).toBeDefined();
+
+    if (originalThreshold === undefined) {
+      delete process.env.RECONCILIATION_DRIFT_THRESHOLD;
+    } else {
+      process.env.RECONCILIATION_DRIFT_THRESHOLD = originalThreshold;
+    }
+  });
+
+  it('returns mismatch_threshold_breached when mismatches meet threshold', async () => {
+    const originalThreshold = process.env.RECONCILIATION_DRIFT_THRESHOLD;
+    process.env.RECONCILIATION_DRIFT_THRESHOLD = '2';
+
+    dbState.firstResult = {
+      total: 10,
+      matches: 8,
+      mismatches: 2, // exactly at threshold of 2
+      errors: 0,
+      reconciled_at: new Date().toISOString(),
+      results: JSON.stringify([
+        { invoiceId: 'inv_1', status: 'mismatch', driftMagnitude: 500 },
+        { invoiceId: 'inv_2', status: 'mismatch', driftMagnitude: 300 },
+      ]),
+    };
+
+    const result = await checkReconciliationHealth();
+    expect(result.status).toBe('mismatch_threshold_breached');
+    expect(result.mismatches).toBe(2);
+    expect(result.totalDrift).toBe(800);
+    expect(result.threshold).toBe(2);
+    expect(result.thresholdBreached).toBe(true);
+    expect(result.lastRun).toBeDefined();
+
+    if (originalThreshold === undefined) {
+      delete process.env.RECONCILIATION_DRIFT_THRESHOLD;
+    } else {
+      process.env.RECONCILIATION_DRIFT_THRESHOLD = originalThreshold;
+    }
+  });
+
+  it('returns mismatch_threshold_breached when mismatches exceed threshold', async () => {
+    const originalThreshold = process.env.RECONCILIATION_DRIFT_THRESHOLD;
+    process.env.RECONCILIATION_DRIFT_THRESHOLD = '2';
+
+    dbState.firstResult = {
+      total: 10,
+      matches: 5,
+      mismatches: 5, // exceeds threshold of 2
+      errors: 0,
+      reconciled_at: new Date().toISOString(),
+      results: JSON.stringify([
+        { invoiceId: 'inv_a', status: 'mismatch', driftMagnitude: 100 },
+        { invoiceId: 'inv_b', status: 'mismatch', driftMagnitude: 200 },
+        { invoiceId: 'inv_c', status: 'mismatch', driftMagnitude: 150 },
+        { invoiceId: 'inv_d', status: 'mismatch', driftMagnitude: 75 },
+        { invoiceId: 'inv_e', status: 'mismatch', driftMagnitude: 25 },
+      ]),
+    };
+
+    const result = await checkReconciliationHealth();
+    expect(result.status).toBe('mismatch_threshold_breached');
+    expect(result.thresholdBreached).toBe(true);
+    expect(result.totalDrift).toBe(550);
+
+    if (originalThreshold === undefined) {
+      delete process.env.RECONCILIATION_DRIFT_THRESHOLD;
+    } else {
+      process.env.RECONCILIATION_DRIFT_THRESHOLD = originalThreshold;
+    }
+  });
+
+  it('returns stale when last run was more than 25 hours ago', async () => {
+    const staleTimestamp = new Date(Date.now() - 26 * 60 * 60 * 1000).toISOString();
+    dbState.firstResult = {
+      total: 5,
+      matches: 5,
+      mismatches: 0,
+      errors: 0,
+      reconciled_at: staleTimestamp,
+      results: JSON.stringify([]),
+    };
+
+    const result = await checkReconciliationHealth();
+    expect(result.status).toBe('stale');
+    expect(result.lastRun).toBe(staleTimestamp);
+    expect(result.error).toMatch(/not run recently/i);
+  });
+
+  it('returns not_run when DB lookup fails (getReconciliationSummary swallows errors → returns null)', async () => {
+    // getReconciliationSummary catches its own errors and returns null.
+    // checkReconciliationHealth therefore sees null and returns not_run.
+    dbState.failFirst = true;
+    const result = await checkReconciliationHealth();
+    expect(['not_run', 'error']).toContain(result.status);
+  });
+
+  it('handles missing results field in summary (totalDrift defaults to 0)', async () => {
+    dbState.firstResult = {
+      total: 5,
+      matches: 3,
+      mismatches: 2,
+      errors: 0,
+      reconciled_at: new Date().toISOString(),
+      results: null, // no results array
+    };
+    // With threshold=1 (default), 2 mismatches >= 1 → mismatch_threshold_breached
+    const originalThreshold = process.env.RECONCILIATION_DRIFT_THRESHOLD;
+    process.env.RECONCILIATION_DRIFT_THRESHOLD = '1';
+
+    const result = await checkReconciliationHealth();
+    expect(result.totalDrift).toBe(0); // defaults gracefully
+    expect(['mismatch_threshold_breached', 'degraded']).toContain(result.status);
+
+    if (originalThreshold === undefined) {
+      delete process.env.RECONCILIATION_DRIFT_THRESHOLD;
+    } else {
+      process.env.RECONCILIATION_DRIFT_THRESHOLD = originalThreshold;
+    }
+  });
+});
+
+// ── performReadinessChecks: reconciliation integration ───────────────────
+
+describe('performReadinessChecks: reconciliation threshold degrades readiness', () => {
+  const { performReadinessChecks } = require('../src/services/health');
+
+  // Mock all the other health checks to return healthy so reconciliation is
+  // the only variable.
+  beforeEach(() => {
+    // Use a fresh dbState for each test
+    dbState.firstResult = null;
+    dbState.failFirst = false;
+  });
+
+  it('is healthy when reconciliation returns healthy', async () => {
+    // Return a clean recent run
+    dbState.firstResult = {
+      total: 5,
+      matches: 5,
+      mismatches: 0,
+      errors: 0,
+      reconciled_at: new Date().toISOString(),
+      results: JSON.stringify([]),
+    };
+
+    const result = await performReadinessChecks();
+    expect(result.checks.reconciliation).toBeDefined();
+    expect(result.checks.reconciliation.status).toBe('healthy');
+  });
+
+  it('degrades readiness when reconciliation status is mismatch_threshold_breached', async () => {
+    const originalThreshold = process.env.RECONCILIATION_DRIFT_THRESHOLD;
+    process.env.RECONCILIATION_DRIFT_THRESHOLD = '1';
+
+    dbState.firstResult = {
+      total: 5,
+      matches: 4,
+      mismatches: 1,
+      errors: 0,
+      reconciled_at: new Date().toISOString(),
+      results: JSON.stringify([{ invoiceId: 'inv_1', status: 'mismatch', driftMagnitude: 100 }]),
+    };
+
+    const result = await performReadinessChecks();
+    expect(result.checks.reconciliation.status).toBe('mismatch_threshold_breached');
+    // healthy should be false due to threshold breach
+    expect(result.healthy).toBe(false);
+
+    if (originalThreshold === undefined) {
+      delete process.env.RECONCILIATION_DRIFT_THRESHOLD;
+    } else {
+      process.env.RECONCILIATION_DRIFT_THRESHOLD = originalThreshold;
+    }
+  });
+
+  it('is not blocked when reconciliation has not_run status (fresh deployment)', async () => {
+    dbState.firstResult = null; // no runs yet
+
+    const result = await performReadinessChecks();
+    expect(result.checks.reconciliation.status).toBe('not_run');
+    // not_run should not block readiness (fresh deployment scenario)
+    // Result depends on other checks, but reconciliation should not be the blocker
+    expect(result.checks.reconciliation.status).not.toBe('mismatch_threshold_breached');
+  });
+
+  it('is not blocked when reconciliation DB lookup fails (not_run or error — non-blocking)', async () => {
+    // getReconciliationSummary swallows errors → checkReconciliationHealth returns not_run.
+    // Either way, it should not be mismatch_threshold_breached.
+    dbState.failFirst = true;
+
+    const result = await performReadinessChecks();
+    // error or not_run — neither should block readiness
+    expect(result.checks.reconciliation.status).not.toBe('mismatch_threshold_breached');
+  });
+
+  it('includes reconciliation in checks object', async () => {
+    dbState.firstResult = null;
+    const result = await performReadinessChecks();
+    expect(result.checks).toHaveProperty('database');
+    expect(result.checks).toHaveProperty('soroban');
+    expect(result.checks).toHaveProperty('storage');
+    expect(result.checks).toHaveProperty('reconciliation');
+  });
+});
+
 // ── GET /api/admin/reconciliation/runs (route handler) ────────────────────
+
 
 const request = require('supertest');
 const express = require('express');
@@ -792,5 +1463,239 @@ describe('DRIFT_THRESHOLD constant', () => {
   it('is a positive integer (at least 1)', () => {
     expect(Number.isInteger(DRIFT_THRESHOLD)).toBe(true);
     expect(DRIFT_THRESHOLD).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ── raiseReconciliationMismatchAlert: Sentry-enabled paths ────────────────
+//
+// Lines 169-191 in reconcileEscrow.js are the Sentry branches: they only run
+// when sentry.isEnabled() returns true and @sentry/node is loadable. We use
+// jest.isolateModules() + jest.doMock() to reload reconcileEscrow.js in a fresh
+// registry where both the sentry wrapper and @sentry/node are replaced with
+// controllable shims. The isolated function is captured from within the
+// isolateModules callback and called from the it() body.
+
+describe('raiseReconciliationMismatchAlert: Sentry-enabled paths', () => {
+
+  describe('withScope path (Sentry fully initialized)', () => {
+    let origChannel;
+    let origThreshold;
+    // These are assigned inside isolateModules so the it() bodies see them.
+    let isolatedRaise;
+    let mockWithScopeFn;
+    let mockCaptureExceptionFn;
+    let mockSetTagFn;
+    let mockSetExtraFn;
+
+    beforeEach(() => {
+      origChannel = process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL;
+      origThreshold = process.env.RECONCILIATION_MISMATCH_ALERT_THRESHOLD;
+      process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL = 'sentry';
+      delete process.env.RECONCILIATION_MISMATCH_ALERT_THRESHOLD;
+
+      mockCaptureExceptionFn = jest.fn();
+      mockSetTagFn = jest.fn();
+      mockSetExtraFn = jest.fn();
+      mockWithScopeFn = jest.fn((cb) => cb({ setTag: mockSetTagFn, setExtra: mockSetExtraFn }));
+
+      jest.isolateModules(() => {
+        jest.doMock('@sentry/node', () => ({
+          withScope: mockWithScopeFn,
+          captureException: mockCaptureExceptionFn,
+        }));
+
+        jest.doMock('../src/observability/sentry', () => ({
+          isEnabled: () => true,
+          captureException: mockCaptureExceptionFn,
+        }));
+
+        // Re-mock transitive deps so the module loads cleanly.
+        jest.doMock('../src/db/knex', () => mockDb);
+        jest.doMock('../src/logger', () => mockLogger);
+        jest.doMock('../src/workers/jobQueue', () =>
+          jest.fn().mockImplementation(() => ({ enqueue: jest.fn() })));
+        jest.doMock('../src/workers/worker', () =>
+          jest.fn().mockImplementation(() => ({ registerHandler: jest.fn() })));
+
+        isolatedRaise = require('../src/jobs/reconcileEscrow').raiseReconciliationMismatchAlert;
+      });
+    });
+
+    afterEach(() => {
+      jest.resetModules();
+      if (origChannel === undefined) {
+        delete process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL;
+      } else {
+        process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL = origChannel;
+      }
+      if (origThreshold === undefined) {
+        delete process.env.RECONCILIATION_MISMATCH_ALERT_THRESHOLD;
+      } else {
+        process.env.RECONCILIATION_MISMATCH_ALERT_THRESHOLD = origThreshold;
+      }
+    });
+
+    it('calls withScope and sets all required tags + extras when Sentry is enabled', () => {
+      isolatedRaise({
+        invoiceId: 'inv_sentry_scope',
+        expected: 10000,
+        actual: 9000,
+        driftMagnitude: 1000,
+        runMismatches: 1,
+      });
+
+      expect(mockWithScopeFn).toHaveBeenCalledTimes(1);
+
+      expect(mockSetTagFn).toHaveBeenCalledWith('alert_type', 'reconciliation_mismatch');
+      expect(mockSetTagFn).toHaveBeenCalledWith('invoice_id', 'inv_sentry_scope');
+
+      expect(mockSetExtraFn).toHaveBeenCalledWith('expected', 10000);
+      expect(mockSetExtraFn).toHaveBeenCalledWith('actual', 9000);
+      expect(mockSetExtraFn).toHaveBeenCalledWith('drift_magnitude', 1000);
+      expect(mockSetExtraFn).toHaveBeenCalledWith('run_mismatches', 1);
+      expect(mockSetExtraFn).toHaveBeenCalledWith('threshold', expect.any(Number));
+
+      expect(mockCaptureExceptionFn).toHaveBeenCalledTimes(1);
+      expect(mockCaptureExceptionFn.mock.calls[0][0]).toBeInstanceOf(Error);
+      expect(mockCaptureExceptionFn.mock.calls[0][0].message).toMatch(/reconciliation mismatch/i);
+    });
+
+    it('does not emit a warn log on sentry-only channel even when Sentry is enabled', () => {
+      isolatedRaise({
+        invoiceId: 'inv_sentry_only',
+        expected: 500,
+        actual: 400,
+        driftMagnitude: 100,
+        runMismatches: 1,
+      });
+      // sentry channel → no warn log
+      expect(mockLogger.warn).not.toHaveBeenCalled();
+    });
+
+    it('fires both warn log and withScope on sentry+log channel', () => {
+      process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL = 'sentry+log';
+
+      isolatedRaise({
+        invoiceId: 'inv_both',
+        expected: 300,
+        actual: 250,
+        driftMagnitude: 50,
+        runMismatches: 1,
+      });
+
+      expect(mockLogger.warn).toHaveBeenCalledTimes(1);
+      expect(mockWithScopeFn).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('fallback path: Sentry enabled but withScope absent from @sentry/node', () => {
+    let origChannel;
+    let isolatedRaise;
+    let mockFallbackCapture;
+
+    beforeEach(() => {
+      origChannel = process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL;
+      process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL = 'sentry';
+
+      mockFallbackCapture = jest.fn();
+
+      jest.isolateModules(() => {
+        // @sentry/node present but withScope is absent → else branch
+        jest.doMock('@sentry/node', () => ({
+          captureException: jest.fn(),
+          // withScope intentionally absent
+        }));
+
+        jest.doMock('../src/observability/sentry', () => ({
+          isEnabled: () => true,
+          captureException: mockFallbackCapture,
+        }));
+
+        jest.doMock('../src/db/knex', () => mockDb);
+        jest.doMock('../src/logger', () => mockLogger);
+        jest.doMock('../src/workers/jobQueue', () =>
+          jest.fn().mockImplementation(() => ({ enqueue: jest.fn() })));
+        jest.doMock('../src/workers/worker', () =>
+          jest.fn().mockImplementation(() => ({ registerHandler: jest.fn() })));
+
+        isolatedRaise = require('../src/jobs/reconcileEscrow').raiseReconciliationMismatchAlert;
+      });
+    });
+
+    afterEach(() => {
+      jest.resetModules();
+      if (origChannel === undefined) {
+        delete process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL;
+      } else {
+        process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL = origChannel;
+      }
+    });
+
+    it('falls back to sentry.captureException wrapper when withScope is absent', () => {
+      isolatedRaise({
+        invoiceId: 'inv_fallback',
+        expected: 200,
+        actual: 150,
+        driftMagnitude: 50,
+        runMismatches: 1,
+      });
+
+      expect(mockFallbackCapture).toHaveBeenCalledTimes(1);
+      expect(mockFallbackCapture.mock.calls[0][0]).toBeInstanceOf(Error);
+    });
+  });
+
+  describe('error resilience: @sentry/node require throws', () => {
+    let origChannel;
+    let isolatedRaise;
+
+    beforeEach(() => {
+      origChannel = process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL;
+      process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL = 'sentry+log';
+
+      jest.isolateModules(() => {
+        // Simulates @sentry/node not installed: require throws ModuleNotFoundError
+        jest.doMock('@sentry/node', () => {
+          throw new Error('@sentry/node not available');
+        });
+
+        jest.doMock('../src/observability/sentry', () => ({
+          isEnabled: () => true,
+          captureException: jest.fn(),
+        }));
+
+        jest.doMock('../src/db/knex', () => mockDb);
+        jest.doMock('../src/logger', () => mockLogger);
+        jest.doMock('../src/workers/jobQueue', () =>
+          jest.fn().mockImplementation(() => ({ enqueue: jest.fn() })));
+        jest.doMock('../src/workers/worker', () =>
+          jest.fn().mockImplementation(() => ({ registerHandler: jest.fn() })));
+
+        isolatedRaise = require('../src/jobs/reconcileEscrow').raiseReconciliationMismatchAlert;
+      });
+    });
+
+    afterEach(() => {
+      jest.resetModules();
+      if (origChannel === undefined) {
+        delete process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL;
+      } else {
+        process.env.RECONCILIATION_MISMATCH_ALERT_CHANNEL = origChannel;
+      }
+    });
+
+    it('does not throw when @sentry/node require fails — Sentry error is swallowed', () => {
+      expect(() => {
+        isolatedRaise({
+          invoiceId: 'inv_sentry_throw',
+          expected: 100,
+          actual: 80,
+          driftMagnitude: 20,
+          runMismatches: 1,
+        });
+      }).not.toThrow();
+      // Log channel still fires even when Sentry throws
+      expect(mockLogger.warn).toHaveBeenCalledTimes(1);
+    });
   });
 });

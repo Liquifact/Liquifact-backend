@@ -14,8 +14,20 @@
 
 'use strict';
 
+const http = require('http');
 const request = require('supertest');
 const express = require('express');
+
+const mockBodySizeLimitRejectionsTotal = {
+  inc: jest.fn(),
+  labels: jest.fn((type) => ({
+    inc: () => mockBodySizeLimitRejectionsTotal.inc({ type }),
+  })),
+};
+
+jest.mock('../metrics', () => ({
+  bodySizeLimitRejectionsTotal: mockBodySizeLimitRejectionsTotal,
+}));
 
 const {
   DEFAULT_LIMITS,
@@ -25,6 +37,7 @@ const {
   invoiceBodyLimit,
   payloadTooLargeHandler,
 } = require('../middleware/bodySizeLimits');
+const { bodySizeLimitRejectionsTotal } = require('../metrics');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -61,6 +74,63 @@ function makeJsonBody(targetBytes) {
  */
 function makeUrlencodedBody(targetBytes) {
   return `data=${'x'.repeat(Math.max(0, targetBytes - 5))}`;
+}
+
+/**
+ * Sends an HTTP/1.1 chunked POST without a Content-Length header.
+ *
+ * @param {import('express').Application} app
+ * @param {object} options
+ * @param {string} [options.path='/test']
+ * @param {string} options.contentType
+ * @param {string} options.body
+ * @returns {Promise<{ status: number, body: object, text: string }>}
+ */
+function postChunked(app, { path = '/test', contentType, body }) {
+  return new Promise((resolve, reject) => {
+    const server = app.listen(0, '127.0.0.1', () => {
+      const { port } = server.address();
+      const req = http.request(
+        {
+          host: '127.0.0.1',
+          port,
+          method: 'POST',
+          path,
+          headers: {
+            'Content-Type': contentType,
+            'Transfer-Encoding': 'chunked',
+          },
+        },
+        (res) => {
+          let text = '';
+
+          res.setEncoding('utf8');
+          res.on('data', (chunk) => {
+            text += chunk;
+          });
+          res.on('end', () => {
+            server.close(() => {
+              resolve({
+                status: res.statusCode,
+                body: text ? JSON.parse(text) : {},
+                text,
+              });
+            });
+          });
+        }
+      );
+
+      req.on('error', (error) => {
+        server.close(() => reject(error));
+      });
+
+      const splitAt = Math.max(1, Math.floor(body.length / 2));
+      req.write(body.slice(0, splitAt));
+      req.end(body.slice(splitAt));
+    });
+
+    server.on('error', reject);
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -224,6 +294,16 @@ describe('jsonBodyLimit()', () => {
     handlers.forEach((h) => expect(typeof h).toBe('function'));
   });
 
+  it('uses the default JSON limit when no override is provided', async () => {
+    const defaultApp = buildApp(jsonBodyLimit());
+    const res = await request(defaultApp)
+      .post('/test')
+      .set('Content-Type', 'application/json')
+      .send(makeJsonBody(512));
+
+    expect(res.status).toBe(200);
+  });
+
   it('first handler is the named pre-flight guard', () => {
     const [guard] = jsonBodyLimit('100kb');
     expect(guard.name).toBe('jsonSizeGuard');
@@ -318,6 +398,47 @@ describe('jsonBodyLimit()', () => {
     expect(res.status).toBe(200);
   });
 
+  it('delegates malformed Content-Length values to the parser limit', () => {
+    const [guard] = jsonBodyLimit(LIMIT);
+    const next = jest.fn();
+
+    guard({ headers: { 'content-length': 'not-a-number' } }, {}, next);
+
+    expect(next).toHaveBeenCalledTimes(1);
+  });
+
+  it('delegates negative Content-Length values to the parser limit', () => {
+    const [guard] = jsonBodyLimit(LIMIT);
+    const next = jest.fn();
+
+    guard({ headers: { 'content-length': '-1' } }, {}, next);
+
+    expect(next).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts under-limit chunked JSON without a Content-Length header', async () => {
+    const res = await postChunked(app, {
+      contentType: 'application/json',
+      body: makeJsonBody(512),
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.received).toBeDefined();
+  });
+
+  it('rejects oversized chunked JSON without a Content-Length header', async () => {
+    const res = await postChunked(app, {
+      contentType: 'application/json',
+      body: makeJsonBody(2048),
+    });
+
+    expect(res.status).toBe(413);
+    expect(res.body).toMatchObject({
+      error: 'Payload Too Large',
+      path: '/test',
+    });
+  });
+
   // ── Parser behaviour ──────────────────────────────────────────────────
 
   it('returns 400 for malformed JSON', async () => {
@@ -361,6 +482,16 @@ describe('urlencodedBodyLimit()', () => {
     expect(handlers).toHaveLength(2);
   });
 
+  it('uses the default URL-encoded limit when no override is provided', async () => {
+    const defaultApp = buildApp(urlencodedBodyLimit());
+    const res = await request(defaultApp)
+      .post('/test')
+      .set('Content-Type', 'application/x-www-form-urlencoded')
+      .send(makeUrlencodedBody(128));
+
+    expect(res.status).toBe(200);
+  });
+
   it('first handler is the named pre-flight guard', () => {
     const [guard] = urlencodedBodyLimit('50kb');
     expect(guard.name).toBe('urlencodedSizeGuard');
@@ -382,6 +513,19 @@ describe('urlencodedBodyLimit()', () => {
       .set('Content-Type', 'application/x-www-form-urlencoded')
       .send(makeUrlencodedBody(200));
     expect(res.status).toBe(200);
+  });
+
+  it('rejects oversized chunked URL-encoded bodies without a Content-Length header', async () => {
+    const res = await postChunked(app, {
+      contentType: 'application/x-www-form-urlencoded',
+      body: makeUrlencodedBody(2048),
+    });
+
+    expect(res.status).toBe(413);
+    expect(res.body).toMatchObject({
+      error: 'Payload Too Large',
+      path: '/test',
+    });
   });
 
   it('allows Content-Length 1 byte under the limit', async () => {
@@ -493,6 +637,19 @@ describe('invoiceBodyLimit()', () => {
       .set('Content-Type', 'application/json')
       .send(makeJsonBody(3 * 1024));
     expect(res.status).toBe(413);
+  });
+
+  it('rejects oversized chunked invoice JSON without a Content-Length header', async () => {
+    const res = await postChunked(appCustom, {
+      contentType: 'application/json',
+      body: makeJsonBody(3 * 1024),
+    });
+
+    expect(res.status).toBe(413);
+    expect(res.body).toMatchObject({
+      error: 'Payload Too Large',
+      path: '/test',
+    });
   });
 
   it('413 response includes path and limit fields', async () => {
@@ -639,5 +796,224 @@ describe('payloadTooLargeHandler()', () => {
       .send(makeJsonBody(1024)); // 1 KB — well under 10 KB
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// bodySizeLimitRejectionsTotal metric
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('bodySizeLimitRejectionsTotal metric', () => {
+  let metricSpy;
+
+  beforeEach(() => {
+    // Spy on the counter's .inc() method to track invocations
+    metricSpy = jest.spyOn(bodySizeLimitRejectionsTotal, 'inc');
+    bodySizeLimitRejectionsTotal.labels.mockClear();
+  });
+
+  afterEach(() => {
+    metricSpy.mockRestore();
+  });
+
+  // ── Pre-flight guard: JSON ────────────────────────────────────────────
+
+  it('increments metric with type "json" on oversized JSON Content-Length pre-flight', async () => {
+    const app = buildApp(jsonBodyLimit('1kb'));
+
+    const res = await request(app)
+      .post('/test')
+      .set('Content-Type', 'application/json')
+      .set('Content-Length', String(parseSize('1kb') + 1))
+      .send('{}');
+
+    expect(res.status).toBe(413);
+    expect(metricSpy).toHaveBeenCalledWith({ type: 'json' });
+  });
+
+  it('increments metric with type "json" on oversized JSON body rejection', async () => {
+    const app = buildApp(jsonBodyLimit('1kb'));
+
+    const res = await request(app)
+      .post('/test')
+      .set('Content-Type', 'application/json')
+      .send(makeJsonBody(2048));
+
+    expect(res.status).toBe(413);
+    expect(metricSpy).toHaveBeenCalledWith({ type: 'json' });
+  });
+
+  it('increments metric with type "json" on oversized chunked JSON body rejection', async () => {
+    const app = buildApp(jsonBodyLimit('1kb'));
+
+    const res = await postChunked(app, {
+      contentType: 'application/json',
+      body: makeJsonBody(2048),
+    });
+
+    expect(res.status).toBe(413);
+    expect(metricSpy).toHaveBeenCalledWith({ type: 'json' });
+  });
+
+  it('keeps the legacy invoice label when jsonBodyLimit receives the invoice default', async () => {
+    const app = buildApp(jsonBodyLimit(DEFAULT_LIMITS.invoice));
+
+    const res = await request(app)
+      .post('/test')
+      .set('Content-Type', 'application/json')
+      .set('Content-Length', String(parseSize(DEFAULT_LIMITS.invoice) + 1))
+      .send('{}');
+
+    expect(res.status).toBe(413);
+    expect(metricSpy).toHaveBeenCalledWith({ type: 'invoice' });
+  });
+
+  // ── Pre-flight guard: URL-encoded ─────────────────────────────────────
+
+  it('increments metric with type "urlencoded" on oversized URL-encoded pre-flight', async () => {
+    const app = buildApp(urlencodedBodyLimit('1kb'));
+
+    const res = await request(app)
+      .post('/test')
+      .set('Content-Type', 'application/x-www-form-urlencoded')
+      .set('Content-Length', String(parseSize('1kb') + 1))
+      .send('x=1');
+
+    expect(res.status).toBe(413);
+    expect(metricSpy).toHaveBeenCalledWith({ type: 'urlencoded' });
+  });
+
+  it('increments metric with type "urlencoded" on oversized URL-encoded body rejection', async () => {
+    const app = buildApp(urlencodedBodyLimit('1kb'));
+
+    const res = await request(app)
+      .post('/test')
+      .set('Content-Type', 'application/x-www-form-urlencoded')
+      .send(makeUrlencodedBody(2048));
+
+    expect(res.status).toBe(413);
+    expect(metricSpy).toHaveBeenCalledWith({ type: 'urlencoded' });
+  });
+
+  it('increments metric with type "urlencoded" on oversized chunked URL-encoded rejection', async () => {
+    const app = buildApp(urlencodedBodyLimit('1kb'));
+
+    const res = await postChunked(app, {
+      contentType: 'application/x-www-form-urlencoded',
+      body: makeUrlencodedBody(2048),
+    });
+
+    expect(res.status).toBe(413);
+    expect(metricSpy).toHaveBeenCalledWith({ type: 'urlencoded' });
+  });
+
+  it('increments metric with type "invoice" on oversized chunked invoice rejection', async () => {
+    const app = buildApp(invoiceBodyLimit('1kb'));
+
+    const res = await postChunked(app, {
+      contentType: 'application/json',
+      body: makeJsonBody(2048),
+    });
+
+    expect(res.status).toBe(413);
+    expect(metricSpy).toHaveBeenCalledWith({ type: 'invoice' });
+  });
+
+  // ── PayloadTooLargeHandler: derives from content-type ────────────────
+
+  it('increments metric with type "json" from payloadTooLargeHandler for JSON content-type', async () => {
+    const app = express();
+    app.post('/trigger', (_req, _res, next) => {
+      next(Object.assign(new Error('too large'), { type: 'entity.too.large', limit: 102400 }));
+    });
+    app.use(payloadTooLargeHandler);
+
+    const res = await request(app)
+      .post('/trigger')
+      .set('Content-Type', 'application/json');
+
+    expect(res.status).toBe(413);
+    expect(metricSpy).toHaveBeenCalledWith({ type: 'json' });
+  });
+
+  it('increments metric with type "urlencoded" from payloadTooLargeHandler for form content-type', async () => {
+    const app = express();
+    app.post('/trigger', (_req, _res, next) => {
+      next(Object.assign(new Error('too large'), { type: 'entity.too.large', limit: 51200 }));
+    });
+    app.use(payloadTooLargeHandler);
+
+    const res = await request(app)
+      .post('/trigger')
+      .set('Content-Type', 'application/x-www-form-urlencoded');
+
+    expect(res.status).toBe(413);
+    expect(metricSpy).toHaveBeenCalledWith({ type: 'urlencoded' });
+  });
+
+  it('increments metric with type "unknown" from payloadTooLargeHandler for unrecognized content-type', async () => {
+    const app = express();
+    app.post('/trigger', (_req, _res, next) => {
+      next(Object.assign(new Error('too large'), { type: 'entity.too.large', limit: 102400 }));
+    });
+    app.use(payloadTooLargeHandler);
+
+    const res = await request(app)
+      .post('/trigger')
+      .set('Content-Type', 'application/octet-stream');
+
+    expect(res.status).toBe(413);
+    expect(metricSpy).toHaveBeenCalledWith({ type: 'unknown' });
+  });
+
+  it('increments metric with type "unknown" from payloadTooLargeHandler when no content-type header', async () => {
+    const app = express();
+    app.post('/trigger', (_req, _res, next) => {
+      next(Object.assign(new Error('too large'), { type: 'entity.too.large', limit: 102400 }));
+    });
+    app.use(payloadTooLargeHandler);
+
+    const res = await request(app).post('/trigger');
+
+    expect(res.status).toBe(413);
+    expect(metricSpy).toHaveBeenCalledWith({ type: 'unknown' });
+  });
+
+  // ── Under-limit requests do NOT increment ────────────────────────────
+
+  it('does NOT increment metric for under-limit JSON request', async () => {
+    const app = buildApp(jsonBodyLimit('10kb'));
+
+    const res = await request(app)
+      .post('/test')
+      .set('Content-Type', 'application/json')
+      .send(makeJsonBody(512));
+
+    expect(res.status).toBe(200);
+    expect(metricSpy).not.toHaveBeenCalled();
+  });
+
+  it('does NOT increment metric for under-limit URL-encoded request', async () => {
+    const app = buildApp(urlencodedBodyLimit('10kb'));
+
+    const res = await request(app)
+      .post('/test')
+      .set('Content-Type', 'application/x-www-form-urlencoded')
+      .send(makeUrlencodedBody(200));
+
+    expect(res.status).toBe(200);
+    expect(metricSpy).not.toHaveBeenCalled();
+  });
+
+  it('does NOT increment metric when payloadTooLargeHandler passes non-size error through', async () => {
+    const app = express();
+    app.post('/trigger', (_req, _res, next) => next(new Error('unrelated')));
+    app.use(payloadTooLargeHandler);
+    app.use((err, _req, res, _next) => res.status(500).json({ error: err.message }));
+
+    const res = await request(app).post('/trigger');
+
+    expect(res.status).toBe(500);
+    expect(metricSpy).not.toHaveBeenCalled();
   });
 });

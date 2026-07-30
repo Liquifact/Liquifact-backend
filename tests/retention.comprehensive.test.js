@@ -891,4 +891,82 @@ describe('Retention System - Comprehensive Coverage Tests', () => {
       await expect(retentionJob.getRecentExecutions('test-tenant-id', 10)).rejects.toThrow('Recent executions failed');
     });
   });
+  describe('Forensic before-state snapshots', () => {
+    test('should build salted hashed snapshots without clear-text PII', () => {
+      const invoice = {
+        id: 'invoice-snapshot-1',
+        customer_name: 'Forensic Customer',
+        customer_email: 'forensic@example.com',
+        customer_tax_id: null
+      };
+
+      const snapshot = retentionJob.buildPiiBeforeStateSnapshot(invoice, [
+        'customer_name',
+        'customer_email',
+        'customer_tax_id'
+      ]);
+
+      expect(snapshot.fieldCount).toBe(3);
+      expect(snapshot.valueHashCount).toBe(2);
+      expect(snapshot.fieldHashes.customer_name).toBe(retentionJob.hashPiiValue('Forensic Customer', invoice.id));
+      expect(snapshot.fieldHashes.customer_email).toMatch(/^[a-f0-9]{64}$/);
+      expect(snapshot.fieldHashes.customer_email).not.toBe('forensic@example.com');
+      expect(snapshot.fieldHashes).not.toHaveProperty('customer_tax_id');
+    });
+
+    test('should return hashed before-state for destructive purge helper calls', async () => {
+      const invoiceId = 'invoice-real-snapshot-1';
+      const invoiceQuery = {
+        where: jest.fn().mockReturnThis(),
+        first: jest.fn().mockResolvedValue({
+          id: invoiceId,
+          customer_name: 'Real Purge Customer',
+          customer_email: 'real-purge@example.com',
+          customer_tax_id: null
+        })
+      };
+      const updateQuery = {
+        where: jest.fn().mockReturnThis(),
+        update: jest.fn().mockResolvedValue(1)
+      };
+      db.mockImplementationOnce(() => invoiceQuery).mockImplementationOnce(() => updateQuery);
+
+      const result = await retentionJob.purgeInvoicePii(invoiceId, [
+        'customer_name',
+        'customer_email',
+        'customer_tax_id'
+      ], false);
+
+      expect(result.success).toBe(true);
+      expect(result.oldValues.customer_name).toBe(retentionJob.hashPiiValue('Real Purge Customer', invoiceId));
+      expect(result.oldValues.customer_email).toMatch(/^[a-f0-9]{64}$/);
+      expect(result.oldValues.customer_email).not.toBe('real-purge@example.com');
+      expect(result.oldValues).not.toHaveProperty('customer_tax_id');
+      expect(result.beforeStateSnapshot).toMatchObject({
+        fieldCount: 3,
+        valueHashCount: 2
+      });
+      expect(updateQuery.update).toHaveBeenCalledWith({
+        customer_name: null,
+        customer_email: null,
+        customer_tax_id: null
+      });
+    });
+
+    test('should not snapshot clear-text values during dry-run purge helper calls', async () => {
+      const result = await retentionJob.purgeInvoicePii('invoice-dry-snapshot-1', [
+        'customer_name',
+        'customer_email'
+      ], true);
+
+      expect(result.dryRun).toBe(true);
+      expect(result.oldValues).toEqual({});
+      expect(result.beforeStateSnapshot).toEqual({
+        fieldHashes: {},
+        fieldCount: 2,
+        valueHashCount: 0
+      });
+    });
+  });
+
 });

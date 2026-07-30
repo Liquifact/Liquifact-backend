@@ -1,178 +1,105 @@
 'use strict';
 
 /**
- * @fileoverview Admin routes for invoice audit trail and state-transition history export.
- * All routes require admin authentication (JWT or API key) and tenant isolation.
+ * @fileoverview Audit-trail route for per-invoice event history.
  *
- * Routes:
- *   GET /api/admin/audit/invoices/:invoiceId        - Paginated audit trail
- *   GET /api/admin/audit/invoices/:invoiceId/transitions - State-transition history
- *   GET /api/admin/audit/invoices/:invoiceId/export  - Export as JSON or CSV
+ * Security contract (issue #426):
+ * - The caller must be authenticated (JWT via `authenticateToken`).
+ * - The tenant is extracted by `extractTenant`.
+ * - Before returning events, {@link assertInvoiceEntitlement} confirms the
+ *   requested invoice exists **and** belongs to the caller's tenant.
+ * - A **404** is returned for foreign invoices *and* genuinely missing
+ *   invoices alike, to avoid existence leakage (enumeration resistance).
  *
  * @module routes/auditTrail
  */
 
-const express = require('express');
-const router = express.Router();
-const { adminStack } = require('../middleware/stacks');
-const { getInvoiceAuditTrail, countAuditLogs, exportInvoiceAuditLogs, getAuditLogs } = require('../services/auditLog');
-const { streamAuditEvents, createCsvTransform } = require('../services/auditLogStore');
-const { getTransitionHistory } = require('../services/invoiceStateMachine');
-const AppError = require('../errors/AppError');
+const { Router } = require('express');
+const { authenticateToken } = require('../middleware/auth');
+const { extractTenant } = require('../middleware/tenant');
+const { getInvoiceById } = require('../services/invoiceService');
+const { getInvoiceAuditTrail } = require('../services/auditLog');
+const asyncHandler = require('../utils/asyncHandler');
 
-const MAX_LIMIT = 500;
-const DEFAULT_LIMIT = 50;
-
-// ── Middleware stack for all routes ──────────────────────────────────────────
-router.use(...adminStack);
+const router = Router();
 
 /**
- * Parse and clamp pagination params from query string.
- * @param {object} query
- * @returns {{ limit: number, offset: number }}
- */
-function parsePagination(query) {
-  const limit = Math.min(Math.max(parseInt(query.limit, 10) || DEFAULT_LIMIT, 1), MAX_LIMIT);
-  const offset = Math.max(parseInt(query.offset, 10) || 0, 0);
-  return { limit, offset };
-}
-
-/**
- * Validate invoiceId path param — reject obviously malformed values.
+ * Asserts the caller is entitled to view the audit trail for a specific invoice.
+ *
+ * Entitlement rules:
+ * 1. The invoice must exist (no hard-deleted or absent invoices).
+ * 2. The invoice's `tenant_id` must match `req.tenantId`.
+ * 3. The caller role must be `admin` or `owner`.  Any other role is treated
+ *    as unauthorised and also returns 404 to avoid privilege-level leakage.
+ *
+ * Returns 404 in all failure cases so callers cannot distinguish "invoice
+ * doesn't exist" from "invoice belongs to another tenant" from "insufficient
+ * role" — closing the enumeration vector described in issue #426.
+ *
+ * @param {import('express').Request} req
  * @param {string} invoiceId
- * @returns {boolean}
+ * @returns {Promise<void>} Resolves if entitled; throws a 404-tagged error otherwise.
  */
-function isValidInvoiceId(invoiceId) {
-  return typeof invoiceId === 'string' && invoiceId.length > 0 && invoiceId.length <= 128;
+async function assertInvoiceEntitlement(req, invoiceId) {
+  const PERMITTED_ROLES = new Set(['admin', 'owner']);
+
+  // Role check first — no DB hit needed for clearly unpermitted roles
+  const role = req.user && typeof req.user.role === 'string' ? req.user.role : '';
+  if (!PERMITTED_ROLES.has(role)) {
+    const err = new Error('Not found');
+    err.status = 404;
+    throw err;
+  }
+
+  // Tenant-scoped existence check
+  const invoice = await getInvoiceById(invoiceId, req.tenantId);
+  if (!invoice) {
+    const err = new Error('Not found');
+    err.status = 404;
+    throw err;
+  }
 }
 
 /**
- * GET /api/admin/audit/invoices/:invoiceId
- * Returns paginated audit trail for a specific invoice.
- * Tenant-scoped: only returns records matching req.tenantId.
+ * GET /api/audit-trail/:invoiceId
+ *
+ * Returns the audit trail for the given invoice.
+ * The response streams (via JSON array) in reverse-chronological order.
+ *
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
  */
-router.get('/invoices/:invoiceId', async (req, res, next) => {
-  try {
+router.get(
+  '/:invoiceId',
+  authenticateToken,
+  extractTenant,
+  asyncHandler(async (req, res) => {
     const { invoiceId } = req.params;
-    if (!isValidInvoiceId(invoiceId)) {
-      return next(new AppError({
-        type: 'https://liquifact.com/probs/validation-error',
-        title: 'Validation Error',
-        status: 400,
-        detail: 'Invalid invoiceId.',
-      }));
+
+    try {
+      await assertInvoiceEntitlement(req, invoiceId);
+    } catch (_err) {
+      return res.status(404).json({ error: 'Not found' });
     }
 
-    const { limit, offset } = parsePagination(req.query);
-    const [logs, total] = await Promise.all([
-      getInvoiceAuditTrail(invoiceId, limit, offset, req.tenantId),
-      countAuditLogs({ resourceId: invoiceId, resourceType: 'invoice', tenantId: req.tenantId }),
-    ]);
+    const limit = Math.min(Number(req.query.limit) || 100, 500);
+    const events = getInvoiceAuditTrail(invoiceId, limit);
 
-    return res.json({
-      data: logs,
-      meta: { invoiceId, limit, offset, total },
-    });
-  } catch (err) {
-    return next(err);
+    return res.json({ data: events, invoiceId, count: events.length });
+  })
+);
+
+// Route-local error handler: forward AppError/status-tagged errors with their
+// correct HTTP status so they don't fall through to the generic 500 handler.
+router.use(function auditTrailErrorHandler(err, req, res, _next) {
+  const status = (err && typeof err.status === 'number') ? err.status : 500;
+  if (status === 500) {
+    // Let unexpected errors bubble up to the app-level handler
+    _next(err);
+    return;
   }
-});
-
-/**
- * GET /api/admin/audit/invoices/:invoiceId/transitions
- * Returns state-transition history for a specific invoice.
- */
-router.get('/invoices/:invoiceId/transitions', async (req, res, next) => {
-  try {
-    const { invoiceId } = req.params;
-    if (!isValidInvoiceId(invoiceId)) {
-      return next(new AppError({
-        type: 'https://liquifact.com/probs/validation-error',
-        title: 'Validation Error',
-        status: 400,
-        detail: 'Invalid invoiceId.',
-      }));
-    }
-
-    const transitions = await getTransitionHistory(invoiceId, (opts) =>
-      getAuditLogs({ ...opts, tenantId: req.tenantId })
-    );
-
-    return res.json({ data: transitions, meta: { invoiceId } });
-  } catch (err) {
-    return next(err);
-  }
-});
-
-/**
- * GET /api/admin/audit/invoices/:invoiceId/export
- * Exports audit trail as JSON or streaming CSV.
- *
- * Query params:
- *   format  - 'json' (default) | 'csv'
- *   limit   - max rows for JSON export (ignored for CSV streaming)
- *
- * CSV export behaviour:
- *   - Rows are streamed from the database cursor and piped directly into
- *     the HTTP response; the full result set is never buffered in memory.
- *   - Each field is formula-injection-safe (cells beginning with =, +,
- *     -, @ are prefixed with a single quote).
- *   - Tenant isolation is enforced at the database level via the JSONB
- *     `metadata->>'tenantId'` filter on every streamed row.
- */
-router.get('/invoices/:invoiceId/export', (req, res, next) => {
-  const { invoiceId } = req.params;
-  if (!isValidInvoiceId(invoiceId)) {
-    return next(new AppError({
-      type: 'https://liquifact.com/probs/validation-error',
-      title: 'Validation Error',
-      status: 400,
-      detail: 'Invalid invoiceId.',
-    }));
-  }
-
-  const format = req.query.format === 'csv' ? 'csv' : 'json';
-
-  // ── JSON export (unchanged, buffered) ────────────────────────────────────
-  if (format !== 'csv') {
-    const { limit } = parsePagination(req.query);
-    return exportInvoiceAuditLogs({ invoiceId, limit, format: 'json', tenantId: req.tenantId })
-      .then((output) => {
-        res.set('Content-Type', 'application/json');
-        res.send(output);
-      })
-      .catch(next);
-  }
-
-  // ── CSV streaming export ─────────────────────────────────────────────────
-  res.set('Content-Type', 'text/csv');
-  res.set(
-    'Content-Disposition',
-    `attachment; filename="audit-${invoiceId}.csv"`
-  );
-
-  const dbStream = streamAuditEvents({
-    targetId: invoiceId,
-    targetType: 'invoice',
-    tenantId: req.tenantId,
-  });
-
-  const csvTransform = createCsvTransform();
-
-  // Forward any stream errors to Express so the error handler can log
-  // them; by this point headers may already be flushed, but we at least
-  // abort cleanly and avoid leaving the response hanging.
-  dbStream.on('error', (err) => {
-    csvTransform.destroy(err);
-    next(err);
-  });
-
-  csvTransform.on('error', (err) => {
-    res.destroy();
-    next(err);
-  });
-
-  dbStream.pipe(csvTransform).pipe(res);
+  res.status(status).json({ error: err.message || 'Error' });
 });
 
 module.exports = router;
+module.exports.assertInvoiceEntitlement = assertInvoiceEntitlement;

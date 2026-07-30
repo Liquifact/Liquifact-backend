@@ -39,6 +39,7 @@ router.use(...adminStack);
  * @swagger
  * /api/admin/reconciliation/runs:
  *   get:
+ *     operationId: listReconciliationRuns
  *     summary: List recent escrow reconciliation runs (paginated)
  *     description: |
  *       Returns a paginated list of nightly escrow reconciliation runs from
@@ -167,8 +168,9 @@ router.get('/runs', async (req, res, next) => {
 
     // Fetch the total count and the current page in parallel.
     const [countResult, rows] = await Promise.all([
-      dbClient('reconciliation_runs').count('id as count'),
+      dbClient('reconciliation_runs').where({ tenant_id: req.tenantId }).count('id as count'),
       dbClient('reconciliation_runs')
+        .where({ tenant_id: req.tenantId })
         .select(
           'id',
           'total',

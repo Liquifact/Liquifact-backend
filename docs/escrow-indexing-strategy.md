@@ -45,6 +45,27 @@ Skipping a record does not stall ingestion: the Horizon cursor (`nextCursor`)
 is derived from the last *record* in the batch, so the cursor advances past
 skipped events on the next cycle.
 
+## Event Identifier Validation & Quarantine
+
+To guarantee database integrity and prevent malformed data injection, the indexer strictly validates two key event identifiers before persistence:
+
+1. **`contractId`**:
+   - Must start with 'C' (Stellar StrKey contract address format).
+   - Must be exactly 56 base32 characters.
+   - Must carry a valid CRC16-XMODEM checksum (checked using `@stellar/stellar-sdk`'s `StrKey.isValidContractId`).
+2. **`txHash`**:
+   - Must be exactly 64 hexadecimal characters.
+   - Must be case-insensitive.
+   - Must not contain prefix like `0x` or other non-hexadecimal characters.
+
+### Rejection and Quarantine Behavior
+
+When an incoming event contains an invalid `contractId` or `txHash` identifier:
+- The `normalizeEvent` function throws an error, causing the persistence transaction to be skipped for that specific event.
+- The malformed event is **not** persisted to the `escrow_events` table or projected to the `escrow_event_projection` table, preventing database pollution.
+- Instead of terminating the cycle, the error is caught at the batch loop level in `runEscrowIndexerCycle`. The cycle increments the skipped counter (`skipped`) and emits a warning log including the error message and event identifier.
+- The `escrow_indexer_events_skipped_total` Prometheus counter is incremented, and the remaining valid events in the batch are processed normally.
+
 ## Why This Over Captive Core
 - Lower operational overhead for current Express service footprint.
 - Faster delivery for production-ready MVP.

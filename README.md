@@ -38,6 +38,7 @@ Part of the LiquiFact stack: frontend (Next.js) | backend (this repo) | contract
 
    > [!IMPORTANT]
    > **Startup Validation Gate**: The application validates all required environment variables at boot time before binding to a port. If the configuration is invalid (e.g. `JWT_SECRET` is shorter than 32 characters or KYC keys are half-configured), the server will print a redacted error summary showing the failed keys and exit immediately. Secret values are never exposed in validation output.
+   > Authentication uses the validated `JWT_SECRET`, algorithm allowlist, issuer, and audience settings from the central config. The literal `test-secret` fallback is only permitted when `NODE_ENV=test`; in every other environment unavailable auth config rejects the request instead of accepting forgeable tokens.
 
 4. Start database services
 
@@ -56,6 +57,12 @@ Part of the LiquiFact stack: frontend (Next.js) | backend (this repo) | contract
 ## Configuration Reference
 
 For a complete, tested mapping of every environment variable to its type, default, consumer, and secret status, see [`docs/configuration.md`](./docs/configuration.md).
+## SME wallet authorization
+
+SME-capital routes bind authorization to the authenticated principal's wallet address. The middleware resolves the wallet from the user's authenticated profile only, so values supplied through headers, query strings, or request bodies are ignored and cannot spoof a bound wallet.
+
+When no wallet is bound to the authenticated account, the middleware returns a uniform RFC 7807-style 403 Forbidden response. Valid account addresses must still match the Stellar public-key format, as enforced by the shared validator.
+
 ## Response Caching
 
 The backend includes a TTL-based response-cache middleware backed by an in-memory store. Caching is applied to expensive read endpoints to reduce latency and database load.
@@ -76,8 +83,10 @@ Clients can bypass the cache by sending a `Cache-Control: no-cache` request head
 | Endpoint                                | Cache key format                                           | TTL      |
 |-----------------------------------------|------------------------------------------------------------|----------|
 | `GET /api/marketplace`                  | `marketplace:<tenantId>:<originalUrl>`                     | 15s      |
-| `GET /api/investor/locks`               | `investor:locks:<tenantId>:<originalUrl>`                  | 15s      |
-| `GET /api/investor/locks/:invoiceId`    | `investor:lock:<tenantId>:<invoiceId>:<funderAddress>`     | 15s      |
+| `GET /api/investor/locks`               | `investor:locks:<tenantId>:sha256(<principalScope>):<path>?<normalizedQuery>` | 15s      |
+| `GET /api/investor/locks/:invoiceId`    | `investor:lock:<tenantId>:sha256(<principalScope>):<invoiceId>:sha256(<funderAddress>)` | 15s      |
+
+For investor-lock responses, `<principalScope>` is `admin:<role>` for tenant-wide admin or owner reads, or `funder:<boundAddress>` for non-admin investor reads. The cache key hashes principal scope and `funderAddress` query values, and normalizes query parameter ordering. This prevents one authenticated principal from receiving another principal's cached lock response when the URL is otherwise identical without storing raw funder addresses in cache keys.
 
 ### Tenant isolation
 
@@ -105,16 +114,17 @@ Cache store errors are caught and logged; they never block the request.
 ---
 
 ## Observability
+## Sentry Observability
 
-Optional Sentry error tracking is supported through the `SENTRY_DSN` environment variable. When enabled, the server scrubs sensitive values before sending events, including:
+The backend uses Sentry for error tracking with enhanced security scrubbing:
 
-- Invoice payload bodies and invoice-related fields
-- Authorization headers and bearer tokens
-- JWT claims (issuer, audience) and algorithms
-- API keys and secret values
-- Stellar XDR / Stellar-specific payloads
+- Recursive deep scrubbing for nested objects
+- Redaction of sensitive fields (password, token, api-key, etc.)
+- URL and query string scrubbing to prevent PII leakage
+- Bounded recursion to prevent DoS attacks
 
-### Prometheus metrics endpoint (`GET /metrics`)
+See `src/observability/sentry.js` for implementation details.
+
 
 The `/metrics` endpoint exposes Prometheus-formatted metrics via a dedicated route handler at `GET /metrics`. It is **never** served to unauthenticated or non-loopback clients.
 
@@ -168,11 +178,92 @@ Health state is also surfaced as a Prometheus gauge (`readiness_gauge`).
 
 Environment variables:
 
+- `SOROBAN_RPC_URL` - Optional Soroban RPC endpoint. When unset, Soroban readiness reports `unknown` and does not block readiness.
+- `SOROBAN_HEALTH_TIMEOUT_MS` - Soroban readiness probe abort timeout in milliseconds. Defaults to `5000` and is clamped to `250-10000`.
+- `SOROBAN_LATENCY_WARN_MS` - RPC latency at or below this value is reported as `healthy`. Defaults to `200`.
+- `SOROBAN_LATENCY_FAIL_MS` - RPC latency above this value is reported as `unhealthy`, with `degraded` between warn and fail. Defaults to `500`.
 - `SENTRY_DSN` — Optional Sentry DSN. Example: `https://<PUBLIC_KEY>@o<ORG_ID>.ingest.sentry.io/<PROJECT_ID>`
 - `SENTRY_RELEASE` — Optional release tag. Defaults to package version when available.
 - `SENTRY_ENVIRONMENT` — Optional environment tag. Defaults to `NODE_ENV`.
 
 Do not store secrets in source control. Use `.env` locally and deployment secrets in production.
+
+### API Key Auth Metrics
+
+Every request that passes through the `authenticateApiKey` middleware emits structured metrics and logs to support operational visibility. No API keys, authorization headers, secrets, or PII are ever included in metric labels or log output.
+
+#### Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `api_key_auth_duration_seconds` | Histogram | `endpoint`, `method`, `status`, `outcome` | Duration of API key authenticated requests |
+| `api_key_auth_errors_total` | Counter | `cause` | Error count by bounded cause |
+
+**Duration label values**
+
+| Label | Source | Bounded? |
+|-------|--------|----------|
+| `endpoint` | `req.path` | Yes — limited to known route paths |
+| `method` | HTTP verb (GET, POST, etc.) | Yes — finite set |
+| `status` | HTTP status code string | Yes — finite set |
+| `outcome` | `success` \| `client_error` \| `server_error` | Yes — 3 values |
+
+**Error cause label values**
+
+| `cause` value | HTTP status |
+|---------------|-------------|
+| `unauthorized` | 401 |
+| `forbidden` | 403 |
+| `internal_error` | 500+ |
+
+Cardinality is strictly bounded — raw exception messages, dynamic identifiers, or request data are never used as labels.
+
+#### Structured logs
+
+Every API key authenticated request emits one structured log line (pino JSON) on response finish:
+
+```json
+{
+  "endpoint": "/api/admin/escrow/batch",
+  "method": "POST",
+  "status": 200,
+  "duration_ms": 12.34,
+  "outcome": "success"
+}
+```
+
+For failures, an `error_type` field is included:
+
+```json
+{
+  "endpoint": "/api/admin/escrow/batch",
+  "method": "POST",
+  "status": 401,
+  "duration_ms": 3.21,
+  "outcome": "client_error",
+  "error_type": "unauthorized"
+}
+```
+
+The ambient request context (`requestId`, `correlationId`, `tenantId`, `userId`) is automatically merged into every log line by the pino proxy (`src/logger.js`) when the request runs within an `AsyncLocalStorage` context.
+
+#### Example PromQL
+
+```promql
+# 95th percentile API key auth latency by endpoint
+histogram_quantile(
+  0.95,
+  sum(rate(api_key_auth_duration_seconds_bucket[5m])) by (le, endpoint)
+)
+
+# API key auth error rate by cause
+sum(rate(api_key_auth_errors_total[5m])) by (cause)
+
+# Proportion of 401 responses across all API key auth endpoints
+sum(rate(api_key_auth_duration_seconds_count{outcome="client_error",status="401"}[5m]))
+  /
+sum(rate(api_key_auth_duration_seconds_count[5m]))
+```
 
 ### Prometheus metrics
 
@@ -181,8 +272,115 @@ The application exposes Prometheus metrics on `GET /metrics` (subject to the sam
 - `liquifact_job_queue_depth`: Number of pending jobs currently waiting in background queues (includes main queue across registered job queues).
 - `liquifact_job_retry_queue_size`: Number of jobs currently waiting in retry queues across registered job queues.
 - `liquifact_worker_inflight_count`: Number of jobs currently being processed by registered background workers.
+- `soroban_rpc_call_duration_seconds`: Histogram of end-to-end Soroban RPC wrapper latency, labelled by bounded `method` and `outcome` values. The timing includes retry delays because it measures the full `callSorobanContract()` wrapper path.
+- `soroban_rpc_retry_causes_total`: Counter of Soroban retry attempts, labelled by bounded `cause` values (`timeout`, `429`, `5xx`, `unknown`).
+- `api_key_auth_duration_seconds`: Histogram of API key authenticated request duration, labelled by bounded `endpoint`, `method`, `status`, and `outcome` values.
+- `api_key_auth_errors_total`: Counter of API key auth errors by bounded `cause` label (`unauthorized`, `forbidden`, `internal_error`).
 
 These gauges are updated by sampling registered `JobQueue` and `BackgroundWorker` instances and are intentionally bounded to avoid high-cardinality labels.
+
+### Worker error-log context
+
+When a background job handler throws, the worker (`src/workers/worker.js`) logs a
+structured `Job handler failed` error through `src/logger.js` before scheduling the
+retry. Each log line carries enough context to trace the failure back to a tenant
+and, when available, to the request that enqueued the job:
+
+- `jobId`, `jobType`, and `attempt` — which job failed and on which attempt.
+- A **safe allow-listed subset** of the job payload: `tenantId`, `invoiceId`,
+  `correlationId`, `performedBy`, `policyId`, `batchSize`. Only primitive values
+  are copied; nested objects are never logged.
+- `err` — the thrown error, serialized by pino.
+
+Full payloads are never logged, so webhook secrets, signing tokens, and invoice
+bodies cannot leak into logs. As defence in depth, the assembled context is also
+passed through the shared `redactValue` scrubber from `src/services/auditLogStore.js`,
+which masks any value whose key matches a sensitive pattern (`password`, `secret`,
+`token`, `apiKey`, `authorization`, `privateKey`, `seed`, `mnemonic`).
+
+If the enqueuing request placed a `correlationId` on the payload, the error log can
+be joined against that request's API logs for end-to-end tracing. Retry behaviour is
+unchanged: the failure is logged and the job is re-queued with exponential backoff.
+
+Soroban metric labels are intentionally coarse and bounded:
+
+- `method` is normalized to a small allowlist of method families such as `contract_call`, `simulate_transaction`, and `get_ledger_entries`. Unknown or untrusted values are collapsed to `unknown`.
+- `outcome` is limited to `success`, `error`, or `circuit_open`.
+- `cause` is limited to `timeout`, `429`, `5xx`, or `unknown`.
+
+No request payloads, contract arguments, presigned URLs, bearer tokens, or other secrets are included in metric labels.
+
+Example PromQL:
+
+```promql
+# 95th percentile end-to-end Soroban latency by method
+histogram_quantile(
+  0.95,
+  sum(rate(soroban_rpc_call_duration_seconds_bucket[5m])) by (le, method)
+)
+
+# Retry rate by retry cause
+sum(rate(soroban_rpc_retry_causes_total[5m])) by (cause)
+```
+
+### Body-size limit rejection metrics
+
+The `body_size_limit_rejections_total` counter tracks every request rejected with HTTP 413 Payload Too Large, labelled by the body parser type that rejected it:
+
+| Label `type` | Trigger |
+|---|---|
+| `json` | Rejected by the global JSON body parser (default 100 KB) |
+| `urlencoded` | Rejected by the URL-encoded body parser (default 50 KB) |
+| `invoice` | Rejected by the stricter invoice upload parser (default 512 KB) |
+| `unknown` | Rejected by the generic error handler when content-type cannot be determined |
+
+This counter is designed for **DoS detection**: a sudden spike in any `type` label indicates a potential attack attempting to overwhelm the API with oversized payloads.
+
+#### DoS detection alert rules
+
+The following PromQL alerts detect rapid increases in body-size rejections. A sustained rate of 10+ rejections per minute is a strong signal of a volumetric DoS attempt.
+
+```promql
+# Alert when JSON body-size rejections exceed 10 per minute (potential DoS)
+rate(body_size_limit_rejections_total{type="json"}[5m]) > 0.167
+
+# Alert when urlencoded body-size rejections exceed 10 per minute
+rate(body_size_limit_rejections_total{type="urlencoded"}[5m]) > 0.167
+
+# Aggregate alert across ALL body-size limit types
+sum(rate(body_size_limit_rejections_total[5m])) > 0.167
+```
+
+**Tuning guidance:**
+
+| Environment | Suggested rate threshold | Rationale |
+|---|---|---|
+| Development / CI | `> 0.5` (30/min) | Higher baseline from automated test traffic |
+| Production (normal) | `> 0.167` (10/min) | Expected occasional oversized payloads from legitimate clients |
+| Production (locked down) | `> 0.017` (1/min) | Very low tolerance — almost all oversized payloads are malicious |
+
+For production deployments, include the full YAML alert rule from [`docs/prometheus-rules.yml`](./docs/prometheus-rules.yml).
+
+### Grafana dashboard
+
+Import the pre-built Grafana dashboard to visualize body-size limit rejection metrics over time:
+
+  1. Open Grafana → **+** → **Import**.
+  2. Upload or paste [`docs/grafana-dashboard.json`](./docs/grafana-dashboard.json).
+  3. Select your Prometheus data source.
+  4. Click **Import**.
+
+The dashboard includes the following panels:
+
+| Panel | Type | Description |
+|---|---|---|
+| Rejection Rate by Type | Time series | `rate(body_size_limit_rejections_total[5m])` per `type` label (json, urlencoded, invoice, unknown) + aggregate |
+| Current Rejection Rate | Stat | Live rate with green/yellow/red background thresholds matching alert severity |
+| Rejections by Type (Current) | Bar gauge | Instant per-type rates for quick scanning |
+| Cumulative Rejections (Last Hour) | Bar gauge | `increase()[1h]` per type — sustained values > 600 suggest probing |
+| Cumulative Rejections Over Time | Time series | Hourly increase per type over the selected time window |
+| Alert Threshold Reference | Bar gauge | Combined rate with visual threshold markers |
+| Historical Rejection Heatmap | Time series (step) | All-types aggregate with color-coded severity bands |
 
 ---
 
@@ -244,6 +442,70 @@ Error: Mismatch: STELLAR_NETWORK=TESTNET requires SOROBAN_RPC_URL="https://sorob
 
 ---
 
+## CORS Policy
+
+Cross-Origin Resource Sharing is configured in `src/config/cors.js`.
+
+### Configuration
+
+Set the allowed origins via environment variable (comma-separated):
+
+```bash
+CORS_ORIGINS=https://app.example.com,https://admin.example.com
+```
+
+`CORS_ALLOWED_ORIGINS` is accepted as an alias for backward compatibility. When both are set, `CORS_ALLOWED_ORIGINS` takes precedence.
+
+In `NODE_ENV=development` with no variable set, a hard-coded set of `localhost` origins is permitted automatically.
+
+In all other environments with no variable set, every browser origin is denied.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CORS_ORIGINS` | unset | Comma-separated list of trusted origins |
+| `CORS_ALLOWED_ORIGINS` | unset | Alias for `CORS_ORIGINS` (preferred when both are present) |
+| `CORS_MAX_AGE` | `600` | Preflight `Access-Control-Max-Age` in seconds |
+
+### Origin normalization
+
+Incoming origins are normalized before allowlist comparison to eliminate case and trailing-slash bypasses:
+
+1. The origin is parsed with the WHATWG `URL` parser (`new URL(origin)`).
+2. `url.origin` is used as the canonical form — the URL parser lowercases the scheme and host, and never includes a trailing slash.
+3. Both the incoming request origin **and** each allowlist entry are normalized before comparison.
+
+Practical consequences:
+
+- `HTTPS://APP.EXAMPLE.COM` → compared as `https://app.example.com` ✅ allowed if listed
+- `https://app.example.com/` → compared as `https://app.example.com` ✅ allowed if listed
+- `HTTPS://APP.EXAMPLE.COM/` → compared as `https://app.example.com` ✅ allowed if listed
+- `https://attacker.example.com` → not in allowlist ❌ rejected
+
+### `null`-origin handling
+
+The literal string `"null"` is sent by browsers for requests from sandboxed `<iframe>` elements, `data:` URIs, and local `file://` navigations. It is **never** an acceptable origin value for credentialed responses:
+
+- `normalizeOrigin("null")` returns `null` immediately — it is never parsed as a URL.
+- `isAllowedOrigin("null", allowlist)` always returns `false`, even if the string `"null"` appears in the allowlist.
+- Requests arriving with `Origin: null` receive a `403 Forbidden` response.
+
+### Credentialed origin policy
+
+Arbitrary origins are never reflected into `Access-Control-Allow-Origin` when `Access-Control-Allow-Credentials: true` is set. Only origins that are explicitly present in the allowlist receive the `Access-Control-Allow-Origin` response header. All other origins — including `"null"`, unparseable values, and any origin absent from the allowlist — receive an error response.
+
+### No-Origin requests
+
+Requests with **no** `Origin` header (curl, Postman, service-to-service, server-side fetch) are always passed through. The CORS middleware only acts when the browser sends an `Origin` header.
+
+### Security notes
+
+- No origin is reflected without being explicitly allowlisted.
+- The literal `"null"` origin is unconditionally denied regardless of allowlist contents.
+- Case variants (`HTTPS://APP.EXAMPLE.COM`) and trailing-slash variants (`https://app.example.com/`) are normalized before comparison — they match the allowlist entry if present, but cannot bypass it.
+- The allowlist can be reloaded at runtime via `reloadCorsOrigins()` without restarting the server.
+
+---
+
 ## API Key Authentication
 
 Service-to-service callers authenticate with the `X-API-Key` request header. Keys are loaded from the `API_KEYS` environment variable — **no database connection is opened per request**.
@@ -292,6 +554,96 @@ On success, `req.apiClient` is set to `{ clientId, scopes }`.
 
 ---
 
+## Docker / Deployment
+
+The production image is built with two hardening measures that address
+container-security best practices (CIS Docker Benchmark):
+
+### Image overview
+
+| Property | Value |
+|---|---|
+| Base image | `node:20-slim` |
+| Build strategy | Multi-stage (deps → runtime) |
+| Runtime user | `appuser` (UID 1001, non-root) |
+| Dependency install | `npm ci --omit=dev` against committed `package-lock.json` |
+| Health probe | `GET /readyz` (HTTP 200 = healthy) |
+| Exposed port | `3001` |
+
+### Non-root runtime user
+
+The final image creates a dedicated `appuser`/`appgroup` (UID/GID 1001) and
+switches to that identity before `CMD`. The process therefore runs without
+`root` privileges, limiting the blast radius of any application-layer exploit.
+
+```dockerfile
+RUN groupadd --gid 1001 appgroup \
+    && useradd --uid 1001 --gid appgroup --no-create-home --shell /bin/false appuser
+...
+USER appuser
+```
+
+### Lockfile-verified install
+
+`npm ci` requires `package-lock.json` to be present and in sync with
+`package.json`. If the lockfile is absent or diverged the build fails
+immediately — no silent version drift into production.
+
+> **Note:** `package-lock.json` must be committed to the repository.
+> The `.gitignore` was updated to allow this file; run
+> `npm install` locally and commit the generated lockfile before building the
+> Docker image.
+
+### Multi-stage build
+
+The `deps` stage installs dependencies; the `runtime` stage copies only the
+resolved `node_modules` and application source. Build tooling, npm itself,
+and any intermediate files never reach the final layer.
+
+### Building and running
+
+```bash
+# Build the hardened image
+docker build -t liquifact-backend:latest .
+
+# Run with required environment variables
+docker run --rm \
+  -p 3001:3001 \
+  -e NODE_ENV=production \
+  -e DATABASE_URL=postgresql://user:pass@host:5432/db \
+  liquifact-backend:latest
+
+# Verify the container runs as a non-root user
+docker run --rm --entrypoint id liquifact-backend:latest
+# Expected output: uid=1001(appuser) gid=1001(appgroup) groups=1001(appgroup)
+```
+
+### Edge cases
+
+| Scenario | Behaviour |
+|---|---|
+| `package-lock.json` missing | `npm ci` fails; `docker build` exits non-zero |
+| `package-lock.json` out of sync | `npm ci` fails; `docker build` exits non-zero |
+| Health check during startup | `--start-period=5s` absorbs boot time; probe retried up to 3× |
+| Non-root file permissions | `chown -R appuser:appgroup /app` grants app full access to its own tree |
+
+### Graceful Shutdown
+
+The application implements coordinated graceful shutdown to prevent request interruption, prevent database pool leaking, and allow background jobs to drain properly.
+
+When a termination signal (`SIGTERM` or `SIGINT`) is received:
+1. **HTTP Listener Closure**: The server immediately stops accepting new HTTP connections via `server.close()`.
+2. **Request Draining**: Existing active HTTP requests are allowed to complete. Idle keep-alive connections are closed immediately.
+3. **Background Worker Stop**: The active background worker is stopped gracefully using `worker.stop()`, allowing in-flight jobs to complete.
+4. **Knex Pool Destruction**: The Knex database connection pool is closed (`db.destroy()`).
+5. **Clean Exit**: The process exits cleanly with status code `0`.
+
+#### Configuration
+
+- `SHUTDOWN_TIMEOUT_MS`: The maximum time (in milliseconds) to wait for all phases of graceful shutdown to complete before forcing a process exit with status code `1` (defaults to `10000` / 10 seconds).
+
+---
+
 ## Development
 
 | Command | Description |
@@ -314,21 +666,10 @@ On success, `req.apiClient` is set to `{ clientId, scopes }`.
 | `npm run load:baseline` | Run the core endpoint load baseline suite |
 
 Default port: `3001`.
-
-## Caching
-
-The application uses an in-memory cache store (`MemoryCacheStore`) by default for token metadata and other transient data to avoid unbounded memory growth.
-
-### Bounded In-Memory Cache (`MemoryCacheStore`)
-- **Eviction Policy**: Configurable `maxEntries` bound (defaults to `5000`) with **Least Recently Used (LRU)** eviction. Expired entries are also lazily evicted on `get()`.
-- **Metrics**: Emits hit, miss, and eviction counts to Prometheus via standard counters:
-  - `soroban_footprint_cache_hits_total`
-  - `soroban_footprint_cache_misses_total`
-  - `soroban_footprint_cache_evictions_total`
-
-### Escrow Redis Cache
-- **Configuration**: Optional and disabled by default. Set `REDIS_ESCROW_CACHE_ENABLED=true` with `REDIS_URL` to enable it.
-- **Tuning**: `REDIS_ESCROW_CACHE_TTL_SECONDS` is strictly clamped to `5..300`, and `REDIS_ESCROW_LEDGER_GAP_THRESHOLD` controls ledger-gap invalidation.
+Escrow Redis cache is optional and disabled by default; set `REDIS_ESCROW_CACHE_ENABLED=true` with `REDIS_URL` to enable it.
+`REDIS_ESCROW_CACHE_TTL_SECONDS` is strictly clamped to `5..300`, and `REDIS_ESCROW_LEDGER_GAP_THRESHOLD` controls ledger-gap invalidation.
+`ESCROW_READ_PROJECTION_ENABLED` — feature flag that gates the projection/cache-based escrow read path (`getEscrowStateWithProjection`). When set to `false`, the service skips the Redis cache and `escrow_event_projection` table and reads directly from the Soroban contract (live read). Defaults to `true`.
+`CONFIG_RUNTIME_ENABLED` — feature flag that gates the `/api/admin/config` POST and GET `/sections` endpoints. When set to `false`, requests return `404` so the runtime config surface can be disabled without a deploy. Defaults to `true`.
 
 Incremental TypeScript setup and migration guidance lives in `docs/typescript-plan.md`.
 
@@ -355,7 +696,7 @@ npm run db:migrate
 
 ### Key Features
 
-- **Multi-tenant isolation** with tenant-scoped data
+- **Multi-tenant isolation** with tenant-scoped data (see [`docs/multi-tenancy.md`](./docs/multi-tenancy.md))
 - **Soft deletes** for data recovery
 - **Audit trail** for compliance
 - **UUID primary keys** for distributed systems
@@ -373,12 +714,15 @@ The API is documented using OpenAPI 3.0 specification.
 - **Interactive Docs**: `GET /docs` - Swagger UI for exploring and testing the API
 - **Correlation Strategy**: See [`docs/invoice-correlation.md`](./docs/invoice-correlation.md) for details on how `invoiceId` correlates with on-chain Stellar and Soroban data.
 - **Signing Modes**: See [`docs/ops-signing.md`](./docs/ops-signing.md) for details on the escrow transaction signing modes (delegated, custodial, stubbed).
+- **Multi-Tenancy Model**: See [`docs/multi-tenancy.md`](./docs/multi-tenancy.md) for details on the multi-tenant architecture and data isolation constraints.
 
 The documentation covers all public endpoints including health checks, invoice management, escrow operations, and investment opportunities.
 
 - **Marketplace**: `GET /api/marketplace` - Search and sort invoices by yield, maturity, and funded ratio. Supports advanced filtering (`yieldBpsMin`, `maturityDateTo`, `fundedRatioMin`, etc.) and both **cursor-based** and offset pagination.
 
   **Cursor pagination (recommended)** — stable under inserts/deletes; use the `nextCursor` value from one response as the `cursor` param in the next request. Cursors are opaque and HMAC-signed; any modification returns 400.
+
+  Cursor signatures use `CURSOR_SECRET` when set, otherwise `JWT_SECRET`. The public development fallback is only available in `development` and `test`; production deployments must configure a real secret before signing or verifying cursors. For production, prefer `CURSOR_TTL_ENABLED=true` with a bounded `CURSOR_TTL_SECONDS` such as `3600` to limit replay windows. Shorter TTLs reduce replay risk but can expire long-running pagination sessions.
 
   **Offset pagination (legacy)** — use `page` + `limit` as before. `nextCursor` and `hasMore` are also returned so clients can migrate incrementally.
 
@@ -409,6 +753,43 @@ curl -H "Authorization: Bearer <token>" \
      "http://localhost:3001/api/marketplace?yieldBpsMin=500&sortBy=yield_bps&order=desc&page=2&limit=10"
 ```
 
+- **Investment Opportunities**: `GET /api/invest/opportunities` — List open investment opportunities available for funding. Returns tenant-scoped invoices enriched with live on-chain escrow state via batched Soroban reads.
+
+  **Response DTO fields**
+
+  | Field | Type | Description |
+  |---|---|---|
+  | `invoiceId` | string | Unique identifier of the underlying invoice |
+  | `fundedBpsOfTarget` | number | Funding progress in basis points (10000 = 100%) |
+  | `maturityAt` | string (ISO 8601) | Investment maturity timestamp |
+  | `yieldBpsDisplay` | number | Expected return in basis points (e.g. 500 = 5%) |
+  | `onChain` | object | Live blockchain state pointers |
+  | `onChain.escrowAddress` | string | Stellar/Soroban escrow contract address |
+  | `onChain.ledgerIndex` | string \| null | Last synchronized ledger index |
+
+  **Pagination**
+
+  | Param | Type | Default | Range | Description |
+  |---|---|---|---|---|
+  | `page` | integer | 1 | ≥ 1 | 1-based page number |
+  | `limit` | integer | 20 | 1–100 | Items per page |
+
+  **Security**
+
+  - Tenant-scoped: requires `x-tenant-id` header or JWT `tenantId` claim.
+  - Non-investable invoice statuses (draft, cancelled, etc.) are never exposed.
+  - Per-invoice on-chain read failures silently skip enrichment for that invoice; the full list is never 500'd.
+  - Cross-tenant invoice IDs are filtered before any escrow read is made.
+
+  **Example**
+  ```bash
+  curl -H "Authorization: Bearer <token>" \
+       "http://localhost:3001/api/invest/opportunities?page=1&limit=10"
+  # Response: { data: [...], meta: { total, page, limit, totalPages } }
+  ```
+
+  **Funding endpoint**: `POST /api/invest/fund-invoice` — Submit a funding commitment to an escrow contract. Requires KYC verification, validates the investor address, and enforces idempotency to prevent double-funding. See [`docs/escrow-integration-overview.md`](./docs/escrow-integration-overview.md) for the full funding flow.
+
 ---
 
 ## SME Wallet Authorization
@@ -423,7 +804,13 @@ The `src/middleware/smeAuth.js` middleware binds Stellar wallet authorization st
 
 ### Address format
 
-All wallet addresses are validated against `^G[A-Z2-7]{55}$` (Stellar Ed25519 public key format). Invalid formats yield a `400` before any capital-movement logic runs.
+All SME wallet addresses are validated as Stellar account public keys (`G...` StrKeys). Contract addresses (`C...`) are intentionally rejected here because this middleware binds user accounts to wallets, not escrow contracts. Invalid formats yield a `400` before any capital-movement logic runs.
+
+Shared StrKey validation lives in `src/utils/validators.js`:
+
+- `isValidStellarAccountAddress(value)` accepts only `G...` account public keys.
+- `isValidStellarContractAddress(value)` accepts only `C...` Soroban contract addresses.
+- `isValidStellarAddress(value)` accepts either form for routes and services that can work with both account and contract StrKeys.
 
 ### Error responses
 
@@ -503,6 +890,10 @@ invoice.pdf            -> accepted
 
 ### Tenant and Invoice Validation
 
+Tenant IDs are **required** for all SME upload operations, provided either via:
+- `X-Tenant-Id` header (service-to-service), or
+- `tenantId` JWT claim (authenticated users).
+
 Tenant IDs and invoice IDs are validated before key generation.
 
 Allowed characters:
@@ -522,6 +913,14 @@ Rejected examples:
 tenant/admin
 inv/123
 ```
+
+### Idempotency for Presigned URL Generation
+
+The `POST /api/sme/invoice/presigned-url` endpoint **requires an `Idempotency-Key` header** to prevent duplicate invoiceId creation and ensure retries don't generate new presigned URLs.
+
+- Valid key format: 8–128 URL-safe characters (a-z, A-Z, 0-9, ., _, :, -)
+- Same key + same body → returns cached response (same invoiceId and presigned URL)
+- Same key + different body → returns 409 Conflict
 
 ### MIME Type Validation
 
@@ -1179,11 +1578,19 @@ The backend supports durable idempotency keys for funding operations to safely r
 
 ## Investor Commitment
 
-`src/services/investorCommitment.js` persists funding intents from the `POST /api/invest/fund-invoice` flow and exposes an in-memory lock store for the `GET /api/investor/locks` routes.
+`src/services/investorCommitment.js` persists funding intents from the `POST /api/invest/fund-invoice` flow and exposes tenant-scoped, Knex-backed investor lock storage for the `GET /api/investor/locks` routes.
 
 ### Amount validation
 
-`amountStroops` is the on-chain principal unit. The service enforces strict format rules **before any database write**:
+`amountStroops` is the on-chain principal unit. `POST /api/invest/fund-invoice` and the persistence service share the same `validateAmountStroops` helper so invalid values are rejected before any escrow submission or database write. Clients must send `amountStroops` as a JSON string, not a number:
+
+```json
+{
+  "invoiceId": "inv_7788",
+  "investorAddress": "GDRXE2BQUC3AZNPVFSCEZ76NJ3WWL25FYFK6RGZGIEKWE4SOUJ3LNLRK",
+  "amountStroops": "10000000"
+}
+```
 
 | Rule | Detail |
 |------|--------|
@@ -1205,21 +1612,21 @@ Any violation throws a `CommitmentValidationError` with a typed `.code`:
 
 ### Address validation
 
-`validateAddress(address)` checks that the investor address is a valid Stellar public key (G… or C… prefix, 56 base-32 characters). It returns `{ valid, reason }` and is also called from the `GET /api/investor/locks` routes to validate the `funderAddress` query parameter.
+`validateAddress(address)` checks that the investor address is a valid Stellar public key (G… or C… prefix, 56 base-32 characters). It returns `{ valid, reason }` and is also called from the `GET /api/investor/locks` routes to validate the requested `funderAddress` query parameter and the funder address bound to a non-admin caller.
 
 ### Idempotency
 
 `persistCommitment` accepts an optional `idempotencyKey`. When a row with that key already exists the function returns it immediately — no second insert is made. `updateCommitment` refuses to modify `amount_stroops` to prevent silent corruption of commitment records.
 
-### In-memory lock store
+### Investor lock store
 
-The service maintains a `Map`-backed lock cache (claimNotBefore, investorEffectiveYieldBps) mirrored from the DB. All cached entries carry `stale: true` because they are not read live from the chain.
+The service stores lock records (`claimNotBefore`, `investorEffectiveYieldBps`) in the `investor_locks` table. Rows are unique by `tenant_id`, `invoice_id`, and `funder_address`, so the same invoice/funder pair can exist independently for different tenants. Fresh database reads return `stale: false`; the stale flag is derived from each row's refresh timestamp instead of being hardcoded for every response.
 
 | Function | Purpose |
 |----------|---------|
 | `seedInvestorLocks()` | Populate representative data (used in tests) |
-| `clearInvestorLocks()` | Wipe the cache (used between test suites) |
-| `setInvestorLock(params)` | Upsert a lock record |
+| `clearInvestorLocks()` | Wipe durable lock rows, optionally by tenant (used between test suites) |
+| `setInvestorLock(params)` | Upsert a tenant-scoped lock record |
 | `getInvestorLock(invoiceId, funderAddress)` | Look up a single lock |
 | `getInvestorLocksByAddress(funderAddress, opts)` | Filter by funder address |
 | `getAllInvestorLocks(opts)` | List all locks |
@@ -1228,10 +1635,10 @@ The service maintains a `Map`-backed lock cache (claimNotBefore, investorEffecti
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/investor/locks` | List locks, optional `funderAddress` / `invoiceId` filters |
-| `GET` | `/api/investor/locks/:invoiceId` | Single lock for a specific invoice and funder |
+| `GET` | `/api/investor/locks` | List the caller's funder locks, with optional `funderAddress` / `invoiceId` filters |
+| `GET` | `/api/investor/locks/:invoiceId` | Single lock for a specific invoice and authorized funder |
 
-Both routes require a valid JWT (`Authorization: Bearer <token>`). An invalid `funderAddress` returns `400` with `{ error: "invalid Stellar address: …" }`.
+Both routes require a valid JWT (`Authorization: Bearer <token>`). Non-admin callers are scoped to the `funderAddress`, `walletAddress`, `stellarAddress`, or `investorAddress` claim on their authenticated principal. If they omit `funderAddress`, the routes use the bound funder address automatically. If they request a different funder, the routes return `403`. Admin and owner callers may list all tenant locks or inspect any funder. An invalid `funderAddress` returns `400` with `{ error: "invalid Stellar address: …" }`.
 
 ---
 
@@ -1285,8 +1692,9 @@ Both ends of the pipeline attach `error` listeners. If the database stream or th
 
 Every CSV field is processed by `escapeCsvField()` in `src/services/auditLogStore.js`:
 
-1. **Leading-character neutralisation** — cells beginning with `=`, `+`, `-`, `@`, TAB, or CR are prefixed with a single quote (`'`). This prevents spreadsheet software (Excel, LibreOffice Calc, Google Sheets) from interpreting the cell as a formula or a DDE command.
-2. **RFC 4180 quoting** — fields containing commas, double-quotes, or newlines are wrapped in double-quotes; embedded double-quotes are doubled (`"` → `""`).
+1. **Leading-whitespace normalisation** — the field is checked after stripping leading whitespace (`trimStart()`), so values like ` =HYPERLINK(...)` or `\t=cmd` are caught even when the dangerous character is not in position 0.
+2. **Leading-character neutralisation** — cells whose first non-whitespace character is `=`, `+`, `-`, `@`, `|`, TAB, or CR are prefixed with a single quote (`'`). This covers the full OWASP CSV Injection list and prevents spreadsheet software (Excel, LibreOffice Calc, Google Sheets) from interpreting the cell as a formula or DDE command.
+3. **RFC 4180 quoting** — fields containing commas, double-quotes, or newlines are wrapped in double-quotes; embedded double-quotes are doubled (`"` → `""`).
 
 #### Tenant isolation
 
@@ -1424,39 +1832,48 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for branch naming, local checks, testing 
 
 ### Maturity Reminders
 
-The backend sends maturity reminders to relevant parties before invoices reach their settlement date. Email delivery includes built-in resiliency:
+The backend sends maturity reminders to relevant parties before invoices reach their settlement date. Email delivery includes built-in resiliency that prevents silent message loss and never crashes the background worker.
 
-- **Exponential backoff**: Transient SMTP failures (4xx, network errors) are automatically retried with configurable backoff (default: 3 attempts, ~1s base delay, doubling each attempt)
-- **Error classification**: Permanent SMTP failures (5xx, invalid recipient) fail immediately without retry to avoid wasting resources
-- **Dead-lettering**: Emails that fail after all retries are dead-lettered to an in-memory queue for manual inspection and recovery
-- **Observability**: Prometheus counters track delivery attempts, successes, and dead-lettered messages with fine-grained failure reasons
+- **Exponential backoff**: Transient SMTP failures (4xx, network errors) are automatically retried with configurable backoff. Default: 3 attempts, ~1 s base delay, doubling each attempt, ±20% jitter.
+- **Error classification**: Permanent SMTP failures (5xx response codes, "user unknown", "mailbox not found") fail immediately without retry. Transient failures are retried up to `SMTP_MAX_RETRIES` times.
+- **Dead-lettering**: After all retries are exhausted — or immediately on a permanent failure — a sanitized record is written to `maturity_reminder_dead_letters`. Recipient email, customer name, invoice amount, and raw SMTP errors are never stored.
+- **Observability**: Three Prometheus counters track every attempt, every successful delivery, and every dead-letter event with bounded, PII-free labels.
 
 #### Configuration
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `SMTP_HOST` | - | SMTP server hostname |
-| `SMTP_PORT` | 587 | SMTP server port |
-| `SMTP_USER` | - | SMTP authenticated username |
-| `SMTP_PASS` | - | SMTP authenticated password |
-| `SMTP_FROM` | `noreply@liquifact.com` | Sender email address |
-| `SMTP_MAX_RETRIES` | 3 | Maximum retry attempts for transient failures |
+| `SMTP_HOST` | unset | SMTP server hostname. When absent, the system runs in dry-run mode. |
+| `SMTP_PORT` | `587` | SMTP server port. |
+| `SMTP_USER` | unset | SMTP authenticated username. |
+| `SMTP_PASS` | unset | SMTP authenticated password. Never logged. |
+| `SMTP_FROM` | `noreply@liquifact.com` | Sender email address. |
+| `SMTP_MAX_RETRIES` | `3` | Maximum delivery attempts for transient failures. Clamped to 1–10. |
 
-When `SMTP_HOST` is unset, the system runs in **dry-run** mode (logs to console instead of sending real emails), which is ideal for local development and CI testing.
+When `SMTP_HOST` is unset, the system runs in **dry-run** mode: emails are logged to the console instead of being sent, ideal for local development and CI.
 
 #### Metrics
 
 Three Prometheus counters track reminder delivery:
 
 ```
-maturity_reminder_delivery_attempts_total{job_type="maturity_reminder"}    # Each attempt (including retries)
-maturity_reminder_delivery_success_total{job_type="maturity_reminder"}     # Successful deliveries
-maturity_reminder_dead_letter_total{job_type,reason}                       # Dead-lettered reminders
-  ├─ reason="permanent_error"      # Permanent SMTP failures (5xx)
-  └─ reason="max_retries_exceeded" # Exhausted all transient retries
+maturity_reminder_delivery_attempts_total{job_type,reason}   # Every attempt, including retries
+maturity_reminder_delivery_success_total{job_type}           # Confirmed successful deliveries
+maturity_reminder_dead_letter_total{job_type,reason}         # Dead-lettered reminders
+  ├─ reason="smtp_timeout"         # Network / connection timeout
+  ├─ reason="smtp_reject"          # SMTP 5xx / permanent rejection
+  ├─ reason="template_error"       # Template rendering failure
+  └─ reason="unknown"              # Unmapped failure
 ```
 
-See [`docs/email-ops.md`](./docs/email-ops.md) for full technical details on retry logic, error classification, and dead-letter queue management.
+#### Security notes
+
+- SMTP credentials (`SMTP_USER`, `SMTP_PASS`) are never written to any log line.
+- Recipient email addresses are not stored in dead-letter records or Prometheus labels.
+- The `attempts` bound (1–10) prevents unbounded retry loops.
+- The dead-letter persistence call is fire-and-forget; a database outage cannot stall reminder delivery.
+
+See [`docs/email-ops.md`](./docs/email-ops.md) for full technical details on retry logic, error classification, dead-letter column schema, and PromQL alert examples.
 
 ---
 

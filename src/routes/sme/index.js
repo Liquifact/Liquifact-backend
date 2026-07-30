@@ -1,5 +1,12 @@
 /**
  * SME Routes Index
+ *
+ * Persistence write endpoints:
+ *  - POST /api/sme/invoice/presigned-url
+ *  - POST /api/sme/invoice
+ *
+ * Both routes reject unknown fields, wrong types, and out-of-range values with
+ * a structured RFC 7807 400 before any storage call runs.
  */
 
 'use strict';
@@ -10,86 +17,104 @@ const router = express.Router();
 const metricsRoutes = require('./metrics');
 const multer = require('multer');
 const storageService = require('../../services/storage');
+const { extractTenant } = require('../../middleware/tenant');
+const idempotencyMiddleware = require('../../middleware/idempotency');
+const { optionalMultipartIdempotency } = require('../../middleware/multipartIdempotency');
+const { instrumentPersistence } = require('../../middleware/persistenceMetrics');
+const { MAX_FILE_SIZE_BYTES, validatePersistenceBody, presignedUploadBodySchema } = require('../../schemas/persistence');
+const { createPersistenceRateLimiter } = require('../../middleware/persistenceRateLimit');
+const { createCompressionMiddleware } = require('../../middleware/compression');
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 512 * 1024,
+    fileSize: MAX_FILE_SIZE_BYTES,
   },
 });
+
+// Initialize persistence rate limiter
+const persistenceRateLimiter = createPersistenceRateLimiter();
+
+// Compress large persistence responses above 1 KB threshold.
+// Small responses pass through uncompressed to avoid overhead.
+router.use(createCompressionMiddleware());
 
 router.use('/', metricsRoutes);
 
 // POST /api/sme/invoice/presigned-url - Request a presigned upload URL
-router.post('/invoice/presigned-url', express.json(), async (req, res) => {
-  try {
-    const { fileName, mimeType, fileSize } = req.body;
+router.post(
+  '/invoice/presigned-url',
+  express.json(),
+  extractTenant,
+  idempotencyMiddleware,
+  validatePersistenceBody(presignedUploadBodySchema),
+  async (req, res, next) => {
+    try {
+      const { fileName, mimeType, fileSize, invoiceId: bodyInvoiceId } = req.validated;
+      const tenantId = req.tenantId;
+      const invoiceId = bodyInvoiceId || crypto.randomUUID();
 
-    if (!fileName || !mimeType || fileSize == null) {
-      return res.status(400).json({
-        error: 'fileName, mimeType, and fileSize are required',
+      const result = await storageService.getPresignedUploadUrl({
+        tenantId,
+        invoiceId,
+        fileName,
+        mimeType,
+        fileSize,
       });
+
+      res.json({
+        message: 'Presigned upload URL generated',
+        uploadUrl: result.url,
+        fileKey: result.key,
+        invoiceId,
+      });
+    } catch (error) {
+      return next(error);
     }
-
-    const tenantId = req.user?.id || req.user?.sub || 'unknown';
-    const invoiceId = req.body.invoiceId || crypto.randomUUID();
-
-    const result = await storageService.getPresignedUploadUrl({
-      tenantId,
-      invoiceId,
-      fileName,
-      mimeType,
-      fileSize,
-    });
-
-    res.json({
-      message: 'Presigned upload URL generated',
-      uploadUrl: result.url,
-      fileKey: result.key,
-      invoiceId,
-    });
-  } catch (error) {
-    if (error.code === 'INVALID_MIME_TYPE' || error.code === 'FILE_TOO_LARGE') {
-      return res.status(400).json({ error: error.message });
-    }
-    console.error('Presigned URL error:', error);
-    res.status(500).json({ error: 'Failed to generate presigned upload URL' });
   }
-});
+);
 
 // POST /api/sme/invoice - Upload PDF invoice
-router.post('/invoice', upload.single('invoice'), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'Invoice file is required' });
+router.post(
+  '/invoice',
+  persistenceRateLimiter,
+  upload.single('invoice'),
+  extractTenant,
+  optionalMultipartIdempotency,
+  instrumentPersistence('sme_invoice_upload', async (req, res, next) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: 'Invoice file is required' });
+      }
+
+      const tenantId = req.tenantId;
+      const invoiceId = (req.validated && req.validated.invoiceId) || crypto.randomUUID();
+
+      const key = await storageService.uploadFile(
+        req.file.buffer,
+        req.file.originalname,
+        req.file.mimetype,
+        tenantId,
+        invoiceId
+      );
+
+      const signedUrl = await storageService.getSignedUrl(key);
+
+      res.json({
+        message: 'Invoice uploaded successfully',
+        fileKey: key,
+        signedUrl,
+        invoiceId,
+      });
+    } catch (error) {
+      return next(error);
     }
+  })
+);
 
-    const tenantId = req.user?.id || req.user?.sub || 'unknown';
-    const invoiceId = req.body?.invoiceId || crypto.randomUUID();
-
-    const key = await storageService.uploadFile(
-      req.file.buffer,
-      req.file.originalname,
-      req.file.mimetype,
-      tenantId,
-      invoiceId
-    );
-
-    const signedUrl = await storageService.getSignedUrl(key);
-
-    res.json({
-      message: 'Invoice uploaded successfully',
-      fileKey: key,
-      signedUrl,
-      invoiceId,
-    });
-  } catch (error) {
-    if (error.code === 'INVALID_MIME_TYPE' || error.code === 'FILE_TOO_LARGE') {
-      return res.status(400).json({ error: error.message });
-    }
-    console.error('Upload error:', error);
-    res.status(500).json({ error: 'Failed to upload invoice' });
-  }
-});
+// Mount the shared persistence error middleware after all route handlers.
+// Inline try/catch blocks have been replaced with next(error) calls so that
+// all persistence errors flow through this centralised handler.
+router.use(persistenceErrorHandler);
 
 module.exports = router;

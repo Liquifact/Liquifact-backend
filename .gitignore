@@ -113,8 +113,11 @@ Thumbs.db
 # Target (from incoming commit)
 .target
 
-# Lockfile (install with npm install; CI does not rely on a committed lockfile)
-package-lock.json
+# package-lock.json is intentionally committed.
+# The production Dockerfile uses `npm ci` which REQUIRES the lockfile to be
+# present and in sync with package.json — the build fails otherwise.
+# This enforces reproducible, supply-chain-verified installs (CIS Docker
+# Benchmark recommendation).
 
 # Local scratch / merge artifacts
 *_out.txt

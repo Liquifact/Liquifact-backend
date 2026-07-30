@@ -1,0 +1,172 @@
+# LiquiFact API — Prometheus Alerting Rules
+#
+# Deploy this file to your Prometheus server (e.g. /etc/prometheus/rules/)
+# and reference it in prometheus.yml under rule_files.
+#
+# See README.md → Body-size limit rejection metrics for DoS detection tuning
+# guidance.
+
+groups:
+  - name: liquifact-dos-detection
+    interval: 1m
+    rules:
+      # ──────────────────────────────────────────────────────────────
+      # Body-size limit rejection rate alerts (DoS detection)
+      # ──────────────────────────────────────────────────────────────
+      #
+      # A rapid increase in body_size_limit_rejections_total indicates
+      # a potential volumetric DoS attack targeting the API with
+      # oversized payloads.
+      #
+      # Thresholds assume production traffic. Adjust per environment:
+      #   Dev/CI:    > 0.5  (30/min)
+      #   Prod (std): > 0.167 (10/min)
+      #   Prod (tight): > 0.017 (1/min)
+
+      - alert: BodySizeLimitRejectionRateHigh
+        expr: |
+          sum(rate(body_size_limit_rejections_total[5m])) > 0.167
+        for: 2m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "High rate of body-size limit rejections (potential DoS)"
+          description: >
+            Body-size limit rejections are occurring at {{ $value | humanizeRate }} per second
+            over the last 5 minutes. This may indicate a DoS attack with oversized payloads.
+
+      - alert: BodySizeLimitRejectionRateCritical
+        expr: |
+          sum(rate(body_size_limit_rejections_total[5m])) > 0.5
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Critical rate of body-size limit rejections (active DoS)"
+          description: >
+            Body-size limit rejections are occurring at {{ $value | humanizeRate }} per second
+            over the last 5 minutes. Immediate investigation required — this is likely an
+            active DoS attack.
+
+      # ──────────────────────────────────────────────────────────────
+      # Per-type alerts — helps identify which parser is under attack
+      # ──────────────────────────────────────────────────────────────
+
+      - alert: BodySizeLimitRejectionJsonHigh
+        expr: |
+          rate(body_size_limit_rejections_total{type="json"}[5m]) > 0.167
+        for: 2m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "High rate of JSON body-size rejections"
+          description: >
+            JSON body-size rejections: {{ $value | humanizeRate }}/s over 5 min.
+            Targeted attack on global JSON parser (limit ≈ 100 KB).
+
+      - alert: BodySizeLimitRejectionUrlencodedHigh
+        expr: |
+          rate(body_size_limit_rejections_total{type="urlencoded"}[5m]) > 0.167
+        for: 2m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "High rate of URL-encoded body-size rejections"
+          description: >
+            URL-encoded body-size rejections: {{ $value | humanizeRate }}/s over 5 min.
+            Targeted attack on URL-encoded parser (limit ≈ 50 KB).
+
+      - alert: BodySizeLimitRejectionInvoiceHigh
+        expr: |
+          rate(body_size_limit_rejections_total{type="invoice"}[5m]) > 0.167
+        for: 2m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "High rate of invoice body-size rejections"
+          description: >
+            Invoice body-size rejections: {{ $value | humanizeRate }}/s over 5 min.
+            Targeted attack on invoice upload endpoint (limit ≈ 512 KB).
+
+      # ──────────────────────────────────────────────────────────────
+      # Baseline health alert — sustained violations indicate
+      # misconfiguration rather than an attack
+      # ──────────────────────────────────────────────────────────────
+
+      - alert: BodySizeLimitRejectionSustained
+        expr: |
+          sum(increase(body_size_limit_rejections_total[1h])) > 3600
+        labels:
+          severity: info
+          team: platform
+        annotations:
+          summary: "Sustained body-size rejections over 1 hour"
+          description: >
+            {{ $value | humanize }} body-size rejections in the last hour.
+            If this is sustained every hour, consider investigating whether
+            legitimate clients have a misconfigured payload size or the
+            limit is set too low for normal traffic.
+
+  - name: liquifact-default
+    interval: 1m
+    rules:
+      # ──────────────────────────────────────────────────────────────
+      # Escrow reconciliation alerts (from README.md)
+      # ──────────────────────────────────────────────────────────────
+
+      - alert: EscrowReconciliationDrift
+        expr: |
+          increase(escrow_reconciliation_mismatches_total[26h]) > 0
+        labels:
+          severity: warning
+          team: finance
+        annotations:
+          summary: "Escrow reconciliation drift detected"
+          description: >
+            On-chain funded amount differs from DB funded total for at
+            least one invoice in the last 26 hours.
+
+      - alert: EscrowReconciliationDriftAlerted
+        expr: |
+          increase(escrow_reconciliation_drift_alerts_total[26h]) > 0
+        labels:
+          severity: warning
+          team: finance
+        annotations:
+          summary: "Escrow reconciliation run exceeded drift threshold"
+          description: >
+            A reconciliation run breached the configured drift threshold.
+            Check logs for the detailed mismatch report.
+
+      # ──────────────────────────────────────────────────────────────
+      # Escrow indexer staleness alerts (from docs/escrow-indexing-strategy.md)
+      # ──────────────────────────────────────────────────────────────
+
+      - alert: EscrowIndexerStalled
+        expr: |
+          (time() - escrow_indexer_last_cursor_advance_timestamp_seconds) > 600
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Escrow indexer cursor has not advanced for 10 minutes"
+          description: >
+            Last cursor advance: {{ $value | humanizeTimestamp }}
+
+      - alert: EscrowIndexerHighFailureRate
+        expr: |
+          rate(escrow_indexer_cycle_failures_total[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Escrow indexer experiencing high failure rate"
+          description: >
+            Failure rate: {{ $value | humanizePercentage }}

@@ -25,11 +25,12 @@ const { auditMiddleware } = require('./middleware/audit');
 const requestId = require('./middleware/requestId');
 const { correlationIdMiddleware } = require('./middleware/correlationId');
 const invoiceService = require('./services/invoiceService');
-const { resolveEscrowAddress } = require('./config/escrowMap');
-const { getEscrowStateWithProjection } = require('./services/escrowRead');
+const { CursorError } = require('./utils/cursorPagination');
+const { getEscrowRead } = require('./services/escrowReadService');
 const { createCorsOptions, isCorsOriginRejectedError } = require('./config/cors');
+const { corsObservability } = require('./middleware/corsObservability');
+const { get: getConfig } = require('./config');
 const { validateInvoiceQueryParams } = require('./utils/validators');
-const { computeEscrowDerivedFields } = require('./services/escrowDerived');
 const { invoiceCreateSchema, parseValidationErrors } = require('./schemas/invoice');
 const {
   invoiceBodyLimit,
@@ -37,10 +38,14 @@ const {
   payloadTooLargeHandler,
   urlencodedBodyLimit,
 } = require('./middleware/bodySizeLimits');
+const healthRoutes = require('./routes/health');
 const { performHealthChecks, performReadinessChecks } = require('./services/health');
+const { validateHealthQuery, rejectBodyOnGet } = require('./schemas/health');
 const responseHelper = require('./utils/responseHelper');
 const logger = require('./logger');
 const { metricsAuth, metricsHandler } = require('./metrics');
+const { metricsLimiter } = require('./middleware/rateLimit');
+const { instrumentHealth } = require('./middleware/healthMetrics');
 const smeRoutes = require('./routes/sme');
 const invoiceFileRoutes = require('./routes/invoiceFile');
 const auditTrailRoutes = require('./routes/auditTrail');
@@ -50,8 +55,23 @@ const marketplaceRoutes = require('./routes/marketplace');
 const retentionRoutes = require('./routes/retention');
 const invoiceStateRoutes = require('./routes/invoiceStateRoutes');
 const adminEscrowRoutes = require('./routes/adminEscrow');
+const adminEscrowReadRoutes = require('./routes/adminEscrowRead');
+const adminWebhooksRoutes = require('./routes/adminWebhooks');
+const adminConfigRoutes = require('./routes/adminConfig');
 const kycRoutes = require('./routes/kyc');
+const adminKycRoutes = require('./routes/adminKyc');
+const reconciliationRoutes = require('./routes/reconciliation');
+const adminIndexerRoutes = require('./routes/adminIndexer');
+const adminMetricsRoutes = require('./routes/adminMetrics');
 const v1Routes = require('./routes/v1');
+const apiKeysRoutes = require('./routes/apiKeys');
+const {
+  mountFeatureRouter,
+  assertNoDuplicateRouterMounts,
+  resetFeatureRouterMounts,
+} = require('./utils/routeMountRegistry');
+const { createCompressionMiddleware } = require('./middleware/compression');
+const { configErrorHandler } = require('./middleware/configErrorHandler');
 
 /**
  * Returns a 403 JSON response only for the dedicated blocked-origin CORS error.
@@ -64,7 +84,8 @@ const v1Routes = require('./routes/v1');
  */
 function handleCorsError(err, req, res, next) {
   if (isCorsOriginRejectedError(err)) {
-    res.status(403).json({ error: err.message });
+    if (res.locals) res.locals.isCorsOriginRejected = true;
+    res.status(403).json({ error: err.message, code: err.code });
     return;
   }
   next(err);
@@ -87,8 +108,9 @@ function handleInternalError(err, req, res, _next) {
     return;
   }
 
-  // AppError: use the status it carries
-  if (err && err.status && err.status >= 400 && err.status < 500) {
+  // AppError: use the status it carries (400–599).
+  // This covers both 4xx client errors and 5xx upstream errors (e.g. 502).
+  if (err && err.status && err.status >= 400 && err.status <= 599) {
     res.status(err.status).json({
       error: {
         code: err.code || String(err.status),
@@ -121,9 +143,11 @@ function handleInternalError(err, req, res, _next) {
  * @returns {import('express').Express} Configured Express application.
  */
 function createApp() {
+  resetFeatureRouterMounts();
   const app = express();
 
   // ── 1. CORS ──────────────────────────────────────────────────────────────
+  app.use(corsObservability);
   app.use(cors(createCorsOptions()));
 
   // ── 1.a. KYC webhook raw body parser ──────────────────────────────────────
@@ -143,29 +167,33 @@ function createApp() {
   // ── 4. Routes ────────────────────────────────────────────────────────────
 
   // ── Health / Liveness / Readiness ──────────────────────────────────────
+  // Issue #769 — per-client rate limiter before individual handlers.
+  // Mounted first so monitoring scrapers and K8s probes all share the same
+  // per-client budget and a flood of unauthenticated requests is gated
+  // before it reaches the dependency checks.
 
   // Liveness probe — no external dependencies
-  app.get('/health', (req, res) => {
+  app.get('/health', rejectBodyOnGet, validateHealthQuery, instrumentHealth('health_liveness', (req, res) => {
     res.json({
       status: 'ok',
       service: 'liquifact-api',
       version: '0.1.0',
       timestamp: new Date().toISOString(),
     });
-  });
+  }));
 
   // Liveness alias (Kubernetes convention)
-  app.get('/healthz', (req, res) => {
+  app.get('/healthz', rejectBodyOnGet, validateHealthQuery, instrumentHealth('health_liveness', (req, res) => {
     res.json({
       status: 'ok',
       service: 'liquifact-api',
       version: '0.1.0',
       timestamp: new Date().toISOString(),
     });
-  });
+  }));
 
   // Full health check (all dependencies)
-  app.get('/ready', async (req, res) => {
+  app.get('/ready', rejectBodyOnGet, validateHealthQuery, instrumentHealth('health_full', async (req, res) => {
     try {
       const { healthy, checks } = await performHealthChecks();
       const status = healthy ? 200 : 503;
@@ -184,10 +212,10 @@ function createApp() {
         error: error.message,
       });
     }
-  });
+  }));
 
   // Readiness probe (critical deps only: DB, Soroban RPC)
-  app.get('/readyz', async (req, res) => {
+  app.get('/readyz', rejectBodyOnGet, validateHealthQuery, instrumentHealth('health_readiness', async (req, res) => {
     try {
       const { healthy, checks } = await performReadinessChecks();
       const status = healthy ? 200 : 503;
@@ -206,7 +234,7 @@ function createApp() {
         error: error.message,
       });
     }
-  });
+  }));
 
   // API info
   app.get('/api', (req, res) => {
@@ -226,6 +254,8 @@ function createApp() {
     });
   });
 
+  app.use('/api/api-keys', apiKeysRoutes);
+
   // Invoices — GET (list)
   app.get('/api/invoices', async (req, res) => {
     const { isValid, fieldErrors, validatedParams } = validateInvoiceQueryParams(req.query);
@@ -238,9 +268,28 @@ function createApp() {
         fieldErrors,
       });
     }
-    const invoices = await invoiceService.getInvoices(validatedParams);
+
+    let result;
+    try {
+      result = await invoiceService.getInvoicesWithPagination(validatedParams);
+    } catch (err) {
+      if (err instanceof CursorError) {
+        return res.status(400).json({
+          type: 'https://liquifact.io/problems/validation-error',
+          title: 'Validation Error',
+          status: 400,
+          detail: 'Query parameters contain invalid values.',
+          fieldErrors: {
+            cursor: err.message,
+          },
+        });
+      }
+      throw err;
+    }
+
     res.json({
-      data: invoices,
+      data: result.data,
+      meta: result.meta,
       message: 'Invoices retrieved successfully.',
     });
   });
@@ -267,43 +316,27 @@ function createApp() {
   });
 
   // Escrow — GET by invoiceId (proxied through Soroban retry wrapper with address mapping)
-  app.get('/api/escrow/:invoiceId', async (req, res) => {
+  // Compression middleware: gzip/deflate for large escrow-read responses (issue #961).
+  // Threshold: 1 KB (DEFAULT_THRESHOLD). Respects Accept-Encoding; small responses
+  // pass through uncompressed. Vary: Accept-Encoding is always set.
+  app.get('/api/escrow/:invoiceId', createCompressionMiddleware(), async (req, res, next) => {
     const invoiceId = String(req.params.invoiceId || '')
       .trim()
       .replace(/\s+/g, '');
 
-    try {
-      // Resolve escrow contract address using the mapping system
-      const escrowAddress = resolveEscrowAddress(invoiceId);
-      
-      if (!escrowAddress) {
-        return res.status(404).json({ 
-          error: `No escrow contract mapping found for invoice ID '${invoiceId}'` 
-        });
-      }
+    const { result, escrowAddress, error, code, statusCode } = await getEscrowRead(invoiceId);
 
-      // Read from projection, cache, or live read fallback
-      const state = await getEscrowStateWithProjection(invoiceId);
-
-      const derived = computeEscrowDerivedFields(state);
-
-      const data = {
-        ...state,
-        ...derived,
-        escrowAddress
-      };
-
-      // Include escrow address in response headers
-      res.set('X-Escrow-Address', escrowAddress);
-      res.json({
-        data,
-        message: state.fromProjection 
-          ? 'Escrow state read from event projection.'
-          : 'Escrow state read from live Soroban contract.',
-      });
-    } catch (error) {
-      res.status(500).json({ error: error.message || 'Error fetching escrow state' });
+    if (error) {
+      return res.status(statusCode).json({ error, code });
     }
+
+    res.set('X-Escrow-Address', escrowAddress);
+    return res.json({
+      ...responseHelper.success(result),
+      message: result && result.fromProjection
+        ? 'Escrow state read from event projection.'
+        : 'Escrow state read from live Soroban contract.',
+    });
   });
 
   /**
@@ -326,22 +359,54 @@ function createApp() {
     next(new Error('Sensitive'));
   });
 
-  // ── 5. SME & Invoice File routes ─────────────────────────────────────────
-  app.use('/api/sme', smeRoutes);
-  app.use('/api/invoices', invoiceFileRoutes);
-  app.use('/api/invoices', invoiceStateRoutes);
-  app.use('/api/invest', investRoutes);
-  app.use('/api/investor', investorRoutes);
-  app.use('/api/kyc', kycRoutes);
-  app.use('/api/marketplace', marketplaceRoutes);
-  app.use('/api/retention', retentionRoutes);
-  app.use('/api/admin/audit', auditTrailRoutes);
-  app.use('/api/admin/escrow', adminEscrowRoutes);
-  app.use('/api/admin/reconciliation', reconciliationRoutes);
-  app.use('/v1', v1Routes);
+  /**
+   * Feature router mounts — order is intentional.
+   *
+   * Each router is imported once and mounted once via `mountFeatureRouter`.
+   * Multiple routers may share a base path only when they are distinct instances
+   * (e.g. invoice file upload + invoice state machine both use `/api/invoices`).
+   * The investor router (`/api/investor`) must never be mounted twice; duplicate
+   * mounts are rejected at bootstrap by `assertNoDuplicateRouterMounts`.
+   *
+   * Investor handlers apply `authenticateToken` then `extractTenant` before
+   * lock list or detail logic runs (see `routes/investor.js`).
+   *
+   * @see docs/request-lifecycle-middleware-order.md
+   */
+  mountFeatureRouter(app, '/api/sme', smeRoutes);
+  mountFeatureRouter(app, '/api/invoices', invoiceFileRoutes);
+  if (getConfig().INVOICE_STATE_ENABLED === 'true') {
+    mountFeatureRouter(app, '/api/invoices', invoiceStateRoutes);
+  }
+  mountFeatureRouter(app, '/api/invest', investRoutes);
+  mountFeatureRouter(app, '/api/investor', investorRoutes);
+  mountFeatureRouter(app, '/api/kyc', kycRoutes);
+  mountFeatureRouter(app, '/api/marketplace', marketplaceRoutes);
+  mountFeatureRouter(app, '/api/health', healthRoutes);
+  mountFeatureRouter(app, '/api/retention', retentionRoutes);
+  mountFeatureRouter(app, '/api/admin/audit', auditTrailRoutes);
+  mountFeatureRouter(app, '/api/admin/escrow', adminEscrowRoutes);
+  mountFeatureRouter(app, '/api/admin/escrow-read', adminEscrowReadRoutes);
+  mountFeatureRouter(app, '/api/admin/webhooks', adminWebhooksRoutes);
+  if (getConfig().CONFIG_RUNTIME_ENABLED === 'true') {
+    mountFeatureRouter(app, '/api/admin/config', adminConfigRoutes);
+  }
+  mountFeatureRouter(app, '/api/admin/reconciliation', reconciliationRoutes);
+  if (getConfig().ESCROW_INDEXER_ENABLED === 'true') {
+    mountFeatureRouter(app, '/api/admin/indexer', adminIndexerRoutes);
+  }
+  mountFeatureRouter(app, '/api/admin/metrics', adminMetricsRoutes);
+  mountFeatureRouter(app, '/api/admin/kyc', adminKycRoutes);
+  mountFeatureRouter(app, '/v1', v1Routes);
+  mountFeatureRouter(app, '/api', apiKeysRoutes);
+
+  assertNoDuplicateRouterMounts();
 
   // ── 6. Prometheus metrics ────────────────────────────────────────────────
-  app.get('/metrics', metricsAuth, metricsHandler);
+  // Rate limiter mounted BEFORE metricsAuth so unauthenticated attempts
+  // still consume quota — defending against brute-force token guessing
+  // on the metrics surface (issue #744).
+  app.get('/metrics', metricsLimiter, metricsAuth, metricsHandler);
 
   // ── 7. 404 catch-all ─────────────────────────────────────────────────────
   app.use((req, res) => {
@@ -351,6 +416,7 @@ function createApp() {
   // ── 8 – 10. Error handlers (order matters) ───────────────────────────────
   app.use(handleCorsError);
   app.use(payloadTooLargeHandler);
+  app.use(configErrorHandler);
   app.use(handleInternalError);
 
   return app;

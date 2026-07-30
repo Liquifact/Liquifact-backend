@@ -348,6 +348,7 @@ describe('Retention Purge Job - Dry Run Tests', () => {
 
       expect(auditLogs).toHaveLength(1);
       expect(auditLogs[0].pii_fields).toEqual(['customer_name', 'customer_email']);
+      expect(auditLogs[0].old_values).toEqual({});
 
       // Verify job execution record
       const executions = await db('retention_job_executions')

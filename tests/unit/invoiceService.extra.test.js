@@ -5,6 +5,8 @@ jest.mock('../../src/db/knex', () => {
   const mockDb = jest.fn(() => mockDb);
   mockDb.select = jest.fn().mockReturnThis();
   mockDb.where = jest.fn().mockReturnThis();
+  mockDb.whereNull = jest.fn().mockReturnThis();
+  mockDb.whereIn = jest.fn().mockReturnThis();
   mockDb.orderBy = jest.fn().mockReturnThis();
   mockDb.insert = jest.fn().mockReturnThis();
   mockDb.update = jest.fn().mockReturnThis();
@@ -22,7 +24,8 @@ describe('Consolidated Invoice Service - extra', () => {
   test('getInvoices tenant variant calls db with tenant filter', async () => {
     await invoiceService.getInvoices('tenant_1');
     expect(db).toHaveBeenCalledWith('invoices');
-    expect(db().where).toHaveBeenCalledWith({ tenant_id: 'tenant_1', deleted_at: null });
+    expect(db().where).toHaveBeenCalledWith({ tenant_id: 'tenant_1' });
+    expect(db().whereNull).toHaveBeenCalledWith('deleted_at');
   });
 
   test('getInvoiceById returns null when not found', async () => {

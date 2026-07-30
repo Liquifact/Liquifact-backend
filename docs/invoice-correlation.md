@@ -40,3 +40,22 @@ When using Stellar classic payments (e.g., simple `Payment` operations) alongsid
 
 - **Validation**: All `invoiceId` values must be validated against the allowed pattern (`/^[a-zA-Z0-9_-]{1,128}$/`) before being passed to on-chain operations to prevent injection or malformed storage keys.
 - **Privacy**: While `invoiceId` values are generally not sensitive, be aware that they are visible on-chain when used in Soroban arguments or Stellar memos. Use opaque identifiers if privacy is a concern.
+## Memo Truncation Guard
+
+Stellar classic payment memos are limited to **28 bytes**. The escrow
+submission prefixes every memo with `lq:` (3 bytes), leaving 25 bytes
+for the `invoiceId`.
+
+### Policy
+- `submitFundEscrow` calls `buildMemo(invoiceId)` before building the
+  transaction.
+- `buildMemo` measures the full memo byte-length with `Buffer.byteLength`.
+- If the memo exceeds 28 bytes, it throws an `EscrowSubmitError` with a
+  clear message — the transaction is never submitted with a truncated memo.
+- No silent truncation is permitted; callers must ensure `invoiceId` is
+  short enough to fit, or use an alternative correlation strategy.
+
+### Why this matters
+A truncated memo no longer maps back to the invoice during indexing,
+breaking on-chain-to-DB correlation. Failing loudly prevents silent
+data loss.

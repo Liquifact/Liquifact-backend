@@ -9,16 +9,22 @@
  * that these tests run entirely without a real database connection.
  */
 
-const { Readable, pipeline } = require('stream');
+const { Readable, Writable, pipeline } = require('stream');
 const { promisify } = require('util');
 
 const pipelineAsync = promisify(pipeline);
 
 jest.mock('../src/db/knex');
 
+const defaultKnex = require('../src/db/knex');
+
 const {
   escapeCsvField,
   CSV_HEADERS,
+  REDACTED,
+  appendAuditEvent,
+  redactValue,
+  normalizeMetadata,
   rowToCsvLine,
   createCsvTransform,
   streamAuditEvents,
@@ -113,6 +119,211 @@ describe('escapeCsvField', () => {
     // Numbers are coerced to string; "-100" starts with - so it gets prefixed
     expect(escapeCsvField(-100)).toBe("'-100");
   });
+
+  // ── Leading-whitespace regression (issue fix) ─────────────────────────────
+
+  it('neutralizes a field with a leading space then "=" (whitespace bypass)', () => {
+    expect(escapeCsvField(' =HYPERLINK("http://evil.com")')).toBe(
+      '"\' =HYPERLINK(""http://evil.com"")"'
+    );
+  });
+
+  it('neutralizes a field with multiple leading spaces then "+"', () => {
+    expect(escapeCsvField('   +cmd')).toBe("'   +cmd");
+  });
+
+  it('neutralizes a field with a leading tab then "=" (tab-prefix bypass)', () => {
+    expect(escapeCsvField('\t=MALICIOUS()')).toBe("'\t=MALICIOUS()");
+  });
+
+  it('neutralizes a field with a leading carriage return then "="', () => {
+    expect(escapeCsvField('\r=MALICIOUS()')).toBe('"\'\r=MALICIOUS()"');
+  });
+
+  it('neutralizes a field with leading space then "-"', () => {
+    expect(escapeCsvField(' -2+3')).toBe("' -2+3");
+  });
+
+  it('neutralizes a field with leading space then "@"', () => {
+    expect(escapeCsvField(' @SUM(1)')).toBe("' @SUM(1)");
+  });
+
+  // ── Pipe (|) prefix (OWASP DDE) ──────────────────────────────────────────
+
+  it('prefixes | with a single quote (DDE/pipe injection)', () => {
+    expect(escapeCsvField('|calc.exe')).toBe("'|calc.exe");
+  });
+
+  it('neutralizes a field with leading space then "|"', () => {
+    expect(escapeCsvField(' |calc.exe')).toBe("' |calc.exe");
+  });
+
+  // ── Whitespace-only and all-whitespace edge cases ─────────────────────────
+
+  it('does not prefix whitespace-only values', () => {
+    expect(escapeCsvField('   ')).toBe('   ');
+    expect(escapeCsvField('\t')).toBe('\t');
+  });
+
+  it.each([
+    ['=', '=SUM(A1:A2)', "'=SUM(A1:A2)"],
+    ['+', '+SUM(A1:A2)', "'+SUM(A1:A2)"],
+    ['-', '-SUM(A1:A2)', "'-SUM(A1:A2)"],
+    ['@', '@SUM(A1:A2)', "'@SUM(A1:A2)"],
+    ['|', '|calc.exe', "'|calc.exe"],
+    ['leading space', '  =SUM(A1:A2)', "'  =SUM(A1:A2)"],
+    ['leading tab', '\t=SUM(A1:A2)', "'\t=SUM(A1:A2)"],
+    ['leading CR', '\r=SUM(A1:A2)', '"\'\r=SUM(A1:A2)"'],
+  ])('neutralizes formula lead %s', (_label, value, expected) => {
+    expect(escapeCsvField(value)).toBe(expected);
+  });
+});
+
+// ── redactValue / normalizeMetadata ──────────────────────────────────────────
+
+describe('redactValue and normalizeMetadata', () => {
+  it('preserves null and undefined values when redacting leaf values', () => {
+    expect(redactValue(null)).toBeNull();
+    expect(redactValue(undefined)).toBeUndefined();
+  });
+
+  it('redacts every sensitive key pattern recursively', () => {
+    const input = {
+      password: 'p',
+      clientSecret: 's',
+      refresh_token: 't',
+      apiKey: 'api',
+      'api-key': 'api-dash',
+      authorization: 'Bearer secret',
+      private_key: 'pk',
+      privateKey: 'pk2',
+      seedPhrase: 'seed',
+      mnemonic: 'words',
+      nested: {
+        tokenValue: 'nested-token',
+        safe: 'keep',
+        list: [{ passwordHash: 'hash' }, { value: 'plain' }],
+      },
+    };
+
+    expect(redactValue(input)).toEqual({
+      password: REDACTED,
+      clientSecret: REDACTED,
+      refresh_token: REDACTED,
+      apiKey: REDACTED,
+      'api-key': REDACTED,
+      authorization: REDACTED,
+      private_key: REDACTED,
+      privateKey: REDACTED,
+      seedPhrase: REDACTED,
+      mnemonic: REDACTED,
+      nested: {
+        tokenValue: REDACTED,
+        safe: 'keep',
+        list: [{ passwordHash: REDACTED }, { value: 'plain' }],
+      },
+    });
+  });
+
+  it('normalizes non-object metadata to an empty object', () => {
+    expect(normalizeMetadata(null)).toEqual({});
+    expect(normalizeMetadata('tenant-alpha')).toEqual({});
+  });
+
+  it('returns redacted metadata for object input', () => {
+    expect(normalizeMetadata({ tenantId: 'tenant-alpha', token: 'secret' })).toEqual({
+      tenantId: 'tenant-alpha',
+      token: REDACTED,
+    });
+  });
+});
+
+// ── appendAuditEvent ──────────────────────────────────────────────────────────
+
+describe('appendAuditEvent', () => {
+  beforeEach(() => {
+    defaultKnex.mockReset();
+  });
+
+  it('serializes a normalized, redacted audit event record', async () => {
+    const insert = jest.fn().mockResolvedValue();
+    const mockKnex = jest.fn(() => ({ insert }));
+
+    await appendAuditEvent(
+      {
+        eventType: 'invoice.updated',
+        action: 'UPDATE',
+        actorType: 'user',
+        actorId: 'actor-1',
+        targetType: 'invoice',
+        targetId: 'inv-001',
+        requestId: 'req-1',
+        route: '/api/invoices/inv-001',
+        method: 'PATCH',
+        statusCode: 200,
+        ipAddress: '127.0.0.1',
+        userAgent: 'jest',
+        metadata: {
+          tenantId: 'tenant-alpha',
+          authorization: 'Bearer secret',
+          nested: { apiKey: 'key' },
+        },
+      },
+      { db: mockKnex }
+    );
+
+    expect(mockKnex).toHaveBeenCalledWith('audit_log_events');
+    expect(insert).toHaveBeenCalledWith({
+      event_type: 'invoice.updated',
+      action: 'UPDATE',
+      actor_type: 'user',
+      actor_id: 'actor-1',
+      target_type: 'invoice',
+      target_id: 'inv-001',
+      request_id: 'req-1',
+      route: '/api/invoices/inv-001',
+      method: 'PATCH',
+      status_code: 200,
+      ip_address: '127.0.0.1',
+      user_agent: 'jest',
+      metadata: JSON.stringify({
+        tenantId: 'tenant-alpha',
+        authorization: REDACTED,
+        nested: { apiKey: REDACTED },
+      }),
+    });
+  });
+
+  it('uses the default database and nulls missing optional fields', async () => {
+    const insert = jest.fn().mockResolvedValue();
+    defaultKnex.mockReturnValue({ insert });
+
+    await appendAuditEvent({
+      eventType: 'system.audit',
+      action: 'CREATE',
+      actorType: 'system',
+      actorId: 'system',
+      statusCode: '200',
+      metadata: null,
+    });
+
+    expect(defaultKnex).toHaveBeenCalledWith('audit_log_events');
+    expect(insert).toHaveBeenCalledWith({
+      event_type: 'system.audit',
+      action: 'CREATE',
+      actor_type: 'system',
+      actor_id: 'system',
+      target_type: null,
+      target_id: null,
+      request_id: null,
+      route: null,
+      method: null,
+      status_code: null,
+      ip_address: null,
+      user_agent: null,
+      metadata: JSON.stringify({}),
+    });
+  });
 });
 
 // ── rowToCsvLine ──────────────────────────────────────────────────────────────
@@ -186,7 +397,7 @@ describe('createCsvTransform', () => {
     const transform = createCsvTransform();
     const output = await collectStream(src.pipe(transform));
     expect(output).toContain("'=CMD()");
-    expect(output).not.toContain('=CMD()'); // bare injection must not appear
+    expect(output).not.toMatch(/(^|,)=CMD\(\)(,|\n)/m);
   });
 
   it('escapes commas in streamed field values', async () => {
@@ -205,7 +416,7 @@ describe('createCsvTransform', () => {
     expect(output).toContain('"admin""quoted"""');
   });
 
-  it('propagates upstream errors to the transform', (done) => {
+  it('propagates upstream errors through the stream pipeline', async () => {
     const src = new Readable({
       objectMode: true,
       read() {
@@ -213,11 +424,30 @@ describe('createCsvTransform', () => {
       },
     });
     const transform = createCsvTransform();
-    src.pipe(transform);
-    transform.on('error', (err) => {
-      expect(err.message).toBe('db error');
-      done();
+    const sink = new Writable({
+      write(_chunk, _enc, callback) {
+        callback();
+      },
     });
+
+    await expect(pipelineAsync(src, transform, sink)).rejects.toThrow('db error');
+  });
+
+  it('propagates row serialization errors through the stream pipeline', async () => {
+    const badRow = makeRow();
+    Object.defineProperty(badRow, 'id', {
+      get() {
+        throw new Error('bad row');
+      },
+    });
+    const transform = createCsvTransform();
+    const sink = new Writable({
+      write(_chunk, _enc, callback) {
+        callback();
+      },
+    });
+
+    await expect(pipelineAsync(rowsToStream([badRow]), transform, sink)).rejects.toThrow('bad row');
   });
 
   it('writes only one header row across multiple rows', async () => {
@@ -233,22 +463,32 @@ describe('createCsvTransform', () => {
 // ── streamAuditEvents ─────────────────────────────────────────────────────────
 
 describe('streamAuditEvents', () => {
+  beforeEach(() => {
+    defaultKnex.mockReset();
+  });
+
   /**
    * Builds a tiny mock Knex that records how it was called and returns a
    * Readable stream of the supplied rows when `.stream()` is invoked.
    */
   function makeMockKnex(rows = []) {
-    const calls = {};
+    const filters = {};
     const mockQuery = {
       select: jest.fn().mockReturnThis(),
       orderBy: jest.fn().mockReturnThis(),
-      where: jest.fn().mockReturnThis(),
-      whereRaw: jest.fn().mockReturnThis(),
-      stream: jest.fn(() => rowsToStream(rows)),
+      where: jest.fn((column, value) => {
+        filters[column] = value;
+        return mockQuery;
+      }),
+      whereRaw: jest.fn((_sql, params) => {
+        filters.tenantId = params[0];
+        return mockQuery;
+      }),
+      stream: jest.fn(() => rowsToStream(rows.filter((row) => rowMatchesFilters(row, filters)))),
     };
     const knex = jest.fn(() => mockQuery);
     knex._query = mockQuery;
-    knex._calls = calls;
+    knex._filters = filters;
     return knex;
   }
 
@@ -256,6 +496,16 @@ describe('streamAuditEvents', () => {
     const mockKnex = makeMockKnex([]);
     streamAuditEvents({}, { db: mockKnex });
     expect(mockKnex._query.stream).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the default database when no db option is provided', async () => {
+    const mockKnex = makeMockKnex([makeRow({ id: 7, actor_id: 'default-db-user' })]);
+    defaultKnex.mockImplementation(mockKnex);
+
+    const output = await collectStream(streamAuditEvents().pipe(createCsvTransform()));
+
+    expect(defaultKnex).toHaveBeenCalledWith('audit_log_events');
+    expect(output).toContain('default-db-user');
   });
 
   it('applies targetId filter when provided', () => {
@@ -298,6 +548,22 @@ describe('streamAuditEvents', () => {
     expect(lines).toHaveLength(3); // header + 2 rows
   });
 
+  it('does not emit cross-tenant rows when tenantId is provided', async () => {
+    const rows = [
+      makeRow({ id: 1, actor_id: 'tenant-a-user', metadata: { tenantId: 'tenant-a' } }),
+      makeRow({ id: 2, actor_id: 'tenant-b-user', metadata: { tenantId: 'tenant-b' } }),
+      makeRow({ id: 3, actor_id: 'tenant-a-admin', metadata: JSON.stringify({ tenantId: 'tenant-a' }) }),
+    ];
+    const mockKnex = makeMockKnex(rows);
+
+    const dbStream = streamAuditEvents({ tenantId: 'tenant-a' }, { db: mockKnex });
+    const output = await collectStream(dbStream.pipe(createCsvTransform()));
+
+    expect(output).toContain('tenant-a-user');
+    expect(output).toContain('tenant-a-admin');
+    expect(output).not.toContain('tenant-b-user');
+  });
+
   it('returns a readable stream (not a plain array)', () => {
     const mockKnex = makeMockKnex([]);
     const result = streamAuditEvents({}, { db: mockKnex });
@@ -305,3 +571,48 @@ describe('streamAuditEvents', () => {
     expect(typeof result.on).toBe('function');
   });
 });
+
+/**
+ * Applies the mock query-builder filters used by makeMockKnex.
+ *
+ * @param {object} row Audit log row.
+ * @param {object} filters Captured filters.
+ * @returns {boolean} True when the row matches all filters.
+ */
+function rowMatchesFilters(row, filters) {
+  if (filters.target_id && row.target_id !== filters.target_id) {
+    return false;
+  }
+
+  if (filters.target_type && row.target_type !== filters.target_type) {
+    return false;
+  }
+
+  if (filters.tenantId && readTenantId(row.metadata) !== filters.tenantId) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Reads tenantId from object or JSON-string metadata in test rows.
+ *
+ * @param {*} metadata Raw row metadata.
+ * @returns {string|undefined} Tenant identifier when present.
+ */
+function readTenantId(metadata) {
+  if (!metadata) {
+    return undefined;
+  }
+
+  if (typeof metadata === 'string') {
+    try {
+      return JSON.parse(metadata).tenantId;
+    } catch (_error) {
+      return undefined;
+    }
+  }
+
+  return metadata.tenantId;
+}
