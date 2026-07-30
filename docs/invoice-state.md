@@ -712,19 +712,43 @@ handling. Always branch on `code` rather than `message` or `detail`.
 | Code | HTTP Status | Endpoint(s) | Description |
 |------|-------------|-------------|-------------|
 | `INVOICE_NOT_FOUND` | 404 | All | Invoice does not exist or belongs to a different tenant. |
-| `MISSING_TARGET_STATE` | 400 | `/transition` | `targetState` field absent from request body. |
+| `MISSING_TARGET_STATE` | 400 | `/transition`, `/bulk` (`transition` action) | `targetState` field absent from request body. |
 | `INVALID_TARGET_STATE` | 400 | `/transition` | `targetState` is not a recognized lifecycle state value. |
+| `MISSING_CURRENT_STATE` | 400 | `/transition` | Invoice has no persisted `status` value (data integrity issue) — should not occur in practice. |
 | `INVALID_CURRENT_STATE` | 400 | `/transition` | Invoice's current state is not a recognized lifecycle state (data integrity issue). |
 | `INVALID_TRANSITION` | 400 | `/transition`, `/reject` | The `from → to` pair is not in `VALID_TRANSITIONS`. Includes `allowedTransitions` hint in `details`. |
 | `TERMINAL_STATE` | 400 | All write endpoints | Invoice is in a terminal state; further transitions are blocked. |
 | `ALREADY_IN_TARGET_STATE` | 400 | `/approve`, `/transition` | `targetState` equals the invoice's current state. |
 | `MISSING_TRANSITION_REASON` | 400 | `/transition`, `/reject`, `/link-escrow` (if cancelled) | `reason` is required for the target state but was absent or whitespace-only. |
 | `TRANSITION_REASON_TOO_LONG` | 400 | All write endpoints | `reason` exceeds 1 024 characters. |
+| `TRANSITION_CONFLICT` | 409 | `/transition`, `/approve`, `/reject`, `/link-escrow`, `/bulk` | Optimistic concurrency check failed — another request changed the invoice's status between read and write. Retry the request; it will either succeed against the new state or return a state-specific error (e.g. `TERMINAL_STATE`). |
 | `CANNOT_LINK_TO_ESCROW` | 400 | `/link-escrow` | Invoice is not in `approved` state. |
 | `MISSING_ACTOR` | 400 | All write endpoints | `req.user` is absent — the authenticated actor could not be resolved. |
 | `KYC_GATE_FAILED` | 403 | `/link-escrow` | SME KYC status does not permit funding operations. |
 | `MISSING_SME_ID` | 400 | `/link-escrow` | Authenticated principal has no `smeId` JWT claim. |
 | `INTERNAL_SERVER_ERROR` | 500 | All | Unexpected server-side error. No retry without investigation. |
+
+**`/bulk`-only codes** — these never surface as the HTTP status/error for the
+whole request (except the first two, which reject the entire batch before
+any item runs); per-item codes are embedded in `results[].code` inside a
+`200` response instead (see
+[`docs/invoice-state-troubleshooting.md`](invoice-state-troubleshooting.md#bulk-operations-per-item-errors-are-always-200)):
+
+| Code | Scope | Description |
+|------|-------|-------------|
+| `INVALID_BATCH_TYPE` | Whole batch, 400 | Request body is not a JSON array. |
+| `EMPTY_BATCH` | Whole batch, 400 | Array is present but has zero items. |
+| `BATCH_OVER_CAP` | Whole batch, 400 | Array has more than `MAX_BULK_ITEMS` (25) items. |
+| `MISSING_INVOICE_ID` | Per-item, embedded in 200 | Item's `invoiceId` is absent, not a string, or empty after trimming. |
+| `MISSING_ACTION` | Per-item, embedded in 200 | Item's `action` is absent or not a string. |
+| `INVALID_ACTION` | Per-item, embedded in 200 | Item's `action` is not one of `approve`/`reject`/`link-escrow`/`transition`. |
+| `BULK_ITEM_ERROR` | Per-item, embedded in 200 | Fallback when a thrown error has no `.code` at all. |
+
+A per-item `transition` action can also produce any of the single-invoice
+codes above (`MISSING_TARGET_STATE`, `INVOICE_NOT_FOUND`, `TERMINAL_STATE`,
+`TRANSITION_CONFLICT`, etc.) — the dispatch reuses the exact same
+`approve`/`reject`/`linkEscrow`/`transition` service functions as the
+single-invoice endpoints.
 
 ### 6.3 Missing tenant context (400)
 
