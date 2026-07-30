@@ -2394,6 +2394,8 @@ module.exports = {
   invoiceStateCacheHitsTotal,
   invoiceStateCacheMissesTotal,
   invoiceStateCacheEvictionsTotal,
+  invoiceStateRequestDurationMs,
+  invoiceStateRequestCount,
   persistenceRequestDurationSeconds,
   persistenceRequestsTotal,
   persistenceRequestErrorsTotal,

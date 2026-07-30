@@ -19,14 +19,12 @@ jest.mock('../../src/metrics', () => {
     normalizeKycWebhookStatusClass: jest.fn().mockReturnValue('4xx'),
     normalizeKycWebhookCause: jest.fn().mockReturnValue('none'),
 
-    // Invoice-state cache-eviction counter — needed so
-    // routes/invoiceStateRoutes.js's invalidateInvoiceStateCache (called
-    // after every successful transition/approve/reject/link-escrow) doesn't
-    // crash in tests that exercise the write paths without their own local
-    // metrics mock. Pre-existing gap: this metric is called by code that
-    // predates this test change; any write-path test was already exposed to
-    // it (surfaced here while writing the invoice-state soak test).
-    invoiceStateCacheEvictionsTotal: { labels: jest.fn().mockReturnThis(), inc: jest.fn() },
+    // Invoice-state request metrics — needed so
+    // middleware/invoiceStateMetrics.js's res.on('finish') callback (wired
+    // into every invoice-state route) doesn't crash in tests that exercise
+    // those routes without their own local metrics mock.
+    invoiceStateRequestDurationMs: { labels: jest.fn().mockReturnThis(), observe: jest.fn() },
+    invoiceStateRequestCount: { labels: jest.fn().mockReturnThis(), inc: jest.fn() },
   };
 });
 
