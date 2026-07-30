@@ -21,6 +21,7 @@ const { extractTenant } = require('../../middleware/tenant');
 const idempotencyMiddleware = require('../../middleware/idempotency');
 const { optionalMultipartIdempotency } = require('../../middleware/multipartIdempotency');
 const { instrumentPersistence } = require('../../middleware/persistenceMetrics');
+const { persistenceErrorHandler } = require('../../middleware/persistenceErrorHandler');
 const { MAX_FILE_SIZE_BYTES, validatePersistenceBody, presignedUploadBodySchema } = require('../../schemas/persistence');
 const { createPersistenceRateLimiter } = require('../../middleware/persistenceRateLimit');
 const { createCompressionMiddleware } = require('../../middleware/compression');

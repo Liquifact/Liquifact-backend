@@ -28,11 +28,27 @@
  * - `validateSmeMetricsApiResponse` — validate a GET response against the schema
  * - `validateBulkMetricsResponse`   — validate a bulk response against the schema
  *
+ * ## Input hardening
+ * Every metrics write/read boundary rejects, rather than silently repairs,
+ * malformed input:
+ *  - unknown fields are rejected on bodies (`.strict()`) and stripped on query
+ *    params (`.strip()`);
+ *  - all strings are length-bounded (`tenantId`/`userId` ≤ 128, `cursor` ≤ 512);
+ *  - all numbers are range-bounded (`limit` 1–100, integers only);
+ *  - failures carry a machine-readable `code` plus per-field `fieldCodes` drawn
+ *    from `METRICS_VALIDATION_CODES`, so clients never string-match messages.
+ *
  * @module schemas/metrics
  */
 
 const { z } = require('zod');
 const { createQueryValidator } = require('./validationHelper');
+const {
+  METRICS_VALIDATION_CODES,
+  METRICS_VALIDATION_ERROR_CODE,
+  METRICS_VALIDATION_PROBLEM_TYPE,
+  codeForIssue,
+} = require('../constants/metricsValidationCodes');
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -45,42 +61,82 @@ const GET_METRICS_LIMIT_MIN = 1;
 /** Maximum allowed `limit` query param for paginated GET requests. */
 const GET_METRICS_LIMIT_MAX = 100;
 
+/**
+ * Maximum accepted length of the opaque `cursor` query param.
+ *
+ * Cursors this service issues are far shorter; the bound exists so an
+ * arbitrarily long attacker-supplied string is rejected at the boundary
+ * instead of being handed to the cursor decoder.
+ */
+const GET_METRICS_CURSOR_MAX_LENGTH = 512;
+
+/** Maximum accepted length of `tenantId` / `userId` in a bulk operation. */
+const BULK_METRICS_ID_MAX_LENGTH = 128;
+
 // ── Request schemas ──────────────────────────────────────────────────────────
 
 /**
  * Query-parameter schema for `GET /api/sme/metrics`.
  *
  * Both `cursor` and `limit` are optional.
- *  - `cursor` — opaque pagination cursor; non-empty when present.
- *  - `limit`  — coerced from raw query string to an integer clamped 1–100.
- *               Non-numeric or absent values yield `undefined` (no error).
+ *  - `cursor` — opaque pagination cursor; non-empty and at most
+ *    {@link GET_METRICS_CURSOR_MAX_LENGTH} characters when present.
+ *  - `limit`  — parsed from the raw query string to an integer that must lie
+ *    within 1–100 inclusive. Absent values yield `undefined` (no error).
  *
- * Unknown query parameters are stripped via `.strip()`.
+ * ### Rejected rather than coerced
+ * A malformed or out-of-range `limit` is now a hard `400`. Previously
+ * `limit=abc` was silently treated as absent and `limit=9999` was silently
+ * clamped to 100, which meant a caller could not tell that the value they sent
+ * had been discarded. Both now surface a structured error with a machine-
+ * readable code so the mistake is visible at the boundary.
+ *
+ * Unknown query parameters are stripped via `.strip()` (they are ignored, not
+ * rejected, because proxies and analytics tooling routinely append their own).
  *
  * @type {z.ZodObject}
  */
 const getMetricsQuerySchema = z
   .object({
     cursor: z
-      .string()
+      .string({ message: 'cursor must be a string' })
       .trim()
       .min(1, { message: 'cursor must not be empty when provided' })
+      .max(GET_METRICS_CURSOR_MAX_LENGTH, {
+        message: `cursor must not exceed ${GET_METRICS_CURSOR_MAX_LENGTH} characters`,
+      })
       .optional(),
     limit: z
-      .string()
+      .string({ message: 'limit must be a string' })
       .optional()
-      .transform((val) => {
+      .transform((val, ctx) => {
         if (val === undefined) { return undefined; }
-        const parsed = parseInt(val, 10);
-        if (isNaN(parsed)) { return undefined; }
-        return Math.min(Math.max(parsed, GET_METRICS_LIMIT_MIN), GET_METRICS_LIMIT_MAX);
+
+        const trimmed = val.trim();
+        // Reject anything that is not a bare, optionally-signed integer.
+        // `parseInt` alone would accept '20abc' and '1e5'; `Number` would
+        // accept '0x10' and ' '.
+        if (!/^-?\d+$/.test(trimmed)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            params: { metricsCode: METRICS_VALIDATION_CODES.FIELD_FORMAT_INVALID },
+            message: `limit must be an integer between ${GET_METRICS_LIMIT_MIN} and ${GET_METRICS_LIMIT_MAX}`,
+          });
+          return z.NEVER;
+        }
+
+        return Number(trimmed);
       })
       .pipe(
         z
           .number()
-          .int()
-          .min(GET_METRICS_LIMIT_MIN)
-          .max(GET_METRICS_LIMIT_MAX)
+          .int({ message: 'limit must be an integer' })
+          .min(GET_METRICS_LIMIT_MIN, {
+            message: `limit must be at least ${GET_METRICS_LIMIT_MIN}`,
+          })
+          .max(GET_METRICS_LIMIT_MAX, {
+            message: `limit must not exceed ${GET_METRICS_LIMIT_MAX}`,
+          })
           .optional()
       ),
   })
@@ -97,12 +153,16 @@ const bulkMetricsOperationSchema = z
       .string({ message: 'tenantId is required' })
       .trim()
       .min(1, { message: 'tenantId must not be empty' })
-      .max(128, { message: 'tenantId must not exceed 128 characters' }),
+      .max(BULK_METRICS_ID_MAX_LENGTH, {
+        message: `tenantId must not exceed ${BULK_METRICS_ID_MAX_LENGTH} characters`,
+      }),
     userId: z
       .string({ message: 'userId is required' })
       .trim()
       .min(1, { message: 'userId must not be empty' })
-      .max(128, { message: 'userId must not exceed 128 characters' }),
+      .max(BULK_METRICS_ID_MAX_LENGTH, {
+        message: `userId must not exceed ${BULK_METRICS_ID_MAX_LENGTH} characters`,
+      }),
   })
   .strict();
 
@@ -231,6 +291,48 @@ function parseValidationErrors(zodError) {
   return fieldErrors;
 }
 
+/**
+ * Maps a Zod `ZodError` to a field-keyed map of machine-readable codes.
+ *
+ * Mirrors the shape of {@link parseValidationErrors} — same keys, same
+ * ordering — but each entry holds stable {@link METRICS_VALIDATION_CODES}
+ * members instead of human-readable messages, so clients can branch on the
+ * failure kind without string-matching wording that is free to change.
+ *
+ * Unknown-key issues are additionally expanded so each offending key gets its
+ * own entry (Zod reports them as one issue on the parent object, which would
+ * otherwise hide *which* field was rejected).
+ *
+ * @param {z.ZodError} zodError
+ * @returns {Object<string, string[]>}
+ */
+function parseValidationFieldCodes(zodError) {
+  const fieldCodes = {};
+
+  const push = (path, code) => {
+    if (!fieldCodes[path]) {
+      fieldCodes[path] = [];
+    }
+    if (!fieldCodes[path].includes(code)) {
+      fieldCodes[path].push(code);
+    }
+  };
+
+  for (const issue of zodError.issues) {
+    const path = issue.path.join('.');
+    push(path, codeForIssue(issue));
+
+    // Surface each unrecognised key individually, e.g. `operations.0.extra`.
+    if (issue.code === 'unrecognized_keys' && Array.isArray(issue.keys)) {
+      for (const key of issue.keys) {
+        push(path ? `${path}.${key}` : key, METRICS_VALIDATION_CODES.UNKNOWN_FIELD);
+      }
+    }
+  }
+
+  return fieldCodes;
+}
+
 // ── Middleware ───────────────────────────────────────────────────────────────
 
 /**
@@ -244,6 +346,7 @@ function parseValidationErrors(zodError) {
 const validateGetMetricsQuery = createQueryValidator(getMetricsQuerySchema, {
   title: 'Invalid Query Parameters',
   detail: 'One or more query parameters are invalid.',
+  code: METRICS_VALIDATION_ERROR_CODE,
 });
 
 /**
@@ -251,6 +354,28 @@ const validateGetMetricsQuery = createQueryValidator(getMetricsQuerySchema, {
  *
  * On success, attaches parsed value to `req.validated`.
  * On failure, returns a 400 RFC 7807 Problem Details response.
+ *
+ * ### Failure response shape
+ *
+ * ```json
+ * {
+ *   "type": "https://liquifact.io/problems/validation-error",
+ *   "title": "Validation Error",
+ *   "status": 400,
+ *   "detail": "Request body contains invalid or missing fields.",
+ *   "code": "METRICS_VALIDATION_ERROR",
+ *   "fieldErrors": { "operations.0.userId": ["userId is required"] },
+ *   "fieldCodes": { "operations.0.userId": ["FIELD_REQUIRED"] }
+ * }
+ * ```
+ *
+ * `code` and `fieldCodes` are additive: `type`, `title`, `status`, `detail` and
+ * `fieldErrors` keep their previous values and shapes, so existing clients are
+ * unaffected.
+ *
+ * A non-object body (`null`, an array, a bare string — reachable when a client
+ * sends `Content-Type: application/json` with a scalar payload) is rejected
+ * here rather than propagating an untyped value into the handler.
  *
  * @param {import('express').Request} req
  * @param {import('express').Response} res
@@ -265,13 +390,16 @@ function validateBulkMetricsBody(req, res, next) {
   }
 
   const fieldErrors = parseValidationErrors(result.error);
+  const fieldCodes = parseValidationFieldCodes(result.error);
 
   return res.status(400).json({
-    type: 'https://liquifact.io/problems/validation-error',
+    type: METRICS_VALIDATION_PROBLEM_TYPE,
     title: 'Validation Error',
     status: 400,
     detail: 'Request body contains invalid or missing fields.',
+    code: METRICS_VALIDATION_ERROR_CODE,
     fieldErrors,
+    fieldCodes,
   });
 }
 
@@ -323,7 +451,15 @@ module.exports = {
 
   // Utilities / constants
   parseValidationErrors,
+  parseValidationFieldCodes,
   MAX_BULK_OPERATIONS,
   GET_METRICS_LIMIT_MIN,
   GET_METRICS_LIMIT_MAX,
+  GET_METRICS_CURSOR_MAX_LENGTH,
+  BULK_METRICS_ID_MAX_LENGTH,
+
+  // Error-code taxonomy (re-exported for convenience)
+  METRICS_VALIDATION_CODES,
+  METRICS_VALIDATION_ERROR_CODE,
+  METRICS_VALIDATION_PROBLEM_TYPE,
 };

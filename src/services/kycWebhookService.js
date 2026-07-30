@@ -13,12 +13,13 @@ const kycService = require('./kycService');
 const logger = require('../logger');
 const { getAuditLogs } = require('./auditLog');
 const { redactValue } = require('./auditLogStore');
-const { verifySignature, parseJsonPayload, validateKycWebhookRequest } = require('../middleware/kycWebhookValidation');
+const { verifySignature } = require('./webhooks');
+const { parseJsonPayload, validateKycWebhookRequest } = require('../middleware/kycWebhookValidation');
 const { kycWebhookSchema, parseValidationErrors, kycWebhookListResponseSchema } = require('../schemas/kycWebhook');
 const { decodeCursor, encodeCursor, CursorError } = require('../utils/cursorPagination');
 const KycWebhookError = require('../errors/KycWebhookError');
 const {
-  HTTP_HEADERS,
+  HTTP_HEADERS: _HTTP_HEADERS,
   KYC_WEBHOOK_ROUTES,
   KYC_WEBHOOK_ERROR_CODES,
   KYC_WEBHOOK_MESSAGES,

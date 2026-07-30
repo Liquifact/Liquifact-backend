@@ -3,6 +3,9 @@
 const express = require('express');
 const router = express.Router();
 const invoiceStateService = require('../services/invoiceStateService');
+const { extractTenant } = require('../middleware/tenant');
+const { createCompressionMiddleware } = require('../middleware/compression');
+const { invoiceStateErrorHandler } = require('../middleware/invoiceStateErrorHandler');
 const { requireKycForFunding, auditKycAccess } = require('../middleware/kycGating');
 const responseHelper = require('../utils/responseHelper');
 const { cacheResponse, makeInvoiceStateKey } = require('../middleware/cache');
@@ -142,11 +145,8 @@ router.post('/:id/transition', async (req, res, next) => {
   const { targetState, reason } = req.body || {};
 
   try {
-    if (!targetState) {
-      return res.status(400).json(
-        responseHelper.error('Target state is required', 'MISSING_TARGET_STATE'),
-      );
-    }
+    const context = buildContext(req, { action: 'transition', targetState });
+    const result = await invoiceStateService.transition(req.params.id, req.tenantId, targetState, reason, context);
 
     const context = buildContext(req, { action: 'transition' });
     const result = await invoiceStateService.transition(req.params.id, req.tenantId, targetState, reason, context);
@@ -216,7 +216,7 @@ router.post('/:id/transition', async (req, res, next) => {
  *             schema:
  *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
  */
-router.post('/:id/approve', async (req, res, next) => {
+router.post('/:id/approve', instrumentInvoiceState('approve', async (req, res, next) => {
   const { reason } = req.body || {};
 
   try {
@@ -236,7 +236,7 @@ router.post('/:id/approve', async (req, res, next) => {
     }
     return next(error);
   }
-});
+}));
 
 /**
  * @swagger
@@ -286,7 +286,7 @@ router.post('/:id/approve', async (req, res, next) => {
  *             schema:
  *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
  */
-router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, async (req, res, next) => {
+router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, instrumentInvoiceState('link-escrow', async (req, res, next) => {
   const { escrowId, reason } = req.body || {};
 
   try {
@@ -309,7 +309,7 @@ router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, async (req
     }
     return next(error);
   }
-});
+}));
 
 /**
  * @swagger
@@ -358,7 +358,7 @@ router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, async (req
  *             schema:
  *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
  */
-router.post('/:id/reject', async (req, res, next) => {
+router.post('/:id/reject', instrumentInvoiceState('reject', async (req, res, next) => {
   const { reason } = req.body || {};
 
   try {
@@ -378,7 +378,7 @@ router.post('/:id/reject', async (req, res, next) => {
     }
     return next(error);
   }
-});
+}));
 
 /**
  * @swagger
@@ -417,7 +417,7 @@ router.post('/:id/reject', async (req, res, next) => {
  *             schema:
  *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
  */
-router.get('/:id/history', async (req, res, next) => {
+router.get('/:id/history', instrumentInvoiceState('history', async (req, res, next) => {
   try {
     const result = await invoiceStateService.getHistory(req.params.id, req.tenantId);
 
@@ -432,13 +432,14 @@ router.get('/:id/history', async (req, res, next) => {
     }
     return next(error);
   }
-});
-
-const MAX_BULK_ITEMS = 25;
+}));
 
 /**
  * POST /api/invoices/bulk
- * Processes a batch of invoice-state operations and returns per-item results.
+ * Thin HTTP wrapper: parses/shape-validates the body, delegates batch-size
+ * validation, per-item validation, and action dispatch to
+ * `invoiceStateService.processBulkOperations` (#1113), then translates the
+ * result (or a thrown `StateTransitionError`) into a response.
  */
 /**
  * @swagger
@@ -491,7 +492,7 @@ const MAX_BULK_ITEMS = 25;
  *             schema:
  *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
  */
-router.post('/bulk', async (req, res, _next) => {
+router.post('/bulk', instrumentInvoiceState('bulk', async (req, res, _next) => {
   const items = req.body;
 
   if (!Array.isArray(items)) {
@@ -501,10 +502,14 @@ router.post('/bulk', async (req, res, _next) => {
     });
   }
 
-  if (items.length === 0) {
-    return res.status(400).json({
-      ...responseHelper.error('Batch must contain at least one invoice-state operation', 'EMPTY_BATCH'),
+  try {
+    const baseContext = buildContext(req);
+    const { results, summary } = await invoiceStateService.processBulkOperations(items, req.tenantId, baseContext);
+
+    return res.status(200).json({
+      ...responseHelper.success({ results, summary }),
       correlationId: getCorrelationId(req),
+      message: 'Bulk invoice-state operation completed',
     });
   }
 
@@ -568,7 +573,12 @@ router.post('/bulk', async (req, res, _next) => {
         }
       }
     } catch (error) {
-      console.error('BULK ITEM ERROR', { index, action, invoiceId, code: error.code, message: error.message, stack: error.stack });
+      // Structured, PII-safe log: bounded action/code only — no invoiceId,
+      // error message, or stack trace (per #1111, never log secrets/PII).
+      logger.warn(
+        { index, action, code: error.code || 'BULK_ITEM_ERROR' },
+        'invoice-state bulk item failed'
+      );
       results.push({
         index,
         success: false,
@@ -576,6 +586,7 @@ router.post('/bulk', async (req, res, _next) => {
         code: error.code || 'BULK_ITEM_ERROR',
       });
     }
+    return next(error);
   }
 
   const summary = {
@@ -589,7 +600,7 @@ router.post('/bulk', async (req, res, _next) => {
     correlationId: req.correlationId || req.id || null,
     message: 'Bulk invoice-state operation completed',
   });
-});
+}));
 
 // Mount the shared invoice-state error middleware after all route
 // handlers so StateTransitionErrors from any handler receive a

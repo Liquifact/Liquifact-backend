@@ -1,3 +1,5 @@
+const client = require("prom-client");
+const registry = new client.Registry();
 'use strict';
 
 /**
@@ -421,12 +423,6 @@ class NoopRegistry {
 }
 
 let registry = new client.Registry();
-
-const {
-  negotiateEncoding,
-  compress,
-  DEFAULT_THRESHOLD,
-} = require('./middleware/compression');
 
 if (typeof client.collectDefaultMetrics === 'function') {
   client.collectDefaultMetrics({ register: registry });
@@ -1474,16 +1470,11 @@ function normalizePersistenceCause(err, status) {
   const code = Number(status);
   if (!err && code < 400) { return 'none'; }
 
-  const errCode = err && typeof err === 'object' && 'code' in err ? String(err.code) : '';
-  if (['INVALID_MIME_TYPE', 'FILE_TOO_LARGE', 'INVALID_TENANT_ID'].includes(errCode)) {
-    return 'validation';
-  }
-  if (code >= 400 && code < 500) { return 'validation'; }
-  if (errCode.startsWith('STORAGE') || errCode === 'ENOENT' || errCode === 'EACCES') {
-    return 'storage';
-  }
-  return 'internal';
-}
+const invoiceStateCacheMissesTotal = new client.Counter({
+  name: 'invoice_state_cache_misses_total',
+  help: 'Total invoice state cache misses',
+  registers: [registry],
+});
 
 /**
  * Histogram: Wall-clock duration of persistence-endpoint requests in seconds.
@@ -1498,8 +1489,8 @@ let persistenceRequestDurationSeconds = new client.Histogram({
 });
 
 /**
- * Counter: Total persistence-endpoint requests.
- * @type {import('prom-client').Counter}
+ * Storage-service error codes that indicate a client-side validation failure.
+ * @readonly
  */
 let persistenceRequestsTotal = new client.Counter({
   name: 'persistence_requests_total',
@@ -1509,8 +1500,8 @@ let persistenceRequestsTotal = new client.Counter({
 });
 
 /**
- * Counter: Persistence-endpoint request errors by cause.
- * @type {import('prom-client').Counter}
+ * Storage-layer error codes that indicate an object-storage failure.
+ * @readonly
  */
 let persistenceRequestErrorsTotal = new client.Counter({
   name: 'persistence_request_errors_total',
@@ -1523,11 +1514,17 @@ let persistenceRequestErrorsTotal = new client.Counter({
  * Bounded enum of allowed `status_class` label values for metrics endpoint.
  * @readonly
  */
+const _METRICS_ENDPOINT_STATUS_CLASS_ENUM = Object.freeze(['2xx', '4xx', '5xx']);
 
 /**
  * Bounded enum of allowed `cause` label values for metrics endpoint errors.
  * @readonly
  */
+const _METRICS_ENDPOINT_CAUSE_ENUM = Object.freeze([
+  'none',
+  'auth_failure',
+  'internal_error',
+]);
 
 /**
  * Maps an HTTP status code to a bounded `status_class` label value.
@@ -1569,12 +1566,13 @@ let metricsRequestDurationSeconds = new client.Histogram({
 });
 
 /**
- * Counter: Total requests to the /metrics endpoint, labelled by status class.
+ * Counter: Metrics endpoint scrapes by bounded status class.
  * @type {import('prom-client').Counter}
  */
 
 /**
- * Counter: errors serving the /metrics endpoint, labelled by status class and cause.
+ * Counter: Metrics endpoint failures by bounded cause. Only incremented for
+ * non-`none` causes so a healthy scrape never emits an error series.
  * @type {import('prom-client').Counter}
  */
 
@@ -1588,6 +1586,46 @@ let metricsRequestDurationSeconds = new client.Histogram({
  * @param {import('express').Request} [params.req] - Request, for a scoped logger.
  * @returns {void}
  */
+
+/**
+ * Records the outcome of a metrics endpoint request: duration histogram,
+ * request counter, bounded error counter, and one structured log line at the
+ * severity matching the status class.
+ *
+ * Labels are always drawn from the bounded normalisers — raw status codes and
+ * error messages are never used as label values (unbounded cardinality).
+ *
+ * @param {object} params
+ * @param {number} params.statusCode - Final HTTP status code.
+ * @param {number} [params.durationSeconds=0] - Wall-clock duration.
+ * @param {unknown} [params.error] - Error associated with the outcome, if any.
+ * @param {import('express').Request} [params.req] - Request, used for the
+ *   correlated request logger.
+ * @returns {void}
+ */
+function recordMetricsEndpointOutcome({ statusCode, durationSeconds = 0, error, req } = {}) {
+  const statusClass = normalizeMetricsEndpointStatusClass(statusCode);
+  const cause = normalizeMetricsEndpointCause(error, statusCode);
+
+  metricsRequestsTotal.labels(statusClass).inc();
+  metricsRequestDurationSeconds.labels(statusClass).observe(
+    Number.isFinite(durationSeconds) ? durationSeconds : 0
+  );
+  if (cause !== 'none') {
+    metricsRequestErrorsTotal.labels(cause).inc();
+  }
+
+  const requestLogger = logger.createRequestLogger(req || {});
+  const payload = { event: 'metrics.scrape', statusClass, cause, durationSeconds };
+
+  if (statusClass === '5xx') {
+    requestLogger.error({ ...payload, err: error && error.message }, 'metrics endpoint request failed');
+  } else if (statusClass === '4xx') {
+    requestLogger.warn(payload, 'metrics endpoint request rejected');
+  } else {
+    requestLogger.info(payload, 'metrics endpoint request served');
+  }
+}
 
 // ── KYC webhook metrics (issue #731) ────────────────────────────────────────
 
@@ -1843,22 +1881,21 @@ let escrowReadCacheEvictionsTotal = new client.Counter({
   registers: [registry],
 });
 
-const invoiceStateCacheHitsTotal = new client.Counter({
-  name: 'invoice_state_cache_hits_total',
-  help: 'Total invoice state cache hits',
+const corsCacheHitsTotal = new client.Counter({
+  name: 'cors_cache_hits_total',
+  help: 'Total CORS origin-cache hits',
   registers: [registry],
 });
 
-const invoiceStateCacheMissesTotal = new client.Counter({
-  name: 'invoice_state_cache_misses_total',
-  help: 'Total invoice state cache misses',
+const corsCacheMissesTotal = new client.Counter({
+  name: 'cors_cache_misses_total',
+  help: 'Total CORS origin-cache misses',
   registers: [registry],
 });
 
-const invoiceStateCacheEvictionsTotal = new client.Counter({
-  name: 'invoice_state_cache_evictions_total',
-  help: 'Total invoice state cache evictions',
-  labelNames: ['reason'],
+const corsCacheEvictionsTotal = new client.Counter({
+  name: 'cors_cache_evictions_total',
+  help: 'Total CORS origin-cache evictions',
   registers: [registry],
 });
 
@@ -2301,6 +2338,8 @@ module.exports = {
   invoiceStateCacheHitsTotal,
   invoiceStateCacheMissesTotal,
   invoiceStateCacheEvictionsTotal,
+  invoiceStateRequestDurationMs,
+  invoiceStateRequestCount,
   persistenceRequestDurationSeconds,
   persistenceRequestsTotal,
   persistenceRequestErrorsTotal,
@@ -2320,7 +2359,6 @@ module.exports = {
   normalizeSorobanRpcMethod,
   normalizeSorobanRpcOutcome,
   normalizeSorobanRetryCause,
-  normalizeReminderReason,
   healthRequestDurationSeconds,
   healthRequestsTotal,
   healthRequestErrorsTotal,
@@ -2335,8 +2373,4 @@ module.exports = {
   corsRequestDurationSeconds,
   corsRequestsTotal,
   corsRequestErrorsTotal,
-  corsCacheHitsTotal,
-  corsCacheMissesTotal,
-  corsCacheEvictionsTotal,
-  corsCacheInvalidationsTotal,
 };

@@ -332,7 +332,7 @@ function createApp() {
 
     res.set('X-Escrow-Address', escrowAddress);
     return res.json({
-      data: result,
+      ...responseHelper.success(result),
       message: result && result.fromProjection
         ? 'Escrow state read from event projection.'
         : 'Escrow state read from live Soroban contract.',
