@@ -9,6 +9,9 @@ const { cacheResponse, makeInvoiceStateKey } = require('../middleware/cache');
 const { getSharedStore } = require('../services/cacheStore');
 const { cacheConfig } = require('../config/cache');
 const { invoiceStateCacheEvictionsTotal } = require('../metrics');
+const { extractTenant } = require('../middleware/tenant');
+const { createCompressionMiddleware } = require('../middleware/compression');
+const invoiceStateErrorHandler = require('../middleware/invoiceStateErrorHandler');
 
 router.use(extractTenant);
 
@@ -119,99 +122,84 @@ function sendTransitionError(res, error, correlationId) {
  * @returns {string} Status class label.
  */
 router.get('/:id/state', cacheState, async (req, res, next) => {
-  const { id } = req.params;
-
   try {
-    const invoice = await invoiceService.resolveInvoiceForTenant(id, req.tenantId);
-
-    if (!invoice) {
-      return sendInvoiceNotFound(res);
-    }
-
-    const currentState = invoice.status;
-    const allowedTransitions = getAllowedTransitions(currentState);
+    const result = await invoiceStateService.getState(req.params.id, req.tenantId);
 
     return res.json({
-      ...responseHelper.success({
-        invoiceId: id,
-        currentState,
-        allowedTransitions,
-        isTerminal: allowedTransitions.length === 0,
-      }),
+      ...responseHelper.success(result),
       message: 'Invoice state retrieved successfully',
     });
   } catch (error) {
     return next(error);
   }
-  if (statusCode >= 400) {
-    return '4xx';
-  }
-  return '2xx';
-}
+});
 
 /**
- * Maps an error object to a coarse telemetry cause label.
- *
- * @param {Error|null|undefined} error - Error raised by a handler.
- * @returns {string} Error cause label.
+ * @swagger
+ * /api/invoices/{id}/transition:
+ *   post:
+ *     operationId: transitionInvoiceState
+ *     summary: Transition an invoice to a target state
+ *     description: Executes a state-machine transition for an invoice and persists an audit log entry.
+ *     tags: [InvoiceState]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Invoice ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [targetState]
+ *             properties:
+ *               targetState:
+ *                 type: string
+ *               reason:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Invoice transitioned successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/InvoiceStateTransitionResponse'
+ *       400:
+ *         description: Transition error or validation error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
+ *       404:
+ *         description: Invoice not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
  */
 router.post('/:id/transition', async (req, res, next) => {
-  const { id } = req.params;
   const { targetState, reason } = req.body || {};
 
   try {
-    if (!targetState) {
-      return res.status(400).json(
-        responseHelper.error('Target state is required', 'MISSING_TARGET_STATE'),
-      );
-    }
+    const context = buildContext(req, { action: 'transition', targetState });
+    const result = await invoiceStateService.transition(req.params.id, req.tenantId, targetState, reason, context);
 
-    const actor = getActorFromRequest(req);
-    const ipAddress = req.ip || (req.socket && req.socket.remoteAddress) || 'unknown';
-    const userAgent = req.get('user-agent') || 'unknown';
-
-    const result = await invoiceService.transitionInvoice(id, targetState, req.tenantId, {
-      actor,
-      reason,
-      ipAddress,
-      userAgent,
-      metadata: {
-        method: req.method,
-        path: req.path,
-      },
-    });
-
-    invalidateInvoiceStateCache(req.tenantId, id);
+    invalidateInvoiceStateCache(req.tenantId, req.params.id);
 
     return res.status(200).json({
-      ...responseHelper.success({
-        invoiceId: id,
-        previousState: result.previousState,
-        currentState: result.newState,
-        transitionedAt: result.transitionedAt,
-        transitionedBy: result.transitionedBy,
-        reason,
-        auditLogId: result.auditLog.id,
-      }),
-      message: `Invoice transitioned from ${result.previousState} to ${result.newState}`,
+      ...responseHelper.success(result),
+      message: `Invoice transitioned from ${result.previousState} to ${result.currentState}`,
     });
   } catch (error) {
-    if (error.code) {
-      return sendTransitionError(res, error);
-    }
     return next(error);
   }
-  if (error.code && typeof error.code === 'string') {
-    return error.code;
-  }
-  if (error.statusCode >= 500) {
-    return 'server_error';
-  }
-  if (error.statusCode >= 400) {
-    return 'client_error';
-  }
-  return 'unknown_error';
-}
+});
 
 /**
  * POST /api/invoices/:id/approve
@@ -270,7 +258,7 @@ router.post('/:id/approve', async (req, res, next) => {
     const context = buildContext(req, { action: 'approve' });
     const result = await invoiceStateService.approve(req.params.id, req.tenantId, reason, context);
 
-    invalidateInvoiceStateCache(req.tenantId, id);
+    invalidateInvoiceStateCache(req.tenantId, req.params.id);
 
     return res.status(200).json({
       ...responseHelper.success(result),
@@ -343,7 +331,7 @@ router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, async (req
     });
     const result = await invoiceStateService.linkEscrow(req.params.id, req.tenantId, escrowId, reason, context);
 
-    invalidateInvoiceStateCache(req.tenantId, id);
+    invalidateInvoiceStateCache(req.tenantId, req.params.id);
 
     return res.status(200).json({
       ...responseHelper.success(result),
@@ -412,7 +400,7 @@ router.post('/:id/reject', async (req, res, next) => {
     const context = buildContext(req, { action: 'reject' });
     const result = await invoiceStateService.reject(req.params.id, req.tenantId, reason, context);
 
-    invalidateInvoiceStateCache(req.tenantId, id);
+    invalidateInvoiceStateCache(req.tenantId, req.params.id);
 
     return res.status(200).json({
       ...responseHelper.success(result),

@@ -16,18 +16,16 @@
 const express = require('express');
 
 const router = express.Router();
-const { listIndexerEvents, bulkIndexerEvents, validateBulkPayload, INDEXER_SORT_FIELDS, MAX_BULK_BATCH_SIZE } = require('../services/indexerService');
+const { listIndexerEvents, bulkIndexerEvents, validateBulkPayload } = require('../services/indexerService');
 const { mapQueryToDTO, mapDTOToServiceParams } = require('../dto/indexer');
 const { CursorError } = require('../utils/cursorPagination');
 const { adminStack } = require('../middleware/stacks');
 const { indexerLimiter } = require('../middleware/rateLimit');
 const { createCompressionMiddleware } = require('../middleware/compression');
-const { mapQueryToDTO, mapDTOToServiceParams, mapServiceResultToResponseDTO } = require('../dto/indexer');
 const responseHelper = require('../utils/responseHelper');
 const logger = require('../logger');
 const { validateIndexerQuery } = require('../schemas/indexerQuery');
 const { instrumentIndexer } = require('../middleware/indexerMetrics');
-const { mapQueryToDTO, mapDTOToServiceParams } = require('../dto/indexer');
 
 // Apply a per-client rate limit before admin auth so bursts are contained
 // even when the caller is unauthenticated or misconfigured.
@@ -36,6 +34,11 @@ router.use(indexerLimiter);
 // Apply admin auth (JWT or API key) + tenant extraction to every route in this
 // file.
 router.use(...adminStack);
+
+// Compress indexer responses above the default 1 KB threshold.
+// Respects Accept-Encoding (gzip preferred over deflate); small responses
+// are always sent as plain JSON regardless of the client's encoding preference.
+router.use(createCompressionMiddleware());
 
 /**
  * @swagger
@@ -149,7 +152,11 @@ router.get('/events', instrumentIndexer(async (req, res, next) => {
       });
     }
 
-    // ── 2. Call service with correlation context ────────────────────────────
+    // ── 2. Map validated params → request DTO → service options ────────────
+    const queryDTO = mapQueryToDTO(params);
+    const serviceParams = mapDTOToServiceParams(queryDTO);
+
+    // ── 3. Call service with correlation context ────────────────────────────
     const correlationId = req.correlationId || req.id;
     let result;
     try {

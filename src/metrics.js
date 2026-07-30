@@ -422,12 +422,6 @@ class NoopRegistry {
 
 const registry = new client.Registry();
 
-const {
-  negotiateEncoding,
-  compress,
-  DEFAULT_THRESHOLD,
-} = require('./middleware/compression');
-
 if (typeof client.collectDefaultMetrics === 'function') {
   client.collectDefaultMetrics({ register: registry });
 }
@@ -789,48 +783,6 @@ function resetMetricsForTests() {
   corsCacheMissesTotal.reset();
   corsCacheEvictionsTotal.reset();
   corsCacheInvalidationsTotal.reset();
-}
-
-/**
- * Counter: Total metrics endpoint requests by status class.
- * @type {import('prom-client').Counter}
- */
-const metricsRequestsTotal = new client.Counter({
-  name: 'metrics_requests_total',
-  help: 'Total number of /metrics endpoint requests',
-  labelNames: ['status_class'],
-  registers: [registry],
-});
-
-/**
- * Counter: Metrics endpoint request errors by cause.
- * @type {import('prom-client').Counter}
- */
-const metricsRequestErrorsTotal = new client.Counter({
-  name: 'metrics_request_errors_total',
-  help: 'Total number of /metrics endpoint request errors',
-  labelNames: ['cause'],
-  registers: [registry],
-});
-
-/**
- * Records metrics endpoint request outcome for observability.
- *
- * @param {object} params
- * @param {number} params.statusCode - HTTP status code.
- * @param {number} params.durationSeconds - Request duration.
- * @param {Error|null} [params.error] - Error if request failed.
- * @param {import('express').Request} [params.req] - Express request.
- * @returns {void}
- */
-function recordMetricsEndpointOutcome({ statusCode, durationSeconds, error, req } = {}) {
-  const statusClass = normalizeMetricsEndpointStatusClass(statusCode);
-  const cause = normalizeMetricsEndpointCause(error, statusCode);
-  metricsRequestDurationSeconds.labels({ status_class: statusClass }).observe(durationSeconds);
-  metricsRequestsTotal.labels({ status_class: statusClass }).inc();
-  if (cause !== 'none') {
-    metricsRequestErrorsTotal.labels({ cause }).inc();
-  }
 }
 
 /**
@@ -1458,60 +1410,55 @@ function normalizePersistenceCause(err, status) {
   const code = Number(status);
   if (!err && code < 400) { return 'none'; }
 
-  const errCode = err && typeof err === 'object' && 'code' in err ? String(err.code) : '';
-  if (['INVALID_MIME_TYPE', 'FILE_TOO_LARGE', 'INVALID_TENANT_ID'].includes(errCode)) {
-    return 'validation';
-  }
-  if (code >= 400 && code < 500) { return 'validation'; }
-  if (errCode.startsWith('STORAGE') || errCode === 'ENOENT' || errCode === 'EACCES') {
-    return 'storage';
-  }
-  return 'internal';
-}
+const invoiceStateCacheMissesTotal = new client.Counter({
+  name: 'invoice_state_cache_misses_total',
+  help: 'Total invoice state cache misses',
+  registers: [registry],
+});
 
-/**
- * Histogram: Wall-clock duration of persistence-endpoint requests in seconds.
- * @type {import('prom-client').Histogram}
- */
-const persistenceRequestDurationSeconds = new client.Histogram({
-  name: 'persistence_request_duration_seconds',
-  help: 'Duration of persistence endpoint requests in seconds',
-  labelNames: ['endpoint', 'status_class'],
-  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5],
+const invoiceStateCacheEvictionsTotal = new client.Counter({
+  name: 'invoice_state_cache_evictions_total',
+  help: 'Total invoice state cache evictions',
+  labelNames: ['reason'],
   registers: [registry],
 });
 
 /**
- * Counter: Total persistence-endpoint requests.
- * @type {import('prom-client').Counter}
+ * Storage-service error codes that indicate a client-side validation failure.
+ * @readonly
  */
-const persistenceRequestsTotal = new client.Counter({
-  name: 'persistence_requests_total',
-  help: 'Total number of persistence endpoint requests',
-  labelNames: ['endpoint', 'status_class'],
-  registers: [registry],
-});
+const _PERSISTENCE_VALIDATION_CODES = Object.freeze([
+  'INVALID_MIME_TYPE',
+  'FILE_TOO_LARGE',
+  'INVALID_TENANT_ID',
+]);
 
 /**
- * Counter: Persistence-endpoint request errors by cause.
- * @type {import('prom-client').Counter}
+ * Storage-layer error codes that indicate an object-storage failure.
+ * @readonly
  */
-const persistenceRequestErrorsTotal = new client.Counter({
-  name: 'persistence_request_errors_total',
-  help: 'Total number of persistence endpoint request errors by cause',
-  labelNames: ['endpoint', 'cause'],
-  registers: [registry],
-});
+const _PERSISTENCE_STORAGE_CODES = Object.freeze([
+  'STORAGE_WRITE_FAILED',
+  'STORAGE_READ_FAILED',
+  'ENOENT',
+  'EACCES',
+]);
 
 /**
  * Bounded enum of allowed `status_class` label values for metrics endpoint.
  * @readonly
  */
+const _METRICS_ENDPOINT_STATUS_CLASS_ENUM = Object.freeze(['2xx', '4xx', '5xx']);
 
 /**
  * Bounded enum of allowed `cause` label values for metrics endpoint errors.
  * @readonly
  */
+const _METRICS_ENDPOINT_CAUSE_ENUM = Object.freeze([
+  'none',
+  'auth_failure',
+  'internal_error',
+]);
 
 /**
  * Maps an HTTP status code to a bounded `status_class` label value.
@@ -1553,12 +1500,13 @@ const metricsRequestDurationSeconds = new client.Histogram({
 });
 
 /**
- * Counter: Total requests to the /metrics endpoint, labelled by status class.
+ * Counter: Metrics endpoint scrapes by bounded status class.
  * @type {import('prom-client').Counter}
  */
 
 /**
- * Counter: errors serving the /metrics endpoint, labelled by status class and cause.
+ * Counter: Metrics endpoint failures by bounded cause. Only incremented for
+ * non-`none` causes so a healthy scrape never emits an error series.
  * @type {import('prom-client').Counter}
  */
 
@@ -1572,6 +1520,46 @@ const metricsRequestDurationSeconds = new client.Histogram({
  * @param {import('express').Request} [params.req] - Request, for a scoped logger.
  * @returns {void}
  */
+
+/**
+ * Records the outcome of a metrics endpoint request: duration histogram,
+ * request counter, bounded error counter, and one structured log line at the
+ * severity matching the status class.
+ *
+ * Labels are always drawn from the bounded normalisers — raw status codes and
+ * error messages are never used as label values (unbounded cardinality).
+ *
+ * @param {object} params
+ * @param {number} params.statusCode - Final HTTP status code.
+ * @param {number} [params.durationSeconds=0] - Wall-clock duration.
+ * @param {unknown} [params.error] - Error associated with the outcome, if any.
+ * @param {import('express').Request} [params.req] - Request, used for the
+ *   correlated request logger.
+ * @returns {void}
+ */
+function recordMetricsEndpointOutcome({ statusCode, durationSeconds = 0, error, req } = {}) {
+  const statusClass = normalizeMetricsEndpointStatusClass(statusCode);
+  const cause = normalizeMetricsEndpointCause(error, statusCode);
+
+  metricsRequestsTotal.labels(statusClass).inc();
+  metricsRequestDurationSeconds.labels(statusClass).observe(
+    Number.isFinite(durationSeconds) ? durationSeconds : 0
+  );
+  if (cause !== 'none') {
+    metricsRequestErrorsTotal.labels(cause).inc();
+  }
+
+  const requestLogger = logger.createRequestLogger(req || {});
+  const payload = { event: 'metrics.scrape', statusClass, cause, durationSeconds };
+
+  if (statusClass === '5xx') {
+    requestLogger.error({ ...payload, err: error && error.message }, 'metrics endpoint request failed');
+  } else if (statusClass === '4xx') {
+    requestLogger.warn(payload, 'metrics endpoint request rejected');
+  } else {
+    requestLogger.info(payload, 'metrics endpoint request served');
+  }
+}
 
 // ── KYC webhook metrics (issue #731) ────────────────────────────────────────
 
@@ -1827,22 +1815,21 @@ const escrowReadCacheEvictionsTotal = new client.Counter({
   registers: [registry],
 });
 
-const invoiceStateCacheHitsTotal = new client.Counter({
-  name: 'invoice_state_cache_hits_total',
-  help: 'Total invoice state cache hits',
+const corsCacheHitsTotal = new client.Counter({
+  name: 'cors_cache_hits_total',
+  help: 'Total CORS origin-cache hits',
   registers: [registry],
 });
 
-const invoiceStateCacheMissesTotal = new client.Counter({
-  name: 'invoice_state_cache_misses_total',
-  help: 'Total invoice state cache misses',
+const corsCacheMissesTotal = new client.Counter({
+  name: 'cors_cache_misses_total',
+  help: 'Total CORS origin-cache misses',
   registers: [registry],
 });
 
-const invoiceStateCacheEvictionsTotal = new client.Counter({
-  name: 'invoice_state_cache_evictions_total',
-  help: 'Total invoice state cache evictions',
-  labelNames: ['reason'],
+const corsCacheEvictionsTotal = new client.Counter({
+  name: 'cors_cache_evictions_total',
+  help: 'Total CORS origin-cache evictions',
   registers: [registry],
 });
 
@@ -2366,8 +2353,6 @@ module.exports = {
   metricsAuth,
   metricsHandler,
   recordMetricsEndpointOutcome,
-  apiKeyAuthDurationSeconds,
-  apiKeyAuthErrorsTotal,
   normalizeMetricsEndpointStatusClass,
   normalizeMetricsEndpointCause,
   metricsRequestDurationSeconds,
@@ -2432,7 +2417,6 @@ module.exports = {
   normalizeSorobanRpcMethod,
   normalizeSorobanRpcOutcome,
   normalizeSorobanRetryCause,
-  normalizeReminderReason,
   healthRequestDurationSeconds,
   healthRequestsTotal,
   healthRequestErrorsTotal,
@@ -2447,8 +2431,4 @@ module.exports = {
   corsRequestDurationSeconds,
   corsRequestsTotal,
   corsRequestErrorsTotal,
-  corsCacheHitsTotal,
-  corsCacheMissesTotal,
-  corsCacheEvictionsTotal,
-  corsCacheInvalidationsTotal,
 };
