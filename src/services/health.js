@@ -342,6 +342,76 @@ async function checkKycHealth() {
 }
 
 /**
+ * Checks invoice-state readiness.
+ *
+ * Optional / non-blocking dependency, matching the KYC and indexer-staleness
+ * checks above: returns `'disabled'` when the `INVOICE_STATE_ENABLED` feature
+ * flag (see `src/config/index.js`, gates route mounting in `app.js`) is not
+ * `'true'`, so a deployment that doesn't run invoice-state is never held back
+ * by this check.
+ *
+ * When enabled, verifies two independent things, both fast:
+ * 1. The in-process state-machine definitions (`INVOICE_STATES`,
+ *    `VALID_TRANSITIONS` from `./invoiceStateMachine`) are non-empty — a
+ *    zero-I/O sanity check that catches a broken module load immediately,
+ *    with no timeout needed since it never leaves the process.
+ * 2. The `invoices` table (invoice-state's core dependency) is queryable,
+ *    via a bounded, timeout-guarded probe mirroring `checkDatabaseHealth`'s
+ *    `Promise.race` pattern — catches invoice-state-specific issues (e.g. a
+ *    missing/renamed column from a bad migration) that a generic `SELECT 1`
+ *    against the DB connection would not.
+ *
+ * Status values:
+ * - `'healthy'`    — state machine definitions are well-formed and the
+ *                    `invoices` table is reachable within the timeout.
+ * - `'unhealthy'`  — state machine definitions are malformed, or the table
+ *                    probe failed/timed out.
+ * - `'disabled'`   — `INVOICE_STATE_ENABLED` is not `'true'`.
+ *
+ * Tuning env var:
+ * - `INVOICE_STATE_HEALTH_TIMEOUT_MS` — milliseconds before the table probe
+ *                                       times out (default 2000).
+ *
+ * @returns {Promise<{status: string, latency?: number, error?: string}>}
+ */
+async function checkInvoiceStateHealth() {
+  if (cfg.get().INVOICE_STATE_ENABLED !== 'true') {
+    return { status: 'disabled' };
+  }
+
+  const { INVOICE_STATES, VALID_TRANSITIONS } = require('./invoiceStateMachine');
+  if (
+    !INVOICE_STATES ||
+    Object.keys(INVOICE_STATES).length === 0 ||
+    !VALID_TRANSITIONS ||
+    Object.keys(VALID_TRANSITIONS).length === 0
+  ) {
+    return { status: 'unhealthy', error: 'Invoice state machine definitions are empty' };
+  }
+
+  const timeoutMs = parseInt(process.env.INVOICE_STATE_HEALTH_TIMEOUT_MS, 10) || 2000;
+  const start = Date.now();
+  let timeoutId;
+
+  try {
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error('INVOICE_STATE_PROBE_TIMEOUT')), timeoutMs);
+      if (timeoutId.unref) {
+        timeoutId.unref();
+      }
+    });
+
+    await Promise.race([db('invoices').select('id').limit(1), timeoutPromise]);
+    clearTimeout(timeoutId);
+
+    return { status: 'healthy', latency: Date.now() - start };
+  } catch (error) {
+    clearTimeout(timeoutId);
+    return { status: 'unhealthy', latency: Date.now() - start, error: error.message };
+  }
+}
+
+/**
  * Checks escrow indexer staleness.
  * Returns 'disabled' when the indexer is not enabled.
  * Returns 'stale' when the cursor hasn't advanced within the configured threshold.
@@ -424,19 +494,21 @@ async function checkStorageHealth() {
  * @returns {Promise<{healthy: boolean, checks: Object}>}
  */
 async function performHealthChecks() {
-  const [soroban, database, kyc, indexerStaleness, storage] = await Promise.all([
+  const [soroban, database, kyc, indexerStaleness, storage, invoiceState] = await Promise.all([
     checkSorobanHealth(),
     checkDatabaseHealth(),
     checkKycHealth(),
     checkIndexerStaleness(),
     checkStorageHealth(),
+    checkInvoiceStateHealth(),
   ]);
 
-  const checks = { soroban, database, kyc, indexerStaleness, storage };
+  const checks = { soroban, database, kyc, indexerStaleness, storage, invoiceState };
   const healthy =
     (soroban.status === 'healthy' || soroban.status === 'unknown') &&
     (kyc.status === 'healthy' || kyc.status === 'disabled') &&
     (indexerStaleness.status === 'healthy' || indexerStaleness.status === 'disabled') &&
+    (invoiceState.status === 'healthy' || invoiceState.status === 'disabled') &&
     // Storage is in-memory or opted out → non-blocking. Missing config or
     // unreachable buckets → blocking for `/ready` because uploads will fail.
     storage.status !== 'not_configured' &&
@@ -540,7 +612,7 @@ async function performReadinessChecks() {
  * This makes the list stable and sortable for cursor-based pagination.
  *
  * The check order is fixed to: soroban → database → kyc → indexerStaleness →
- * storage → reconciliation, which matches `performHealthChecks` /
+ * storage → invoiceState → reconciliation, which matches `performHealthChecks` /
  * `performReadinessChecks`.
  *
  * @param {Object}  [options]
@@ -552,12 +624,13 @@ async function listHealthChecks({ snapshotTime } = {}) {
   const ts = snapshotTime !== undefined ? snapshotTime : Date.now();
   const timestamp = new Date(ts).toISOString();
 
-  const [soroban, database, kyc, indexerStaleness, storage, reconciliation] = await Promise.all([
+  const [soroban, database, kyc, indexerStaleness, storage, invoiceState, reconciliation] = await Promise.all([
     checkSorobanHealth(),
     checkDatabaseHealth(),
     checkKycHealth(),
     checkIndexerStaleness(),
     checkStorageHealth(),
+    checkInvoiceStateHealth(),
     checkReconciliationHealth(),
   ]);
 
@@ -567,6 +640,7 @@ async function listHealthChecks({ snapshotTime } = {}) {
     { id: 'kyc', name: 'KYC Provider', status: kyc.status, timestamp, detail: kyc },
     { id: 'indexerStaleness', name: 'Escrow Indexer Staleness', status: indexerStaleness.status, timestamp, detail: indexerStaleness },
     { id: 'storage', name: 'Storage (S3)', status: storage.status, timestamp, detail: storage },
+    { id: 'invoiceState', name: 'Invoice State', status: invoiceState.status, timestamp, detail: invoiceState },
     { id: 'reconciliation', name: 'Escrow Reconciliation', status: reconciliation.status, timestamp, detail: reconciliation },
   ];
 }
@@ -577,6 +651,7 @@ module.exports = {
   checkKycHealth,
   checkStorageHealth,
   checkIndexerStaleness,
+  checkInvoiceStateHealth,
   checkReconciliationHealth,
   performHealthChecks,
   performReadinessChecks,
