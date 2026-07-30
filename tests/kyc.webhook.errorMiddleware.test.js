@@ -4,10 +4,10 @@
  * @fileoverview Tests for the KYC webhook error-handling middleware.
  *
  * Covers:
- *  - KycWebhookError → consistent structured response envelope
+ *  - KycWebhookError → RFC 7807 application/problem+json response
  *  - Retryable flag mapping (503/missing_secret → true, others → false)
  *  - Retry hint resolution per status/code
- *  - correlation_id passthrough
+ *  - Content-Type: application/problem+json
  *  - Non-KycWebhookError forwarded to next()
  *  - req._kycErrorCode set for metrics hooks
  *  - Edge cases: missing correlationId, undefined code
@@ -46,8 +46,8 @@ function buildTestApp(handler) {
 }
 
 describe('kycWebhookErrorHandler', () => {
-  describe('structured response envelope', () => {
-    test('returns error.code, error.message, correlation_id, retryable, retry_hint', async () => {
+  describe('RFC 7807 response envelope', () => {
+    test('returns application/problem+json with type, title, status, detail, instance, code, retryable, retry_hint', async () => {
       const app = buildTestApp(() => {
         throw new KycWebhookError('Invalid webhook signature', 401, 'invalid_signature');
       });
@@ -55,14 +55,16 @@ describe('kycWebhookErrorHandler', () => {
       const res = await request(app).get('/test');
 
       expect(res.status).toBe(401);
+      expect(res.headers['content-type']).toContain('application/problem+json');
       expect(res.body).toEqual({
-        error: {
-          code: 'invalid_signature',
-          message: 'Invalid webhook signature',
-          correlation_id: 'test-corr-123',
-          retryable: false,
-          retry_hint: '',
-        },
+        type: 'https://liquifact.com/probs/unauthorized',
+        title: 'Unauthorized',
+        status: 401,
+        detail: 'Invalid webhook signature',
+        instance: '/test',
+        code: 'invalid_signature',
+        retryable: false,
+        retry_hint: '',
       });
     });
 
@@ -87,7 +89,7 @@ describe('kycWebhookErrorHandler', () => {
       });
 
       const res = await request(app).get('/test');
-      expect(res.body.error.retryable).toBe(true);
+      expect(res.body.retryable).toBe(true);
     });
 
     test('429 is retryable', async () => {
@@ -96,7 +98,7 @@ describe('kycWebhookErrorHandler', () => {
       });
 
       const res = await request(app).get('/test');
-      expect(res.body.error.retryable).toBe(true);
+      expect(res.body.retryable).toBe(true);
     });
 
     test('401 is not retryable', async () => {
@@ -105,7 +107,7 @@ describe('kycWebhookErrorHandler', () => {
       });
 
       const res = await request(app).get('/test');
-      expect(res.body.error.retryable).toBe(false);
+      expect(res.body.retryable).toBe(false);
     });
 
     test('400 is not retryable', async () => {
@@ -114,7 +116,7 @@ describe('kycWebhookErrorHandler', () => {
       });
 
       const res = await request(app).get('/test');
-      expect(res.body.error.retryable).toBe(false);
+      expect(res.body.retryable).toBe(false);
     });
 
     test('500 is not retryable', async () => {
@@ -123,7 +125,7 @@ describe('kycWebhookErrorHandler', () => {
       });
 
       const res = await request(app).get('/test');
-      expect(res.body.error.retryable).toBe(false);
+      expect(res.body.retryable).toBe(false);
     });
   });
 
@@ -134,7 +136,7 @@ describe('kycWebhookErrorHandler', () => {
       });
 
       const res = await request(app).get('/test');
-      expect(res.body.error.retry_hint).toBe('Retry the request in a few moments.');
+      expect(res.body.retry_hint).toBe('Retry the request in a few moments.');
     });
 
     test('429 returns rate limit hint', async () => {
@@ -143,7 +145,7 @@ describe('kycWebhookErrorHandler', () => {
       });
 
       const res = await request(app).get('/test');
-      expect(res.body.error.retry_hint).toBe('Wait for the rate limit window to reset before retrying.');
+      expect(res.body.retry_hint).toBe('Wait for the rate limit window to reset before retrying.');
     });
 
     test('non-retryable error returns empty hint', async () => {
@@ -152,65 +154,32 @@ describe('kycWebhookErrorHandler', () => {
       });
 
       const res = await request(app).get('/test');
-      expect(res.body.error.retry_hint).toBe('');
+      expect(res.body.retry_hint).toBe('');
     });
   });
 
-  describe('correlation_id', () => {
-    test('uses req.correlationId when present', async () => {
+  describe('instance field', () => {
+    test('uses req.originalUrl as instance', async () => {
       const app = buildTestApp(() => {
         throw new KycWebhookError('Error', 400, 'test_code');
       });
 
-      const res = await request(app)
-        .get('/test')
-        .set('x-correlation-id', 'custom-id-abc');
-
-      expect(res.body.error.correlation_id).toBe('custom-id-abc');
-    });
-
-    test('falls back to req.id when correlationId is absent', async () => {
-      const app = express();
-      app.use(express.json());
-      app.get('/test', (req, res, next) => {
-        req.id = 'request-id-456';
-        next(new KycWebhookError('Error', 400, 'test_code'));
-      });
-      app.use(kycWebhookErrorHandler);
-
       const res = await request(app).get('/test');
-      expect(res.body.error.correlation_id).toBe('request-id-456');
-    });
-
-    test('falls back to "unknown" when neither is set', async () => {
-      const app = express();
-      app.use(express.json());
-      app.get('/test', (_req, res, next) => {
-        next(new KycWebhookError('Error', 400, 'test_code'));
-      });
-      app.use(kycWebhookErrorHandler);
-
-      const res = await request(app).get('/test');
-      expect(res.body.error.correlation_id).toBe('unknown');
+      expect(res.body.instance).toBe('/test');
     });
   });
 
-  describe('req._kycErrorCode', () => {
-    test('sets req._kycErrorCode for metrics hooks', async () => {
-      let capturedErrorCode;
+  describe('error code in response body', () => {
+    test('response body includes the error code from KycWebhookError', async () => {
       const app = express();
       app.use(express.json());
       app.get('/test', (_req, res, next) => {
         next(new KycWebhookError('Error', 500, 'persistence_error'));
       });
       app.use(kycWebhookErrorHandler);
-      app.use((err, req, _res, next) => {
-        capturedErrorCode = req._kycErrorCode;
-        next(err);
-      });
 
-      await request(app).get('/test');
-      expect(capturedErrorCode).toBe('persistence_error');
+      const res = await request(app).get('/test');
+      expect(res.body.code).toBe('persistence_error');
     });
   });
 
@@ -247,8 +216,8 @@ describe('kycWebhookErrorHandler', () => {
 
       const res = await request(app).get('/test');
       expect(res.status).toBe(400);
-      expect(res.body.error.code).toBeUndefined();
-      expect(res.body.error.retryable).toBe(false);
+      expect(res.body.code).toBeUndefined();
+      expect(res.body.retryable).toBe(false);
     });
 
     test('handles error with empty message', async () => {
@@ -258,7 +227,7 @@ describe('kycWebhookErrorHandler', () => {
 
       const res = await request(app).get('/test');
       expect(res.status).toBe(400);
-      expect(res.body.error.message).toBe('');
+      expect(res.body.detail).toBe('');
     });
 
     test('logs warning with error details', async () => {
