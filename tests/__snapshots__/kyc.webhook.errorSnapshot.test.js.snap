@@ -20,60 +20,130 @@ exports[`kyc-webhook POST /api/kyc/webhook — error response body snapshots 200
 
 exports[`kyc-webhook POST /api/kyc/webhook — error response body snapshots 400 Bad Request invalid JSON payload (route wraps the SyntaxError as a stable message) 1`] = `
 {
-  "error": "Invalid JSON payload",
+  "code": "invalid_payload",
+  "detail": "Invalid JSON payload",
+  "instance": "/api/kyc/webhook",
+  "retry_hint": "",
+  "retryable": false,
+  "status": 400,
+  "title": "Bad Request",
+  "type": "https://liquifact.com/probs/bad-request",
 }
 `;
 
 exports[`kyc-webhook POST /api/kyc/webhook — error response body snapshots 400 Bad Request missing or invalid smeId 1`] = `
 {
-  "error": "Missing or invalid smeId",
+  "code": "missing_sme_id",
+  "detail": "Missing or invalid smeId",
+  "instance": "/api/kyc/webhook",
+  "retry_hint": "",
+  "retryable": false,
+  "status": 400,
+  "title": "Bad Request",
+  "type": "https://liquifact.com/probs/bad-request",
 }
 `;
 
 exports[`kyc-webhook POST /api/kyc/webhook — error response body snapshots 400 Bad Request missing or invalid status 1`] = `
 {
-  "error": "Missing or invalid status",
+  "code": "missing_status",
+  "detail": "Missing or invalid status",
+  "instance": "/api/kyc/webhook",
+  "retry_hint": "",
+  "retryable": false,
+  "status": 400,
+  "title": "Bad Request",
+  "type": "https://liquifact.com/probs/bad-request",
 }
 `;
 
 exports[`kyc-webhook POST /api/kyc/webhook — error response body snapshots 400 Bad Request missing tenant context when payload carries tenantId 1`] = `
 {
-  "error": "Missing tenant context.",
+  "code": "missing_tenant_context",
+  "detail": "Missing tenant context.",
+  "instance": "/api/kyc/webhook",
+  "retry_hint": "",
+  "retryable": false,
+  "status": 400,
+  "title": "Bad Request",
+  "type": "https://liquifact.com/probs/bad-request",
 }
 `;
 
 exports[`kyc-webhook POST /api/kyc/webhook — error response body snapshots 400 Bad Request unknown provider status — fail-closed (#592) 1`] = `
 {
-  "error": "Unknown provider status: mystery_status",
+  "code": "unknown_status",
+  "detail": "Unknown provider status: mystery_status",
+  "instance": "/api/kyc/webhook",
+  "retry_hint": "",
+  "retryable": false,
+  "status": 400,
+  "title": "Bad Request",
+  "type": "https://liquifact.com/probs/bad-request",
 }
 `;
 
 exports[`kyc-webhook POST /api/kyc/webhook — error response body snapshots 401 Unauthorized invalid webhook signature 1`] = `
 {
-  "error": "Invalid webhook signature",
+  "code": "invalid_signature",
+  "detail": "Invalid webhook signature",
+  "instance": "/api/kyc/webhook",
+  "retry_hint": "",
+  "retryable": false,
+  "status": 401,
+  "title": "Unauthorized",
+  "type": "https://liquifact.com/probs/unauthorized",
 }
 `;
 
 exports[`kyc-webhook POST /api/kyc/webhook — error response body snapshots 401 Unauthorized missing X-Signature header 1`] = `
 {
-  "error": "Missing X-Signature header",
+  "code": "missing_signature",
+  "detail": "Missing X-Signature header",
+  "instance": "/api/kyc/webhook",
+  "retry_hint": "",
+  "retryable": false,
+  "status": 401,
+  "title": "Unauthorized",
+  "type": "https://liquifact.com/probs/unauthorized",
 }
 `;
 
 exports[`kyc-webhook POST /api/kyc/webhook — error response body snapshots 403 Forbidden tenant scope mismatch 1`] = `
 {
-  "error": "Tenant scope mismatch.",
+  "code": "tenant_mismatch",
+  "detail": "Tenant scope mismatch.",
+  "instance": "/api/kyc/webhook",
+  "retry_hint": "",
+  "retryable": false,
+  "status": 403,
+  "title": "Forbidden",
+  "type": "https://liquifact.com/probs/forbidden",
 }
 `;
 
 exports[`kyc-webhook POST /api/kyc/webhook — error response body snapshots 500 Internal Server Error persistence_error — persistKycRecord throws 1`] = `
 {
-  "error": "Simulated DB write failure",
+  "code": "persistence_error",
+  "detail": "Simulated DB write failure",
+  "instance": "/api/kyc/webhook",
+  "retry_hint": "",
+  "retryable": false,
+  "status": 500,
+  "title": "Internal Server Error",
+  "type": "https://liquifact.com/probs/internal-server-error",
 }
 `;
 
 exports[`kyc-webhook POST /api/kyc/webhook — error response body snapshots 503 Service Unavailable missing_secret — apiSecret not configured 1`] = `
 {
-  "error": "KYC webhook ingestion is not configured",
+  "code": "missing_secret",
+  "detail": "KYC webhook ingestion is not configured",
+  "instance": "/api/kyc/webhook",
+  "retry_hint": "Retry the request in a few moments.",
+  "retryable": true,
+  "status": 503,
+  "title": "Service Unavailable",
+  "type": "https://liquifact.com/probs/service-unavailable",
 }
 `;

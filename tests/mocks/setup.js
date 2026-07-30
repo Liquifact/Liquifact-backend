@@ -9,6 +9,15 @@ jest.mock('../../src/metrics', () => {
     footprintCacheHitsTotal: makeCounter(),
     footprintCacheMissesTotal: makeCounter(),
     footprintCacheEvictionsTotal: makeCounter(),
+
+    // KYC webhook metrics — needed so route handlers can call
+    // normalizeKycWebhookStatusClass / normalizeKycWebhookCause
+    // in their res.on('finish') callbacks without crashing.
+    kycWebhookRequestDurationSeconds: { observe: jest.fn() },
+    kycWebhookRequestsTotal: { inc: jest.fn() },
+    kycWebhookErrorsTotal: { inc: jest.fn() },
+    normalizeKycWebhookStatusClass: jest.fn().mockReturnValue('4xx'),
+    normalizeKycWebhookCause: jest.fn().mockReturnValue('none'),
   };
 });
 
