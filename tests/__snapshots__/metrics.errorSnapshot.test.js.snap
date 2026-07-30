@@ -1,0 +1,41 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`Metrics error-response body snapshots 400 validation error — err.status 400 maps to VALIDATION_ERROR (HTTP 422) 1`] = `
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "The request contains invalid parameters. (Invalid metric query parameter)",
+    "retryable": false,
+  },
+}
+`;
+
+exports[`Metrics error-response body snapshots 404 not found — err.code NOT_FOUND maps to NOT_FOUND (HTTP 404) 1`] = `
+{
+  "error": {
+    "code": "NOT_FOUND",
+    "message": "The requested metrics resource was not found. (Metric 'orders_per_sec' not found)",
+    "retryable": false,
+  },
+}
+`;
+
+exports[`Metrics error-response body snapshots 409 conflict — err.status 409 not in classification; falls to INTERNAL_SERVER_ERROR (HTTP 500) 1`] = `
+{
+  "error": {
+    "code": "INTERNAL_SERVER_ERROR",
+    "message": "An unexpected error occurred while processing the metrics request. (Concurrent metric update conflict)",
+    "retryable": false,
+  },
+}
+`;
+
+exports[`Metrics error-response body snapshots 500 internal server error — err.code INTERNAL_SERVER_ERROR (HTTP 500) 1`] = `
+{
+  "error": {
+    "code": "INTERNAL_SERVER_ERROR",
+    "message": "An unexpected error occurred while processing the metrics request. (Metrics registry crashed)",
+    "retryable": false,
+  },
+}
+`;
