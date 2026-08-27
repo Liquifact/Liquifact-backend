@@ -31,6 +31,7 @@ const { invoiceCreateSchema, invoiceUpdateSchema, parseValidationErrors } = requ
 const { escrowBatchReadSchema } = require('../../schemas/escrowBatchRead');
 const { validatePatchFields, detectLockedFieldChange } = require('../../middleware/patchInvoice');
 const { validateHealthQuery, rejectBodyOnGet } = require('../../schemas/health');
+const { invoiceIdempotencyMiddleware } = require('../../middleware/invoiceIdempotency');
 
 // ── Sub-router mounts ────────────────────────────────────────────────────────
 router.use('/invest', investRoutes);
@@ -115,7 +116,7 @@ router.get('/invoices', extractTenant, async (req, res, next) => {
  * Response 201:
  *   { data: Invoice, message: string }
  */
-router.post('/invoices', extractTenant, async (req, res, next) => {
+router.post('/invoices', extractTenant, invoiceIdempotencyMiddleware(), async (req, res, next) => {
   try {
     // --- Zod validation -------------------------------------------------------
     const parsed = invoiceCreateSchema.safeParse(req.body);
