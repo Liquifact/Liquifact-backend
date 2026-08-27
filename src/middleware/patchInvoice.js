@@ -14,7 +14,7 @@
  *
  * @type {ReadonlySet<string>}
  */
-const MUTABLE_FIELDS = new Set(['amount', 'customer', 'notes']);
+const MUTABLE_FIELDS = new Set(['amount', 'customer', 'notes', 'version']);
 
 /**
  * Fields that become read-only once the invoice moves past the initial

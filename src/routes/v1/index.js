@@ -30,6 +30,7 @@ const AppError = require('../../errors/AppError');
 const { invoiceCreateSchema, invoiceUpdateSchema, parseValidationErrors } = require('../../schemas/invoice');
 const { escrowBatchReadSchema } = require('../../schemas/escrowBatchRead');
 const { validatePatchFields, detectLockedFieldChange } = require('../../middleware/patchInvoice');
+const { InvoiceVersionError, conflictPayload, expectedVersionFromRequest } = require('../../services/invoiceConcurrency');
 const { validateHealthQuery, rejectBodyOnGet } = require('../../schemas/health');
 
 // ── Sub-router mounts ────────────────────────────────────────────────────────
@@ -287,8 +288,24 @@ router.patch('/invoices/:id', extractTenant, validatePatchFields, async (req, re
       );
     }
 
-    const updates = parsed.data;
-    const updated = await invoiceService.updateInvoice(invoiceId, updates, req.tenantId);
+    let expectedVersion;
+    try {
+      expectedVersion = expectedVersionFromRequest(req.body, req.headers['if-match']);
+    } catch (versionError) {
+      if (versionError instanceof InvoiceVersionError) versionError.statusCode = 400;
+      return next(versionError);
+    }
+
+    const { version: _version, ...updates } = parsed.data;
+    let updated;
+    try {
+      updated = await invoiceService.updateInvoice(invoiceId, updates, req.tenantId, { expectedVersion });
+    } catch (versionError) {
+      if (versionError instanceof InvoiceVersionError) {
+        return res.status(versionError.statusCode).json(conflictPayload(versionError));
+      }
+      throw versionError;
+    }
 
     if (!updated) {
       return next(new AppError({ title: 'Not Found', status: 404, detail: 'Invoice not found' }));

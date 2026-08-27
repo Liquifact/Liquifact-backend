@@ -160,6 +160,11 @@ const invoiceCreateSchema = z
  */
 const invoiceUpdateSchema = z
   .object({
+    version: z
+      .number({ invalid_type_error: 'version must be a number' })
+      .int({ message: 'version must be an integer' })
+      .positive({ message: 'version must be positive' })
+      .safe({ message: 'version must be a safe integer' }),
     amount: z
       .number({ invalid_type_error: 'amount must be a number' })
       .positive({ message: 'amount must be a positive number' })
