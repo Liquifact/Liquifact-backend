@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const db = require('../db/knex');
 const logger = require('../logger');
 const { resolveInvoiceByAddress } = require('../config/escrowMap');
@@ -32,8 +33,27 @@ class ValidationError extends Error {
   }
 }
 
+class LeaseLostError extends Error {
+  /**
+   * Creates an escrow indexer lease fencing error.
+   * @param {string} message Human-readable failure.
+   * @param {string} code Stable error code.
+   * @param {object|null} details Validation details.
+   */
+  constructor(message, code = 'LEASE_LOST', details = null) {
+    super(message);
+    this.name = 'LeaseLostError';
+    this.code = code;
+    this.details = details;
+  }
+}
+
 const DEFAULT_POLL_INTERVAL_MS = 15_000;
 const DEFAULT_BATCH_SIZE = 100;
+
+// Fencing token lease; expiry is compared with the database clock.
+const LEASE_KEY = 'worker_lease';
+const DEFAULT_LEASE_DURATION_MS = 30_000;
 
 /**
  * Validates a Stellar contract ID using StrKey encoding rules (starts with 'C', correct length, and valid checksum).
@@ -202,7 +222,72 @@ function normalizeEvent(rawEvent) {
  *   upsertEvent, and upsertProjection methods.
  */
 function createKnexEscrowEventStore(knex) {
+  async function assertLease(trx, token) {
+    const row = await (trx || knex)('escrow_indexer_state')
+      .where({ key: LEASE_KEY })
+      .whereRaw("value::jsonb ->> 'token' = ?", [token])
+      .whereRaw("(value::jsonb ->> 'expiresAt')::bigint > EXTRACT(EPOCH FROM NOW()) * 1000")
+      .first();
+    if (!row) {
+      throw new LeaseLostError('Escrow indexer lease is missing, stale, or expired.', 'LEASE_LOST');
+    }
+    return typeof row.value === 'string' ? JSON.parse(row.value) : row.value;
+  }
+
   return {
+    async acquireLease({ leaseDurationMs = DEFAULT_LEASE_DURATION_MS } = {}) {
+      const token = crypto.randomUUID();
+      const result = await knex.raw(
+        `INSERT INTO escrow_indexer_state (key, value, updated_at)
+         VALUES (?, jsonb_build_object('token', ?, 'expiresAt', EXTRACT(EPOCH FROM NOW()) * 1000 + ?)::text, NOW())
+         ON CONFLICT (key) DO UPDATE
+           SET value = EXCLUDED.value,
+               updated_at = NOW()
+           WHERE escrow_indexer_state.value IS NULL
+              OR COALESCE((escrow_indexer_state.value::jsonb ->> 'expiresAt')::bigint, 0) <= EXTRACT(EPOCH FROM NOW()) * 1000
+         RETURNING value`,
+        [LEASE_KEY, token, leaseDurationMs],
+      );
+      if (!result.rows || result.rows.length === 0) {
+        return null;
+      }
+      return typeof result.rows[0].value === 'string'
+        ? JSON.parse(result.rows[0].value)
+        : result.rows[0].value;
+    },
+
+    async renewLease(token, leaseDurationMs = DEFAULT_LEASE_DURATION_MS) {
+      const result = await knex.raw(
+        `UPDATE escrow_indexer_state
+         SET value = jsonb_build_object(
+               'token', value::jsonb ->> 'token',
+               'expiresAt', EXTRACT(EPOCH FROM NOW()) * 1000 + ?
+             )::text,
+             updated_at = NOW()
+         WHERE key = ?
+           AND value::jsonb ->> 'token' = ?
+           AND COALESCE((value::jsonb ->> 'expiresAt')::bigint, 0) > EXTRACT(EPOCH FROM NOW()) * 1000
+         RETURNING value`,
+        [leaseDurationMs, LEASE_KEY, token],
+      );
+      if (!result.rows || result.rows.length === 0) {
+        return null;
+      }
+      return typeof result.rows[0].value === 'string'
+        ? JSON.parse(result.rows[0].value)
+        : result.rows[0].value;
+    },
+
+    async completeLease(token) {
+      const deleted = await knex('escrow_indexer_state')
+        .where({ key: LEASE_KEY })
+        .whereRaw("value::jsonb ->> 'token' = ?", [token])
+        .del();
+      return deleted > 0;
+    },
+
+    assertLease,
+
     async loadCursor() {
       const row = await knex('escrow_indexer_state')
         .where({ key: 'horizon_cursor' })
@@ -210,7 +295,10 @@ function createKnexEscrowEventStore(knex) {
       return row ? row.value : null;
     },
 
-    async saveCursor(cursor) {
+    async saveCursor(cursor, fenceToken) {
+      if (fenceToken) {
+        await assertLease(null, fenceToken);
+      }
       await knex('escrow_indexer_state')
         .insert({ key: 'horizon_cursor', value: cursor, updated_at: knex.fn.now() })
         .onConflict('key')
@@ -295,13 +383,17 @@ function shouldReplaceProjection(currentProjection, event) {
  * @param {object} deps - Dependencies.
  * @param {object} deps.store - Event store implementation.
  * @param {Function} deps.transactionRunner - Runs a callback within a transaction.
+ * @param {string} [deps.fenceToken] - Lease fencing token required for fenced writes.
  * @param {object} rawEvent - Raw event to normalize and persist.
  * @returns {Promise<void>} Resolves when the event and projection are written.
  */
-async function persistEscrowEvent({ store, transactionRunner }, rawEvent) {
+async function persistEscrowEvent({ store, transactionRunner, fenceToken }, rawEvent) {
   const event = normalizeEvent(rawEvent);
 
   await transactionRunner(async (trx) => {
+    if (fenceToken && typeof store.assertLease === 'function') {
+      await store.assertLease(trx, fenceToken);
+    }
     await store.upsertEvent(trx, event);
     const projection = await store.findProjection(event.invoiceId);
     if (shouldReplaceProjection(projection, event)) {
@@ -401,28 +493,85 @@ async function runEscrowIndexerCycle({
   transactionRunner,
   log = logger,
   batchSize = DEFAULT_BATCH_SIZE,
+  leaseDurationMs = DEFAULT_LEASE_DURATION_MS,
 }) {
-  const cursor = await store.loadCursor();
-  const { events, nextCursor } = await fetchEscrowEvents({ cursor, limit: batchSize });
+  const lease = typeof store.acquireLease === 'function'
+    ? await store.acquireLease({ leaseDurationMs })
+    : null;
 
-  let processed = 0;
-  let skipped = 0;
+  if (typeof store.acquireLease === 'function' && !lease) {
+    log.info({}, 'Escrow indexer cycle skipped; lease is held by another worker.');
+    return null;
+  }
 
-  for (const rawEvent of events) {
-    try {
-      await persistEscrowEvent({ store, transactionRunner }, rawEvent);
-      processed += 1;
-    } catch (error) {
-      skipped += 1;
-      log.warn({ err: error, eventId: rawEvent && rawEvent.eventId }, 'Skipping invalid escrow event.');
+  if (lease) {
+    log.info(
+      { leaseToken: lease.token, expiresAt: new Date(lease.expiresAt).toISOString() },
+      'Escrow indexer lease acquired.'
+    );
+  }
+
+  try {
+    const cursor = await store.loadCursor();
+    const { events, nextCursor } = await fetchEscrowEvents({ cursor, limit: batchSize });
+
+    let processed = 0;
+    let skipped = 0;
+
+    for (const rawEvent of events) {
+      if (lease && typeof store.renewLease === 'function') {
+        const renewed = await store.renewLease(lease.token, leaseDurationMs);
+        if (!renewed) {
+          throw new LeaseLostError('Escrow indexer lease expired before renewal.', 'LEASE_EXPIRED');
+        }
+        lease.expiresAt = renewed.expiresAt;
+        log.info(
+          { leaseToken: lease.token, expiresAt: new Date(lease.expiresAt).toISOString() },
+          'Escrow indexer lease renewed.'
+        );
+      }
+
+      try {
+        await persistEscrowEvent(
+          { store, transactionRunner, fenceToken: lease && lease.token },
+          rawEvent
+        );
+        processed += 1;
+      } catch (error) {
+        if (error instanceof LeaseLostError) {
+          log.error(
+            { err: error, eventId: rawEvent && rawEvent.eventId },
+            'Escrow indexer lease lost; aborting cycle.'
+          );
+          throw error;
+        }
+        skipped += 1;
+        log.warn({ err: error, eventId: rawEvent && rawEvent.eventId }, 'Skipping invalid escrow event.');
+      }
     }
-  }
 
-  if (nextCursor && nextCursor !== cursor) {
-    await store.saveCursor(nextCursor);
-  }
+    if (nextCursor && nextCursor !== cursor) {
+      await store.saveCursor(nextCursor, lease && lease.token);
+    }
 
-  return { processed, skipped, cursorBefore: cursor, cursorAfter: nextCursor || cursor || null };
+    if (lease && typeof store.completeLease === 'function') {
+      await store.completeLease(lease.token);
+      log.info({ leaseToken: lease.token }, 'Escrow indexer lease completed.');
+    }
+
+    return {
+      processed,
+      skipped,
+      cursorBefore: cursor,
+      cursorAfter: nextCursor || cursor || null,
+      leaseToken: lease && lease.token,
+    };
+  } catch (error) {
+    if (lease && typeof store.completeLease === 'function') {
+      await store.completeLease(lease.token).catch(() => {});
+    }
+    throw error;
+  }
 }
 /**
  * Creates an escrow indexer with start/stop polling control and a re-entrancy
@@ -449,6 +598,11 @@ function createEscrowIndexer(options = {}) {
     /* istanbul ignore next -- default transaction runner exercised with knex; unit tests inject transactionRunner via DI. */
     ((handler) => (options.db || db).transaction(handler));
   const pollIntervalMs = Number(options.pollIntervalMs || process.env.ESCROW_INDEXER_POLL_INTERVAL_MS || DEFAULT_POLL_INTERVAL_MS);
+  const leaseDurationMs = Number(
+    options.leaseDurationMs ||
+    process.env.ESCROW_INDEXER_LEASE_DURATION_MS ||
+    DEFAULT_LEASE_DURATION_MS
+  );
 
   let timer = null;
   let running = false;
@@ -543,4 +697,5 @@ module.exports = {
   isValidStellarContractId,
   isValidTxHash,
   ValidationError,
+  LeaseLostError,
 };
