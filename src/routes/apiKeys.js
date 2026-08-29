@@ -13,6 +13,8 @@ router.use(apiKeysLimiter);
 
 const MAX_BULK_ITEMS = 25;
 
+const ROTATION_OVERLAP_MS = 5 * 60 * 1000;
+
 const bulkItemSchema = z.discriminatedUnion('action', [
   z.object({
     action: z.literal('create'),
@@ -31,6 +33,12 @@ const bulkItemSchema = z.discriminatedUnion('action', [
   z.object({
     action: z.literal('deactivate'),
     id: z.number().int().positive(),
+  }),
+  z.object({
+    action: z.literal('rotate'),
+    id: z.number().int().positive(),
+    apiKey: z.string().trim().min(8).max(4096),
+    name: z.string().trim().min(1).max(255).optional(),
   }),
 ]);
 
@@ -200,6 +208,21 @@ async function ensureApiKeyTable(db) {
   if (!hasTenantId) {
     await run(db, 'ALTER TABLE api_keys ADD COLUMN tenant_id TEXT');
   }
+
+  const hasStatus = columns.some((column) => column.name === 'status');
+  if (!hasStatus) {
+    await run(db, "ALTER TABLE api_keys ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
+  }
+
+  const hasActivatedAt = columns.some((column) => column.name === 'activated_at');
+  if (!hasActivatedAt) {
+    await run(db, 'ALTER TABLE api_keys ADD COLUMN activated_at DATETIME');
+  }
+
+  const hasRetiresAt = columns.some((column) => column.name === 'retires_at');
+  if (!hasRetiresAt) {
+    await run(db, 'ALTER TABLE api_keys ADD COLUMN retires_at DATETIME');
+  }
 }
 
 /**
@@ -211,16 +234,21 @@ async function ensureApiKeyTable(db) {
  */
 async function createKey(db, item) {
   const keyHash = hashApiKey(item.apiKey);
-  await run(db, 'INSERT INTO api_keys (tenant_id, key_hash, name, is_active) VALUES (?, ?, ?, 1)', [
+  const activatedAt = new Date().toISOString();
+  await run(db, "INSERT INTO api_keys (tenant_id, key_hash, name, is_active, status, activated_at) VALUES (?, ?, ?, 1, 'active', ?)", [
     item.tenantId,
     keyHash,
     item.name,
+    activatedAt,
   ]);
-  const row = await get(db, 'SELECT id, name, is_active FROM api_keys WHERE key_hash = ? AND tenant_id = ?', [keyHash, item.tenantId]);
+  const row = await get(db, "SELECT id, name, is_active, status, activated_at, retires_at FROM api_keys WHERE key_hash = ? AND tenant_id = ?", [keyHash, item.tenantId]);
   return {
     id: row.id,
     name: row.name,
     isActive: Boolean(row.is_active),
+    status: row.status,
+    activatedAt: row.activated_at,
+    retiresAt: row.retires_at,
   };
 }
 
@@ -244,16 +272,108 @@ async function updateKey(db, item) {
 
   if (item.action === 'rename') {
     await run(db, 'UPDATE api_keys SET name = ? WHERE id = ? AND tenant_id = ?', [item.name, item.id, item.tenantId]);
+  } else if (item.action === 'activate') {
+    await run(db, "UPDATE api_keys SET is_active = 1, status = 'active', retires_at = NULL WHERE id = ? AND tenant_id = ?", [item.id, item.tenantId]);
   } else {
-    await run(db, 'UPDATE api_keys SET is_active = ? WHERE id = ? AND tenant_id = ?', [item.action === 'activate' ? 1 : 0, item.id, item.tenantId]);
+    await run(db, "UPDATE api_keys SET is_active = 0, status = 'retired' WHERE id = ? AND tenant_id = ?", [item.id, item.tenantId]);
   }
 
-  const updated = await get(db, 'SELECT id, name, is_active FROM api_keys WHERE id = ? AND tenant_id = ?', [item.id, item.tenantId]);
+  const updated = await get(db, "SELECT id, name, is_active, status, activated_at, retires_at FROM api_keys WHERE id = ? AND tenant_id = ?", [item.id, item.tenantId]);
   return {
     id: updated.id,
     name: updated.name,
     isActive: Boolean(updated.is_active),
+    status: updated.status,
+    activatedAt: updated.activated_at,
+    retiresAt: updated.retires_at,
   };
+}
+
+/**
+ * Atomically rotates an active API key by retiring the old key and creating
+ * the replacement in the same transaction. The old key remains usable until
+ * its retires_at timestamp, and the new key becomes visible only on commit.
+ *
+ * @param {object} db - SQLite database handle.
+ * @param {object} item - Parsed rotate operation.
+ * @returns {Promise<object>} Created key summary with rotation metadata.
+ */
+async function rotateKey(db, item) {
+  const now = new Date();
+  const retiresAt = new Date(now.getTime() + ROTATION_OVERLAP_MS);
+  const keyHash = hashApiKey(item.apiKey);
+
+  try {
+    await run(db, 'BEGIN IMMEDIATE');
+
+    const existing = await get(
+      db,
+      "SELECT id, name, status, is_active, retires_at FROM api_keys WHERE id = ? AND tenant_id = ?",
+      [item.id, item.tenantId]
+    );
+    if (!existing) {
+      throw new AppError({
+        type: 'https://liquifact.com/probs/not-found',
+        title: 'API Key Not Found',
+        status: 404,
+        detail: `API key ${item.id} was not found`,
+      });
+    }
+    if (existing.status !== 'active' || existing.is_active !== 1) {
+      throw new AppError({
+        type: 'https://liquifact.com/probs/conflict',
+        title: 'API Key Not Active',
+        status: 409,
+        detail: `API key ${item.id} is not active and cannot be rotated`,
+      });
+    }
+
+    const updateResult = await run(
+      db,
+      "UPDATE api_keys SET status = 'retiring', retires_at = ? WHERE id = ? AND tenant_id = ? AND status = 'active'",
+      [retiresAt.toISOString(), item.id, item.tenantId]
+    );
+    if (updateResult.changes !== 1) {
+      throw new AppError({
+        type: 'https://liquifact.com/probs/conflict',
+        title: 'Rotation Conflict',
+        status: 409,
+        detail: `API key ${item.id} was concurrently rotated`,
+      });
+    }
+
+    await run(
+      db,
+      "INSERT INTO api_keys (tenant_id, key_hash, name, is_active, status, activated_at, retires_at) VALUES (?, ?, ?, 1, 'active', ?, NULL)",
+      [item.tenantId, keyHash, item.name || existing.name, now.toISOString()]
+    );
+
+    const row = await get(
+      db,
+      "SELECT id, name, is_active, status, activated_at, retires_at FROM api_keys WHERE key_hash = ? AND tenant_id = ?",
+      [keyHash, item.tenantId]
+    );
+
+    await run(db, 'COMMIT');
+
+    return {
+      id: row.id,
+      name: row.name,
+      isActive: true,
+      status: row.status,
+      activatedAt: row.activated_at,
+      retiresAt: row.retires_at,
+      previousId: existing.id,
+      previousRetiresAt: retiresAt.toISOString(),
+    };
+  } catch (err) {
+    try {
+      await run(db, 'ROLLBACK');
+    } catch {
+      // Preserve the original error if rollback also fails.
+    }
+    throw err;
+  }
 }
 
 /**
@@ -329,6 +449,8 @@ router.post('/bulk', authenticateApiKey({ requiredScope: 'invoices:write' }), ex
 
         if (item.action === 'create') {
           result = await createKey(db, item);
+        } else if (item.action === 'rotate') {
+          result = await rotateKey(db, item);
         } else {
           result = await updateKey(db, item);
         }
