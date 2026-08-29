@@ -2,7 +2,13 @@
 
 const { assertAllowedTransition } = require('./invoiceStateMachine');
 
-const VERSION_PATTERN = /^(?>W/)?(??"?)?([1-9][0-9]{0,18})(?:"?)?$/;
+// Matches a bare positive integer or a weak ETag wrapping one, e.g. `5`,
+// `"5"`, or `W/"5"`. (Pre-existing syntax error fixed here: the previous
+// pattern used an invalid atomic group `(?>...)` and an invalid empty
+// group `(??...)`, which threw at module load and broke every test suite
+// that transitively requires this module — unrelated to the settlement
+// dry-run feature in this PR, but fixed so the suite can run at all.)
+const VERSION_PATTERN = /^(?:W\/)?"?([1-9][0-9]{0,18})"?$/;
 const MAX_VERSION = Number.MAX_SAFE_INTEGER;
 
 class InvoiceVersionError extends Error {
