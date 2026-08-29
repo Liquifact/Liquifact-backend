@@ -40,6 +40,7 @@ const {
 const { adminConfigLimiter } = require('../middleware/rateLimit');
 const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
 const { configErrorHandler } = require('../middleware/configErrorHandler');
+const { saveDraft, publishConfig, getConfigVersion, getConfigHistory } = require('../services/configVersioning');
 const optionalIdempotency = require('../middleware/optionalIdempotency');
 const { instrumentConfig } = require('../middleware/configMetrics');
 const { toAdminConfigRequestDto, fromAdminConfigRequestDto } = require('../dto/config');
@@ -346,6 +347,228 @@ router.post('/purge', async (req, res, next) => {
       retentionDays: summary.retentionDays,
       maxBatchesReached: summary.maxBatchesReached,
     });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+
+// ── POST /api/admin/config/draft ────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/admin/config/draft:
+ *   post:
+ *     operationId: saveConfigDraft
+ *     summary: Save a configuration draft
+ *     description: |
+ *       Saves a configuration draft for operator review before publishing.
+ *       If a draft already exists for the section+tenant, it is updated.
+ *       Does not affect the currently published configuration.
+ *     tags: [AdminConfig]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [section, config]
+ *             properties:
+ *               section: { type: string }
+ *               config: { type: object }
+ *     responses:
+ *       201:
+ *         description: Draft saved
+ *       401:
+ *         $ref: '#/components/responses/Problem401'
+ *       403:
+ *         $ref: '#/components/responses/Problem403'
+ */
+router.post('/draft', validateBody(runtimeConfigSchema), async (req, res, next) => {
+  try {
+    const validatedDto = toAdminConfigRequestDto(req.validated);
+    const { section, config: validatedConfig } = fromAdminConfigRequestDto(validatedDto);
+
+    const draft = await saveDraft(section, validatedConfig, {
+      tenantId: req.tenantId,
+      actor: req.apiClient?.clientId || req.user?.sub,
+    });
+
+    return res.status(201).json({
+      id: draft.id,
+      section: draft.section,
+      config: JSON.parse(draft.config),
+      draftStatus: draft.draft_status,
+      version: draft.version,
+      diffSummary: draft.diff_summary,
+      draftActor: draft.draft_actor,
+      message: 'Draft saved for review.',
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// ── POST /api/admin/config/publish ──────────────────────────────────────────
+/**
+ * @swagger
+ * /api/admin/config/publish:
+ *   post:
+ *     operationId: publishConfigVersion
+ *     summary: Publish a configuration version
+ *     description: |
+ *       Publishes a configuration with optimistic concurrency control.
+ *       Requires `expectedVersion` to match the current version, preventing
+ *       silent overwrites from concurrent edits. Returns 409 if the version
+ *       has changed since the operator loaded it.
+ *     tags: [AdminConfig]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [section, config, expectedVersion]
+ *             properties:
+ *               section: { type: string }
+ *               config: { type: object }
+ *               expectedVersion: { type: integer, description: Current version for optimistic CAS }
+ *     responses:
+ *       200:
+ *         description: Config published
+ *       401:
+ *         $ref: '#/components/responses/Problem401'
+ *       403:
+ *         $ref: '#/components/responses/Problem403'
+ *       409:
+ *         description: Stale version — another operator published first
+ *       422:
+ *         description: No changes detected
+ */
+router.post('/publish', validateBody(runtimeConfigSchema), async (req, res, next) => {
+  try {
+    const validatedDto = toAdminConfigRequestDto(req.validated);
+    const { section, config: validatedConfig } = fromAdminConfigRequestDto(validatedDto);
+
+    const expectedVersion = req.body.expectedVersion !== undefined
+      ? Number(req.body.expectedVersion)
+      : undefined;
+
+    const published = await publishConfig(section, validatedConfig, {
+      tenantId: req.tenantId,
+      actor: req.apiClient?.clientId || req.user?.sub,
+      expectedVersion,
+    });
+
+    return res.status(200).json({
+      id: published.id,
+      section: published.section,
+      config: JSON.parse(published.config),
+      draftStatus: published.draft_status,
+      version: published.version,
+      diffSummary: published.diff_summary,
+      publishedBy: published.published_by,
+      publishedAt: published.published_at,
+      message: `Configuration v${published.version} published.`,
+    });
+  } catch (err) {
+    if (err.code === 'STALE_VERSION') {
+      return res.status(409).json({
+        type: 'https://liquifact.com/probs/stale-version',
+        title: 'Stale Version',
+        status: 409,
+        detail: err.message,
+      });
+    }
+    if (err.code === 'EMPTY_DIFF') {
+      return res.status(422).json({
+        type: 'https://liquifact.com/probs/empty-diff',
+        title: 'No Changes',
+        status: 422,
+        detail: err.message,
+      });
+    }
+    return next(err);
+  }
+});
+
+// ── GET /api/admin/config/version/:section ──────────────────────────────────
+/**
+ * @swagger
+ * /api/admin/config/version/{section}:
+ *   get:
+ *     operationId: getConfigVersion
+ *     summary: Get current config version for a section
+ *     description: Returns the current published or draft config with version info.
+ *     tags: [AdminConfig]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: section
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Current version returned
+ *       404:
+ *         description: No config found for section
+ */
+router.get('/version/:section', async (req, res, next) => {
+  try {
+    const record = await getConfigVersion(req.params.section, req.tenantId);
+    if (!record) {
+      return res.status(404).json({
+        type: 'https://liquifact.com/probs/not-found',
+        title: 'Not Found',
+        status: 404,
+        detail: `No configuration found for section '${req.params.section}'.`,
+      });
+    }
+    return res.json({
+      id: record.id,
+      section: record.section,
+      config: JSON.parse(record.config),
+      draftStatus: record.draft_status,
+      version: record.version,
+      diffSummary: record.diff_summary,
+      publishedBy: record.published_by,
+      publishedAt: record.published_at,
+      draftActor: record.draft_actor,
+      createdAt: record.created_at,
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// ── GET /api/admin/config/history/:section ──────────────────────────────────
+/**
+ * @swagger
+ * /api/admin/config/history/{section}:
+ *   get:
+ *     operationId: getConfigHistory
+ *     summary: Get version history for a config section
+ *     description: Returns the last 20 versions for audit/review.
+ *     tags: [AdminConfig]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: section
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Version history returned
+ */
+router.get('/history/:section', async (req, res, next) => {
+  try {
+    const history = await getConfigHistory(req.params.section, req.tenantId);
+    return res.json({ section: req.params.section, versions: history });
   } catch (err) {
     return next(err);
   }
