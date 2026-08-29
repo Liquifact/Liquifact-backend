@@ -49,6 +49,34 @@ async function getState(id, tenantId) {
 }
 
 /**
+ * Resolves an invoice for a tenant or throws the canonical not-found error.
+ */
+async function resolveInvoiceForMutation(id, tenantId) {
+  const invoice = await invoiceService.resolveInvoiceForTenant(id, tenantId);
+  if (!invoice) {
+    throw new StateTransitionError('Invoice not found', 'INVOICE_NOT_FOUND', 404);
+  }
+  return invoice;
+}
+
+/**
+ * Ensures the requested target state is a valid transition from the invoice's
+ * current state. All state-changing handlers go through this single guard so
+ * transition rules are not duplicated across mutation paths.
+ */
+function assertTransitionAllowed(invoice, targetState) {
+  const allowedTransitions = getAllowedTransitions(invoice.status);
+  if (!allowedTransitions.includes(targetState)) {
+    throw new StateTransitionError(
+      `Transition from ${invoice.status} to ${targetState} is not allowed`,
+      'INVALID_STATE_TRANSITION',
+      400,
+      { currentState: invoice.status, targetState }
+    );
+  }
+}
+
+/**
  * Executes a state transition.
  */
 async function transition(id, tenantId, targetState, reason, context) {
@@ -56,12 +84,16 @@ async function transition(id, tenantId, targetState, reason, context) {
     throw new StateTransitionError('Target state is required', 'MISSING_TARGET_STATE', 400);
   }
 
+  const invoice = await resolveInvoiceForMutation(id, tenantId);
+  assertTransitionAllowed(invoice, targetState);
+
   const result = await invoiceService.transitionInvoice(id, targetState, tenantId, {
     actor: context.actor,
     reason: reason,
     ipAddress: context.ipAddress,
     userAgent: context.userAgent,
     metadata: context.metadata,
+    expectedRevision: invoice.revision,
   });
 
   return {
@@ -79,12 +111,16 @@ async function transition(id, tenantId, targetState, reason, context) {
  * Approves an invoice.
  */
 async function approve(id, tenantId, reason, context) {
+  const invoice = await resolveInvoiceForMutation(id, tenantId);
+  assertTransitionAllowed(invoice, INVOICE_STATES.APPROVED);
+
   const result = await invoiceService.transitionInvoice(id, INVOICE_STATES.APPROVED, tenantId, {
     actor: context.actor,
     reason: reason || 'Invoice approved',
     ipAddress: context.ipAddress,
     userAgent: context.userAgent,
     metadata: context.metadata,
+    expectedRevision: invoice.revision,
   });
 
   return {
@@ -102,15 +138,14 @@ async function approve(id, tenantId, reason, context) {
  * Links an approved invoice to escrow.
  */
 async function linkEscrow(id, tenantId, escrowId, reason, context) {
-  const invoice = await invoiceService.resolveInvoiceForTenant(id, tenantId);
-  if (!invoice) {
-    throw new StateTransitionError('Invoice not found', 'INVOICE_NOT_FOUND', 404);
-  }
+  const invoice = await resolveInvoiceForMutation(id, tenantId);
 
   const linkValidation = canLinkToEscrow(invoice);
   if (!linkValidation.canLink) {
     throw new StateTransitionError(linkValidation.reason, 'CANNOT_LINK_TO_ESCROW', 400);
   }
+
+  assertTransitionAllowed(invoice, INVOICE_STATES.LINKED_ESCROW);
 
   const result = await invoiceService.transitionInvoice(id, INVOICE_STATES.LINKED_ESCROW, tenantId, {
     actor: context.actor,
@@ -122,6 +157,7 @@ async function linkEscrow(id, tenantId, escrowId, reason, context) {
       ...context.metadata,
       escrowId: escrowId || 'pending',
     },
+    expectedRevision: invoice.revision,
   });
 
   return {
@@ -143,12 +179,16 @@ async function reject(id, tenantId, reason, context) {
     throw new StateTransitionError('Reason is required for rejection', 'MISSING_TRANSITION_REASON', 400);
   }
 
+  const invoice = await resolveInvoiceForMutation(id, tenantId);
+  assertTransitionAllowed(invoice, INVOICE_STATES.REJECTED);
+
   const result = await invoiceService.transitionInvoice(id, INVOICE_STATES.REJECTED, tenantId, {
     actor: context.actor,
     reason,
     ipAddress: context.ipAddress,
     userAgent: context.userAgent,
     metadata: context.metadata,
+    expectedRevision: invoice.revision,
   });
 
   return {
