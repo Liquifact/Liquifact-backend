@@ -82,7 +82,7 @@ describe('Health endpoint coverage', () => {
     performHealthChecks.mockResolvedValueOnce({
       healthy: false,
       checks: {
-        database: { status: 'unhealthy', error: 'Database unreachable' },
+        database: { status: 'unhealthy', error: { code: 'DEPENDENCY_ERROR', hint: 'Database unreachable' } },
         soroban: { status: 'healthy' },
       },
     });
@@ -120,7 +120,7 @@ describe('Health endpoint coverage', () => {
     performReadinessChecks.mockResolvedValueOnce({
       healthy: false,
       checks: {
-        database: { status: 'unhealthy', error: 'Database unreachable' },
+        database: { status: 'unhealthy', error: { code: 'DEPENDENCY_ERROR', hint: 'Database unreachable' } },
         soroban: { status: 'healthy' },
       },
     });
