@@ -44,6 +44,10 @@ function runBootConfigValidation() {
   }
   try {
     validate();
+    
+    // Boot-time dependency validation phase
+    const { validateDependencies } = require('./config/dependencyValidator');
+    validateDependencies();
   } catch (error) {
     logRedactedSummary(error);
     process.exit(1);
