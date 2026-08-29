@@ -8,6 +8,7 @@ use soroban_sdk::{
 
 #[contracttype]
 pub enum DataKey {
+    
     FeeRecipient,
     Bounty(u64),
     NextId,
