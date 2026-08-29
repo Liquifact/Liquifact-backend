@@ -430,23 +430,24 @@ async function replayWebhook(deadLetterId, fenceToken = null) {
   }
 
     const MAX_REPLAYS = 10;
-    if (record.replay_count >= MAX_REPLAYS) {
+    if (row.replay_count >= MAX_REPLAYS) {
       throw Object.assign(new Error(`Replay cap reached for dead-letter row: ${deadLetterId}`), { code: 'REPLAY_CAP_REACHED' });
     }
+    if (row.is_replaying) {
+      throw Object.assign(new Error(`Replay already in progress for dead-letter row: ${deadLetterId}`), { code: 'REPLAY_IN_PROGRESS' });
+    }
 
-    await trx('webhook_dead_letters')
+    // Claim the row atomically so concurrent replays cannot double-send.
+    await db('webhook_dead_letters')
       .where('id', deadLetterId)
       .update({
         is_replaying: true,
-        replay_count: record.replay_count + 1,
-        updated_at: db.fn.now()
+        replay_count: row.replay_count + 1,
+        updated_at: db.fn.now(),
       });
 
-    return record;
-  });
-
-  try {
-    const tenant = await db('tenants').select('settings').where('id', row.tenant_id).first();
+    try {
+      const tenant = await db('tenants').select('settings').where('id', row.tenant_id).first();
     const secret = tenant?.settings?.webhook_secret;
     if (!secret) {
       throw new Error(`No webhook secret configured for tenant ${row.tenant_id}`);

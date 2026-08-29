@@ -1,5 +1,3 @@
-const client = require("prom-client");
-const registry = new client.Registry();
 'use strict';
 
 /**
@@ -1546,10 +1544,29 @@ function normalizePersistenceStatusClass(status) {
 function normalizePersistenceCause(err, status) {
   const code = Number(status);
   if (!err && code < 400) { return 'none'; }
+  if (code >= 400 && code < 500) { return 'validation'; }
+  const errCode = err && typeof err === 'object' ? err.code : undefined;
+  if (typeof errCode === 'string' && _PERSISTENCE_STORAGE_CODES.includes(errCode)) {
+    return 'storage';
+  }
+  return 'internal';
+}
+
+const invoiceStateCacheHitsTotal = new client.Counter({
+  name: 'invoice_state_cache_hits_total',
+  help: 'Total invoice state cache hits',
+  registers: [registry],
+});
 
 const invoiceStateCacheMissesTotal = new client.Counter({
   name: 'invoice_state_cache_misses_total',
   help: 'Total invoice state cache misses',
+  registers: [registry],
+});
+
+const invoiceStateCacheEvictionsTotal = new client.Counter({
+  name: 'invoice_state_cache_evictions_total',
+  help: 'Total invoice state cache evictions',
   registers: [registry],
 });
 
@@ -2056,53 +2073,6 @@ const _PERSISTENCE_STORAGE_CODES = Object.freeze([
  */
 
 /**
- * Bounded enum of allowed `status_class` label values for metrics endpoint.
- * @readonly
- */
-const _METRICS_ENDPOINT_STATUS_CLASS_ENUM = Object.freeze(['2xx', '4xx', '5xx']);
-
-/**
- * Bounded enum of allowed `cause` label values for metrics endpoint errors.
- * @readonly
- */
-const _METRICS_ENDPOINT_CAUSE_ENUM = Object.freeze([
-  'none',
-  'auth_failure',
-  'internal_error',
-]);
-
-/**
- * Maps an HTTP status code to a bounded `status_class` label value.
- *
- * @param {unknown} status - HTTP status code.
- * @returns {string} Bounded value from {'2xx'|'4xx'|'5xx'}.
- */
-
-/**
- * Maps a metrics endpoint outcome to a bounded `cause` label value.
- *
- * @param {unknown} err - Raw error object, if any.
- * @param {number} [status] - HTTP status code.
- * @returns {string} Bounded value from {'none'|'auth_failure'|'internal_error'}.
- */
-
-/**
- * Histogram: Wall-clock duration of metrics endpoint scrapes in seconds.
- * @type {import('prom-client').Histogram}
- */
-
-/**
- * Counter: Metrics endpoint scrapes by bounded status class.
- * @type {import('prom-client').Counter}
- */
-
-/**
- * Counter: Metrics endpoint failures by bounded cause. Only incremented for
- * non-`none` causes so a healthy scrape never emits an error series.
- * @type {import('prom-client').Counter}
- */
-
-/**
  * Records the outcome of a metrics endpoint request: duration histogram,
  * request counter, bounded error counter, and one structured log line at the
  * severity matching the status class.
@@ -2226,24 +2196,6 @@ const _METRICS_ENDPOINT_CAUSE_ENUM = Object.freeze([
 
 
 
-
-const corsCacheHitsTotal = new client.Counter({
-  name: 'cors_cache_hits_total',
-  help: 'Total CORS origin-cache hits',
-  registers: [registry],
-});
-
-const corsCacheMissesTotal = new client.Counter({
-  name: 'cors_cache_misses_total',
-  help: 'Total CORS origin-cache misses',
-  registers: [registry],
-});
-
-const corsCacheEvictionsTotal = new client.Counter({
-  name: 'cors_cache_evictions_total',
-  help: 'Total CORS origin-cache evictions',
-  registers: [registry],
-});
 
 const corsCacheInvalidationsTotal = new client.Counter({
   name: 'cors_cache_invalidations_total',
