@@ -18,6 +18,7 @@ const { kycWebhookSchema, parseValidationErrors, kycWebhookListResponseSchema } 
 const { decodeCursor, encodeCursor, CursorError } = require('../utils/cursorPagination');
 const { quarantineKycWebhook, validateEnvelope } = require('./kycQuarantineService');
 const KycWebhookError = require('../errors/KycWebhookError');
+const { sanitizeTelemetryString, redactErrorForTelemetry } = require('../utils/telemetryRedaction');
 const {
   HTTP_HEADERS: _HTTP_HEADERS,
   KYC_WEBHOOK_ROUTES,
@@ -197,8 +198,14 @@ async function processWebhookIngestion({
 
   const normalised = kycService.normalizeProviderStatus(status);
   if (normalised === kycService.KYC_STATUSES.UNKNOWN) {
+    // The provider fully controls `status` on this fail-closed path, and it
+    // flows into a log line, a quarantine record, and the error message
+    // returned to the caller — sanitize it once, up front, so all three
+    // sinks inherit the same redaction rather than needing separate fixes
+    // (issue #1200).
+    const safeStatus = sanitizeTelemetryString(status);
     logger.warn(
-      { smeId, status },
+      { smeId, status: safeStatus },
       'KYC webhook received status outside PROVIDER_STATUS_MAP; rejecting (fail-closed)'
     );
     await quarantineKycWebhook({
@@ -206,15 +213,15 @@ async function processWebhookIngestion({
       payload,
       event: envelopeValidation.event,
       smeId,
-      reason: `Unknown provider status: ${status}`,
+      reason: `Unknown provider status: ${safeStatus}`,
       errorCode: KYC_WEBHOOK_ERROR_CODES.UNKNOWN_STATUS,
-      errorDetails: { status },
+      errorDetails: { status: safeStatus },
       tenantId: requestTenantId || payloadTenantId,
       actor,
       ipAddress,
       userAgent,
     });
-    throw new KycWebhookError(`Unknown provider status: ${status}`, 400, KYC_WEBHOOK_ERROR_CODES.UNKNOWN_STATUS);
+    throw new KycWebhookError(`Unknown provider status: ${safeStatus}`, 400, KYC_WEBHOOK_ERROR_CODES.UNKNOWN_STATUS);
   }
 
   try {
@@ -243,8 +250,19 @@ async function processWebhookIngestion({
 
     return { success: true, smeId: record.smeId, status: record.status };
   } catch (error) {
-    logger.error({ smeId, error: error.message }, KYC_WEBHOOK_MESSAGES.FAILED_INGESTION);
-    throw new KycWebhookError(error.message, 500, KYC_WEBHOOK_ERROR_CODES.PERSISTENCE_ERROR);
+    // `error` here is typically a DB/persistence failure — some drivers
+    // (notably Postgres unique-constraint violations) include the offending
+    // column *value* in their error message (e.g. `Key (ssn)=(123-45-6789)
+    // already exists`), so this is redacted the same as a provider error
+    // before it is logged or reused as the KycWebhookError message that
+    // flows into the HTTP response (issue #1200).
+    const safeError = redactErrorForTelemetry(error);
+    logger.error({ smeId, error: safeError }, KYC_WEBHOOK_MESSAGES.FAILED_INGESTION);
+    throw new KycWebhookError(
+      safeError && typeof safeError.message === 'string' ? safeError.message : 'KYC record persistence failed',
+      500,
+      KYC_WEBHOOK_ERROR_CODES.PERSISTENCE_ERROR,
+    );
   }
 }
 
