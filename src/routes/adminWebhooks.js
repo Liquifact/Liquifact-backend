@@ -15,6 +15,7 @@ const { replayWebhook, resolveDeadLetter } = require('../services/webhooks');
 const metrics = require('../metrics');
 const { authenticateToken } = require('../middleware/auth');
 const { authenticateApiKey } = require('../middleware/apiKeyAuth');
+const idempotencyMiddleware = require('../middleware/idempotency');
 const logger = require('../logger');
 
 // ── Constants & Helpers ──────────────────────────────────────────────────────
@@ -438,7 +439,7 @@ router.get('/dead-letters', async (req, res, next) => {
 
 // ── POST /replay/:id ─────────────────────────────────────────────────────────
 
-router.post('/replay/:id', async (req, res) => {
+router.post('/replay/:id', idempotencyMiddleware, async (req, res) => {
   const { id } = req.params;
   try {
     await replayWebhook(id);
@@ -451,6 +452,12 @@ router.post('/replay/:id', async (req, res) => {
     if (err.code === 'ALREADY_RESOLVED') {
       return res.status(409).json({ error: `Dead-letter row already resolved: ${id}` });
     }
+    if (err.code === 'REPLAY_IN_PROGRESS') {
+      return res.status(409).json({ error: err.message });
+    }
+    if (err.code === 'REPLAY_CAP_REACHED') {
+      return res.status(422).json({ error: err.message });
+    }
     logger.error({ deadLetterId: id, err: err.message }, 'Admin replay failed');
     return res.status(502).json({ error: `Replay failed: ${err.message}` });
   }
@@ -458,7 +465,7 @@ router.post('/replay/:id', async (req, res) => {
 
 // ── POST /replay (batch) ──────────────────────────────────────────────────────
 
-router.post('/replay', async (req, res) => {
+router.post('/replay', idempotencyMiddleware, async (req, res) => {
   const { ids, tenantId, limit = 50 } = req.body || {};
 
   if (!ids && !tenantId) {

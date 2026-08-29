@@ -429,43 +429,70 @@ async function replayWebhook(deadLetterId, fenceToken = null) {
     throw Object.assign(new Error(`Dead-letter row already resolved: ${deadLetterId}`), { code: 'ALREADY_RESOLVED' });
   }
 
-  const tenant = await db('tenants').select('settings').where('id', row.tenant_id).first();
-  const secret = tenant?.settings?.webhook_secret;
-  if (!secret) {
-    throw new Error(`No webhook secret configured for tenant ${row.tenant_id}`);
-  }
+    const MAX_REPLAYS = 10;
+    if (record.replay_count >= MAX_REPLAYS) {
+      throw Object.assign(new Error(`Replay cap reached for dead-letter row: ${deadLetterId}`), { code: 'REPLAY_CAP_REACHED' });
+    }
 
-  const body = typeof row.payload === 'string' ? row.payload : JSON.stringify(row.payload);
+    await trx('webhook_dead_letters')
+      .where('id', deadLetterId)
+      .update({
+        is_replaying: true,
+        replay_count: record.replay_count + 1,
+        updated_at: db.fn.now()
+      });
 
-  // Enforce payload bounding guard on replay
-  validatePayloadBounds(body);
+    return record;
+  });
 
-  const signatureHeader = createSignatureHeader(secret, body);
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 5000);
-
-  let response;
   try {
-    response = await fetch(row.webhook_url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Signature': signatureHeader,
-      },
-      body,
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timeoutId);
-  }
+    const tenant = await db('tenants').select('settings').where('id', row.tenant_id).first();
+    const secret = tenant?.settings?.webhook_secret;
+    if (!secret) {
+      throw new Error(`No webhook secret configured for tenant ${row.tenant_id}`);
+    }
 
-  if (!response.ok) {
-    throw new Error(`Webhook replay responded with ${response.status}`);
-  }
+    const body = typeof row.payload === 'string' ? row.payload : JSON.stringify(row.payload);
 
-  await resolveDeadLetter(deadLetterId);
-  logger.info({ deadLetterId, webhook_url: row.webhook_url }, 'Webhook replayed successfully');
+    // Enforce payload bounding guard on replay
+    validatePayloadBounds(body);
+
+    const signatureHeader = createSignatureHeader(secret, body);
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+    let response;
+    try {
+      response = await fetch(row.webhook_url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Signature': signatureHeader,
+        },
+        body,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    if (!response.ok) {
+      throw new Error(`Webhook replay responded with ${response.status}`);
+    }
+
+    await resolveDeadLetter(deadLetterId);
+    logger.info({ deadLetterId, webhook_url: row.webhook_url }, 'Webhook replayed successfully');
+  } catch (err) {
+    await db('webhook_dead_letters')
+      .where('id', deadLetterId)
+      .update({
+        is_replaying: false,
+        last_error: err.message,
+        updated_at: db.fn.now()
+      });
+    throw err;
+  }
 }
 
 const MAX_CONFIG_WEBHOOK_PAYLOAD_BYTES = 32768;
@@ -1066,8 +1093,10 @@ async function emitIndexerWebhook({ tenantId, event = 'indexer.event_ingested', 
 /**
  * Marks a dead-letter row as resolved without re-sending.
  */
-async function resolveDeadLetter(deadLetterId) {  await db('webhook_dead_letters').where('id', deadLetterId).update({
+async function resolveDeadLetter(deadLetterId) {
+  await db('webhook_dead_letters').where('id', deadLetterId).update({
     resolved: true,
+    is_replaying: false,
     resolved_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   });
