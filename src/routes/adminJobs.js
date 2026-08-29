@@ -7,8 +7,9 @@
  * admin callers. The endpoint requires a valid JWT bearer token or API key and
  * applies the standard admin middleware stack (auth → tenant extraction).
  *
- * Payload JSONB is intentionally excluded from list rows — it may contain
- * sensitive job arguments that should not be exposed in bulk listings.
+ * Payload JSONB and lease fencing tokens are intentionally excluded from list
+ * rows — they may contain sensitive job arguments or grant write access that
+ * should not be exposed in bulk listings.
  *
  * ## Pagination
  *
@@ -66,8 +67,9 @@ router.use(...adminStack);
  *
  *       Cursors are opaque HMAC-signed tokens. Any modification returns 400.
  *
- *       **Note**: `payload` is intentionally excluded from every row to prevent
- *       sensitive job arguments from leaking in bulk API responses.
+ *       **Note**: `payload` and lease fencing tokens are intentionally excluded
+ *       from every row to prevent sensitive job arguments or write credentials
+ *       from leaking in bulk API responses.
  *
  *     tags: [Admin, Jobs]
  *     security:
@@ -160,7 +162,7 @@ router.use(...adminStack);
  *
  * Response 200:
  *   Standard success envelope whose `data` array contains job summary objects
- *   (payload excluded) and whose `meta` carries cursor pagination fields.
+ *   (payload and fencing tokens excluded) and whose `meta` carries cursor pagination fields.
  *
  * Response 400:
  *   When query parameters are invalid or the cursor is tampered/malformed.
@@ -239,8 +241,17 @@ router.get('/', async (req, res, next) => {
       'Admin jobs listing retrieved',
     );
 
+    const data = result.data.map((job) => {
+      const safeJob = { ...job };
+      // Never expose lease fencing tokens; doing so would let a stale worker
+      // bypass the fencing token check after its lease has been reassigned.
+      delete safeJob.lease_token;
+      delete safeJob.payload;
+      return safeJob;
+    });
+
     return res.status(200).json({
-      ...responseHelper.success(result.data, result.meta),
+      ...responseHelper.success(data, result.meta),
       message: 'Background jobs retrieved successfully.',
     });
   } catch (err) {

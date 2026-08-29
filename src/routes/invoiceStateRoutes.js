@@ -12,9 +12,6 @@ const { cacheResponse, makeInvoiceStateKey } = require('../middleware/cache');
 const { getSharedStore } = require('../services/cacheStore');
 const { cacheConfig } = require('../config/cache');
 const { invoiceStateCacheEvictionsTotal } = require('../metrics');
-const { extractTenant } = require('../middleware/tenant');
-const { createCompressionMiddleware } = require('../middleware/compression');
-const { invoiceStateErrorHandler } = require('../middleware/invoiceStateErrorHandler');
 
 router.use(extractTenant);
 
@@ -142,14 +139,11 @@ router.get('/:id/state', cacheState, async (req, res, next) => {
 });
 
 router.post('/:id/transition', async (req, res, next) => {
-  const { targetState, reason } = req.body || {};
+  const { targetState, reason, revision } = req.body || {};
 
   try {
     const context = buildContext(req, { action: 'transition', targetState });
-    const result = await invoiceStateService.transition(req.params.id, req.tenantId, targetState, reason, context);
-
-    const context = buildContext(req, { action: 'transition' });
-    const result = await invoiceStateService.transition(req.params.id, req.tenantId, targetState, reason, context);
+    const result = await invoiceStateService.transition(req.params.id, req.tenantId, targetState, reason, revision, context);
 
     invalidateInvoiceStateCache(req.tenantId, req.params.id);
 
@@ -217,11 +211,11 @@ router.post('/:id/transition', async (req, res, next) => {
  *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
  */
 router.post('/:id/approve', instrumentInvoiceState('approve', async (req, res, next) => {
-  const { reason } = req.body || {};
+  const { reason, revision } = req.body || {};
 
   try {
     const context = buildContext(req, { action: 'approve' });
-    const result = await invoiceStateService.approve(req.params.id, req.tenantId, reason, context);
+    const result = await invoiceStateService.approve(req.params.id, req.tenantId, reason, revision, context);
 
     invalidateInvoiceStateCache(req.tenantId, req.params.id);
 
@@ -287,14 +281,14 @@ router.post('/:id/approve', instrumentInvoiceState('approve', async (req, res, n
  *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
  */
 router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, instrumentInvoiceState('link-escrow', async (req, res, next) => {
-  const { escrowId, reason } = req.body || {};
+  const { escrowId, reason, revision } = req.body || {};
 
   try {
     const context = buildContext(req, {
       action: 'link-escrow',
       escrowId: escrowId || 'pending',
     });
-    const result = await invoiceStateService.linkEscrow(req.params.id, req.tenantId, escrowId, reason, context);
+    const result = await invoiceStateService.linkEscrow(req.params.id, req.tenantId, escrowId, reason, revision, context);
 
     invalidateInvoiceStateCache(req.tenantId, req.params.id);
 

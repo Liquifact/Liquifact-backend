@@ -35,7 +35,7 @@ describe('invoiceStateService', () => {
 
   describe('getState', () => {
     it('should return state and allowed transitions', async () => {
-      invoiceService.resolveInvoiceForTenant.mockResolvedValue({ status: 'pending' });
+      invoiceService.resolveInvoiceForTenant.mockResolvedValue({ status: 'pending', revision: 1 });
       invoiceStateMachine.getAllowedTransitions.mockReturnValue(['approved', 'rejected']);
 
       const result = await invoiceStateService.getState(invoiceId, tenantId);
@@ -47,11 +47,12 @@ describe('invoiceStateService', () => {
         currentState: 'pending',
         allowedTransitions: ['approved', 'rejected'],
         isTerminal: false,
+        revision: 1,
       });
     });
 
     it('should mark terminal states correctly', async () => {
-      invoiceService.resolveInvoiceForTenant.mockResolvedValue({ status: 'rejected' });
+      invoiceService.resolveInvoiceForTenant.mockResolvedValue({ status: 'rejected', revision: 1 });
       invoiceStateMachine.getAllowedTransitions.mockReturnValue([]);
 
       const result = await invoiceStateService.getState(invoiceId, tenantId);
@@ -69,6 +70,8 @@ describe('invoiceStateService', () => {
 
   describe('transition', () => {
     it('should transition invoice state', async () => {
+      invoiceService.resolveInvoiceForTenant.mockResolvedValue({ status: 'pending', revision: 1 });
+      invoiceStateMachine.getAllowedTransitions.mockReturnValue(['approved']);
       invoiceService.transitionInvoice.mockResolvedValue({
         previousState: 'pending',
         newState: 'approved',
@@ -77,19 +80,20 @@ describe('invoiceStateService', () => {
         auditLog: { id: 'audit-1' },
       });
 
-      const result = await invoiceStateService.transition(invoiceId, tenantId, 'approved', 'looks good', context);
+      const result = await invoiceStateService.transition(invoiceId, tenantId, 'approved', 'looks good', context, 1);
 
       expect(invoiceService.transitionInvoice).toHaveBeenCalledWith(
         invoiceId,
         'approved',
         tenantId,
-        {
+        expect.objectContaining({
           actor: context.actor,
           reason: 'looks good',
           ipAddress: context.ipAddress,
           userAgent: context.userAgent,
           metadata: context.metadata,
-        }
+          expectedRevision: 1,
+        })
       );
       expect(result.auditLogId).toBe('audit-1');
       expect(result.previousState).toBe('pending');
@@ -101,9 +105,10 @@ describe('invoiceStateService', () => {
     });
   });
 
-  describe('approve', () => {
-    it('should approve invoice', async () => {
-      invoiceStateMachine.INVOICE_STATES = { APPROVED: 'approved' };
+  describe('revision and transition enforcement', () => {
+    it('valid transition succeeds with the current revision', async () => {
+      invoiceService.resolveInvoiceForTenant.mockResolvedValue({ status: 'pending', revision: 1 });
+      invoiceStateMachine.getAllowedTransitions.mockReturnValue(['approved']);
       invoiceService.transitionInvoice.mockResolvedValue({
         previousState: 'pending',
         newState: 'approved',
@@ -112,13 +117,89 @@ describe('invoiceStateService', () => {
         auditLog: { id: 'audit-1' },
       });
 
-      const result = await invoiceStateService.approve(invoiceId, tenantId, null, context);
+      const result = await invoiceStateService.transition(invoiceId, tenantId, 'approved', 'looks good', context, 1);
 
       expect(invoiceService.transitionInvoice).toHaveBeenCalledWith(
         invoiceId,
         'approved',
         tenantId,
-        expect.objectContaining({ reason: 'Invoice approved' })
+        expect.objectContaining({ expectedRevision: 1 })
+      );
+      expect(result.currentState).toBe('approved');
+    });
+
+    it('same transition is retried and rejected as an invalid transition', async () => {
+      invoiceService.resolveInvoiceForTenant.mockResolvedValue({ status: 'approved', revision: 2 });
+      invoiceStateMachine.getAllowedTransitions.mockReturnValue(['linked_escrow']);
+
+      await expect(invoiceStateService.transition(invoiceId, tenantId, 'approved', 'retry', context, 2))
+        .rejects.toMatchObject({ code: 'INVALID_TRANSITION' });
+      expect(invoiceService.transitionInvoice).not.toHaveBeenCalled();
+    });
+
+    it('stale revision is rejected', async () => {
+      invoiceService.resolveInvoiceForTenant.mockResolvedValue({ status: 'pending', revision: 2 });
+      invoiceStateMachine.getAllowedTransitions.mockReturnValue(['approved']);
+      invoiceService.transitionInvoice.mockRejectedValue(
+        Object.assign(new Error('Revision conflict'), { code: 'STALE_REVISION' })
+      );
+
+      await expect(invoiceStateService.transition(invoiceId, tenantId, 'approved', 'looks good', context, 1))
+        .rejects.toMatchObject({ code: 'STALE_REVISION' });
+    });
+
+    it('invalid backward transition is rejected', async () => {
+      invoiceService.resolveInvoiceForTenant.mockResolvedValue({ status: 'approved', revision: 2 });
+      invoiceStateMachine.getAllowedTransitions.mockReturnValue(['linked_escrow']);
+
+      await expect(invoiceStateService.transition(invoiceId, tenantId, 'pending', 'rewind', context, 2))
+        .rejects.toMatchObject({ code: 'INVALID_TRANSITION' });
+      expect(invoiceService.transitionInvoice).not.toHaveBeenCalled();
+    });
+
+    it('two different transitions race; second caller loses with stale revision', async () => {
+      invoiceService.resolveInvoiceForTenant.mockResolvedValue({ status: 'pending', revision: 1 });
+      invoiceStateMachine.getAllowedTransitions.mockReturnValue(['approved', 'rejected']);
+
+      invoiceService.transitionInvoice.mockResolvedValueOnce({
+        previousState: 'pending',
+        newState: 'approved',
+        transitionedAt: '2023-01-01T00:00:00Z',
+        transitionedBy: 'user-789',
+        auditLog: { id: 'audit-1' },
+      });
+      invoiceService.transitionInvoice.mockRejectedValueOnce(
+        Object.assign(new Error('Revision conflict'), { code: 'STALE_REVISION' })
+      );
+
+      const first = await invoiceStateService.transition(invoiceId, tenantId, 'approved', 'first', context, 1);
+      expect(first.currentState).toBe('approved');
+
+      await expect(invoiceStateService.transition(invoiceId, tenantId, 'rejected', 'second', context, 1))
+        .rejects.toMatchObject({ code: 'STALE_REVISION' });
+    });
+  });
+
+  describe('approve', () => {
+    it('should approve invoice', async () => {
+      invoiceStateMachine.INVOICE_STATES = { APPROVED: 'approved' };
+      invoiceService.resolveInvoiceForTenant.mockResolvedValue({ status: 'pending', revision: 1 });
+      invoiceStateMachine.getAllowedTransitions.mockReturnValue(['approved']);
+      invoiceService.transitionInvoice.mockResolvedValue({
+        previousState: 'pending',
+        newState: 'approved',
+        transitionedAt: '2023-01-01T00:00:00Z',
+        transitionedBy: 'user-789',
+        auditLog: { id: 'audit-1' },
+      });
+
+      const result = await invoiceStateService.approve(invoiceId, tenantId, null, context, 1);
+
+      expect(invoiceService.transitionInvoice).toHaveBeenCalledWith(
+        invoiceId,
+        'approved',
+        tenantId,
+        expect.objectContaining({ reason: 'Invoice approved', expectedRevision: 1 })
       );
       expect(result.currentState).toBe('approved');
     });
@@ -127,7 +208,7 @@ describe('invoiceStateService', () => {
   describe('linkEscrow', () => {
     it('should link invoice to escrow', async () => {
       invoiceStateMachine.INVOICE_STATES = { LINKED_ESCROW: 'linked_escrow' };
-      invoiceService.resolveInvoiceForTenant.mockResolvedValue({ status: 'approved' });
+      invoiceService.resolveInvoiceForTenant.mockResolvedValue({ status: 'approved', revision: 2 });
       invoiceStateMachine.canLinkToEscrow.mockReturnValue({ canLink: true });
       invoiceService.transitionInvoice.mockResolvedValue({
         previousState: 'approved',
@@ -137,22 +218,22 @@ describe('invoiceStateService', () => {
         auditLog: { id: 'audit-1' },
       });
 
-      const result = await invoiceStateService.linkEscrow(invoiceId, tenantId, 'escrow-999', 'reason', context);
+      const result = await invoiceStateService.linkEscrow(invoiceId, tenantId, 'escrow-999', 'reason', context, 2);
 
       expect(invoiceService.transitionInvoice).toHaveBeenCalledWith(
         invoiceId,
         'linked_escrow',
         tenantId,
-        expect.objectContaining({ escrowId: 'escrow-999' })
+        expect.objectContaining({ escrowId: 'escrow-999', expectedRevision: 2 })
       );
       expect(result.escrowId).toBe('escrow-999');
     });
 
     it('should throw if cannot link to escrow', async () => {
-      invoiceService.resolveInvoiceForTenant.mockResolvedValue({ status: 'pending' });
+      invoiceService.resolveInvoiceForTenant.mockResolvedValue({ status: 'pending', revision: 1 });
       invoiceStateMachine.canLinkToEscrow.mockReturnValue({ canLink: false, reason: 'Must be approved' });
 
-      await expect(invoiceStateService.linkEscrow(invoiceId, tenantId, 'escrow-999', 'reason', context))
+      await expect(invoiceStateService.linkEscrow(invoiceId, tenantId, 'escrow-999', 'reason', context, 1))
         .rejects.toThrow('Must be approved');
     });
   });
@@ -160,6 +241,8 @@ describe('invoiceStateService', () => {
   describe('reject', () => {
     it('should reject invoice', async () => {
       invoiceStateMachine.INVOICE_STATES = { REJECTED: 'rejected' };
+      invoiceService.resolveInvoiceForTenant.mockResolvedValue({ status: 'pending', revision: 1 });
+      invoiceStateMachine.getAllowedTransitions.mockReturnValue(['rejected']);
       invoiceService.transitionInvoice.mockResolvedValue({
         previousState: 'pending',
         newState: 'rejected',
@@ -168,13 +251,13 @@ describe('invoiceStateService', () => {
         auditLog: { id: 'audit-1' },
       });
 
-      const result = await invoiceStateService.reject(invoiceId, tenantId, 'bad data', context);
+      const result = await invoiceStateService.reject(invoiceId, tenantId, 'bad data', context, 1);
 
       expect(invoiceService.transitionInvoice).toHaveBeenCalledWith(
         invoiceId,
         'rejected',
         tenantId,
-        expect.objectContaining({ reason: 'bad data' })
+        expect.objectContaining({ reason: 'bad data', expectedRevision: 1 })
       );
       expect(result.currentState).toBe('rejected');
     });
@@ -187,7 +270,7 @@ describe('invoiceStateService', () => {
 
   describe('getHistory', () => {
     it('should return transition history', async () => {
-      invoiceService.resolveInvoiceForTenant.mockResolvedValue({ status: 'approved' });
+      invoiceService.resolveInvoiceForTenant.mockResolvedValue({ status: 'approved', revision: 2 });
       invoiceStateMachine.getTransitionHistory.mockResolvedValue([{ from: 'pending', to: 'approved' }]);
 
       const result = await invoiceStateService.getHistory(invoiceId, tenantId);
@@ -240,6 +323,8 @@ describe('invoiceStateService', () => {
     });
 
     it('accepts a batch exactly at the size cap', async () => {
+      invoiceService.resolveInvoiceForTenant.mockResolvedValue({ status: 'pending', revision: 1 });
+      invoiceStateMachine.getAllowedTransitions.mockReturnValue(['approved']);
       invoiceService.transitionInvoice.mockResolvedValue({
         previousState: 'pending',
         newState: 'approved',
@@ -250,6 +335,7 @@ describe('invoiceStateService', () => {
       const items = Array.from({ length: invoiceStateService.MAX_BULK_ITEMS }, (_, i) => ({
         invoiceId: `inv-${i}`,
         action: 'approve',
+        revision: 1,
       }));
 
       const { summary } = await invoiceStateService.processBulkOperations(items, tenantId, baseContext);
@@ -287,7 +373,7 @@ describe('invoiceStateService', () => {
 
     it('dispatches each action to its corresponding service function with a per-item context', async () => {
       invoiceStateMachine.canLinkToEscrow.mockReturnValue({ canLink: true });
-      invoiceService.resolveInvoiceForTenant.mockResolvedValue({ status: 'approved' });
+      invoiceService.resolveInvoiceForTenant.mockResolvedValue({ status: 'approved', revision: 2 });
       invoiceService.transitionInvoice.mockResolvedValue({
         previousState: 'approved',
         newState: 'linked_escrow',
@@ -296,12 +382,17 @@ describe('invoiceStateService', () => {
         auditLog: { id: 'audit-1' },
       });
 
-      const items = [{ invoiceId: 'inv-1', action: 'link-escrow', escrowId: 'escrow-9', reason: 'go' }];
+      const items = [{ invoiceId: 'inv-1', action: 'link-escrow', escrowId: 'escrow-9', reason: 'go', revision: 2 }];
       const { results } = await invoiceStateService.processBulkOperations(items, tenantId, baseContext);
 
       expect(results[0]).toMatchObject({ index: 0, success: true, action: 'link-escrow' });
       expect(invoiceService.transitionInvoice).toHaveBeenCalledWith(
         'inv-1',
+        'linked_escrow',
+        tenantId,
+        expect.objectContaining({ escrowId: 'escrow-9', reason: 'go', expectedRevision: 2 })
+      );
+    });inv-1',
         'linked_escrow',
         tenantId,
         expect.objectContaining({ escrowId: 'escrow-9' })

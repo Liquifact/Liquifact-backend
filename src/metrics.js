@@ -455,6 +455,25 @@ let workerInFlightGauge = new client.Gauge({
   registers: [registry],
 });
 
+let queueLeaseRenewalsTotal = new client.Counter({
+  name: 'liquifact_queue_lease_renewals_total',
+  help: 'Total number of successful queue worker lease renewals',
+  registers: [registry],
+});
+
+let queueLeaseCompletionsTotal = new client.Counter({
+  name: 'liquifact_queue_lease_completions_total',
+  help: 'Total number of queue worker lease completions',
+  registers: [registry],
+});
+
+let queueLeaseFenceRejectionsTotal = new client.Counter({
+  name: 'liquifact_queue_lease_fence_rejections_total',
+  help: 'Total number of queue worker writes rejected by fencing token',
+  labelNames: ['reason'],
+  registers: [registry],
+});
+
 // Cached metrics text for compatibility with test environments where
 // prom-client is not available (shim). In production with the real
 // prom-client, `metricsHandler` calls the real `registry.metrics()`
@@ -512,6 +531,22 @@ const REMINDER_REASON_ENUM = Object.freeze([
  * Add new job types here when introducing new background job kinds.
  */
 const JOB_TYPE_ENUM = Object.freeze(['maturity_reminder', 'webhook_replay', 'unknown']);
+
+/**
+ * Bounded enum of allowed `reason` label values for queue lease fence rejections.
+ * Raw reason strings must be mapped through normalizeQueueLeaseFenceReason
+ * before being used as a Prometheus label to prevent cardinality explosion.
+ * @readonly
+ */
+const QUEUE_LEASE_FENCE_REASON_ENUM = Object.freeze([
+  'stale_token',
+  'lease_expired',
+  'renewal_race',
+  'worker_restart',
+  'completion_after_reassignment',
+  'clock_skew',
+  'unknown',
+]);
 
 /**
  * Bounded enum of allowed `outcome` label values for webhook replay metrics.
@@ -708,6 +743,41 @@ function normalizeReminderReason(err) {
 }
 
 /**
+ * Maps a raw queue lease fence rejection reason to a bounded Prometheus label value.
+ * @param {unknown} raw - Raw fence reason identifier.
+ * @returns {string} Bounded label value from {@link QUEUE_LEASE_FENCE_REASON_ENUM}.
+ */
+function normalizeQueueLeaseFenceReason(raw) {
+  const str = (typeof raw === 'string' ? raw : (raw && raw.message) || '').toString().trim().toLowerCase();
+  return QUEUE_LEASE_FENCE_REASON_ENUM.includes(str) ? str : 'unknown';
+}
+
+/**
+ * Records a successful queue worker lease renewal.
+ * @returns {void}
+ */
+function recordQueueLeaseRenewal() {
+  queueLeaseRenewalsTotal.inc();
+}
+
+/**
+ * Records a queue worker lease completion.
+ * @returns {void}
+ */
+function recordQueueLeaseCompletion() {
+  queueLeaseCompletionsTotal.inc();
+}
+
+/**
+ * Records a queue worker write rejected by the fencing token.
+ * @param {unknown} reason - Raw fence rejection reason.
+ * @returns {void}
+ */
+function recordQueueLeaseFenceRejection(reason) {
+  queueLeaseFenceRejectionsTotal.labels({ reason: normalizeQueueLeaseFenceReason(reason) }).inc();
+}
+
+/**
  * Maps a raw Soroban RPC method identifier to a bounded metric label value.
  *
  * Raw method names may come from config, wrapper names, or internal call-site
@@ -781,6 +851,9 @@ function resetMetricsForTests() {
   queueDepthGauge.set(0);
   retryQueueSizeGauge.set(0);
   workerInFlightGauge.set(0);
+  queueLeaseRenewalsTotal.reset();
+  queueLeaseCompletionsTotal.reset();
+  queueLeaseFenceRejectionsTotal.reset();
   stopMetricsRefresh();
   corsRequestDurationSeconds.reset();
   corsRequestsTotal.reset();
@@ -2240,6 +2313,9 @@ if (!isEnabled()) {
   queueDepthGauge = new NoopGauge({ name: 'liquifact_job_queue_depth', help: queueDepthGauge.help });
   retryQueueSizeGauge = new NoopGauge({ name: 'liquifact_job_retry_queue_size', help: retryQueueSizeGauge.help });
   workerInFlightGauge = new NoopGauge({ name: 'liquifact_worker_inflight_count', help: workerInFlightGauge.help });
+  queueLeaseRenewalsTotal = new NoopCounter({ name: queueLeaseRenewalsTotal.name, help: queueLeaseRenewalsTotal.help });
+  queueLeaseCompletionsTotal = new NoopCounter({ name: queueLeaseCompletionsTotal.name, help: queueLeaseCompletionsTotal.help });
+  queueLeaseFenceRejectionsTotal = new NoopCounter({ name: queueLeaseFenceRejectionsTotal.name, help: queueLeaseFenceRejectionsTotal.help, labelNames: queueLeaseFenceRejectionsTotal.labelNames });
   escrowIndexerEventsProcessedTotal = new NoopCounter({ name: escrowIndexerEventsProcessedTotal.name, help: escrowIndexerEventsProcessedTotal.help });
   escrowIndexerEventsSkippedTotal = new NoopCounter({ name: escrowIndexerEventsSkippedTotal.name, help: escrowIndexerEventsSkippedTotal.help });
   escrowIndexerCycleFailuresTotal = new NoopCounter({ name: escrowIndexerCycleFailuresTotal.name, help: escrowIndexerCycleFailuresTotal.help });
@@ -2309,6 +2385,14 @@ module.exports = {
   registerWorker,
   refreshMetrics,
   resetMetricsForTests,
+  queueLeaseRenewalsTotal,
+  queueLeaseCompletionsTotal,
+  queueLeaseFenceRejectionsTotal,
+  recordQueueLeaseRenewal,
+  recordQueueLeaseCompletion,
+  recordQueueLeaseFenceRejection,
+  normalizeQueueLeaseFenceReason,
+  QUEUE_LEASE_FENCE_REASON_ENUM,
   escrowIndexerLastCursorAdvanceTimestampSeconds,
   escrowIndexerEventsProcessedTotal,
   escrowIndexerEventsSkippedTotal,

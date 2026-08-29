@@ -605,6 +605,7 @@ async function performHealthChecks() {
  * }>}
  */
 async function performReadinessChecks() {
+  const snapshotTime = Date.now();
   const [database, soroban, storage, reconciliation, metrics] = await Promise.all([
     checkDatabaseHealth(),
     checkSorobanHealth(),
@@ -613,7 +614,66 @@ async function performReadinessChecks() {
     checkMetricsHealth(),
   ]);
 
-  const checks = { database, soroban, storage, reconciliation, metrics };
+  const rawChecks = { database, soroban, storage, reconciliation, metrics };
+
+  // Helper: convert free-form error strings into a machine-readable shape
+  const sanitizeError = (err) => {
+    if (!err) return undefined;
+    if (typeof err === 'string') {
+      return { code: 'DEPENDENCY_ERROR', hint: err };
+    }
+    if (typeof err === 'object') {
+      const code = err.code || 'DEPENDENCY_ERROR';
+      const hint = err.hint || err.message || JSON.stringify(err);
+      return { code, hint };
+    }
+    return { code: 'DEPENDENCY_ERROR', hint: String(err) };
+  };
+
+  // Helper: derive freshness/age where available (seconds)
+  const deriveFreshness = (id, detail) => {
+    if (!detail) return { ageSeconds: null, snapshotTime };
+    if (detail.lastAdvanceTimestamp !== undefined && detail.lastAdvanceTimestamp !== 0) {
+      const nowSec = Math.floor(snapshotTime / 1000);
+      const age = nowSec - (detail.lastAdvanceTimestamp || 0);
+      return { ageSeconds: age, snapshotTime };
+    }
+    if (detail.lastRun) {
+      const last = Date.parse(detail.lastRun);
+      if (!Number.isNaN(last)) {
+        const age = Math.floor((snapshotTime - last) / 1000);
+        return { ageSeconds: age, snapshotTime };
+      }
+    }
+    if (detail.latency !== undefined) {
+      return { ageSeconds: Math.floor(detail.latency / 1000), snapshotTime };
+    }
+    return { ageSeconds: null, snapshotTime };
+  };
+
+  // Build transformed checks that expose freshness and machine-readable errors
+  const checks = Object.fromEntries(
+    Object.entries(rawChecks).map(([id, detail]) => {
+      const safeError = sanitizeError(detail && detail.error);
+      const freshness = deriveFreshness(id, detail);
+
+      const copy = { status: detail && detail.status };
+      if (detail && typeof detail === 'object') {
+        if (detail.latency !== undefined) copy.latency = detail.latency;
+        if (detail.pool) copy.pool = detail.pool;
+        if (detail.elapsedSeconds !== undefined) copy.elapsedSeconds = detail.elapsedSeconds;
+        if (detail.threshold !== undefined) copy.threshold = detail.threshold;
+        if (detail.lastAdvanceTimestamp !== undefined) copy.lastAdvanceTimestamp = detail.lastAdvanceTimestamp;
+        if (detail.mismatches !== undefined) copy.mismatches = detail.mismatches;
+        if (detail.lastRun !== undefined) copy.lastRun = detail.lastRun;
+      }
+
+      const record = { ...copy, freshness };
+      if (safeError) record.error = safeError;
+      return [id, record];
+    })
+  );
+
   // In-memory and explicitly-disabled probes are treated as readiness-OK.
   // Production deployments missing the bucket or with an unreachable
   // bucket DO block readiness.
@@ -622,15 +682,11 @@ async function performReadinessChecks() {
     storage.status === 'in_memory' ||
     storage.status === 'disabled';
 
-  // Determine overall readiness.
-  // - DB degraded (pool saturated) still allows traffic but signals pressure → ready.
-  // - DB unhealthy/not_configured → not ready.
-  // - Soroban degraded (slow) does NOT block readiness.
-  // - Reconciliation threshold breach → degrades readiness.
-  // - Reconciliation not_run / error → non-blocking (fresh deployments).
-  const dbReady = database.status === 'healthy' || database.status === 'degraded';
-  const sorobanReady = soroban.status === 'healthy' || soroban.status === 'degraded' || soroban.status === 'unknown';
-  const reconciliationOk = reconciliation.status !== 'mismatch_threshold_breached';
+  // Determine overall readiness from the raw results to avoid leaking
+  // transformed shapes into the decision logic.
+  const dbReady = rawChecks.database.status === 'healthy' || rawChecks.database.status === 'degraded';
+  const sorobanReady = rawChecks.soroban.status === 'healthy' || rawChecks.soroban.status === 'degraded' || rawChecks.soroban.status === 'unknown';
+  const reconciliationOk = rawChecks.reconciliation.status !== 'mismatch_threshold_breached';
 
   const healthy = dbReady && sorobanReady && storageOk && reconciliationOk;
 
@@ -638,17 +694,17 @@ async function performReadinessChecks() {
   if (!dbReady || !storageOk) {
     readinessGauge.set(0);
   } else if (
-    database.status === 'degraded' ||
-    soroban.status === 'degraded' ||
-    reconciliation.status === 'mismatch_threshold_breached' ||
-    reconciliation.status === 'degraded'
+    rawChecks.database.status === 'degraded' ||
+    rawChecks.soroban.status === 'degraded' ||
+    rawChecks.reconciliation.status === 'mismatch_threshold_breached' ||
+    rawChecks.reconciliation.status === 'degraded'
   ) {
     readinessGauge.set(0.5);
   } else {
     readinessGauge.set(healthy ? 1 : 0);
   }
 
-  return { healthy, checks };
+  return { healthy, checks, snapshotTime };
 }
 
 /**
