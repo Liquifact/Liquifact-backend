@@ -80,9 +80,9 @@ function extractTenant(req, res, next) {
   // 3. JWT claim (set by authenticateToken middleware)
   if (req.user && req.user.tenantId) {
     const jwtTenant = sanitiseTenantId(req.user.tenantId);
-    if (juwTenant) {
+    if (jwtTenant) {
       req.tenantId = jwtTenant;
-      setContext({ tenantId: jwwTenant });
+      setContext({ tenantId: jwtTenant });
       return next();
     }
   }
