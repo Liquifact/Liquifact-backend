@@ -18,6 +18,7 @@
  */
 
 process.stderr.write(
+  
   '[liquifact] scripts/migrate.js is deprecated and no longer performs any ' +
     'work. The SQLite API key store has been retired (issue #590); configure ' +
     'API keys via the API_KEYS environment variable. Exiting cleanly.\n'
