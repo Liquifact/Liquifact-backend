@@ -119,10 +119,57 @@ const kycWebhookListResponseSchema = z.object({
   }),
 });
 
+/**
+ * Zod schema for a quarantined KYC webhook record row.
+ */
+const kycQuarantineRecordSchema = z.object({
+  id: z.string(),
+  tenantId: z.string(),
+  smeId: z.string().nullable().optional(),
+  event: z.string(),
+  payload: z.record(z.unknown()).or(z.array(z.unknown())).or(z.string()).or(z.unknown()),
+  rawPayload: z.string().nullable().optional(),
+  reason: z.string(),
+  errorCode: z.string(),
+  errorDetails: z.unknown().nullable().optional(),
+  actor: z.string().nullable().optional(),
+  ipAddress: z.string().nullable().optional(),
+  userAgent: z.string().nullable().optional(),
+  createdAt: z.union([z.string(), z.date()]),
+  updatedAt: z.union([z.string(), z.date()]),
+});
+
+/**
+ * Zod schema for the full `GET /api/admin/kyc/quarantine` response envelope.
+ */
+const kycQuarantineListResponseSchema = z.object({
+  data: z.array(kycQuarantineRecordSchema),
+  meta: z.object({
+    limit: z.number().int().positive(),
+    hasMore: z.boolean().optional(),
+    nextCursor: z.string().nullable().optional(),
+    offset: z.number().int().nonnegative().optional(),
+    count: z.number().int().nonnegative().optional(),
+  }),
+});
+
+/** Allowed inbound/outbound KYC event types. */
+const ALLOWED_KYC_WEBHOOK_EVENTS = Object.freeze([
+  'kyc.verified',
+  'kyc.rejected',
+  'kyc.exempted',
+  'kyc.pending',
+  'kyc_status_updated',
+  'kyc.status_changed',
+]);
+
 module.exports = {
   kycWebhookSchema,
   kycWebhookRecordSchema,
   kycWebhookListResponseSchema,
+  kycQuarantineRecordSchema,
+  kycQuarantineListResponseSchema,
   parseValidationErrors,
   SME_ID_REGEX,
+  ALLOWED_KYC_WEBHOOK_EVENTS,
 };

@@ -22,8 +22,11 @@ const HTTP_HEADERS = Object.freeze({
 const KYC_WEBHOOK_ROUTES = Object.freeze({
   WEBHOOK: '/webhook',
   WEBHOOKS: '/webhooks',
+  QUARANTINE: '/quarantine',
+  WEBHOOKS_QUARANTINE: '/webhooks/quarantine',
   FULL_WEBHOOK_PATH: '/api/kyc/webhook',
   FULL_WEBHOOKS_PATH: '/api/kyc/webhooks',
+  FULL_QUARANTINE_PATH: '/api/admin/kyc/quarantine',
 });
 
 /** Canonical Outbound KYC Webhook Event Names emitted on SME status transitions. */
@@ -49,6 +52,8 @@ const KYC_WEBHOOK_ERROR_CODES = Object.freeze({
   MISSING_SIGNATURE: 'missing_signature',
   INVALID_SIGNATURE: 'invalid_signature',
   INVALID_PAYLOAD: 'invalid_payload',
+  INVALID_EVENT: 'invalid_event',
+  UNKNOWN_EVENT_TYPE: 'unknown_event_type',
   TENANT_MISMATCH: 'tenant_mismatch',
   MISSING_TENANT_CONTEXT: 'missing_tenant_context',
   MISSING_SME_ID: 'missing_sme_id',
@@ -60,6 +65,7 @@ const KYC_WEBHOOK_ERROR_CODES = Object.freeze({
   INVALID_CURSOR: 'INVALID_CURSOR',
   CIRCUIT_OPEN: 'CIRCUIT_OPEN',
   RATE_LIMITED: 'RATE_LIMITED',
+  QUARANTINED: 'quarantined',
 });
 
 /** User-facing error, warning, and informational messages. */
@@ -68,11 +74,15 @@ const KYC_WEBHOOK_MESSAGES = Object.freeze({
   MISSING_SIGNATURE: 'Missing X-Signature header',
   INVALID_SIGNATURE: 'Invalid webhook signature',
   INVALID_PAYLOAD: 'Invalid JSON payload',
+  INVALID_EVENT: 'Invalid KYC webhook event format',
+  UNKNOWN_EVENT_TYPE: 'Unknown KYC webhook event type',
   TENANT_MISMATCH: 'Tenant scope mismatch.',
   MISSING_TENANT_CONTEXT: 'Missing tenant context.',
   MISSING_SME_ID: 'Missing or invalid smeId',
   MISSING_STATUS: 'Missing or invalid status',
   UNKNOWN_STATUS_PREFIX: 'Unknown provider status: ',
+  PAYLOAD_TOO_LARGE: 'KYC webhook payload exceeds maximum size limit',
+  QUARANTINED: 'KYC webhook payload was malformed and quarantined',
   SUCCESS_INGESTION: 'KYC webhook ingested successfully',
   FAILED_INGESTION: 'Failed to process KYC webhook',
   SECRET_NOT_CONFIGURED_LOG: 'KYC webhook secret is not configured',
@@ -88,6 +98,7 @@ const KYC_WEBHOOK_MESSAGES = Object.freeze({
 const KYC_WEBHOOK_DB = Object.freeze({
   TABLE_KYC_RECORDS: 'kyc_records',
   TABLE_DEAD_LETTERS: 'kyc_webhook_dead_letters',
+  TABLE_KYC_QUARANTINE: 'kyc_webhook_quarantine',
   TABLE_IDEMPOTENCY_KEYS: 'idempotency_keys',
   TABLE_INVOICES: 'invoices',
   TABLE_TENANTS: 'tenants',
