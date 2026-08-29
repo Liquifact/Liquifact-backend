@@ -22,6 +22,7 @@ const express = require('express');
 const cors = require('cors');
 const { createSecurityMiddleware } = require('./middleware/security');
 const { auditMiddleware } = require('./middleware/audit');
+
 const requestId = require('./middleware/requestId');
 const { correlationIdMiddleware } = require('./middleware/correlationId');
 const invoiceService = require('./services/invoiceService');
