@@ -11,7 +11,7 @@ const { z } = require('zod');
  * Schema for retention job payload validation
  */
 const RetentionJobSchema = z.object({
-  tenantId: z.string().uuid(),
+  tenantId: z.string().uuid(),classes: z.array(z.enum(['INVOICE', 'UPLOAD', 'AUDIT'])).default(['INVOICE']),
   policyId: z.string().uuid().optional(),
   dryRun: z.boolean().default(false),
   retentionDays: z.number().positive().optional(),
