@@ -25,6 +25,11 @@ jest.mock('../../src/metrics', () => {
     // those routes without their own local metrics mock.
     invoiceStateRequestDurationMs: { labels: jest.fn().mockReturnThis(), observe: jest.fn() },
     invoiceStateRequestCount: { labels: jest.fn().mockReturnThis(), inc: jest.fn() },
+
+    // Job queue and worker registration functions — needed by JobQueue
+    // constructor and BackgroundWorker to register themselves for metrics.
+    registerJobQueue: jest.fn(),
+    registerWorker: jest.fn(),
   };
 });
 
