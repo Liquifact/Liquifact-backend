@@ -12,7 +12,9 @@ const db = require('../db/knex');
 const logger = require('../logger');
 const { emitKycWebhookForSme } = require('./kycWebhookEmitter');
 const { CircuitBreaker } = require('../utils/circuitBreaker');
+const { withRetry } = require('../utils/retry');
 const { MemoryCacheStore } = require('./cacheStore');
+const { createSignatureHeader, verifySignature } = require('./webhooks');
 const { KYC_STATUSES } = require('../constants/kycWebhooks');
 const { createAuditLog } = require('./auditLog');
 
@@ -98,6 +100,26 @@ class KycProviderError extends Error {
       this.cause = options.cause;
     }
     Error.captureStackTrace?.(this, KycProviderError);
+  }
+}
+
+/**
+ * Stable fail-fast error returned when the KYC dependency circuit is open.
+ * Callers can map `code` to a 503 without parsing provider internals.
+ */
+class KycUpstreamUnavailableError extends KycProviderError {
+  /**
+   * Creates a stable 503 error without exposing the upstream internals.
+   * @param {Error|null} [cause] Internal cause retained for diagnostics only.
+   */
+  constructor(cause = null) {
+    super('KYC provider is temporarily unavailable', {
+      status: 503,
+      retryable: true,
+      code: 'upstream_unavailable',
+      cause: cause instanceof Error ? cause : null,
+    });
+    this.name = 'KycUpstreamUnavailableError';
   }
 }
 
@@ -191,6 +213,20 @@ const sharedKycBreaker = new CircuitBreaker({
  */
 function resetKycCircuitBreaker() {
   sharedKycBreaker.reset();
+}
+
+/**
+ * Returns a safe operational snapshot. No provider URL, key, or response
+ * content is included, making this suitable for metrics/debug endpoints.
+ * @returns {{dependency: string, state: string, failureCount: number, nextAttemptAt: number}}
+ */
+function getKycProviderResilienceState() {
+  return {
+    dependency: 'kyc-provider',
+    state: sharedKycBreaker.state,
+    failureCount: sharedKycBreaker.failureCount,
+    nextAttemptAt: sharedKycBreaker.nextAttemptTime,
+  };
 }
 
 // In-memory store for KYC records (used in test/dev environments)
@@ -712,6 +748,14 @@ async function verifyWithExternalProvider(smeId, _smeData) {
       }),
     );
   } catch (err) {
+    if (err && err.code === 'CIRCUIT_OPEN') {
+      const unavailable = new KycUpstreamUnavailableError(err);
+      logger.warn(
+        { smeId, dependency: 'kyc-provider', state: sharedKycBreaker.state, code: unavailable.code },
+        'KYC provider circuit is open; request failed fast',
+      );
+      throw unavailable;
+    }
     // Log only the safe host and a coarse retryable verdict — never include
     // the API key, signing secret, or upstream response body.
     const verdict = classifyKycError(err);
@@ -966,9 +1010,11 @@ module.exports = {
   invalidateKycStatusCache, // Export for testing (cache invalidation)
   // Issue #592 hardening exports:
   KycProviderError,
+  KycUpstreamUnavailableError,
   classifyKycError,
   sharedKycBreaker,
   resetKycCircuitBreaker,
+  getKycProviderResilienceState,
   parseClampedInt,
   KYC_RETRYABLE_STATUS_CODES,
   KYC_RETRYABLE_NETWORK_CODES,

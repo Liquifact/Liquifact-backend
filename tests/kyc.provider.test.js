@@ -40,6 +40,7 @@ const {
   rejectSmeKyc,
   exemptSmeFromKyc,
   KycProviderError,
+  KycUpstreamUnavailableError,
   classifyKycError,
   getKycProviderConfig,
   normalizeProviderStatus,
@@ -512,10 +513,12 @@ describe('circuit breaker (issue #592)', () => {
     await expect(verifyWithExternalProvider('sme-cb-2', {})).rejects.toBeInstanceOf(KycProviderError);
     await expect(verifyWithExternalProvider('sme-cb-3', {})).rejects.toBeInstanceOf(KycProviderError);
 
-    // The breaker should now be OPEN. A direct verify call fails fast with CIRCUIT_OPEN.
+    // The breaker should now be OPEN. A direct verify call fails fast with a
+    // stable upstream_unavailable contract rather than leaking breaker internals.
     const callCountBefore = global.fetch.mock.calls.length;
-    await expect(verifyWithExternalProvider('sme-cb-4', {})).rejects.toMatchObject({
-      code: 'CIRCUIT_OPEN',
+    await expect(verifyWithExternalProvider('sme-cb-4', {})).rejects.toBeInstanceOf(KycUpstreamUnavailableError);
+    await expect(verifyWithExternalProvider('sme-cb-5', {})).rejects.toMatchObject({
+      code: 'upstream_unavailable', status: 503, retryable: true,
     });
     expect(global.fetch.mock.calls.length).toBe(callCountBefore);
   });
