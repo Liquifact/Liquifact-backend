@@ -111,7 +111,10 @@ const invoiceCreateSchema = z
     /** Optional invoice reference number (max 100 chars). */
     invoiceNumber: z
       .string({ invalid_type_error: 'invoiceNumber must be a string' })
+      .trim()
+      .min(1, { message: 'invoiceNumber must be a non-empty string' })
       .max(100, { message: 'invoiceNumber must not exceed 100 characters' })
+      .transform((v) => v.toLowerCase())
       .optional(),
   })
   .strict() // ← reject unknown keys
@@ -208,7 +211,10 @@ const invoiceUpdateSchema = z
 
     invoiceNumber: z
       .string()
+      .trim()
+      .min(1, { message: 'invoiceNumber must be a non-empty string' })
       .max(100, { message: 'invoiceNumber must not exceed 100 characters' })
+      .transform((v) => v.toLowerCase())
       .optional(),
 
     status: z
