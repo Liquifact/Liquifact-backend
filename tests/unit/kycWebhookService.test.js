@@ -7,39 +7,54 @@
 const crypto = require('crypto');
 const db = require('../../src/db/knex');
 const kycService = require('../../src/services/kycService');
+const auditLog = require('../../src/services/auditLog');
 const kycWebhookService = require('../../src/services/kycWebhookService');
-const { getAuditLogs } = require('../../src/services/auditLog');
 const KycWebhookError = require('../../src/errors/KycWebhookError');
 const { KYC_WEBHOOK_ERROR_CODES, KYC_WEBHOOK_PAGINATION } = require('../../src/constants/kycWebhooks');
 const { encodeCursor } = require('../../src/utils/cursorPagination');
+
+const webhooks = require('../../src/services/webhooks');
 
 jest.mock('../../src/db/knex', () => {
   const mKnex = jest.fn();
   return mKnex;
 });
 
-jest.mock('../../src/services/kycService');
-jest.mock('../../src/services/auditLog');
-
 function createSignature(secret, body) {
-  return crypto.createHmac('sha256', secret).update(body).digest('hex');
+  return webhooks.createSignatureHeader(secret, body);
 }
 
 describe('kycWebhookService', () => {
   const secret = 'test-provider-secret-key-12345';
+  let getKycProviderConfigSpy;
+  let normalizeProviderStatusSpy;
+  let persistKycRecordSpy;
+  let getAuditLogsSpy;
 
   beforeEach(() => {
     jest.clearAllMocks();
-    kycService.getKycProviderConfig.mockReturnValue({
+    getAuditLogsSpy = jest.spyOn(auditLog, 'getAuditLogs').mockResolvedValue([]);
+    getKycProviderConfigSpy = jest.spyOn(kycService, 'getKycProviderConfig').mockReturnValue({
       apiSecret: secret,
     });
-    kycService.normalizeProviderStatus.mockImplementation((s) => {
+    normalizeProviderStatusSpy = jest.spyOn(kycService, 'normalizeProviderStatus').mockImplementation((s) => {
       if (s === 'verified' || s === 'approved') return 'verified';
       if (s === 'pending') return 'pending';
       if (s === 'rejected') return 'rejected';
       return 'unknown';
     });
-    kycService.KYC_STATUSES = { UNKNOWN: 'unknown', VERIFIED: 'verified', PENDING: 'pending' };
+    persistKycRecordSpy = jest.spyOn(kycService, 'persistKycRecord').mockResolvedValue({
+      smeId: 'sme-001',
+      status: 'verified',
+      recordId: 'rec-1',
+    });
+  });
+
+  afterEach(() => {
+    getKycProviderConfigSpy?.mockRestore();
+    normalizeProviderStatusSpy?.mockRestore();
+    persistKycRecordSpy?.mockRestore();
+    getAuditLogsSpy?.mockRestore();
   });
 
   describe('processWebhookIngestion', () => {
@@ -244,11 +259,11 @@ describe('kycWebhookService', () => {
       const mockLogs = [
         { id: 1, action: 'CREATE', secretKey: 'sensitive-token' },
       ];
-      getAuditLogs.mockResolvedValueOnce(mockLogs);
+      auditLog.getAuditLogs.mockResolvedValueOnce(mockLogs);
 
       const res = await kycWebhookService.getWebhookAuditLogs({});
 
-      expect(getAuditLogs).toHaveBeenCalledWith({
+      expect(auditLog.getAuditLogs).toHaveBeenCalledWith({
         resourceType: 'kyc-webhook',
         resourceId: null,
         action: null,
@@ -265,7 +280,7 @@ describe('kycWebhookService', () => {
     });
 
     it('applies smeId and action filters when provided', async () => {
-      getAuditLogs.mockResolvedValueOnce([]);
+      auditLog.getAuditLogs.mockResolvedValueOnce([]);
 
       await kycWebhookService.getWebhookAuditLogs({
         smeId: 'sme-55',
@@ -274,7 +289,7 @@ describe('kycWebhookService', () => {
         rawOffset: '5',
       });
 
-      expect(getAuditLogs).toHaveBeenCalledWith({
+      expect(auditLog.getAuditLogs).toHaveBeenCalledWith({
         resourceType: 'kyc-webhook',
         resourceId: 'sme-55',
         action: 'UPDATE',

@@ -120,12 +120,23 @@ function validateKycWebhookRequest(rawBody, signatureHeader, secret, requestTena
     };
   }
 
-  // Extract / normalise fields
-  const smeId = payload.smeId || payload.sme_id;
-  const status = payload.status || payload.kycStatus || payload.kyc_status;
-  const providerRecordId = payload.recordId || payload.providerRecordId || payload.provider_record_id || null;
-  const verifiedAt = payload.verifiedAt || payload.verified_at || null;
-  const payloadTenantId = payload.tenantId || payload.tenant_id || null;
+  // Extract / normalise fields (supporting enveloped data/payload/record objects)
+  let domainData = payload;
+  if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    if (payload.data && typeof payload.data === 'object' && !Array.isArray(payload.data)) {
+      domainData = payload.data;
+    } else if (payload.payload && typeof payload.payload === 'object' && !Array.isArray(payload.payload)) {
+      domainData = payload.payload;
+    } else if (payload.record && typeof payload.record === 'object' && !Array.isArray(payload.record)) {
+      domainData = payload.record;
+    }
+  }
+
+  const smeId = domainData?.smeId || domainData?.sme_id || payload?.smeId || payload?.sme_id;
+  const status = domainData?.status || domainData?.kycStatus || domainData?.kyc_status || payload?.status || payload?.kycStatus || payload?.kyc_status;
+  const providerRecordId = domainData?.recordId || domainData?.providerRecordId || domainData?.provider_record_id || payload?.recordId || payload?.providerRecordId || payload?.provider_record_id || null;
+  const verifiedAt = domainData?.verifiedAt || domainData?.verified_at || payload?.verifiedAt || payload?.verified_at || null;
+  const payloadTenantId = domainData?.tenantId || domainData?.tenant_id || payload?.tenantId || payload?.tenant_id || null;
 
   // 5. Tenant scope check
   if (payloadTenantId && requestTenantId && payloadTenantId !== requestTenantId) {
