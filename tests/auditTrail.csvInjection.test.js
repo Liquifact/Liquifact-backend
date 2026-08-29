@@ -10,6 +10,9 @@
  */
 
 jest.mock('../src/db/knex');
+jest.mock('../src/middleware/apiKeyAuth', () => ({
+  authenticateApiKey: () => (req, res, next) => next()
+}));
 
 const express = require('express');
 const request = require('supertest');

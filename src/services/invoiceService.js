@@ -361,9 +361,30 @@ async function createInvoice(invoiceData, tenantId) {
     metadata,
   } = invoiceData || {};
 
-  const invoiceId =
-    invoiceNumber ||
-    `inv_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+  const normalizedReference = typeof invoiceNumber === 'string'
+    ? invoiceNumber.trim().toLowerCase()
+    : undefined;
+
+  if (normalizedReference) {
+    const existing = await db('invoices')
+      .where({ tenant_id: tenantId })
+      .whereRaw('LOWER(COALESCE(invoice_number, ?)) = ?', ['', normalizedReference])
+      .first();
+
+    if (existing) {
+      throw new AppError({
+        type: 'https://liquifact.com/probs/conflict',
+        title: 'Conflict',
+        status: 409,
+        detail: 'Invoice reference already exists for this tenant.',
+        instance: '/v1/invoices',
+        code: 'INVOICE_REFERENCE_CONFLICT',
+        retryable: false,
+      });
+    }
+  }
+
+  const invoiceId = `inv_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
 
   const row = {
     invoice_id: invoiceId,
@@ -371,6 +392,7 @@ async function createInvoice(invoiceData, tenantId) {
     customer,
     status,
     tenant_id: tenantId,
+    ...(normalizedReference ? { invoice_number: normalizedReference } : {}),
     ...(currency !== undefined && { currency }),
     ...(dueDate !== undefined && { due_date: dueDate }),
     ...(description !== undefined && { description }),
@@ -379,16 +401,38 @@ async function createInvoice(invoiceData, tenantId) {
 
   // SQLite returns an array of primary-key integers from insert(); PostgreSQL
   // returns full rows when `.returning('*')` is chained. We normalise both.
-  const result = await db('invoices').insert(row).returning('*');
-  getMetricsCacheStore().invalidatePrefix('marketplace:'); 
-  if (Array.isArray(result) && result.length > 0 && typeof result[0] === 'object') {
-    // PostgreSQL path — full row returned
-    return result[0];
-  }
+  try {
+    const result = await db('invoices').insert(row).returning('*');
+    getMetricsCacheStore().invalidatePrefix('marketplace:');
+    if (Array.isArray(result) && result.length > 0 && typeof result[0] === 'object') {
+      // PostgreSQL path — full row returned
+      return result[0];
+    }
 
-  // SQLite path — result is an array of inserted PKs; refetch by invoice_id
-  const inserted = await db('invoices').where({ invoice_id: invoiceId }).first();
-  return inserted;
+    // SQLite path — result is an array of inserted PKs; refetch by invoice_id
+    const inserted = await db('invoices').where({ invoice_id: invoiceId }).first();
+    return inserted;
+  } catch (err) {
+    const uniqueViolation = err && (
+      err.code === 'SQLITE_CONSTRAINT' ||
+      err.code === '23505' ||
+      /duplicate key|unique constraint|UNIQUE constraint/i.test(String(err.message || ''))
+    );
+
+    if (uniqueViolation) {
+      throw new AppError({
+        type: 'https://liquifact.com/probs/conflict',
+        title: 'Conflict',
+        status: 409,
+        detail: 'Invoice reference already exists for this tenant.',
+        instance: '/v1/invoices',
+        code: 'INVOICE_REFERENCE_CONFLICT',
+        retryable: false,
+      });
+    }
+
+    throw err;
+  }
 }
 
 /**

@@ -19,6 +19,8 @@ const { authenticateToken } = require('../middleware/auth');
 const { extractTenant } = require('../middleware/tenant');
 const { getInvoiceById } = require('../services/invoiceService');
 const { getInvoiceAuditTrail } = require('../services/auditLog');
+const { streamAuditEvents, createCsvTransform } = require('../services/auditLogStore');
+const { authenticateApiKey } = require('../middleware/apiKeyAuth');
 const asyncHandler = require('../utils/asyncHandler');
 
 const router = Router();
@@ -87,6 +89,79 @@ router.get(
 
     return res.json({ data: events, invoiceId, count: events.length });
   })
+);
+
+/**
+ * GET /api/admin/audit/invoices/:invoiceId/export
+ *
+ * Streams the audit trail for the given invoice as a CSV file.
+ *
+ * Security & Scope Combinations:
+ * - Requires both a valid JWT (with tenant isolation) and a valid API key.
+ * - The API key must possess the `invoices:export` scope.
+ * - Tenant verification occurs before API key validation.
+ * - Returns 404 for missing invoices, foreign invoices, invalid API keys,
+ *   and insufficient API key scopes to provide indistinguishable safe denials.
+ */
+router.get(
+  '/invoices/:invoiceId/export',
+  authenticateToken,
+  extractTenant,
+  asyncHandler(async (req, res, next) => {
+    // 1. Tenant and existence check first
+    try {
+      await assertInvoiceEntitlement(req, req.params.invoiceId);
+    } catch (_err) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    next();
+  }),
+  (req, res, next) => {
+    // 2. API Key scope check (must return 404 on failure to avoid enumeration)
+    const originalStatus = res.status.bind(res);
+    const originalJson = res.json.bind(res);
+    let authFailed = false;
+
+    res.status = function(code) {
+      if (code === 401 || code === 403) {
+        authFailed = true;
+        return originalStatus(404);
+      }
+      return originalStatus(code);
+    };
+
+    res.json = function(data) {
+      if (authFailed) {
+        return originalJson({ error: 'Not found' });
+      }
+      return originalJson(data);
+    };
+
+    authenticateApiKey({ requiredScope: 'invoices:export' })(req, res, (err) => {
+      // Restore response methods in case downstream needs them
+      res.status = originalStatus;
+      res.json = originalJson;
+      next(err);
+    });
+  },
+  (req, res) => {
+    const { invoiceId } = req.params;
+
+    if (req.query.format !== 'csv') {
+      return res.status(400).json({ error: 'Unsupported format. Only format=csv is supported for exports.' });
+    }
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="audit-${invoiceId}.csv"`);
+
+    const dbStream = streamAuditEvents({
+      resourceId: invoiceId,
+      resourceType: 'invoice',
+      tenantId: req.tenantId,
+    });
+
+    dbStream.pipe(createCsvTransform()).pipe(res);
+  }
 );
 
 // Route-local error handler: forward AppError/status-tagged errors with their
