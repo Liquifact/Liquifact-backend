@@ -66,6 +66,25 @@ const BOUNDED_TARGET_STATES = Object.freeze(
 );
 
 /**
+ * Centralised transition table.
+ *
+ * A transition is valid when `targetState` is the same as `currentState`
+ * (idempotent retry) or appears later in `ALL_INVOICE_STATUSES`. The order
+ * of `ALL_INVOICE_STATUSES` is therefore the source of truth for forward
+ * progress.
+ *
+ * @type {Readonly<Record<string, readonly string[]>>}
+ */
+const ALLOWED_TRANSITIONS = Object.freeze(
+  Object.fromEntries(
+    BOUNDED_TARGET_STATES.map((state, index) => [
+      state,
+      Object.freeze(BOUNDED_TARGET_STATES.slice(index)),
+    ])
+  )
+);
+
+/**
  * Set of allowed top-level keys for the transition body.
  *
  * Anything outside this set is rejected with `UNRECOGNIZED_FIELD`.  The set
@@ -76,7 +95,7 @@ const BOUNDED_TARGET_STATES = Object.freeze(
  * @type {ReadonlySet<string>}
  */
 const ALLOWED_TOP_LEVEL_KEYS = Object.freeze(
-  new Set(['targetState', 'reason', 'actor', 'currentState', 'metadata'])
+  new Set(['targetState', 'reason', 'actor', 'currentState', 'revision', 'metadata'])
 );
 
 // ---------------------------------------------------------------------------
@@ -198,6 +217,11 @@ const transitionBodySchema = z.object({
     })
     .optional(),
 
+  revision: z
+    .number({ error: 'INVALID_REVISION_TYPE' })
+    .int({ error: 'INVALID_REVISION_TYPE' })
+    .nonnegative({ error: 'INVALID_REVISION' }),
+
   metadata: z.unknown().optional(),
 }).strict();
 
@@ -260,6 +284,13 @@ function remapIssueCode(issue, field, input) {
       return 'MISSING_TARGET_STATE';
     }
     return 'INVALID_TARGET_STATE';
+  }
+
+  if (field === 'revision') {
+    const raw = input ? input.revision : undefined;
+    if (raw === undefined || raw === null) {
+      return 'MISSING_REVISION';
+    }
   }
 
   if (typeof issue.message === 'string' && CODE_MESSAGE_PATTERN.test(issue.message)) {
@@ -374,6 +405,13 @@ function safeParseTransitionBody(input) {
     }
   }
 
+  if (parsedData && parsedData.currentState !== undefined) {
+    const allowedTargets = ALLOWED_TRANSITIONS[parsedData.currentState];
+    if (!allowedTargets || !allowedTargets.includes(parsedData.targetState)) {
+      fieldErrors.currentState = 'INVALID_STATE_TRANSITION';
+    }
+  }
+
   if (Object.keys(fieldErrors).length > 0) {
     return { success: false, fieldErrors };
   }
@@ -395,5 +433,6 @@ module.exports = {
   MAX_METADATA_KEYS_PER_OBJECT,
   MAX_METADATA_ARRAY_LENGTH,
   BOUNDED_TARGET_STATES,
+  ALLOWED_TRANSITIONS,
   ALLOWED_TOP_LEVEL_KEYS,
 };
