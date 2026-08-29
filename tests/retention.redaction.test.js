@@ -2,6 +2,12 @@
 
 const { v4: uuidv4 } = require('uuid');
 
+// Distributed per-invoice lock (issue #1213) — mocked to a pass-through so
+// this suite's assertions about purge/audit behavior aren't gated on a real
+// or fake Redis connection. Lock-contention behavior itself is covered by
+// tests/redisLock.test.js and tests/retentionPurge.lock.test.js.
+jest.mock('../src/services/redisLock');
+
 // Mock database similar to retention.dryRun.test.js but expose store via queries
 jest.mock('../src/db/knex', () => {
   const store = {
