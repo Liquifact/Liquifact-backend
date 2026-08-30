@@ -6,12 +6,27 @@ const JobQueue = require('../workers/jobQueue');
 const BackgroundWorker = require('../workers/worker');
 const logger = require('../logger');
 const { z } = require('zod');
+const { createRedisLockService, RedisLockError } = require('../services/redisLock');
+
+/**
+ * Retention purge is a background job that may run on more than one worker
+ * replica (a scheduled run overlapping a manually-triggered one, for
+ * instance). This per-invoice distributed lock ensures at most one worker
+ * purges a given invoice's PII at a time (issue #1213) — using the shared
+ * default Redis client is intentional here rather than per-call injection,
+ * matching how `db` above is required once at module scope; tests replace
+ * this via `jest.mock('../src/services/redisLock')`.
+ */
+const retentionLockService = createRedisLockService();
+
+/** How long a single invoice's purge-and-audit-log step may hold its lock before it is considered stuck. */
+const RETENTION_LOCK_TTL_MS = 30_000;
 
 /**
  * Schema for retention job payload validation
  */
 const RetentionJobSchema = z.object({
-  tenantId: z.string().uuid(),
+  tenantId: z.string().uuid(),classes: z.array(z.enum(['INVOICE', 'UPLOAD', 'AUDIT'])).default(['INVOICE']),
   policyId: z.string().uuid().optional(),
   dryRun: z.boolean().default(false),
   retentionDays: z.number().positive().optional(),
@@ -362,42 +377,83 @@ retentionWorker.registerHandler('retention_purge', async (job) => {
             continue;
           }
 
-          // Purge PII
-          const result = await purgeInvoicePii(invoice.id, validatedFields, dryRun);
+          // Hold a per-invoice lock across the purge + audit-log write so a
+          // second worker processing the same policy concurrently cannot
+          // purge (and double-audit-log) the same invoice. Fail closed: if
+          // the lock cannot even be acquired (Redis unavailable), this
+          // invoice is skipped for this run rather than purged without an
+          // exclusivity guarantee — it will be picked up again on the next
+          // scheduled run. See docs/PR notes (issue #1213) for the
+          // operational implication of this choice.
+          const lockKey = retentionLockService.buildResourceKey('invoice', tenantId, invoice.id);
+          let lockOutcome;
+          try {
+            lockOutcome = await retentionLockService.withLock(
+              { resourceKey: lockKey, ttlMs: RETENTION_LOCK_TTL_MS },
+              async () => {
+                // Purge PII
+                const result = await purgeInvoicePii(invoice.id, validatedFields, dryRun);
 
-          if (result.success) {
-            totalPurged++;
-            result.purgedFields.forEach(field => allPurgedFields.add(field));
+                if (result.success) {
+                  totalPurged++;
+                  result.purgedFields.forEach(field => allPurgedFields.add(field));
 
-            // Log audit trail
-            await logRetentionOperation({
-              tenantId,
-              invoiceId: invoice.id,
-              operation: dryRun ? 'dry_run' : 'pii_purged',
-              piiFields: result.purgedFields,
-              oldValues: result.oldValues,
-              reason: `Retention policy: ${policy.name} (${policyRetentionDays} days)`,
-              performedBy,
-              metadata: {
-                policyId: policy.id,
-                dryRun: result.dryRun,
-                invoiceNumber: invoice.invoice_number,
-                purgedFieldsCount: result.purgedFields.length,
-                beforeStateSnapshot: dryRun ? undefined : {
-                  fieldNames: result.purgedFields,
-                  fieldCount: result.beforeStateSnapshot.fieldCount,
-                  valueHashCount: result.beforeStateSnapshot.valueHashCount
+                  // Log audit trail
+                  await logRetentionOperation({
+                    tenantId,
+                    invoiceId: invoice.id,
+                    operation: dryRun ? 'dry_run' : 'pii_purged',
+                    piiFields: result.purgedFields,
+                    oldValues: result.oldValues,
+                    reason: `Retention policy: ${policy.name} (${policyRetentionDays} days)`,
+                    performedBy,
+                    metadata: {
+                      policyId: policy.id,
+                      dryRun: result.dryRun,
+                      invoiceNumber: invoice.invoice_number,
+                      purgedFieldsCount: result.purgedFields.length,
+                      beforeStateSnapshot: dryRun ? undefined : {
+                        fieldNames: result.purgedFields,
+                        fieldCount: result.beforeStateSnapshot.fieldCount,
+                        valueHashCount: result.beforeStateSnapshot.valueHashCount
+                      }
+                    }
+                  });
+
+                  logger.info({
+                    tenantId,
+                    invoiceId: invoice.id,
+                    invoiceNumber: invoice.invoice_number,
+                    purgedFields: result.purgedFields,
+                    dryRun
+                  }, result.dryRun ? 'Dry run: Would purge PII' : 'Purged PII from invoice');
                 }
-              }
-            });
+              },
+            );
+          } catch (lockError) {
+            if (lockError instanceof RedisLockError) {
+              const errorInfo = {
+                invoiceId: invoice.id,
+                invoiceNumber: invoice.invoice_number,
+                error: lockError.message,
+                code: lockError.code,
+              };
+              errors.push(errorInfo);
+              logger.error(errorInfo, lockError.code === 'LOCK_LOST'
+                ? 'Invoice lock lost mid-purge; a purged/audited record may not have been exclusively owned throughout'
+                : 'Could not acquire invoice lock; skipping invoice for this run (fail closed)');
+              continue;
+            }
+            throw lockError;
+          }
 
-            logger.info({
+          if (lockOutcome && lockOutcome.executed === false) {
+            logger.debug({
               tenantId,
               invoiceId: invoice.id,
-              invoiceNumber: invoice.invoice_number,
-              purgedFields: result.purgedFields,
-              dryRun
-            }, result.dryRun ? 'Dry run: Would purge PII' : 'Purged PII from invoice');
+              reason: lockOutcome.reason,
+            }, 'Skipping invoice already being processed by another worker');
+            continue;
           }
         } catch (error) {
           const errorInfo = {

@@ -56,6 +56,19 @@ function validateMimeType(declaredType, fileBuffer) {
   return { valid: true };
 }
 
+function tenantScopedKeyMatches(meta, tenantId, invoiceId) {
+  const key = meta && (meta.s3_key || meta.key);
+  return typeof key === 'string' && key.startsWith(`tenants/${tenantId}/invoices/${invoiceId}/`);
+}
+
+function hasCleanAntivirusResult(meta) {
+  const status = meta && (meta.av_status || meta.antivirusStatus || meta.virus_scan_status);
+  if (!status) {
+    return false;
+  }
+  return ['clean', 'passed', 'verified'].includes(String(status).toLowerCase());
+}
+
 /**
  * POST /api/invoices/:id/presigned-upload
  * Generate a presigned upload URL scoped to this invoice.
@@ -139,6 +152,12 @@ router.get('/:id/file', async (req, res) => {
   if (!meta) {
     return res.status(404).json({ error: 'Not Found', message: `No file found for invoice ${id}` });
   }
+  if (!tenantScopedKeyMatches(meta, tenantId, id)) {
+    return res.status(403).json({ error: 'Forbidden', message: 'Invoice file is not scoped to this tenant' });
+  }
+  if (!hasCleanAntivirusResult(meta)) {
+    return res.status(423).json({ error: 'Locked', message: 'Invoice file is pending antivirus verification' });
+  }
   try {
     const fileData = await storageService.getFile({ key: meta.s3_key || meta.key });
     res.set('Content-Type', meta.mime_type || meta.mimeType || 'application/pdf');
@@ -212,4 +231,6 @@ router.post('/:id/file/verify', express.raw({ type: 'application/pdf', limit: UP
 module.exports = router;
 module.exports.validatePdfMagicBytes = validatePdfMagicBytes;
 module.exports.validateMimeType = validateMimeType;
+module.exports.tenantScopedKeyMatches = tenantScopedKeyMatches;
+module.exports.hasCleanAntivirusResult = hasCleanAntivirusResult;
 module.exports.UPLOAD_SIZE_LIMIT = UPLOAD_SIZE_LIMIT;

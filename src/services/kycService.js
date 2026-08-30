@@ -17,6 +17,7 @@ const { MemoryCacheStore } = require('./cacheStore');
 const { createSignatureHeader, verifySignature } = require('./webhooks');
 const { KYC_STATUSES } = require('../constants/kycWebhooks');
 const { createAuditLog } = require('./auditLog');
+const { redactErrorForTelemetry, sanitizeTelemetryString, redactForTelemetry } = require('../utils/telemetryRedaction');
 
 const PROVIDER_STATUS_MAP = {
   pending: KYC_STATUSES.PENDING,
@@ -418,7 +419,7 @@ function normalizeProviderStatus(status) {
   }
 
   if (typeof status !== 'string') {
-    logger.warn({ status, type: typeof status }, 'Received non-string provider status, defaulting to unknown');
+    logger.warn({ status: redactForTelemetry(status), type: typeof status }, 'Received non-string provider status, defaulting to unknown');
     return KYC_STATUSES.UNKNOWN;
   }
 
@@ -432,9 +433,11 @@ function normalizeProviderStatus(status) {
 
   // Check if status is in the mapping
   if (!Object.prototype.hasOwnProperty.call(PROVIDER_STATUS_MAP, normalized)) {
-    // Log unmapped status for monitoring and future mapping updates
+    // Log unmapped status for monitoring and future mapping updates. The
+    // provider fully controls this value, so it is sanitized the same way
+    // as any other provider-controlled telemetry (issue #1200).
     logger.warn(
-      { unmappedStatus: normalized, originalStatus: status },
+      { unmappedStatus: sanitizeTelemetryString(normalized), originalStatus: sanitizeTelemetryString(status) },
       'Provider returned unmapped KYC status, defaulting to unknown. Consider extending PROVIDER_STATUS_MAP.',
     );
     return KYC_STATUSES.UNKNOWN;
@@ -757,7 +760,11 @@ async function verifyWithExternalProvider(smeId, _smeData) {
       throw unavailable;
     }
     // Log only the safe host and a coarse retryable verdict — never include
-    // the API key, signing secret, or upstream response body.
+    // the API key, signing secret, or upstream response body. `err` is
+    // passed through redactErrorForTelemetry rather than logging
+    // `err.message` directly: a network-layer failure's message can
+    // originate outside our own code (see issue #1200), and this also
+    // sanitizes any nested `.cause` chain, not just the outermost message.
     const verdict = classifyKycError(err);
     logger.error(
       {
@@ -765,7 +772,7 @@ async function verifyWithExternalProvider(smeId, _smeData) {
         providerHost: safeHost,
         retryable: verdict.retryable,
         reason: verdict.reason,
-        error: err.message,
+        error: redactErrorForTelemetry(err),
       },
       'External KYC provider call failed',
     );
@@ -814,7 +821,7 @@ async function getKycStatus(smeId) {
     try {
       return await readProviderStatusCached(smeId, () => verifyWithExternalProvider(smeId, {}));
     } catch (error) {
-      logger.warn({ smeId, error: error.message }, 'KYC provider lookup failed, falling back to persisted status');
+      logger.warn({ smeId, error: redactErrorForTelemetry(error) }, 'KYC provider lookup failed, falling back to persisted status');
       const record = await readKycRecord(smeId);
       if (record) {
         return record;
