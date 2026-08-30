@@ -154,11 +154,19 @@ describe('Invoice API Integration', () => {
       expect(Object.keys(res.body.fieldErrors).length).toBe(2);
     });
 
-    it('should reject bad limit values with 400', async () => {
+    it('should clamp oversized limits to the maximum page size', async () => {
+      invoiceService.getInvoicesWithPagination.mockResolvedValue({
+        data: [],
+        meta: { total: 0, limit: 100, hasMore: false, nextCursor: null },
+      });
       const res = await request(app).get('/api/invoices?limit=999');
 
-      expect(res.statusCode).toBe(400);
-      expect(res.body.fieldErrors.limit).toBe('limit must be an integer between 1 and 100');
+      expect(res.statusCode).toBe(200);
+      expect(invoiceService.getInvoicesWithPagination).toHaveBeenCalledWith({
+        filters: {},
+        sorting: {},
+        pagination: { limit: 100 },
+      });
     });
 
     it('should reject bad cursor values with 400', async () => {

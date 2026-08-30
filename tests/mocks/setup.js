@@ -30,6 +30,8 @@ jest.mock('../../src/metrics', () => {
     // constructor and BackgroundWorker to register themselves for metrics.
     registerJobQueue: jest.fn(),
     registerWorker: jest.fn(),
+    metricsAuth: (_req, _res, next) => next(),
+    metricsHandler: (_req, res) => res.status(200).send(''),
   };
 });
 
