@@ -1,6 +1,13 @@
 'use strict';
 
 const { z } = require('zod');
+
+// Distributed per-invoice lock (issue #1213) — mocked to a pass-through so
+// this suite's assertions about purge/audit behavior aren't gated on a real
+// or fake Redis connection. Lock-contention behavior itself is covered by
+// tests/redisLock.test.js and tests/retentionPurge.lock.test.js.
+jest.mock('../src/services/redisLock');
+
 const retentionJob = require('../src/jobs/retentionPurge');
 
 // Mock logger to avoid noise in tests
