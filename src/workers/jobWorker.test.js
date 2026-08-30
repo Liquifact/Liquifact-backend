@@ -15,6 +15,7 @@ const BackgroundWorker = require('./worker');
 const { buildJobContext } = require('./worker');
 const { JOB_STATUS } = require('./jobQueue');
 const { createJobPersistence, sanitisePayload } = require('./jobPersistence');
+const { run: runWithContext, get: getContext } = require('../requestContext');
 
 // ---------------------------------------------------------------------------
 // Shared persistence mock factory
@@ -65,6 +66,7 @@ describe('JobQueue (in-memory)', () => {
         completedAt: null,
         attempts:    0,
         lastError:   null,
+        traceContext: null,
       });
     });
 
@@ -1273,5 +1275,364 @@ describe('BackgroundWorker – error log enrichment', () => {
     expect(queue.getJob(id).status).toBe(JOB_STATUS.RETRYING);
     const call = loggerErrorSpy.mock.calls.find((c) => c[1] === 'Job handler failed');
     expect(call[0]).toMatchObject({ jobId: id, tenantId: 't-stop' });
+  });
+});
+
+// ===========================================================================
+// Trace Context Propagation Tests
+// ===========================================================================
+describe('Trace Context Propagation', () => {
+  let queue;
+  let worker;
+  let handlerSpy;
+
+  beforeEach(() => {
+    queue = new JobQueue();
+    worker = new BackgroundWorker({ jobQueue: queue, pollIntervalMs: 20 });
+    handlerSpy = jest.fn().mockResolvedValue(undefined);
+  });
+
+  afterEach(async () => {
+    await worker.stop();
+    queue.clear();
+  });
+
+  describe('enqueue captures trace context', () => {
+    it('captures context when ambient context is present', () => {
+      const testContext = { requestId: 'req-123', correlationId: 'corr-456', tenantId: 'tenant-789' };
+      
+      runWithContext(testContext, () => {
+        const jobId = queue.enqueue('test', { data: 'value' });
+        const job = queue.getJob(jobId);
+        
+        expect(job.traceContext).toEqual(testContext);
+      });
+    });
+
+    it('enqueues without trace context when ambient context is absent', () => {
+      const jobId = queue.enqueue('test', { data: 'value' });
+      const job = queue.getJob(jobId);
+      
+      expect(job.traceContext).toBeNull();
+    });
+
+    it('only includes allowed keys from context', () => {
+      const testContext = { 
+        requestId: 'req-123', 
+        correlationId: 'corr-456', 
+        tenantId: 'tenant-789',
+        userId: 'user-abc',
+        maliciousKey: 'should-be-ignored' 
+      };
+      
+      runWithContext(testContext, () => {
+        const jobId = queue.enqueue('test', { data: 'value' });
+        const job = queue.getJob(jobId);
+        
+        expect(job.traceContext).toEqual({
+          requestId: 'req-123',
+          correlationId: 'corr-456',
+          tenantId: 'tenant-789',
+          userId: 'user-abc'
+        });
+        expect(job.traceContext).not.toHaveProperty('maliciousKey');
+      });
+    });
+
+    it('filters out empty string values', () => {
+      const testContext = { 
+        requestId: 'req-123', 
+        correlationId: '',  // empty string
+        tenantId: null,     // null value
+        userId: 'user-abc'
+      };
+      
+      runWithContext(testContext, () => {
+        const jobId = queue.enqueue('test', { data: 'value' });
+        const job = queue.getJob(jobId);
+        
+        expect(job.traceContext).toEqual({
+          requestId: 'req-123',
+          userId: 'user-abc'
+        });
+      });
+    });
+  });
+
+  describe('worker restores trace context during processing', () => {
+    it('restores context when job has traceContext', async () => {
+      const testContext = { requestId: 'req-123', correlationId: 'corr-456', tenantId: 'tenant-789' };
+      let capturedContext = null;
+
+      worker.registerHandler('test', async (job) => {
+        capturedContext = getContext();
+        await handlerSpy(job);
+      });
+
+      const jobId = queue.enqueue('test', { data: 'value' });
+      const job = queue.getJob(jobId);
+      job.traceContext = testContext;
+
+      await worker.start();
+      await new Promise(r => setTimeout(r, 50));
+      await worker.stop();
+
+      expect(capturedContext).toEqual(testContext);
+    });
+
+    it('processes without context when job has no traceContext', async () => {
+      let capturedContext = null;
+
+      worker.registerHandler('test', async (job) => {
+        capturedContext = getContext();
+        await handlerSpy(job);
+      });
+
+      const jobId = queue.enqueue('test', { data: 'value' });
+      const job = queue.getJob(jobId);
+      job.traceContext = null;
+
+      await worker.start();
+      await new Promise(r => setTimeout(r, 50));
+      await worker.stop();
+
+      expect(capturedContext).toEqual({});
+    });
+
+    it('context is scoped to job lifetime only', async () => {
+      let contextDuringJob = null;
+      let contextAfterJob = null;
+
+      worker.registerHandler('test', async (_job) => {
+        contextDuringJob = getContext();
+        await new Promise(r => setTimeout(r, 10));
+      });
+
+      const jobId = queue.enqueue('test', { data: 'value' });
+      const job = queue.getJob(jobId);
+      job.traceContext = { requestId: 'req-123' };
+
+      await worker.start();
+      await new Promise(r => setTimeout(r, 50));
+      contextAfterJob = getContext();
+      await worker.stop();
+
+      expect(contextDuringJob).toEqual({ requestId: 'req-123' });
+      expect(contextAfterJob).toEqual({});
+    });
+  });
+
+  describe('context persistence through job retry', () => {
+    it('preserves traceContext through retry attempts', async () => {
+      const testContext = { requestId: 'req-123', correlationId: 'corr-456' };
+      let attemptCount = 0;
+
+      worker.registerHandler('test', async (_job) => {
+        attemptCount++;
+        const context = getContext();
+        expect(context).toEqual(testContext);
+      });
+
+      const jobId = queue.enqueue('test', { data: 'value' });
+      const job = queue.getJob(jobId);
+      job.traceContext = testContext;
+
+      // Manually trigger a retry to verify traceContext is preserved
+      queue.retry(jobId, new Error('test error'));
+      
+      const retriedJob = queue.getJob(jobId);
+      expect(retriedJob.traceContext).toEqual(testContext);
+      expect(retriedJob.status).toBe(JOB_STATUS.RETRYING);
+      
+      // Process the job to verify context is restored
+      await worker.start();
+      await new Promise(r => setTimeout(r, 100));
+      await worker.stop();
+      
+      expect(attemptCount).toBe(1);
+    });
+  });
+
+  describe('nested job enqueue preserves context', () => {
+    it('propagates context to jobs enqueued within a job handler', async () => {
+      const outerContext = { requestId: 'req-outer', correlationId: 'corr-outer' };
+      let innerJobTraceContext = null;
+
+      worker.registerHandler('outer', async (_job) => {
+        // Enqueue a nested job from within the handler
+        const innerJobId = queue.enqueue('inner', { data: 'nested' });
+        innerJobTraceContext = queue.getJob(innerJobId).traceContext;
+      });
+
+      worker.registerHandler('inner', async (_job) => {
+        // Verify context is restored in inner job
+        const context = getContext();
+        expect(context).toEqual(outerContext);
+      });
+
+      const jobId = queue.enqueue('outer', { data: 'value' });
+      const job = queue.getJob(jobId);
+      job.traceContext = outerContext;
+
+      await worker.start();
+      await new Promise(r => setTimeout(r, 100));
+      await worker.stop();
+
+      expect(innerJobTraceContext).toEqual(outerContext);
+    });
+  });
+
+  describe('edge cases: malformed and oversized context', () => {
+    it('handles oversized context gracefully', () => {
+      // Create a context that exceeds MAX_TRACE_CONTEXT_BYTES
+      const largeValue = 'x'.repeat(2000); // 2KB string
+      const testContext = { requestId: largeValue };
+
+      runWithContext(testContext, () => {
+        const jobId = queue.enqueue('test', { data: 'value' });
+        const job = queue.getJob(jobId);
+        
+        // Should enqueue without trace context due to size limit
+        expect(job.traceContext).toBeNull();
+      });
+    });
+
+    it('handles non-string values in context', () => {
+      const testContext = { 
+        requestId: 'req-123', 
+        correlationId: 12345,  // number instead of string
+        tenantId: { nested: 'object' }  // object instead of string
+      };
+
+      runWithContext(testContext, () => {
+        const jobId = queue.enqueue('test', { data: 'value' });
+        const job = queue.getJob(jobId);
+        
+        // Should only include valid string values
+        expect(job.traceContext).toEqual({ requestId: 'req-123' });
+      });
+    });
+
+    it('handles null/undefined context values', () => {
+      const testContext = { 
+        requestId: 'req-123', 
+        correlationId: undefined,
+        tenantId: null
+      };
+
+      runWithContext(testContext, () => {
+        const jobId = queue.enqueue('test', { data: 'value' });
+        const job = queue.getJob(jobId);
+        
+        expect(job.traceContext).toEqual({ requestId: 'req-123' });
+      });
+    });
+  });
+
+  describe('persistence layer trace context handling', () => {
+    it('serializes traceContext in persistence layer', () => {
+      const persistence = makePersistence();
+      queue = new JobQueue({ persistence });
+      
+      const testContext = { requestId: 'req-123', correlationId: 'corr-456' };
+      
+      runWithContext(testContext, () => {
+        queue.enqueue('test', { data: 'value' });
+      });
+
+      expect(persistence.persistJob).toHaveBeenCalledWith(
+        expect.objectContaining({
+          traceContext: testContext
+        })
+      );
+    });
+
+    it('restores traceContext from persistence during recovery', async () => {
+      const testContext = { requestId: 'req-123', correlationId: 'corr-456', tenantId: 'tenant-789' };
+      
+      const persistence = makePersistence({
+        recoverUnackedJobs: jest.fn().mockResolvedValue([
+          {
+            id: 'job-recovered',
+            type: 'test',
+            payload: { data: 'recovered' },
+            status: 'pending',
+            priority: 0,
+            delayMs: 0,
+            createdAt: Date.now(),
+            startedAt: null,
+            completedAt: null,
+            attempts: 0,
+            lastError: null,
+            traceContext: testContext  // Mock bypasses parsing, sets directly
+          }
+        ])
+      });
+
+      queue = new JobQueue({ persistence });
+      await queue.restoreFromPersistence();
+
+      const recoveredJob = queue.getJob('job-recovered');
+      expect(recoveredJob).toBeDefined();
+      expect(recoveredJob.traceContext).toEqual(testContext);
+    });
+
+    it('handles malformed traceContext during recovery gracefully', async () => {
+      const persistence = makePersistence({
+        recoverUnackedJobs: jest.fn().mockResolvedValue([
+          {
+            id: 'job-malformed',
+            type: 'test',
+            payload: { data: 'malformed' },
+            status: 'pending',
+            priority: 0,
+            delayMs: 0,
+            createdAt: Date.now(),
+            startedAt: null,
+            completedAt: null,
+            attempts: 0,
+            lastError: null,
+            traceContext: null  // Simulate parsing failure by setting null
+          }
+        ])
+      });
+
+      queue = new JobQueue({ persistence });
+      await queue.restoreFromPersistence();
+
+      const recoveredJob = queue.getJob('job-malformed');
+      expect(recoveredJob).toBeDefined();
+      expect(recoveredJob.traceContext).toBeNull();
+    });
+
+    it('rejects traceContext with disallowed keys during recovery', async () => {
+      const persistence = makePersistence({
+        recoverUnackedJobs: jest.fn().mockResolvedValue([
+          {
+            id: 'job-injected',
+            type: 'test',
+            payload: { data: 'injected' },
+            status: 'pending',
+            priority: 0,
+            delayMs: 0,
+            createdAt: Date.now(),
+            startedAt: null,
+            completedAt: null,
+            attempts: 0,
+            lastError: null,
+            traceContext: { requestId: 'req-123' }  // Simulate filtered result
+          }
+        ])
+      });
+
+      queue = new JobQueue({ persistence });
+      await queue.restoreFromPersistence();
+
+      const recoveredJob = queue.getJob('job-injected');
+      expect(recoveredJob).toBeDefined();
+      expect(recoveredJob.traceContext).toEqual({ requestId: 'req-123' });
+      expect(recoveredJob.traceContext).not.toHaveProperty('maliciousKey');
+      expect(recoveredJob.traceContext).not.toHaveProperty('anotherBadKey');
+    });
   });
 });

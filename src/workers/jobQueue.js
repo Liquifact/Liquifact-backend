@@ -7,10 +7,81 @@
 const crypto = require('crypto');
 const metrics = require('../metrics');
 const logger = require('../logger');
+const { get: getContext, ALLOWED_KEYS } = require('../requestContext');
 
 const REDACTED = '[REDACTED]';
 const SECRET_KEY_PATTERN = /(secret|token|password|api[_-]?key|authorization|credential)/i;
 const NON_TERMINAL_STATUSES = ['pending', 'processing', 'retrying'];
+
+/**
+ * Maximum size for serialized trace context in bytes (1 KB).
+ * Prevents oversized context from bloating job records.
+ */
+const MAX_TRACE_CONTEXT_BYTES = 1024;
+
+/**
+ * Extracts and validates trace context from the current AsyncLocalStorage.
+ *
+ * Only keys in ALLOWED_KEYS are extracted to prevent user-controlled fields
+ * from becoming log labels. Values must be non-empty strings.
+ *
+ * @returns {Object|null} Validated trace context object, or null if empty.
+ */
+function extractTraceContext() {
+  const ctx = getContext();
+  const traceCtx = {};
+  
+  for (const key of ALLOWED_KEYS) {
+    const value = ctx[key];
+    if (typeof value === 'string' && value.length > 0) {
+      traceCtx[key] = value;
+    }
+  }
+  
+  // Return null instead of empty object to distinguish "no context" from "empty context"
+  return Object.keys(traceCtx).length > 0 ? traceCtx : null;
+}
+
+/**
+ * Validates a trace context object against security constraints.
+ *
+ * Only allows keys in ALLOWED_KEYS, requires non-empty string values,
+ * and enforces size limit when serialized.
+ *
+ * @param {Object} traceCtx - Trace context to validate.
+ * @returns {{ ok: true, context: Object } | { ok: false, error: string }}
+ */
+function validateTraceContext(traceCtx) {
+  if (!traceCtx || typeof traceCtx !== 'object') {
+    return { ok: false, error: 'Trace context must be an object' };
+  }
+  
+  const validated = {};
+  for (const key of Object.keys(traceCtx)) {
+    if (!ALLOWED_KEYS.has(key)) {
+      return { ok: false, error: `Invalid trace context key: ${key}` };
+    }
+    
+    const value = traceCtx[key];
+    if (typeof value !== 'string' || value.length === 0) {
+      return { ok: false, error: `Trace context key "${key}" must be a non-empty string` };
+    }
+    
+    validated[key] = value;
+  }
+  
+  // Check size limit
+  try {
+    const serialized = JSON.stringify(validated);
+    if (Buffer.byteLength(serialized, 'utf8') > MAX_TRACE_CONTEXT_BYTES) {
+      return { ok: false, error: 'Trace context exceeds size limit' };
+    }
+  } catch (_err) {
+    return { ok: false, error: 'Failed to serialize trace context' };
+  }
+  
+  return { ok: true, context: validated };
+}
 
 const JOB_STATUS = {
   PENDING:    'pending',
@@ -22,10 +93,12 @@ const JOB_STATUS = {
 
 class JobQueue {
   /**
-   * @param {Object}  options
-   * @param {number}  [options.maxRetries=3]       Hard-capped at 10.
-   * @param {number}  [options.maxQueueSize=10000]
-   * @param {object|null} [options.persistence=null] Adapter from createJobPersistence().
+   * Creates a new JobQueue instance.
+   *
+   * @param {Object} options - Configuration options.
+   * @param {number} [options.maxRetries=3] - Maximum retry attempts (hard-capped at 10).
+   * @param {number} [options.maxQueueSize=10000] - Maximum number of jobs in queue.
+   * @param {object|null} [options.persistence=null] - Persistence adapter from createJobPersistence().
    */
   constructor(options = {}) {
     this.maxRetries   = Math.min(options.maxRetries ?? 3, 10);
@@ -45,13 +118,14 @@ class JobQueue {
   }
 
   /**
-   * Enqueue a job.
-   * @param {string} type
-   * @param {Object} payload  Must be JSON-serialisable.
-   * @param {Object} [options]
-   * @param {number} [options.priority=0]
-   * @param {number} [options.delayMs=0]
-   * @returns {string} jobId
+   * Enqueue a job for processing.
+   *
+   * @param {string} type - Job type identifier.
+   * @param {Object} payload - Job payload (must be JSON-serializable).
+   * @param {Object} [options] - Optional job configuration.
+   * @param {number} [options.priority=0] - Job priority (higher = processed first).
+   * @param {number} [options.delayMs=0] - Delay before job becomes available for processing.
+   * @returns {string} jobId - The generated job ID.
    */
   enqueue(type, payload, options = {}) {
     if (typeof type !== 'string' || type.trim().length === 0) {
@@ -59,11 +133,18 @@ class JobQueue {
     }
     try {
       JSON.stringify(payload);
-    } catch (err) {
-      throw new Error(`Job payload must be JSON-serializable: ${err.message}`);
+    } catch (_err) {
+      throw new Error('Job payload must be JSON-serializable');
     }
     if (this.queue.length + this.retryQueue.length >= this.maxQueueSize) {
       throw new Error(`Queue is full (max ${this.maxQueueSize} jobs)`);
+    }
+
+    // Capture and validate trace context from current AsyncLocalStorage
+    const traceContext = extractTraceContext();
+    const validation = validateTraceContext(traceContext);
+    if (!validation.ok) {
+      logger.warn({ error: validation.error }, '[jobQueue] Invalid trace context, enqueuing without trace');
     }
 
     const jobId = `job-${crypto.randomBytes(8).toString('hex')}`;
@@ -79,6 +160,7 @@ class JobQueue {
       completedAt: null,
       attempts:    0,
       lastError:   null,
+      traceContext: validation.ok ? validation.context : null,
     };
 
     this.jobs.set(jobId, job);
@@ -89,7 +171,9 @@ class JobQueue {
 
   /**
    * Dequeue the next ready job (retry queue first, then main queue).
-   * @returns {Object|null}
+   * Skips delayed jobs (delayMs > now).
+   *
+   * @returns {Object|null} Job object or null if no job is ready.
    */
   dequeue() {
     // Retry queue has priority
@@ -127,8 +211,9 @@ class JobQueue {
   }
 
   /**
-   * Acknowledge successful completion.  Stamps acked_at in DB to block replay.
-   * @param {string} jobId
+   * Acknowledge successful completion. Stamps acked_at in DB to block replay.
+   *
+   * @param {string} jobId - The job ID to acknowledge.
    */
   ack(jobId) {
     const job = this.jobs.get(jobId);
@@ -143,18 +228,20 @@ class JobQueue {
 
   /**
    * Cancel a pending job.
-   * @param {string} jobId
-   * @returns {boolean}
+   *
+   * @param {string} jobId - The job ID to cancel.
+   * @returns {boolean} True if job was found and cancelled, false otherwise.
    */
   cancel(jobId) {
     return this.jobs.delete(jobId);
   }
 
   /**
-   * Retry a failed job with exponential backoff (capped 60 s).
-   * Marks FAILED after maxRetries is exceeded (hard cap 10).
-   * @param {string} jobId
-   * @param {Error|*} error
+   * Retry a failed job with exponential backoff (capped at 60 seconds).
+   * Marks job as FAILED after maxRetries is exceeded (hard cap of 10).
+   *
+   * @param {string} jobId - The job ID to retry.
+   * @param {Error|*} error - The error that caused the retry.
    */
   retry(jobId, error) {
     const job = this.jobs.get(jobId);
@@ -175,12 +262,21 @@ class JobQueue {
     if (this._persistence) { this._persistence.updateJobStatus(job); }
   }
 
-  /** @returns {Object|null} */
+  /**
+   * Retrieves a job by ID.
+   *
+   * @param {string} jobId - The job ID to retrieve.
+   * @returns {Object|null} The job object, or null if not found.
+   */
   getJob(jobId) {
     return this.jobs.get(jobId) || null;
   }
 
-  /** @returns {Object} */
+  /**
+   * Gets queue statistics.
+   *
+   * @returns {Object} Statistics object with counts for each job status.
+   */
   getStats() {
     const s = { pending: 0, processing: 0, completed: 0, failed: 0, retrying: 0,
       total: this.jobs.size, queueLength: this.queue.length,
@@ -195,7 +291,11 @@ class JobQueue {
     return s;
   }
 
-  /** @returns {number} count cleared */
+  /**
+   * Clears all jobs and resets queues.
+   *
+   * @returns {number} Number of jobs cleared.
+   */
   clear() {
     const count = this.jobs.size;
     this.jobs.clear();
@@ -247,6 +347,12 @@ class JobQueue {
 
   // ── private ──────────────────────────────────────────────────────────────
 
+  /**
+   * Checks if a job is ready to be processed.
+   *
+   * @param {Object} job - The job to check.
+   * @returns {boolean} True if the job is ready for processing.
+   */
   _isReadyToProcess(job) {
     if (job.status !== JOB_STATUS.PENDING && job.status !== JOB_STATUS.RETRYING) {
       return false;
@@ -373,6 +479,7 @@ class DurableJobQueue extends JobQueue {
       priority: job.priority,
       delay_until_ms: job.delayMs,
       last_error: job.lastError,
+      trace_context: job.traceContext ? JSON.stringify(job.traceContext) : null,
       created_at: new Date(job.createdAt),
       started_at: null,
       completed_at: null,
@@ -516,6 +623,31 @@ class DurableJobQueue extends JobQueue {
       payload = JSON.parse(payload);
     }
 
+    // Restore trace context if present and valid
+    let traceContext = null;
+    if (row.trace_context) {
+      try {
+        const parsed = typeof row.trace_context === 'string' 
+          ? JSON.parse(row.trace_context) 
+          : row.trace_context;
+        // Validate against ALLOWED_KEYS to prevent injection
+        const validated = {};
+        for (const key of Object.keys(parsed)) {
+          if (ALLOWED_KEYS.has(key) && typeof parsed[key] === 'string' && parsed[key]) {
+            validated[key] = parsed[key];
+          }
+        }
+        if (Object.keys(validated).length > 0) {
+          traceContext = validated;
+        }
+      } catch (err) {
+        logger.warn(
+          { jobId: row.id, error: err.message },
+          '[DurableJobQueue] Failed to parse trace_context from row'
+        );
+      }
+    }
+
     return {
       id: row.id,
       type: row.job_type,
@@ -528,6 +660,7 @@ class DurableJobQueue extends JobQueue {
       completedAt: row.completed_at ? new Date(row.completed_at).getTime() : null,
       attempts: row.attempts || 0,
       lastError: row.last_error || null,
+      traceContext,
     };
   }
 }

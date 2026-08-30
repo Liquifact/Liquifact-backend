@@ -25,6 +25,7 @@ const { assertJobStructure } = require('./persistenceValidation');
 const logger = require('../logger');
 const metrics = require('../metrics');
 const auditLogStore = require('../services/auditLogStore');
+const { run: runWithContext } = require('../requestContext');
 
 /**
  * Background worker that processes queued jobs.
@@ -39,10 +40,20 @@ const auditLogStore = require('../services/auditLogStore');
  *
  * @class BackgroundWorker
  */
+/**
+ * Checks if job queue persistence is enabled via environment variable.
+ *
+ * @returns {boolean} True if persistence is enabled.
+ */
 function isPersistenceEnabled() {
   return String(process.env.JOB_QUEUE_PERSISTENCE_ENABLED || '').toLowerCase() === 'true';
 }
 
+/**
+ * Gets the maximum number of rows to recover from persistence.
+ *
+ * @returns {number} Maximum recovery rows (default 1000).
+ */
 function getMaxRecoveryRows() {
   const parsed = parseInt(process.env.JOB_QUEUE_MAX_RECOVERY_ROWS || '1000', 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 1000;
@@ -246,6 +257,9 @@ class BackgroundWorker {
   /**
    * Process a single job with its registered handler.
    *
+   * Restores trace context from job.traceContext (if present) before executing
+   * the handler, ensuring logs and metrics are correlated with the original request.
+   *
    * @private
    * @param {Object} job - The job to process
    * @returns {Promise<void>}
@@ -259,7 +273,14 @@ class BackgroundWorker {
         throw new Error(`No handler for job type "${job.type}"`);
       }
 
-      await handler(job);
+      // Restore trace context for the job lifetime
+      if (job.traceContext && typeof job.traceContext === 'object') {
+        await runWithContext(job.traceContext, async () => {
+          await handler(job);
+        });
+      } else {
+        await handler(job);
+      }
 
       this.jobQueue.ack(job.id);
     } catch (err) {

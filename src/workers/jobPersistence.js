@@ -213,6 +213,7 @@ function toRow(job) {
     completed_at: job.completedAt ?? null,
     attempts:     job.attempts,
     last_error:   job.lastError   ?? null,
+    trace_context: job.traceContext ? JSON.stringify(job.traceContext) : null,
     acked_at:     null,
   };
 }
@@ -312,6 +313,32 @@ function createJobPersistence(db, options = {}) {
           continue;
         }
 
+        // Restore trace context if present and valid
+        let traceContext = null;
+        if (row.trace_context) {
+          try {
+            const parsed = typeof row.trace_context === 'string' 
+              ? JSON.parse(row.trace_context) 
+              : row.trace_context;
+            // Basic validation: must be object with only allowed keys
+            const ALLOWED_KEYS = new Set(['requestId', 'correlationId', 'tenantId', 'userId']);
+            const validated = {};
+            for (const key of Object.keys(parsed)) {
+              if (ALLOWED_KEYS.has(key) && typeof parsed[key] === 'string' && parsed[key]) {
+                validated[key] = parsed[key];
+              }
+            }
+            if (Object.keys(validated).length > 0) {
+              traceContext = validated;
+            }
+          } catch (err) {
+            logger.warn(
+              { jobId: row.id, error: err.message },
+              '[jobPersistence] Failed to parse trace context during recovery'
+            );
+          }
+        }
+
         recovered.push({
           id:           row.id,
           type:         row.type,
@@ -324,6 +351,7 @@ function createJobPersistence(db, options = {}) {
           completedAt:  null,
           attempts:     row.attempts,
           lastError:    row.last_error ?? null,
+          traceContext: traceContext,
         });
       }
 
