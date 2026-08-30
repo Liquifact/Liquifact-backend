@@ -382,6 +382,13 @@ function verifySignature(secret, rawBody, signatureHeader, toleranceMs = TOLERAN
     return { valid: false, error: 'Invalid signature header format' };
   }
 
+  // timingSafeEqual throws when buffers have different lengths. Validate the
+  // v1 digest shape first so malformed input is a normal authentication
+  // failure rather than an internal server error.
+  if (!/^[a-f0-9]{64}$/i.test(signature)) {
+    return { valid: false, error: 'Invalid signature header format' };
+  }
+
   const now = Date.now();
   const timestampMs = timestamp * 1000;
   if (Math.abs(now - timestampMs) > toleranceMs) {
