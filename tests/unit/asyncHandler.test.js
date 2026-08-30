@@ -44,7 +44,7 @@ describe('asyncHandler utility', () => {
       );
     });
 
-    const res = await request(app).get('/reject');
+    const res = await request(app).get('/reject'); 
 
     expect(res.statusCode).toBe(500);
   });
