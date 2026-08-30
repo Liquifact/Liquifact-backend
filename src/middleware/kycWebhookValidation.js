@@ -67,8 +67,12 @@ function parseJsonPayload(rawBody) {
  * @returns {KycWebhookValidationResult}
  */
 function validateKycWebhookRequest(rawBody, signatureHeader, secret, requestTenantId, kycService) {
-  // 1. Secret must be configured
-  if (!secret) {
+  // 1. Secret / Key configuration check
+  const activeKey = typeof secret === 'object' && secret !== null ? secret.current || secret.active || secret.key : secret;
+  const retiringKey = typeof secret === 'object' && secret !== null ? secret.retiring || secret.previous || secret.old : null;
+  const keyMap = typeof secret === 'object' && secret !== null ? secret.keys || {} : {};
+
+  if (!activeKey && !retiringKey && Object.keys(keyMap).length === 0) {
     return {
       valid: false,
       error: {
@@ -91,8 +95,51 @@ function validateKycWebhookRequest(rawBody, signatureHeader, secret, requestTena
     };
   }
 
-  // 3. Signature must be valid
-  const verification = verifySignature(secret, rawBody, signatureHeader);
+  // 3. Dual-key / key-identifier signature verification
+  // Extract optional keyId from header or signature payload (e.g. kid=..., keyId=..., or keyMap)
+  let candidateKeys = [];
+  let keyId = null;
+
+  if (typeof signatureHeader === 'string') {
+    const kidMatch = signatureHeader.match(/(?:^|[,; ])(?:kid|keyid|key_id)=([a-zA-Z0-9_-]+)/i);
+    if (kidMatch) {
+      keyId = kidMatch[1];
+    }
+  }
+
+  if (keyId) {
+    if (keyMap[keyId]) {
+      candidateKeys = [keyMap[keyId]];
+    } else if (secret?.currentKeyId === keyId && activeKey) {
+      candidateKeys = [activeKey];
+    } else if (secret?.retiringKeyId === keyId && retiringKey) {
+      candidateKeys = [retiringKey];
+    } else {
+      return {
+        valid: false,
+        error: {
+          status: 401,
+          body: { error: KYC_WEBHOOK_MESSAGES.INVALID_SIGNATURE },
+          errorCode: KYC_WEBHOOK_ERROR_CODES.INVALID_SIGNATURE,
+          verificationError: 'Unknown key identifier',
+        },
+      };
+    }
+  } else {
+    if (activeKey) {candidateKeys.push(activeKey);}
+    if (retiringKey) {candidateKeys.push(retiringKey);}
+    if (candidateKeys.length === 0) {candidateKeys = Object.values(keyMap);}
+  }
+
+  let verification = { valid: false, error: 'Signature mismatch' };
+  for (const candidateSecret of candidateKeys) {
+    if (!candidateSecret) {continue;}
+    verification = verifySignature(candidateSecret, rawBody, signatureHeader);
+    if (verification.valid) {
+      break;
+    }
+  }
+
   if (!verification.valid) {
     return {
       valid: false,

@@ -54,12 +54,13 @@ async function processWebhookIngestion({
   ipAddress = 'unknown',
   userAgent = 'unknown',
 } = {}) {
-  const config = kycService.getKycProviderConfig();
-  const secret = config.apiSecret;
+  const config = kycService.getKycProviderConfig() || {};
+  const activeSecret = process.env.WEBHOOK_SIGNING_KEY || config.apiSecret || null;
+  const retiringSecret = process.env.WEBHOOK_SIGNING_KEY_RETIRING || null;
   const sig = signatureHeader || '';
   const body = rawBody instanceof Buffer ? rawBody.toString('utf8') : String(rawBody || '');
 
-  if (!secret) {
+  if (!activeSecret && !retiringSecret) {
     logger.warn({ route: KYC_WEBHOOK_ROUTES.FULL_WEBHOOK_PATH }, 'KYC webhook secret is not configured');
     throw new KycWebhookError(KYC_WEBHOOK_MESSAGES.MISSING_SECRET, 503, KYC_WEBHOOK_ERROR_CODES.MISSING_SECRET);
   }
@@ -68,7 +69,36 @@ async function processWebhookIngestion({
     throw new KycWebhookError(KYC_WEBHOOK_MESSAGES.MISSING_SIGNATURE, 401, KYC_WEBHOOK_ERROR_CODES.MISSING_SIGNATURE);
   }
 
-  const verification = verifySignature(secret, body, sig);
+  let candidateSecrets = [];
+  const kidMatch = typeof sig === 'string' ? sig.match(/(?:^|[,; ])(?:kid|keyid|key_id)=([a-zA-Z0-9_-]+)/i) : null;
+  const keyId = kidMatch ? kidMatch[1] : null;
+
+  if (keyId) {
+    const currentKeyId = process.env.WEBHOOK_SIGNING_KEY_ID || 'current';
+    const retiringKeyId = process.env.WEBHOOK_SIGNING_KEY_RETIRING_ID || 'retiring';
+
+    if (keyId === currentKeyId && activeSecret) {
+      candidateSecrets = [activeSecret];
+    } else if (keyId === retiringKeyId && retiringSecret) {
+      candidateSecrets = [retiringSecret];
+    } else {
+      logger.warn({ keyId }, 'Unknown KYC webhook key identifier');
+      throw new KycWebhookError(KYC_WEBHOOK_MESSAGES.INVALID_SIGNATURE, 401, KYC_WEBHOOK_ERROR_CODES.INVALID_SIGNATURE);
+    }
+  } else {
+    if (activeSecret) {candidateSecrets.push(activeSecret);}
+    if (retiringSecret) {candidateSecrets.push(retiringSecret);}
+  }
+
+  let verification = { valid: false, error: 'Signature mismatch' };
+  for (const candidate of candidateSecrets) {
+    if (!candidate) {continue;}
+    verification = verifySignature(candidate, body, sig);
+    if (verification.valid) {
+      break;
+    }
+  }
+
   if (!verification.valid) {
     logger.warn({ error: verification.error }, 'Invalid KYC webhook signature');
     throw new KycWebhookError(KYC_WEBHOOK_MESSAGES.INVALID_SIGNATURE, 401, KYC_WEBHOOK_ERROR_CODES.INVALID_SIGNATURE);
