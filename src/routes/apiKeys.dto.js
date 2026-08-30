@@ -19,10 +19,13 @@ const { VALID_SCOPES, API_KEY_PREFIX, MIN_KEY_LENGTH } = require('../config/apiK
  * Response DTO representing a single API key.
  *
  * @typedef {Object} ApiKeyResponseDto
- * @property {string}   key      - The raw API key string.
- * @property {string}   clientId - Unique identifier for the service client.
- * @property {string[]} scopes   - Permissions granted to this key.
- * @property {boolean}  revoked  - Whether the key is revoked.
+ * @property {string}       key         - The raw API key string.
+ * @property {string}       clientId    - Unique identifier for the service client.
+ * @property {string[]}     scopes      - Permissions granted to this key.
+ * @property {string}       status      - Lifecycle state: 'active', 'retiring', 'revoked', or 'inactive'.
+ * @property {string |null} activatedAt - ISO timestamp when the key becomes valid.
+ * @property {string |null} expiresAt   - ISO timestamp when the key expires (required for retiring keys).
+ * @property {boolean}      revoked    - Whether the key is revoked (compat convenience).
  */
 
 /**
@@ -47,7 +50,7 @@ const { VALID_SCOPES, API_KEY_PREFIX, MIN_KEY_LENGTH } = require('../config/apiK
  *
  * @typedef {Object} ListApiKeysResponseDto
  * @property {ApiKeyResponseDto[]} data  - Array of key entries.
- * @property {number}              count - Total number of entries.
+ * @property {number}             count - Total number of entries.
  */
 
 /**
@@ -67,7 +70,7 @@ const { VALID_SCOPES, API_KEY_PREFIX, MIN_KEY_LENGTH } = require('../config/apiK
  */
 
 /**
- * Maps an {@link ApiKeyEntry} domain object to an {@link ApiKeyResponseDto}.
+ * Maps an {@param ApiKeyEntry} domain object to an {@code ApiKeyResponseDto}.
  *
  * Only the fields that are part of the public API contract are copied.
  * Extra or internal fields on the input are silently dropped.
@@ -76,16 +79,22 @@ const { VALID_SCOPES, API_KEY_PREFIX, MIN_KEY_LENGTH } = require('../config/apiK
  * @returns {ApiKeyResponseDto} The DTO safe for serialisation.
  */
 function toApiKeyResponseDto(entry) {
+  const status = entry.status || 'active';
+  const activatedAt = entry.activatedAt ? (entry.activatedAt instanceof Date ? entry.activatedAt.toISOString() : entry.activatedAt) : null;
+  const expiresAt = entry.expiresAt ? (entry.expiresAt instanceof Date ? entry.expiresAt.toISOString() : entry.expiresAt) : null;
   return {
     key: entry.key,
     clientId: entry.clientId,
     scopes: [...entry.scopes],
-    revoked: entry.revoked === undefined ? false : Boolean(entry.revoked),
+    status,
+    activatedAt,
+    expiresAt,
+    revoked: entry.revoked === undefined ? status === 'revoked' : Boolean(entry.revoked),
   };
 }
 
 /**
- * Maps a {@link CreateApiKeyRequestDto} to a partial domain entry object.
+ * Maps a CreateApiKeyRequestDto to a partial domain entry object.
  *
  * Only the fields that the caller is allowed to supply are carried over;
  * extra properties on the input are silently discarded.
@@ -98,12 +107,13 @@ function fromCreateApiKeyRequestDto(dto) {
     key: dto.key.trim(),
     clientId: dto.clientId.trim(),
     scopes: [...dto.scopes],
+    status: 'active',
     revoked: false,
   };
 }
 
 /**
- * Builds a {@link CreateApiKeyResponseDto} from a domain entry.
+ * Builds a {@code CreateApiKeyResponseDto} from a domain entry.
  *
  * @param {ApiKeyEntry} entry   - The domain entry that was created.
  * @param {string}      message - Human-readable message (e.g. "API key created successfully.").
@@ -117,7 +127,7 @@ function toCreateApiKeyResponseDto(entry, message) {
 }
 
 /**
- * Builds a {@link DuplicateApiKeyResponseDto} from a domain entry.
+ * Builds a DuplicateApiKeyResponseDto from a domain entry.
  *
  * @param {ApiKeyEntry} entry   - The existing domain entry.
  * @param {string}      message - Human-readable message (e.g. "API key already exists.").
@@ -132,7 +142,7 @@ function toDuplicateApiKeyResponseDto(entry, message) {
 }
 
 /**
- * Builds a {@link ListApiKeysResponseDto} from an array of domain entries.
+ * Builds a ListApiKeysResponseDto from an array of domain entries.
  *
  * @param {ApiKeyEntry[]} entries - Array of domain entries.
  * @returns {ListApiKeysResponseDto} The list response DTO.
@@ -145,7 +155,7 @@ function toListApiKeysResponseDto(entries) {
 }
 
 /**
- * Builds a {@link GetApiKeyResponseDto} from a domain entry.
+ * Builds a GetApiKeyResponseDTO from a domain entry.
  *
  * @param {ApiKeyEntry} entry - The domain entry to return.
  * @returns {GetApiKeyResponseDto} The single-key response DTO.
@@ -157,11 +167,11 @@ function toGetApiKeyResponseDto(entry) {
 }
 
 /**
- * Validates a {@link CreateApiKeyRequestDto} and returns an array of error
+ * Validates a CreateApiKeyRequestDto and returns an array of error
  * detail objects, or an empty array when the input is valid.
  *
  * @param {unknown} body - The raw request body to validate.
- * @returns {{ field: string, message: string }[]} List of validation errors.
+ * @returns {{field: string, message: string}[]} List of validation errors.
  */
 function validateCreateApiKeyRequest(body) {
   const errors = [];

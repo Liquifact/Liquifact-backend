@@ -218,6 +218,11 @@ function authenticateApiKey(options = {}) {
       'API key authentication succeeded'
     );
 
+    setImmediate(() => {
+      const { recordApiKeyUsage } = require('../services/apiKeyUsageService');
+      recordApiKeyUsage(rawKey.trim(), entry.clientId, req.tenantId);
+    });
+
     return next();
   };
 }

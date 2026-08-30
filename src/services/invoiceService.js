@@ -37,6 +37,7 @@ const {
   normalizeInvoiceVersion,
   requireStoredVersion,
 } = require('./invoiceConcurrency');
+const { insertOutboxEvent } = require('./webhookOutbox');
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -360,9 +361,30 @@ async function createInvoice(invoiceData, tenantId) {
     metadata,
   } = invoiceData || {};
 
-  const invoiceId =
-    invoiceNumber ||
-    `inv_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+  const normalizedReference = typeof invoiceNumber === 'string'
+    ? invoiceNumber.trim().toLowerCase()
+    : undefined;
+
+  if (normalizedReference) {
+    const existing = await db('invoices')
+      .where({ tenant_id: tenantId })
+      .whereRaw('LOWER(COALESCE(invoice_number, ?)) = ?', ['', normalizedReference])
+      .first();
+
+    if (existing) {
+      throw new AppError({
+        type: 'https://liquifact.com/probs/conflict',
+        title: 'Conflict',
+        status: 409,
+        detail: 'Invoice reference already exists for this tenant.',
+        instance: '/v1/invoices',
+        code: 'INVOICE_REFERENCE_CONFLICT',
+        retryable: false,
+      });
+    }
+  }
+
+  const invoiceId = `inv_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
 
   const row = {
     invoice_id: invoiceId,
@@ -370,6 +392,7 @@ async function createInvoice(invoiceData, tenantId) {
     customer,
     status,
     tenant_id: tenantId,
+    ...(normalizedReference ? { invoice_number: normalizedReference } : {}),
     ...(currency !== undefined && { currency }),
     ...(dueDate !== undefined && { due_date: dueDate }),
     ...(description !== undefined && { description }),
@@ -378,16 +401,38 @@ async function createInvoice(invoiceData, tenantId) {
 
   // SQLite returns an array of primary-key integers from insert(); PostgreSQL
   // returns full rows when `.returning('*')` is chained. We normalise both.
-  const result = await db('invoices').insert(row).returning('*');
-  getMetricsCacheStore().invalidatePrefix('marketplace:'); 
-  if (Array.isArray(result) && result.length > 0 && typeof result[0] === 'object') {
-    // PostgreSQL path — full row returned
-    return result[0];
-  }
+  try {
+    const result = await db('invoices').insert(row).returning('*');
+    getMetricsCacheStore().invalidatePrefix('marketplace:');
+    if (Array.isArray(result) && result.length > 0 && typeof result[0] === 'object') {
+      // PostgreSQL path — full row returned
+      return result[0];
+    }
 
-  // SQLite path — result is an array of inserted PKs; refetch by invoice_id
-  const inserted = await db('invoices').where({ invoice_id: invoiceId }).first();
-  return inserted;
+    // SQLite path — result is an array of inserted PKs; refetch by invoice_id
+    const inserted = await db('invoices').where({ invoice_id: invoiceId }).first();
+    return inserted;
+  } catch (err) {
+    const uniqueViolation = err && (
+      err.code === 'SQLITE_CONSTRAINT' ||
+      err.code === '23505' ||
+      /duplicate key|unique constraint|UNIQUE constraint/i.test(String(err.message || ''))
+    );
+
+    if (uniqueViolation) {
+      throw new AppError({
+        type: 'https://liquifact.com/probs/conflict',
+        title: 'Conflict',
+        status: 409,
+        detail: 'Invoice reference already exists for this tenant.',
+        instance: '/v1/invoices',
+        code: 'INVOICE_REFERENCE_CONFLICT',
+        retryable: false,
+      });
+    }
+
+    throw err;
+  }
 }
 
 /**
@@ -656,45 +701,78 @@ async function transitionInvoice(invoiceId, targetState, tenantId, options = {})
     updates.metadata = JSON.stringify(meta);
   }
 
-  // Optimistic CAS: only persist when status is still the state we validated against.
-  const persisted = await module.exports.updateInvoice(invoiceId, updates, tenantId, {
-    expectedStatus: invoice.status,
-    expectedVersion: requireStoredVersion(invoice),
-  });
+  // Transactional outbox: atomically commit the invoice mutation and the
+  // webhook outbox event so downstream projections can never become stale.
+  const outboxEvent = `invoice.${invoice.status}_to_${targetState}`;
+  const correlationId = require('../requestContext').getContext().correlationId || null;
 
-  if (!persisted) {
-    const latest = await module.exports.resolveInvoiceForTenant(invoiceId, tenantId);
-    if (!latest) {
-      const err = new Error('Invoice not found');
-      err.code = 'INVOICE_NOT_FOUND';
-      err.statusCode = 404;
+  await db.transaction(async (trx) => {
+    // Optimistic CAS inside the transaction
+    const where = { invoice_id: invoiceId, tenant_id: tenantId, status: invoice.status };
+    if (invoice.version !== undefined) {
+      where.version = requireStoredVersion(invoice);
+    }
+
+    const versionUpdate = invoice.version === undefined ? {} : { version: requireStoredVersion(invoice) + 1 };
+    const result = await trx('invoices')
+      .where(where)
+      .update({ ...updates, ...versionUpdate, updated_at: nowValue() })
+      .returning('*');
+
+    let persisted;
+    if (Array.isArray(result) && result.length > 0 && typeof result[0] === 'object') {
+      persisted = normalizeInvoiceVersion(result[0]);
+    } else if (typeof result === 'number') {
+      if (result === 0) {
+        const err = new Error(
+          `Concurrent modification of invoice ${invoiceId}; transition from ${invoice.status} to ${targetState} aborted`,
+        );
+        err.code = 'TRANSITION_CONFLICT';
+        err.statusCode = 409;
+        throw err;
+      }
+      persisted = await trx('invoices').where({ invoice_id: invoiceId, tenant_id: tenantId }).first();
+    } else {
+      // Empty returning array under Postgres
+      const latest = await trx('invoices').where({ invoice_id: invoiceId, tenant_id: tenantId }).first();
+      if (!latest) {
+        const err = new Error('Invoice not found');
+        err.code = 'INVOICE_NOT_FOUND';
+        err.statusCode = 404;
+        throw err;
+      }
+      if (invoice.version !== undefined && requireStoredVersion(latest) !== requireStoredVersion(invoice) + 1) {
+        const err = new Error(
+          `Concurrent modification of invoice ${invoiceId}; transition from ${invoice.status} to ${targetState} aborted`,
+        );
+        err.code = 'TRANSITION_CONFLICT';
+        err.statusCode = 409;
+        throw err;
+      }
+      persisted = normalizeInvoiceVersion(latest);
+    }
+
+    if (!persisted) {
+      const err = new Error(
+        `Concurrent modification of invoice ${invoiceId}; transition from ${invoice.status} to ${targetState} aborted`,
+      );
+      err.code = 'TRANSITION_CONFLICT';
+      err.statusCode = 409;
       throw err;
     }
 
-    const retryValidation = validateTransition({
+    // Write outbox event atomically with the invoice mutation
+    await insertOutboxEvent(trx, {
       invoiceId,
-      currentState: latest.status,
-      targetState,
-      actor,
-      reason,
+      tenantId,
+      event: outboxEvent,
+      payload: { invoiceId, event: outboxEvent, transition: { from: invoice.status, to: targetState, actor, reason } },
+      correlationId,
     });
-    if (!retryValidation.isValid) {
-      const error = new Error(retryValidation.error);
-      error.code = retryValidation.code;
-      error.allowedTransitions = retryValidation.allowedTransitions;
-      throw error;
-    }
+  });
 
-    const err = new Error(
-      `Concurrent modification of invoice ${invoiceId}; transition from ${invoice.status} to ${targetState} aborted`,
-    );
-    err.code = 'TRANSITION_CONFLICT';
-    err.statusCode = 409;
-    throw err;
-  }
-
-  // Persist succeeded â€” emit audit trail for the winning transition only.
-  return executeTransition({
+  // Transaction committed - emit audit trail for the winning transition only.
+  const transitionResult = await executeTransition({
     invoiceId,
     currentState: invoice.status,
     targetState,
@@ -704,6 +782,19 @@ async function transitionInvoice(invoiceId, targetState, tenantId, options = {})
     userAgent,
     metadata,
   });
+
+  // Fire-and-forget low-latency delivery; if this fails the outbox worker retries.
+  const { enqueueWebhookDelivery } = require('./webhooks');
+  enqueueWebhookDelivery({
+    invoiceId,
+    event: outboxEvent,
+    correlationId,
+    transition: { from: invoice.status, to: targetState, actor, reason, transitionedAt: transitionResult.auditLog.timestamp },
+  }).catch((err) => {
+    logger.warn({ invoiceId, error: err.message }, 'webhook: low-latency delivery failed, outbox worker will retry');
+  });
+
+  return transitionResult;
 }
 
 // ---------------------------------------------------------------------------

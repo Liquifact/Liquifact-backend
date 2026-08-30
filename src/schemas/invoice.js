@@ -15,6 +15,7 @@
  */
 
 const { z } = require('zod');
+const { normalizeMonetaryInput, MonetaryValidationError } = require('../utils/monetary');
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -61,16 +62,36 @@ const currencySchema = z
  *  - String length bounds prevent oversized inputs.
  *  - `amount` must be a positive, finite number.
  *  - `currency` is normalised to upper-case and allowlisted.
+ *  - `amount` is validated for monetary precision (max 2 decimal places).
  *
  * @type {import('zod').ZodObject}
  */
 const invoiceCreateSchema = z
   .object({
-    /** Positive invoice amount. */
+    /** Positive invoice amount with monetary precision validation. */
     amount: z
-      .number({ invalid_type_error: 'amount must be a number', required_error: 'amount is required' })
-      .positive({ message: 'amount must be a positive number' })
-      .finite({ message: 'amount must be a finite number' }),
+      .union([
+        z.number({ invalid_type_error: 'amount must be a number', required_error: 'amount is required' })
+          .positive({ message: 'amount must be a positive number' })
+          .finite({ message: 'amount must be a finite number' }),
+        z.string({ invalid_type_error: 'amount must be a number or string' })
+          .min(1, { message: 'amount must not be empty' }),
+      ])
+      .transform((val) => {
+        // Normalize to canonical decimal string
+        try {
+          return normalizeMonetaryInput(val, 'amount');
+        } catch (err) {
+          if (err instanceof MonetaryValidationError) {
+            throw new z.ZodError([{
+              code: z.ZodIssueCode.custom,
+              message: err.message,
+              path: ['amount'],
+            }]);
+          }
+          throw err;
+        }
+      }),
 
     /** Due date in YYYY-MM-DD format. */
     dueDate: dateSchema.optional(),
@@ -111,7 +132,10 @@ const invoiceCreateSchema = z
     /** Optional invoice reference number (max 100 chars). */
     invoiceNumber: z
       .string({ invalid_type_error: 'invoiceNumber must be a string' })
+      .trim()
+      .min(1, { message: 'invoiceNumber must be a non-empty string' })
       .max(100, { message: 'invoiceNumber must not exceed 100 characters' })
+      .transform((v) => v.toLowerCase())
       .optional(),
   })
   .strict() // ← reject unknown keys
@@ -166,9 +190,27 @@ const invoiceUpdateSchema = z
       .positive({ message: 'version must be positive' })
       .safe({ message: 'version must be a safe integer' }),
     amount: z
-      .number({ invalid_type_error: 'amount must be a number' })
-      .positive({ message: 'amount must be a positive number' })
-      .finite({ message: 'amount must be a finite number' })
+      .union([
+        z.number({ invalid_type_error: 'amount must be a number' })
+          .positive({ message: 'amount must be a positive number' })
+          .finite({ message: 'amount must be a finite number' }),
+        z.string({ invalid_type_error: 'amount must be a number or string' })
+          .min(1, { message: 'amount must not be empty' }),
+      ])
+      .transform((val) => {
+        try {
+          return normalizeMonetaryInput(val, 'amount');
+        } catch (err) {
+          if (err instanceof MonetaryValidationError) {
+            throw new z.ZodError([{
+              code: z.ZodIssueCode.custom,
+              message: err.message,
+              path: ['amount'],
+            }]);
+          }
+          throw err;
+        }
+      })
       .optional(),
 
     dueDate: dateSchema.optional(),
@@ -208,7 +250,10 @@ const invoiceUpdateSchema = z
 
     invoiceNumber: z
       .string()
+      .trim()
+      .min(1, { message: 'invoiceNumber must be a non-empty string' })
       .max(100, { message: 'invoiceNumber must not exceed 100 characters' })
+      .transform((v) => v.toLowerCase())
       .optional(),
 
     status: z

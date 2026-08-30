@@ -43,6 +43,7 @@
  */
 
 const logger = require('../logger');
+const { computeFundedPercentPrecise, toCanonicalDecimal } = require('../utils/monetary');
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -252,6 +253,10 @@ function computeApyPercent(annualRatePercent) {
  * Computes funded percent: (fundedAmount / totalAmount) * 100, rounded to 2 dp.
  * Returns null when totalAmount is zero/negative or either value is non-numeric.
  *
+ * Uses precise BigInt arithmetic via {@link computeFundedPercentPrecise} to
+ * avoid IEEE 754 floating-point drift. Falls back to legacy float arithmetic
+ * when inputs cannot be converted to canonical decimal strings.
+ *
  * @param {unknown} fundedAmount - Amount currently held in escrow.
  * @param {unknown} totalAmount  - Invoice face value (denominator).
  * @returns {number|null}
@@ -266,7 +271,16 @@ function computeFundedPercent(fundedAmount, totalAmount) {
   ) {
     return null;
   }
-  return Math.round((fundedAmount / totalAmount) * 10000) / 100;
+
+  // Try precise arithmetic first
+  try {
+    const fundedStr = toCanonicalDecimal(fundedAmount, 'fundedAmount');
+    const totalStr = toCanonicalDecimal(totalAmount, 'totalAmount');
+    return computeFundedPercentPrecise(fundedStr, totalStr);
+  } catch {
+    // Fall back to legacy float arithmetic for edge cases
+    return Math.round((fundedAmount / totalAmount) * 10000) / 100;
+  }
 }
 
 /**

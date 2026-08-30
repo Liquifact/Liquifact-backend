@@ -55,6 +55,7 @@ jest.mock('../../src/db/knex', () => {
   const auditLogEvents = [];
   const investorLocks = [];
   const invoiceFiles = [];
+  const quarantineRecords = [];
   let queryWheres = {};
   let mockCurrentTable;
   let _lastInserted = null;
@@ -69,6 +70,13 @@ jest.mock('../../src/db/knex', () => {
 
   const filterInvoiceFiles = () => invoiceFiles.filter((row) => {
     return Object.entries(queryWheres).every(([key, value]) => row[key] === value);
+  });
+
+  const filterQuarantineRecords = () => quarantineRecords.filter((row) => {
+    return Object.entries(queryWheres).every(([key, value]) => {
+      if (key === 'created_at') return true;
+      return String(row[key]) === String(value);
+    });
   });
 
   const m = jest.fn((table) => {
@@ -114,6 +122,9 @@ jest.mock('../../src/db/knex', () => {
     if (mockCurrentTable === "invoice_files") {
       invoiceFiles.push(...inserted);
     }
+    if (mockCurrentTable === "kyc_webhook_quarantine") {
+      quarantineRecords.push(...inserted);
+    }
     return m;
   });
   m.onConflict = jest.fn().mockReturnThis();
@@ -156,6 +167,9 @@ jest.mock('../../src/db/knex', () => {
     if (mockCurrentTable === "invoice_files") {
       return Promise.resolve(filterInvoiceFiles()[0]);
     }
+    if (mockCurrentTable === "kyc_webhook_quarantine") {
+      return Promise.resolve(filterQuarantineRecords()[0] || null);
+    }
     return Promise.resolve({ id: 'test', kyc_status: 'approved' });
   });
   m.returning = jest.fn(() => {
@@ -166,6 +180,10 @@ jest.mock('../../src/db/knex', () => {
       const retained = investorLocks.filter((row) => !Object.entries(queryWheres).every(([key, value]) => row[key] === value));
       investorLocks.length = 0;
       investorLocks.push(...retained);
+      return Promise.resolve(1);
+    }
+    if (mockCurrentTable === "kyc_webhook_quarantine") {
+      quarantineRecords.length = 0;
       return Promise.resolve(1);
     }
     auditLogEvents.length = 0;
@@ -220,6 +238,16 @@ jest.mock('../../src/db/knex', () => {
     }
     if (mockCurrentTable === "invoice_files") {
       return Promise.resolve(filterInvoiceFiles()).then(onFulfilled);
+    }
+    if (mockCurrentTable === "kyc_webhook_quarantine") {
+      let results = filterQuarantineRecords();
+      if (_offset) {
+        results = results.slice(_offset);
+      }
+      if (_limit !== null) {
+        results = results.slice(0, _limit);
+      }
+      return Promise.resolve(results).then(onFulfilled);
     }
     return Promise.resolve([]).then(onFulfilled);
   });

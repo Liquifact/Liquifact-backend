@@ -11,13 +11,14 @@
 const db = require('../db/knex');
 const kycService = require('./kycService');
 const logger = require('../logger');
-const { getAuditLogs } = require('./auditLog');
+const auditLog = require('./auditLog');
 const { redactValue } = require('./auditLogStore');
 const { verifySignature } = require('./webhooks');
-const { parseJsonPayload, validateKycWebhookRequest } = require('../middleware/kycWebhookValidation');
 const { kycWebhookSchema, parseValidationErrors, kycWebhookListResponseSchema } = require('../schemas/kycWebhook');
 const { decodeCursor, encodeCursor, CursorError } = require('../utils/cursorPagination');
+const { quarantineKycWebhook, validateEnvelope } = require('./kycQuarantineService');
 const KycWebhookError = require('../errors/KycWebhookError');
+const { sanitizeTelemetryString, redactErrorForTelemetry } = require('../utils/telemetryRedaction');
 const {
   HTTP_HEADERS: _HTTP_HEADERS,
   KYC_WEBHOOK_ROUTES,
@@ -35,6 +36,7 @@ const SORT_FIELD = KYC_WEBHOOK_PAGINATION.SORT_FIELD;
  *
  * Validates secret, signature, payload JSON, tenant context, schema requirements,
  * and provider status map before persisting the record to storage.
+ * Malformed or invalid payloads are safely quarantined with sensitive fields redacted.
  *
  * @param {Object} params
  * @param {string|Buffer} params.rawBody - Raw request body string or Buffer
@@ -53,12 +55,13 @@ async function processWebhookIngestion({
   ipAddress = 'unknown',
   userAgent = 'unknown',
 } = {}) {
-  const config = kycService.getKycProviderConfig();
-  const secret = config.apiSecret;
+  const config = kycService.getKycProviderConfig() || {};
+  const activeSecret = process.env.WEBHOOK_SIGNING_KEY || config.apiSecret || null;
+  const retiringSecret = process.env.WEBHOOK_SIGNING_KEY_RETIRING || null;
   const sig = signatureHeader || '';
   const body = rawBody instanceof Buffer ? rawBody.toString('utf8') : String(rawBody || '');
 
-  if (!secret) {
+  if (!activeSecret && !retiringSecret) {
     logger.warn({ route: KYC_WEBHOOK_ROUTES.FULL_WEBHOOK_PATH }, 'KYC webhook secret is not configured');
     throw new KycWebhookError(KYC_WEBHOOK_MESSAGES.MISSING_SECRET, 503, KYC_WEBHOOK_ERROR_CODES.MISSING_SECRET);
   }
@@ -67,53 +70,102 @@ async function processWebhookIngestion({
     throw new KycWebhookError(KYC_WEBHOOK_MESSAGES.MISSING_SIGNATURE, 401, KYC_WEBHOOK_ERROR_CODES.MISSING_SIGNATURE);
   }
 
-  const verification = verifySignature(secret, body, sig);
+  let candidateSecrets = [];
+  const kidMatch = typeof sig === 'string' ? sig.match(/(?:^|[,; ])(?:kid|keyid|key_id)=([a-zA-Z0-9_-]+)/i) : null;
+  const keyId = kidMatch ? kidMatch[1] : null;
+
+  if (keyId) {
+    const currentKeyId = process.env.WEBHOOK_SIGNING_KEY_ID || 'current';
+    const retiringKeyId = process.env.WEBHOOK_SIGNING_KEY_RETIRING_ID || 'retiring';
+
+    if (keyId === currentKeyId && activeSecret) {
+      candidateSecrets = [activeSecret];
+    } else if (keyId === retiringKeyId && retiringSecret) {
+      candidateSecrets = [retiringSecret];
+    } else {
+      logger.warn({ keyId }, 'Unknown KYC webhook key identifier');
+      throw new KycWebhookError(KYC_WEBHOOK_MESSAGES.INVALID_SIGNATURE, 401, KYC_WEBHOOK_ERROR_CODES.INVALID_SIGNATURE);
+    }
+  } else {
+    if (activeSecret) {candidateSecrets.push(activeSecret);}
+    if (retiringSecret) {candidateSecrets.push(retiringSecret);}
+  }
+
+  let verification = { valid: false, error: 'Signature mismatch' };
+  for (const candidate of candidateSecrets) {
+    if (!candidate) {continue;}
+    verification = verifySignature(candidate, body, sig);
+    if (verification.valid) {
+      break;
+    }
+  }
+
   if (!verification.valid) {
     logger.warn({ error: verification.error }, 'Invalid KYC webhook signature');
     throw new KycWebhookError(KYC_WEBHOOK_MESSAGES.INVALID_SIGNATURE, 401, KYC_WEBHOOK_ERROR_CODES.INVALID_SIGNATURE);
   }
 
-  let payload;
-  try {
-    payload = parseJsonPayload(body);
-  } catch (error) {
-    throw new KycWebhookError(error.message, 400, KYC_WEBHOOK_ERROR_CODES.INVALID_PAYLOAD);
+  // Envelope and payload validation before domain mapping
+  const envelopeValidation = validateEnvelope(body);
+  if (!envelopeValidation.valid) {
+    await quarantineKycWebhook({
+      rawBody: body,
+      payload: envelopeValidation.payload || null,
+      event: envelopeValidation.event || 'unknown',
+      reason: envelopeValidation.reason,
+      errorCode: envelopeValidation.errorCode || KYC_WEBHOOK_ERROR_CODES.INVALID_PAYLOAD,
+      errorDetails: envelopeValidation.errorDetails || null,
+      tenantId: requestTenantId,
+      actor,
+      ipAddress,
+      userAgent,
+    });
+
+    throw new KycWebhookError(
+      envelopeValidation.reason,
+      400,
+      envelopeValidation.errorCode || KYC_WEBHOOK_ERROR_CODES.INVALID_PAYLOAD
+    );
   }
 
-  const payloadTenantId = payload.tenantId || payload.tenant_id || null;
+  const payload = envelopeValidation.payload;
+  const payloadTenantId = envelopeValidation.domainData.tenantId;
 
-  // Delegate all pre-ingestion validation to the shared helper
-  const validation = validateKycWebhookRequest(body, sig, secret, requestTenantId, kycService);
-
-  if (!validation.valid) {
-    const { status: errStatus, body: errBody, errorCode } = validation.error;
-
-    if (errorCode === KYC_WEBHOOK_ERROR_CODES.MISSING_SECRET) {
-      logger.warn({ route: KYC_WEBHOOK_ROUTES.FULL_WEBHOOK_PATH }, KYC_WEBHOOK_MESSAGES.SECRET_NOT_CONFIGURED_LOG);
-    } else if (errorCode === KYC_WEBHOOK_ERROR_CODES.INVALID_SIGNATURE) {
-      logger.warn(
-        { error: validation.error.verificationError || KYC_WEBHOOK_ERROR_CODES.INVALID_SIGNATURE },
-        KYC_WEBHOOK_MESSAGES.INVALID_SIGNATURE_LOG
-      );
-    } else if (errorCode === KYC_WEBHOOK_ERROR_CODES.UNKNOWN_STATUS) {
-      logger.warn(
-        { smeId: validation.error.smeId || '(unknown)', status: validation.error.providerStatus || validation.error.status || '(unknown)' },
-        KYC_WEBHOOK_MESSAGES.FAIL_CLOSED_LOG
-      );
-    }
-
-    throw new KycWebhookError(errBody.error || 'Validation failed', errStatus, errorCode);
+  if (payloadTenantId && requestTenantId && payloadTenantId !== requestTenantId) {
+    await quarantineKycWebhook({
+      rawBody: body,
+      payload,
+      event: envelopeValidation.event,
+      reason: KYC_WEBHOOK_MESSAGES.TENANT_MISMATCH,
+      errorCode: KYC_WEBHOOK_ERROR_CODES.TENANT_MISMATCH,
+      tenantId: requestTenantId,
+      actor,
+      ipAddress,
+      userAgent,
+    });
+    throw new KycWebhookError(KYC_WEBHOOK_MESSAGES.TENANT_MISMATCH, 403, KYC_WEBHOOK_ERROR_CODES.TENANT_MISMATCH);
   }
 
   if (payloadTenantId && !requestTenantId) {
+    await quarantineKycWebhook({
+      rawBody: body,
+      payload,
+      event: envelopeValidation.event,
+      reason: KYC_WEBHOOK_MESSAGES.MISSING_TENANT_CONTEXT,
+      errorCode: KYC_WEBHOOK_ERROR_CODES.MISSING_TENANT_CONTEXT,
+      tenantId: null,
+      actor,
+      ipAddress,
+      userAgent,
+    });
     throw new KycWebhookError(KYC_WEBHOOK_MESSAGES.MISSING_TENANT_CONTEXT, 400, KYC_WEBHOOK_ERROR_CODES.MISSING_TENANT_CONTEXT);
   }
 
   const normalizedPayload = {
-    smeId: payload.smeId ?? payload.sme_id,
-    status: payload.status ?? payload.kycStatus ?? payload.kyc_status,
-    recordId: payload.recordId ?? payload.providerRecordId ?? payload.provider_record_id ?? undefined,
-    verifiedAt: payload.verifiedAt ?? payload.verified_at ?? undefined,
+    smeId: envelopeValidation.domainData.smeId ?? undefined,
+    status: envelopeValidation.domainData.status ?? undefined,
+    recordId: envelopeValidation.domainData.recordId ?? undefined,
+    verifiedAt: envelopeValidation.domainData.verifiedAt ?? undefined,
   };
 
   const parsedPayload = kycWebhookSchema.safeParse(normalizedPayload);
@@ -121,12 +173,51 @@ async function processWebhookIngestion({
     const fieldErrors = parseValidationErrors(parsedPayload.error);
 
     if (fieldErrors.smeId) {
+      await quarantineKycWebhook({
+        rawBody: body,
+        payload,
+        event: envelopeValidation.event,
+        smeId: normalizedPayload.smeId || null,
+        reason: KYC_WEBHOOK_MESSAGES.MISSING_SME_ID,
+        errorCode: KYC_WEBHOOK_ERROR_CODES.MISSING_SME_ID,
+        errorDetails: fieldErrors,
+        tenantId: requestTenantId || payloadTenantId,
+        actor,
+        ipAddress,
+        userAgent,
+      });
       throw new KycWebhookError('Missing or invalid smeId', 400, KYC_WEBHOOK_ERROR_CODES.MISSING_SME_ID);
     }
     if (fieldErrors.status) {
+      await quarantineKycWebhook({
+        rawBody: body,
+        payload,
+        event: envelopeValidation.event,
+        smeId: normalizedPayload.smeId || null,
+        reason: KYC_WEBHOOK_MESSAGES.MISSING_STATUS,
+        errorCode: KYC_WEBHOOK_ERROR_CODES.MISSING_STATUS,
+        errorDetails: fieldErrors,
+        tenantId: requestTenantId || payloadTenantId,
+        actor,
+        ipAddress,
+        userAgent,
+      });
       throw new KycWebhookError('Missing or invalid status', 400, KYC_WEBHOOK_ERROR_CODES.MISSING_STATUS);
     }
 
+    await quarantineKycWebhook({
+      rawBody: body,
+      payload,
+      event: envelopeValidation.event,
+      smeId: normalizedPayload.smeId || null,
+      reason: 'Invalid KYC webhook payload',
+      errorCode: KYC_WEBHOOK_ERROR_CODES.INVALID_PAYLOAD,
+      errorDetails: fieldErrors,
+      tenantId: requestTenantId || payloadTenantId,
+      actor,
+      ipAddress,
+      userAgent,
+    });
     throw new KycWebhookError('Invalid KYC webhook payload', 400, KYC_WEBHOOK_ERROR_CODES.INVALID_PAYLOAD);
   }
 
@@ -137,11 +228,30 @@ async function processWebhookIngestion({
 
   const normalised = kycService.normalizeProviderStatus(status);
   if (normalised === kycService.KYC_STATUSES.UNKNOWN) {
+    // The provider fully controls `status` on this fail-closed path, and it
+    // flows into a log line, a quarantine record, and the error message
+    // returned to the caller — sanitize it once, up front, so all three
+    // sinks inherit the same redaction rather than needing separate fixes
+    // (issue #1200).
+    const safeStatus = sanitizeTelemetryString(status);
     logger.warn(
-      { smeId, status },
+      { smeId, status: safeStatus },
       'KYC webhook received status outside PROVIDER_STATUS_MAP; rejecting (fail-closed)'
     );
-    throw new KycWebhookError(`Unknown provider status: ${status}`, 400, KYC_WEBHOOK_ERROR_CODES.UNKNOWN_STATUS);
+    await quarantineKycWebhook({
+      rawBody: body,
+      payload,
+      event: envelopeValidation.event,
+      smeId,
+      reason: `Unknown provider status: ${safeStatus}`,
+      errorCode: KYC_WEBHOOK_ERROR_CODES.UNKNOWN_STATUS,
+      errorDetails: { status: safeStatus },
+      tenantId: requestTenantId || payloadTenantId,
+      actor,
+      ipAddress,
+      userAgent,
+    });
+    throw new KycWebhookError(`Unknown provider status: ${safeStatus}`, 400, KYC_WEBHOOK_ERROR_CODES.UNKNOWN_STATUS);
   }
 
   try {
@@ -170,8 +280,19 @@ async function processWebhookIngestion({
 
     return { success: true, smeId: record.smeId, status: record.status };
   } catch (error) {
-    logger.error({ smeId, error: error.message }, KYC_WEBHOOK_MESSAGES.FAILED_INGESTION);
-    throw new KycWebhookError(error.message, 500, KYC_WEBHOOK_ERROR_CODES.PERSISTENCE_ERROR);
+    // `error` here is typically a DB/persistence failure — some drivers
+    // (notably Postgres unique-constraint violations) include the offending
+    // column *value* in their error message (e.g. `Key (ssn)=(123-45-6789)
+    // already exists`), so this is redacted the same as a provider error
+    // before it is logged or reused as the KycWebhookError message that
+    // flows into the HTTP response (issue #1200).
+    const safeError = redactErrorForTelemetry(error);
+    logger.error({ smeId, error: safeError }, KYC_WEBHOOK_MESSAGES.FAILED_INGESTION);
+    throw new KycWebhookError(
+      safeError && typeof safeError.message === 'string' ? safeError.message : 'KYC record persistence failed',
+      500,
+      KYC_WEBHOOK_ERROR_CODES.PERSISTENCE_ERROR,
+    );
   }
 }
 
@@ -217,7 +338,7 @@ async function getWebhookAuditLogs({
     offset = v;
   }
 
-  const logs = await getAuditLogs({
+  const logs = await auditLog.getAuditLogs({
     resourceType: 'kyc-webhook',
     resourceId: smeId,
     action,

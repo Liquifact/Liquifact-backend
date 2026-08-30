@@ -67,8 +67,12 @@ function parseJsonPayload(rawBody) {
  * @returns {KycWebhookValidationResult}
  */
 function validateKycWebhookRequest(rawBody, signatureHeader, secret, requestTenantId, kycService) {
-  // 1. Secret must be configured
-  if (!secret) {
+  // 1. Secret / Key configuration check
+  const activeKey = typeof secret === 'object' && secret !== null ? secret.current || secret.active || secret.key : secret;
+  const retiringKey = typeof secret === 'object' && secret !== null ? secret.retiring || secret.previous || secret.old : null;
+  const keyMap = typeof secret === 'object' && secret !== null ? secret.keys || {} : {};
+
+  if (!activeKey && !retiringKey && Object.keys(keyMap).length === 0) {
     return {
       valid: false,
       error: {
@@ -91,8 +95,51 @@ function validateKycWebhookRequest(rawBody, signatureHeader, secret, requestTena
     };
   }
 
-  // 3. Signature must be valid
-  const verification = verifySignature(secret, rawBody, signatureHeader);
+  // 3. Dual-key / key-identifier signature verification
+  // Extract optional keyId from header or signature payload (e.g. kid=..., keyId=..., or keyMap)
+  let candidateKeys = [];
+  let keyId = null;
+
+  if (typeof signatureHeader === 'string') {
+    const kidMatch = signatureHeader.match(/(?:^|[,; ])(?:kid|keyid|key_id)=([a-zA-Z0-9_-]+)/i);
+    if (kidMatch) {
+      keyId = kidMatch[1];
+    }
+  }
+
+  if (keyId) {
+    if (keyMap[keyId]) {
+      candidateKeys = [keyMap[keyId]];
+    } else if (secret?.currentKeyId === keyId && activeKey) {
+      candidateKeys = [activeKey];
+    } else if (secret?.retiringKeyId === keyId && retiringKey) {
+      candidateKeys = [retiringKey];
+    } else {
+      return {
+        valid: false,
+        error: {
+          status: 401,
+          body: { error: KYC_WEBHOOK_MESSAGES.INVALID_SIGNATURE },
+          errorCode: KYC_WEBHOOK_ERROR_CODES.INVALID_SIGNATURE,
+          verificationError: 'Unknown key identifier',
+        },
+      };
+    }
+  } else {
+    if (activeKey) {candidateKeys.push(activeKey);}
+    if (retiringKey) {candidateKeys.push(retiringKey);}
+    if (candidateKeys.length === 0) {candidateKeys = Object.values(keyMap);}
+  }
+
+  let verification = { valid: false, error: 'Signature mismatch' };
+  for (const candidateSecret of candidateKeys) {
+    if (!candidateSecret) {continue;}
+    verification = verifySignature(candidateSecret, rawBody, signatureHeader);
+    if (verification.valid) {
+      break;
+    }
+  }
+
   if (!verification.valid) {
     return {
       valid: false,
@@ -120,12 +167,23 @@ function validateKycWebhookRequest(rawBody, signatureHeader, secret, requestTena
     };
   }
 
-  // Extract / normalise fields
-  const smeId = payload.smeId || payload.sme_id;
-  const status = payload.status || payload.kycStatus || payload.kyc_status;
-  const providerRecordId = payload.recordId || payload.providerRecordId || payload.provider_record_id || null;
-  const verifiedAt = payload.verifiedAt || payload.verified_at || null;
-  const payloadTenantId = payload.tenantId || payload.tenant_id || null;
+  // Extract / normalise fields (supporting enveloped data/payload/record objects)
+  let domainData = payload;
+  if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    if (payload.data && typeof payload.data === 'object' && !Array.isArray(payload.data)) {
+      domainData = payload.data;
+    } else if (payload.payload && typeof payload.payload === 'object' && !Array.isArray(payload.payload)) {
+      domainData = payload.payload;
+    } else if (payload.record && typeof payload.record === 'object' && !Array.isArray(payload.record)) {
+      domainData = payload.record;
+    }
+  }
+
+  const smeId = domainData?.smeId || domainData?.sme_id || payload?.smeId || payload?.sme_id;
+  const status = domainData?.status || domainData?.kycStatus || domainData?.kyc_status || payload?.status || payload?.kycStatus || payload?.kyc_status;
+  const providerRecordId = domainData?.recordId || domainData?.providerRecordId || domainData?.provider_record_id || payload?.recordId || payload?.providerRecordId || payload?.provider_record_id || null;
+  const verifiedAt = domainData?.verifiedAt || domainData?.verified_at || payload?.verifiedAt || payload?.verified_at || null;
+  const payloadTenantId = domainData?.tenantId || domainData?.tenant_id || payload?.tenantId || payload?.tenant_id || null;
 
   // 5. Tenant scope check
   if (payloadTenantId && requestTenantId && payloadTenantId !== requestTenantId) {

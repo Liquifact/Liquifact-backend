@@ -143,6 +143,9 @@ router.post('/invoices', extractTenant, invoiceIdempotencyMiddleware(), async (r
 
     // Normalise buyer / customer: prefer `buyer`, fall back to `customer`
     const customerName = (body.buyer || body.customer || '').trim();
+    const invoiceReference = typeof body.invoiceNumber === 'string'
+      ? body.invoiceNumber.trim().toLowerCase()
+      : undefined;
 
     const invoice = await invoiceService.createInvoice(
       {
@@ -151,7 +154,7 @@ router.post('/invoices', extractTenant, invoiceIdempotencyMiddleware(), async (r
         currency: body.currency,
         dueDate: body.dueDate,
         description: body.description,
-        invoiceNumber: body.invoiceNumber,
+        invoiceNumber: invoiceReference,
       },
       req.tenantId,
     );

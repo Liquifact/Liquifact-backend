@@ -19,28 +19,36 @@ const SENSITIVE_KEY_PATTERNS = [
  * Redacts sensitive values from an object.
  *
  * @param {*} value The value to redact.
+ * @param {RegExp[]} [extraPatterns] Additional key-name patterns to treat as
+ *   sensitive for this call only, layered on top of the base
+ *   {@link SENSITIVE_KEY_PATTERNS}. Optional and backward compatible — every
+ *   existing caller that omits it keeps its exact current behaviour. Callers
+ *   with a domain-specific denylist (e.g. identity/document field names for
+ *   KYC telemetry) should pass their own list here rather than forking this
+ *   function or mutating the shared {@link SENSITIVE_KEY_PATTERNS}.
  * @returns {*} The redacted value.
  */
-function redactValue(value) {
+function redactValue(value, extraPatterns = []) {
   if (value === null || value === undefined) {
     return value;
   }
 
   if (Array.isArray(value)) {
-    return value.map((item) => redactValue(item));
+    return value.map((item) => redactValue(item, extraPatterns));
   }
 
   if (typeof value !== 'object') {
     return value;
   }
 
+  const patterns = extraPatterns.length ? [...SENSITIVE_KEY_PATTERNS, ...extraPatterns] : SENSITIVE_KEY_PATTERNS;
   const sanitized = {};
   for (const [key, currentValue] of Object.entries(value)) {
-    if (SENSITIVE_KEY_PATTERNS.some((pattern) => pattern.test(key))) {
+    if (patterns.some((pattern) => pattern.test(key))) {
       sanitized[key] = REDACTED;
       continue;
     }
-    sanitized[key] = redactValue(currentValue);
+    sanitized[key] = redactValue(currentValue, extraPatterns);
   }
   return sanitized;
 }
@@ -265,6 +273,7 @@ module.exports = {
   redactValue,
   normalizeMetadata,
   REDACTED,
+  SENSITIVE_KEY_PATTERNS,
   escapeCsvField,
   CSV_HEADERS,
   rowToCsvLine,

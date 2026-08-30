@@ -15,6 +15,7 @@ const { replayWebhook, resolveDeadLetter } = require('../services/webhooks');
 const metrics = require('../metrics');
 const { authenticateToken } = require('../middleware/auth');
 const { authenticateApiKey } = require('../middleware/apiKeyAuth');
+const idempotencyMiddleware = require('../middleware/idempotency');
 const logger = require('../logger');
 
 // ── Constants & Helpers ──────────────────────────────────────────────────────
@@ -37,6 +38,10 @@ const SAFE_COLUMNS = [
 ];
 
 class CursorError extends Error {
+  /**
+   *
+   * @param message
+   */
   constructor(message) {
     super(message);
     this.name = 'CursorError';
@@ -48,10 +53,19 @@ const responseHelper = {
   error: (message, code = 'BAD_REQUEST') => ({ error: { code, message } }),
 };
 
+/**
+ *
+ * @param payload
+ */
 function encodeCursor(payload) {
   return Buffer.from(JSON.stringify(payload)).toString('base64');
 }
 
+/**
+ *
+ * @param cursor
+ * @param expectedSortField
+ */
 function decodeCursor(cursor, expectedSortField) {
   if (typeof cursor !== 'string' || !cursor.trim()) {
     throw new CursorError('Cursor must be a non-empty string');
@@ -144,8 +158,12 @@ function decodeCursor(cursor, expectedSortField) {
   throw new CursorError('Invalid cursor payload format');
 }
 
+/**
+ *
+ * @param row
+ */
 function redactRow(row) {
-  if (!row) return row;
+  if (!row) {return row;}
   const copy = { ...row };
   delete copy.webhook_secret;
   delete copy.secret;
@@ -158,10 +176,16 @@ function redactRow(row) {
 
 const _adminApiKeyMiddleware = authenticateApiKey();
 
+/**
+ *
+ * @param req
+ * @param res
+ * @param next
+ */
 function adminAuth(req, res, next) {
   if (req.headers['x-api-key']) {
     return _adminApiKeyMiddleware(req, res, (err) => {
-      if (err) return next(err);
+      if (err) {return next(err);}
       if (req.apiClient?.tenantId) {
         req.tenantId = req.apiClient.tenantId;
       }
@@ -170,7 +194,7 @@ function adminAuth(req, res, next) {
   }
 
   return authenticateToken(req, res, (err) => {
-    if (err) return next(err);
+    if (err) {return next(err);}
     if (req.user?.tenantId) {
       req.tenantId = req.user.tenantId;
     }
@@ -438,7 +462,7 @@ router.get('/dead-letters', async (req, res, next) => {
 
 // ── POST /replay/:id ─────────────────────────────────────────────────────────
 
-router.post('/replay/:id', async (req, res) => {
+router.post('/replay/:id', idempotencyMiddleware, async (req, res) => {
   const { id } = req.params;
   try {
     await replayWebhook(id);
@@ -451,6 +475,12 @@ router.post('/replay/:id', async (req, res) => {
     if (err.code === 'ALREADY_RESOLVED') {
       return res.status(409).json({ error: `Dead-letter row already resolved: ${id}` });
     }
+    if (err.code === 'REPLAY_IN_PROGRESS') {
+      return res.status(409).json({ error: err.message });
+    }
+    if (err.code === 'REPLAY_CAP_REACHED') {
+      return res.status(422).json({ error: err.message });
+    }
     logger.error({ deadLetterId: id, err: err.message }, 'Admin replay failed');
     return res.status(502).json({ error: `Replay failed: ${err.message}` });
   }
@@ -458,7 +488,7 @@ router.post('/replay/:id', async (req, res) => {
 
 // ── POST /replay (batch) ──────────────────────────────────────────────────────
 
-router.post('/replay', async (req, res) => {
+router.post('/replay', idempotencyMiddleware, async (req, res) => {
   const { ids, tenantId, limit = 50 } = req.body || {};
 
   if (!ids && !tenantId) {
@@ -528,6 +558,27 @@ router.post('/resolve/:id', async (req, res) => {
   await resolveDeadLetter(id);
   logger.info({ deadLetterId: id, adminClient: req.apiClient?.clientId || req.user?.sub }, 'Admin resolved dead-letter without replay');
   return res.status(200).json({ resolved: id });
+});
+
+// ── GET /rotation-status ──────────────────────────────────────────────────
+
+router.get('/rotation-status', async (req, res) => {
+  const currentKey = process.env.WEBHOOK_SIGNING_KEY || null;
+  const retiringKey = process.env.WEBHOOK_SIGNING_KEY_RETIRING || null;
+  const currentKeyId = process.env.WEBHOOK_SIGNING_KEY_ID || 'current';
+  const retiringKeyId = process.env.WEBHOOK_SIGNING_KEY_RETIRING_ID || 'retiring';
+
+  const status = {
+    rotationActive: Boolean(currentKey && retiringKey),
+    currentKeyConfigured: Boolean(currentKey),
+    retiringKeyConfigured: Boolean(retiringKey),
+    currentKeyId: currentKey ? currentKeyId : null,
+    retiringKeyId: retiringKey ? retiringKeyId : null,
+    dualKeyVerificationEnabled: Boolean(currentKey && retiringKey),
+    timestamp: new Date().toISOString(),
+  };
+
+  return res.status(200).json({ data: status });
 });
 
 module.exports = router;

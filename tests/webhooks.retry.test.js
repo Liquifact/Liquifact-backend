@@ -83,6 +83,8 @@ function makeDeadLetterRow(overrides = {}) {
     payload: JSON.stringify({ event: 'escrow_funded', invoiceId: 'inv_001' }),
     webhook_url: 'https://merchant.example.com/hook',
     attempts: 3,
+    replay_count: 0,
+    is_replaying: false,
     last_error: 'connect ECONNREFUSED',
     resolved: false,
     resolved_at: null,
@@ -106,6 +108,7 @@ function makeQ({ first = undefined, returning = undefined, select = undefined } 
     whereIn: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
     limit: jest.fn().mockReturnThis(),
+    forUpdate: jest.fn().mockReturnThis(),
     select: jest.fn().mockImplementation(function () {
       if (select !== undefined) {
         // select is either a value to resolve with, or this builder returns itself for chaining
@@ -132,6 +135,8 @@ function mockDbSequence(calls) {
     i += 1;
     return q || makeQ(); // fallback to empty mock
   });
+  db.transaction = jest.fn(cb => cb(db));
+  db.fn = { now: jest.fn().mockReturnValue('now()') };
 }
 
 // ── writeDeadLetter ───────────────────────────────────────────────────────────
@@ -203,8 +208,7 @@ describe('replayWebhook', () => {
     mockFetch.mockResolvedValue({ ok: true, status: 200 });
 
     mockDbSequence([
-      makeQ({ first: row }),                                                    // SELECT dead-letter
-      makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),            // SELECT tenant
+      makeQ({ first: row }), makeQ(), // SELECT dead-letter `n        makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),            // SELECT tenant
       makeQ(),                                                                   // UPDATE resolve
     ]);
 
@@ -229,8 +233,7 @@ describe('replayWebhook', () => {
 
     const resolveQ = makeQ();
     mockDbSequence([
-      makeQ({ first: row }),
-      makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
+      makeQ({ first: row }), makeQ(), makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
       resolveQ,
     ]);
 
@@ -261,6 +264,22 @@ describe('replayWebhook', () => {
     });
   });
 
+  it('throws REPLAY_IN_PROGRESS when the row is already replaying', async () => {
+    mockDbSequence([makeQ({ first: makeDeadLetterRow({ is_replaying: true }) })]);
+
+    await expect(replayWebhook('dl-uuid-1')).rejects.toMatchObject({
+      code: 'REPLAY_IN_PROGRESS',
+    });
+  });
+
+  it('throws REPLAY_CAP_REACHED when the replay count is >= 10', async () => {
+    mockDbSequence([makeQ({ first: makeDeadLetterRow({ replay_count: 10 }) })]);
+
+    await expect(replayWebhook('dl-uuid-1')).rejects.toMatchObject({
+      code: 'REPLAY_CAP_REACHED',
+    });
+  });
+
   it('throws when tenant webhook secret is not configured', async () => {
     mockDbSequence([
       makeQ({ first: makeDeadLetterRow() }),
@@ -275,8 +294,7 @@ describe('replayWebhook', () => {
     mockFetch.mockResolvedValue({ ok: false, status: 503 });
 
     mockDbSequence([
-      makeQ({ first: row }),
-      makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
+      makeQ({ first: row }), makeQ(), makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
     ]);
 
     await expect(replayWebhook('dl-uuid-1')).rejects.toThrow('Webhook replay responded with 503');
@@ -288,8 +306,7 @@ describe('replayWebhook', () => {
 
     const resolveQ = makeQ();
     mockDbSequence([
-      makeQ({ first: row }),
-      makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
+      makeQ({ first: row }), makeQ(), makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
       resolveQ,
     ]);
 
@@ -306,8 +323,7 @@ describe('replayWebhook', () => {
       .mockResolvedValueOnce({ ok: true, status: 200 });
 
     mockDbSequence([
-      makeQ({ first: row }),
-      makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
+      makeQ({ first: row }), makeQ(), makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
       makeQ(),  // first resolve
       makeQ({ first: { ...row, resolved: false } }),
       makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
@@ -337,8 +353,7 @@ describe('webhookReplayHandler', () => {
     global.fetch.mockResolvedValue({ ok: true, status: 200 });
 
     mockDbSequence([
-      makeQ({ first: row }),
-      makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
+      makeQ({ first: row }), makeQ(), makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
       makeQ(),
     ]);
 
@@ -376,8 +391,7 @@ describe('webhookReplayHandler', () => {
     global.fetch.mockResolvedValue({ ok: false, status: 500 });
 
     mockDbSequence([
-      makeQ({ first: row }),
-      makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
+      makeQ({ first: row }), makeQ(), makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
     ]);
 
     await expect(
@@ -456,8 +470,7 @@ describe('Admin webhook routes', () => {
       global.fetch.mockResolvedValue({ ok: true, status: 200 });
 
       mockDbSequence([
-        makeQ({ first: row }),
-        makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
+        makeQ({ first: row }), makeQ(), makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
         makeQ(),
       ]);
 
@@ -474,8 +487,7 @@ describe('Admin webhook routes', () => {
       global.fetch.mockResolvedValue({ ok: true, status: 200 });
 
       mockDbSequence([
-        makeQ({ first: row }),
-        makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
+        makeQ({ first: row }), makeQ(), makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
         makeQ(),
       ]);
 
@@ -511,8 +523,7 @@ describe('Admin webhook routes', () => {
       global.fetch.mockResolvedValue({ ok: false, status: 503 });
 
       mockDbSequence([
-        makeQ({ first: row }),
-        makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
+        makeQ({ first: row }), makeQ(), makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
       ]);
 
       const res = await request(app)
@@ -560,11 +571,9 @@ describe('Admin webhook routes', () => {
       // 2+3+4. Per-row fetches and resolves
       mockDbSequence([
         batchQ,
-        makeQ({ first: rowDetail1 }),
-        makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
+        makeQ({ first: row }), makeQ(), makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
         makeQ(),
-        makeQ({ first: rowDetail2 }),
-        makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
+        makeQ({ first: row }), makeQ(), makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
         makeQ(),
       ]);
 
@@ -594,11 +603,9 @@ describe('Admin webhook routes', () => {
 
       mockDbSequence([
         batchQ,
-        makeQ({ first: rowOk }),
-        makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
+        makeQ({ first: rowOk }), makeQ(), makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
         makeQ(),
-        makeQ({ first: rowFail }),
-        makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
+        makeQ({ first: rowFail }), makeQ(), makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
       ]);
 
       const res = await request(app)
@@ -624,8 +631,7 @@ describe('Admin webhook routes', () => {
 
       mockDbSequence([
         tenantQ,
-        makeQ({ first: rowDetail }),
-        makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
+        makeQ({ first: row }), makeQ(), makeQ({ first: { settings: { webhook_secret: 'sec123' } } }),
         makeQ(),
       ]);
 
@@ -679,3 +685,6 @@ describe('Admin webhook routes', () => {
     });
   });
 });
+
+
+

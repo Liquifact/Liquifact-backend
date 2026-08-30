@@ -194,7 +194,7 @@ function normalizeTransitionReason(reason) {
  *   Validation result.
  */
 function validateTransition(ctx) {
-  const { invoiceId, currentState, targetState, actor } = ctx || {};
+  const { invoiceId, currentState, targetState, actor, revision } = ctx || {};
 
   if (!invoiceId) {
     return { isValid: false, code: 'MISSING_INVOICE_ID' };
@@ -207,6 +207,9 @@ function validateTransition(ctx) {
   }
   if (!actor) {
     return { isValid: false, code: 'MISSING_ACTOR' };
+  }
+  if (!revision) {
+    return { isValid: false, code: 'MISSING_REVISION' };
   }
   if (currentState === targetState) {
     return { isValid: false, code: 'ALREADY_IN_TARGET_STATE' };
@@ -289,6 +292,7 @@ async function executeTransition(ctx) {
       MISSING_CURRENT_STATE: 'Current state is required.',
       MISSING_TARGET_STATE: 'Target state is required.',
       MISSING_ACTOR: 'Actor is required.',
+      MISSING_REVISION: 'Invoice revision is required.',
       INVALID_CURRENT_STATE: 'Current state is not recognised.',
       INVALID_TARGET_STATE: 'Target state is not recognised.',
       ALREADY_IN_TARGET_STATE: 'Invoice is already in the target state.',
@@ -307,8 +311,8 @@ async function executeTransition(ctx) {
     );
   }
 
-  const { invoiceId, currentState, targetState, actor, ipAddress = 'unknown', userAgent = 'unknown', metadata = {} } = ctx;
-  const reason = ctx.reason != null ? normalizeTransitionReason(ctx.reason) : undefined;
+  const { invoiceId, currentState, targetState, actor, revision, ipAddress = 'unknown', userAgent = 'unknown', metadata = {} } = ctx;
+  const reason = validation.reason || undefined;
 
   const auditLog = await createAuditLog({
     actor,
@@ -321,6 +325,7 @@ async function executeTransition(ctx) {
     userAgent,
     metadata: {
       ...metadata,
+      revision,
       reason: reason || null,
       transitionType: `${currentState}_to_${targetState}`,
     },
@@ -359,7 +364,7 @@ async function executeTransition(ctx) {
     success: true,
     previousState: currentState,
     newState: targetState,
-    auditLog,
+    revision,
     transitionedAt,
     transitionedBy: actor,
     auditLog,

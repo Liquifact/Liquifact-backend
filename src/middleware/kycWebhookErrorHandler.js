@@ -16,6 +16,7 @@
 const KycWebhookError = require('../errors/KycWebhookError');
 const formatProblemDetails = require('../utils/problemDetails');
 const logger = require('../logger');
+const { sanitizeTelemetryString } = require('../utils/telemetryRedaction');
 
 /**
  * HTTP status codes that are considered retryable.
@@ -71,9 +72,15 @@ function kycWebhookErrorHandler(err, req, res, next) {
   const correlationId = req.correlationId || req.id || 'unknown';
   const retryable = RETRYABLE_CODES.has(err.code) || RETRYABLE_STATUSES.has(err.status);
 
+  // `err.message` is redacted here as a final, defense-in-depth choke point
+  // for the log line specifically (issue #1200) — the messages that can
+  // carry provider-controlled content are already sanitized at the point
+  // they are constructed (see kycWebhookService.js), so this is a backstop
+  // rather than the only line of defense. `correlationId` is a value this
+  // service generates itself, never provider input, so it is logged as-is.
   logger.warn(
     {
-      err: err.message,
+      err: sanitizeTelemetryString(err.message),
       code: err.code,
       status: err.status,
       correlationId,

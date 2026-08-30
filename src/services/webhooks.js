@@ -42,6 +42,59 @@ const MAX_SIGNATURE_HEADER_PARTS = 10;
 // Maximum outgoing payload size limit (Default: 128 KB)
 const MAX_PAYLOAD_BYTES = Number(process.env.WEBHOOK_MAX_PAYLOAD_BYTES || 128 * 1024);
 
+// ---- Fencing token utilities ----
+const fenceStore = new Map();
+const FENCE_TTL_MS = Number(process.env.WEBHOOK_FENCE_TTL_MS || 30 * 1000);
+
+class FenceError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'FenceError';
+    this.code = 'FENCE_EXPIRED';
+  }
+}
+
+function fenceKey(event, invoiceId) {
+  return `${event}:${invoiceId}`;
+}
+
+function setFence(key, token) {
+  fenceStore.set(key, { token, expiresAt: Date.now() + FENCE_TTL_MS });
+}
+
+function isFenceValid(key, token) {
+  const entry = fenceStore.get(key);
+  if (!entry || entry.token !== token) return false;
+  if (entry.expiresAt < Date.now()) return false;
+  return true;
+}
+
+function assertFence(key, token) {
+  if (!token) return; // no fencing required
+  if (!isFenceValid(key, token)) {
+    logger.warn({ key }, 'Fence token invalid or expired');
+    throw new FenceError(`Fence expired or invalid for job ${key}`);
+  }
+}
+
+function renewFence(key, token) {
+  if (!token) return;
+  if (!isFenceValid(key, token)) {
+    throw new FenceError(`Cannot renew invalid fence for ${key}`);
+  }
+  fenceStore.get(key).expiresAt = Date.now() + FENCE_TTL_MS;
+  logger.debug({ key }, 'Webhook fence renewed');
+}
+
+function clearFence(key, token) {
+  if (!token) return;
+  const entry = fenceStore.get(key);
+  if (entry && entry.token === token) {
+    fenceStore.delete(key);
+    logger.debug({ key }, 'Webhook fence completed');
+  }
+}
+
 /**
  * Recursively sorts keys of an object to ensure deterministic JSON serialization.
  *
@@ -112,7 +165,8 @@ function validatePayloadBounds(body) {
  * @param {Object} [additionalData={}] - Additional data to include in the payload.
  * @returns {Promise<void>}
  */
-async function emitWebhook(event, invoiceId, additionalData = {}) {
+async function emitWebhook(event, invoiceId, additionalData = {}, fenceToken = null) {
+  const key = fenceKey(event, invoiceId);
   try {
     const invoice = await db('invoices').select('tenant_id').where('id', invoiceId).first();
     if (!invoice) {
@@ -162,6 +216,7 @@ async function emitWebhook(event, invoiceId, additionalData = {}) {
 
     const shouldRetry = (err) => {
       if (!err) { return false; }
+      if (err && err.code === 'FENCE_EXPIRED') { return false; }
       if (err.code === 'PAYLOAD_TOO_LARGE') { return false; }
       if (err.code) {
         return ['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN'].includes(err.code) || err.name === 'AbortError';
@@ -174,6 +229,7 @@ async function emitWebhook(event, invoiceId, additionalData = {}) {
     };
 
     const operation = async () => {
+      assertFence(key, fenceToken);
       const controller = new AbortController();
       const timeoutMs = Number(process.env.WEBHOOK_TIMEOUT_MS || 5000);
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -201,6 +257,7 @@ async function emitWebhook(event, invoiceId, additionalData = {}) {
     };
 
     const onRetry = async ({ attempt, error }) => {
+      assertFence(key, fenceToken);
       try {
         await appendAuditEvent({
           eventType: 'webhook_delivery',
@@ -225,6 +282,7 @@ async function emitWebhook(event, invoiceId, additionalData = {}) {
     try {
       const result = await withRetry(operation, { maxRetries, baseDelay, maxDelay, shouldRetry, onRetry });
 
+      assertFence(key, fenceToken);
       try {
         await appendAuditEvent({
           eventType: 'webhook_delivery',
@@ -239,9 +297,15 @@ async function emitWebhook(event, invoiceId, additionalData = {}) {
       } catch (e) {
         logger.warn({ err: e.message }, 'Failed to append audit event for webhook success');
       }
+      clearFence(key, fenceToken);
 
       logger.info({ event, invoiceId, tenant_id }, 'Webhook emitted successfully');
     } catch (error) {
+      if (error && error.code === 'FENCE_EXPIRED') {
+        logger.warn({ event, invoiceId, key, error: error.message }, 'Webhook job fenced; aborting remaining work');
+        return;
+      }
+      assertFence(key, fenceToken);
       try {
         await writeDeadLetter({
           tenantId: tenant_id,
@@ -255,6 +319,7 @@ async function emitWebhook(event, invoiceId, additionalData = {}) {
       } catch (e) {
         logger.warn({ err: e.message }, 'Failed to persist webhook dead-letter');
       }
+      clearFence(key, fenceToken);
 
       try {
         emitWebhook._failureCounter.inc();
@@ -278,8 +343,8 @@ async function emitWebhook(event, invoiceId, additionalData = {}) {
  * @param {Object} params.state - Escrow state payload.
  * @returns {Promise<void>}
  */
-async function emitEscrowReadWebhook({ eventType, invoiceId, state }) {
-  return emitWebhook(eventType || 'escrow.read', invoiceId, { state });
+async function emitEscrowReadWebhook({ eventType, invoiceId, state, fenceToken }) {
+  return emitWebhook(eventType || 'escrow.read', invoiceId, { state }, fenceToken);
 }
 
 /**
@@ -353,7 +418,9 @@ async function writeDeadLetter({ tenantId, invoiceId, event, payload, webhookUrl
 /**
  * Replays a dead-letter row by re-signing and re-sending the stored payload.
  */
-async function replayWebhook(deadLetterId) {
+async function replayWebhook(deadLetterId, fenceToken = null) {
+  const key = fenceKey('deadletter', String(deadLetterId));
+  assertFence(key, fenceToken);
   const row = await db('webhook_dead_letters').where('id', deadLetterId).first();
   if (!row) {
     throw Object.assign(new Error(`Dead-letter row not found: ${deadLetterId}`), { code: 'NOT_FOUND' });
@@ -362,43 +429,71 @@ async function replayWebhook(deadLetterId) {
     throw Object.assign(new Error(`Dead-letter row already resolved: ${deadLetterId}`), { code: 'ALREADY_RESOLVED' });
   }
 
-  const tenant = await db('tenants').select('settings').where('id', row.tenant_id).first();
-  const secret = tenant?.settings?.webhook_secret;
-  if (!secret) {
-    throw new Error(`No webhook secret configured for tenant ${row.tenant_id}`);
+    const MAX_REPLAYS = 10;
+    if (row.replay_count >= MAX_REPLAYS) {
+      throw Object.assign(new Error(`Replay cap reached for dead-letter row: ${deadLetterId}`), { code: 'REPLAY_CAP_REACHED' });
+    }
+    if (row.is_replaying) {
+      throw Object.assign(new Error(`Replay already in progress for dead-letter row: ${deadLetterId}`), { code: 'REPLAY_IN_PROGRESS' });
+    }
+
+    // Claim the row atomically so concurrent replays cannot double-send.
+    await db('webhook_dead_letters')
+      .where('id', deadLetterId)
+      .update({
+        is_replaying: true,
+        replay_count: row.replay_count + 1,
+        updated_at: db.fn.now(),
+      });
+
+    try {
+      const tenant = await db('tenants').select('settings').where('id', row.tenant_id).first();
+    const secret = tenant?.settings?.webhook_secret;
+    if (!secret) {
+      throw new Error(`No webhook secret configured for tenant ${row.tenant_id}`);
+    }
+
+    const body = typeof row.payload === 'string' ? row.payload : JSON.stringify(row.payload);
+
+    // Enforce payload bounding guard on replay
+    validatePayloadBounds(body);
+
+    const signatureHeader = createSignatureHeader(secret, body);
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+    let response;
+    try {
+      response = await fetch(row.webhook_url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Signature': signatureHeader,
+        },
+        body,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    if (!response.ok) {
+      throw new Error(`Webhook replay responded with ${response.status}`);
+    }
+
+    await resolveDeadLetter(deadLetterId);
+    logger.info({ deadLetterId, webhook_url: row.webhook_url }, 'Webhook replayed successfully');
+  } catch (err) {
+    await db('webhook_dead_letters')
+      .where('id', deadLetterId)
+      .update({
+        is_replaying: false,
+        last_error: err.message,
+        updated_at: db.fn.now()
+      });
+    throw err;
   }
-
-  const body = typeof row.payload === 'string' ? row.payload : JSON.stringify(row.payload);
-
-  // Enforce payload bounding guard on replay
-  validatePayloadBounds(body);
-
-  const signatureHeader = createSignatureHeader(secret, body);
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 5000);
-
-  let response;
-  try {
-    response = await fetch(row.webhook_url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Signature': signatureHeader,
-      },
-      body,
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timeoutId);
-  }
-
-  if (!response.ok) {
-    throw new Error(`Webhook replay responded with ${response.status}`);
-  }
-
-  await resolveDeadLetter(deadLetterId);
-  logger.info({ deadLetterId, webhook_url: row.webhook_url }, 'Webhook replayed successfully');
 }
 
 const MAX_CONFIG_WEBHOOK_PAYLOAD_BYTES = 32768;
@@ -999,8 +1094,10 @@ async function emitIndexerWebhook({ tenantId, event = 'indexer.event_ingested', 
 /**
  * Marks a dead-letter row as resolved without re-sending.
  */
-async function resolveDeadLetter(deadLetterId) {  await db('webhook_dead_letters').where('id', deadLetterId).update({
+async function resolveDeadLetter(deadLetterId) {
+  await db('webhook_dead_letters').where('id', deadLetterId).update({
     resolved: true,
+    is_replaying: false,
     resolved_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   });

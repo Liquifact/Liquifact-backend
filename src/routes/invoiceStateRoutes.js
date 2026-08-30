@@ -7,14 +7,12 @@ const { extractTenant } = require('../middleware/tenant');
 const { createCompressionMiddleware } = require('../middleware/compression');
 const { invoiceStateErrorHandler } = require('../middleware/invoiceStateErrorHandler');
 const { requireKycForFunding, auditKycAccess } = require('../middleware/kycGating');
+const { instrumentInvoiceState } = require('../middleware/invoiceStateMetrics');
 const responseHelper = require('../utils/responseHelper');
 const { cacheResponse, makeInvoiceStateKey } = require('../middleware/cache');
 const { getSharedStore } = require('../services/cacheStore');
 const { cacheConfig } = require('../config/cache');
 const { invoiceStateCacheEvictionsTotal } = require('../metrics');
-const { extractTenant } = require('../middleware/tenant');
-const { createCompressionMiddleware } = require('../middleware/compression');
-const { invoiceStateErrorHandler } = require('../middleware/invoiceStateErrorHandler');
 
 router.use(extractTenant);
 
@@ -142,14 +140,11 @@ router.get('/:id/state', cacheState, async (req, res, next) => {
 });
 
 router.post('/:id/transition', async (req, res, next) => {
-  const { targetState, reason } = req.body || {};
+  const { targetState, reason, revision } = req.body || {};
 
   try {
     const context = buildContext(req, { action: 'transition', targetState });
-    const result = await invoiceStateService.transition(req.params.id, req.tenantId, targetState, reason, context);
-
-    const context = buildContext(req, { action: 'transition' });
-    const result = await invoiceStateService.transition(req.params.id, req.tenantId, targetState, reason, context);
+    const result = await invoiceStateService.transition(req.params.id, req.tenantId, targetState, reason, revision, context);
 
     invalidateInvoiceStateCache(req.tenantId, req.params.id);
 
@@ -217,11 +212,11 @@ router.post('/:id/transition', async (req, res, next) => {
  *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
  */
 router.post('/:id/approve', instrumentInvoiceState('approve', async (req, res, next) => {
-  const { reason } = req.body || {};
+  const { reason, revision } = req.body || {};
 
   try {
     const context = buildContext(req, { action: 'approve' });
-    const result = await invoiceStateService.approve(req.params.id, req.tenantId, reason, context);
+    const result = await invoiceStateService.approve(req.params.id, req.tenantId, reason, revision, context);
 
     invalidateInvoiceStateCache(req.tenantId, req.params.id);
 
@@ -287,14 +282,14 @@ router.post('/:id/approve', instrumentInvoiceState('approve', async (req, res, n
  *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
  */
 router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, instrumentInvoiceState('link-escrow', async (req, res, next) => {
-  const { escrowId, reason } = req.body || {};
+  const { escrowId, reason, revision } = req.body || {};
 
   try {
     const context = buildContext(req, {
       action: 'link-escrow',
       escrowId: escrowId || 'pending',
     });
-    const result = await invoiceStateService.linkEscrow(req.params.id, req.tenantId, escrowId, reason, context);
+    const result = await invoiceStateService.linkEscrow(req.params.id, req.tenantId, escrowId, reason, revision, context);
 
     invalidateInvoiceStateCache(req.tenantId, req.params.id);
 
@@ -511,95 +506,11 @@ router.post('/bulk', instrumentInvoiceState('bulk', async (req, res, _next) => {
       correlationId: getCorrelationId(req),
       message: 'Bulk invoice-state operation completed',
     });
+  } catch (error) {
+    // Delegate EMPTY_BATCH / BATCH_OVER_CAP and other StateTransitionErrors
+    // to the shared invoiceStateErrorHandler mounted below (issue #1113).
+    return _next(error);
   }
-
-  if (items.length > MAX_BULK_ITEMS) {
-    return res.status(400).json({
-      ...responseHelper.error(`Batch size exceeds maximum of ${MAX_BULK_ITEMS}`, 'BATCH_OVER_CAP'),
-      correlationId: getCorrelationId(req),
-    });
-  }
-
-  const results = [];
-
-  for (const [index, item] of items.entries()) {
-    let invoiceId;
-    let action;
-    let reason;
-    let escrowId;
-    let targetState;
-
-    try {
-      const payload = item || {};
-      ({ invoiceId, action, reason, escrowId, targetState } = payload);
-
-      if (!invoiceId || typeof invoiceId !== 'string' || invoiceId.trim().length === 0) {
-        throw Object.assign(new Error('invoiceId is required and must be a non-empty string'), { code: 'MISSING_INVOICE_ID' });
-      }
-
-      if (!action || typeof action !== 'string') {
-        throw Object.assign(new Error('action is required and must be a string'), { code: 'MISSING_ACTION' });
-      }
-
-      const context = buildContext(req, { action, bulkIndex: index });
-      let result;
-
-      switch (action) {
-        case 'approve': {
-          result = await invoiceStateService.approve(invoiceId.trim(), req.tenantId, reason, context);
-          results.push({ index, success: true, action, result });
-          break;
-        }
-        case 'reject': {
-          result = await invoiceStateService.reject(invoiceId.trim(), req.tenantId, reason, context);
-          results.push({ index, success: true, action, result });
-          break;
-        }
-        case 'link-escrow': {
-          result = await invoiceStateService.linkEscrow(invoiceId.trim(), req.tenantId, escrowId || null, reason, context);
-          results.push({ index, success: true, action, result });
-          break;
-        }
-        case 'transition': {
-          if (!targetState || typeof targetState !== 'string' || targetState.trim().length === 0) {
-            throw Object.assign(new Error('targetState is required for transition action'), { code: 'MISSING_TARGET_STATE' });
-          }
-          result = await invoiceStateService.transition(invoiceId.trim(), req.tenantId, targetState.trim(), reason, context);
-          results.push({ index, success: true, action, result });
-          break;
-        }
-        default: {
-          throw Object.assign(new Error(`Unknown action: ${action}`), { code: 'INVALID_ACTION' });
-        }
-      }
-    } catch (error) {
-      // Structured, PII-safe log: bounded action/code only — no invoiceId,
-      // error message, or stack trace (per #1111, never log secrets/PII).
-      logger.warn(
-        { index, action, code: error.code || 'BULK_ITEM_ERROR' },
-        'invoice-state bulk item failed'
-      );
-      results.push({
-        index,
-        success: false,
-        error: error.message,
-        code: error.code || 'BULK_ITEM_ERROR',
-      });
-    }
-    return next(error);
-  }
-
-  const summary = {
-    total: results.length,
-    succeeded: results.filter((item) => item.success).length,
-    failed: results.filter((item) => !item.success).length,
-  };
-
-  return res.status(200).json({
-    ...responseHelper.success({ results, summary }),
-    correlationId: req.correlationId || req.id || null,
-    message: 'Bulk invoice-state operation completed',
-  });
 }));
 
 // Mount the shared invoice-state error middleware after all route

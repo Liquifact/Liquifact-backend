@@ -2,6 +2,7 @@
 
 const express = require('express');
 const router = express.Router();
+const db = require('../db/knex');
 const { adminStack } = require('../middleware/stacks');
 const {
   softDeleteKycWebhook,
@@ -10,6 +11,11 @@ const {
   purgeExpiredSoftDeletes,
   SOFT_DELETE_ERRORS,
 } = require('../services/kycWebhookSoftDelete');
+const {
+  listQuarantinedWebhooks,
+  getQuarantinedWebhookById,
+} = require('../services/kycQuarantineService');
+const { CursorError } = require('../utils/cursorPagination');
 const { getAuditLogs } = require('../services/auditLog');
 const { redactValue } = require('../services/auditLogStore');
 const AppError = require('../errors/AppError');
@@ -19,6 +25,12 @@ router.use(...adminStack);
 
 const MAX_DELETE_REASON_LENGTH = 500;
 
+/**
+ * Resolves the authenticated actor identifier from the request object.
+ *
+ * @param {import('express').Request} req - Express request object
+ * @returns {string|null} The resolved actor ID or null if unauthenticated
+ */
 function _resolveActor(req) {
   const jwtActor = req.user && (req.user.sub || req.user.userId || req.user.id);
   if (jwtActor) {
@@ -30,6 +42,12 @@ function _resolveActor(req) {
   return null;
 }
 
+/**
+ * Parses and validates a soft-delete reason string.
+ *
+ * @param {unknown} reason - Raw reason value
+ * @returns {{ok: boolean, value?: string|null, detail?: string}} Validation outcome
+ */
 function _parseDeleteReason(reason) {
   if (reason === undefined || reason === null || reason === '') {
     return { ok: true, value: null };
@@ -47,6 +65,13 @@ function _parseDeleteReason(reason) {
   return { ok: true, value: trimmed || null };
 }
 
+/**
+ * Maps soft-delete service errors to RFC 7807 problem details AppErrors.
+ *
+ * @param {Error} err - Error thrown by soft-delete service
+ * @param {import('express').Request} req - Express request object
+ * @returns {AppError} Formatted AppError instance
+ */
 function _mapSoftDeleteError(err, req) {
   const known = {
     [SOFT_DELETE_ERRORS.INVALID_SME_ID]: {
@@ -215,5 +240,163 @@ router.post('/webhooks/purge', async (req, res, next) => {
     return next(err);
   }
 });
+
+// ── Quarantine inspection routes (issue #1197) ──────────────────────────────
+
+/**
+ * Handles GET /api/admin/kyc/quarantine to list quarantined webhook records.
+ *
+ * @param {import('express').Request} req - Express request object
+ * @param {import('express').Response} res - Express response object
+ * @param {import('express').NextFunction} next - Express next function
+ * @returns {Promise<void>}
+ */
+async function _handleListQuarantine(req, res, next) {
+  try {
+    const {
+      limit: rawLimit,
+      offset: rawOffset,
+      cursor,
+      smeId,
+      event,
+      reason,
+      errorCode,
+      createdAfter,
+      createdBefore,
+    } = req.query;
+
+    const tenantId = req.tenantId;
+    if (!tenantId) {
+      return next(new AppError({
+        type: 'https://liquifact.com/probs/forbidden',
+        title: 'Forbidden',
+        status: 403,
+        detail: 'Tenant context required',
+        instance: req.originalUrl,
+      }));
+    }
+
+    if (rawLimit !== undefined) {
+      const v = parseInt(rawLimit, 10);
+      if (isNaN(v) || v < 1 || v > 100) {
+        return next(new AppError({
+          type: 'https://liquifact.com/probs/validation-error',
+          title: 'Validation Error',
+          status: 400,
+          detail: 'limit must be an integer between 1 and 100',
+          instance: req.originalUrl,
+        }));
+      }
+    }
+
+    if (rawOffset !== undefined) {
+      const v = parseInt(rawOffset, 10);
+      if (isNaN(v) || v < 0) {
+        return next(new AppError({
+          type: 'https://liquifact.com/probs/validation-error',
+          title: 'Validation Error',
+          status: 400,
+          detail: 'offset must be a non-negative integer',
+          instance: req.originalUrl,
+        }));
+      }
+    }
+
+    if (createdAfter !== undefined && isNaN(Date.parse(createdAfter))) {
+      return next(new AppError({
+        type: 'https://liquifact.com/probs/validation-error',
+        title: 'Validation Error',
+        status: 400,
+        detail: 'createdAfter must be a valid ISO 8601 date-time string',
+        instance: req.originalUrl,
+      }));
+    }
+
+    if (createdBefore !== undefined && isNaN(Date.parse(createdBefore))) {
+      return next(new AppError({
+        type: 'https://liquifact.com/probs/validation-error',
+        title: 'Validation Error',
+        status: 400,
+        detail: 'createdBefore must be a valid ISO 8601 date-time string',
+        instance: req.originalUrl,
+      }));
+    }
+
+    const result = await listQuarantinedWebhooks({
+      tenantId,
+      smeId,
+      event,
+      reason,
+      errorCode,
+      createdAfter,
+      createdBefore,
+      cursor,
+      rawLimit,
+      rawOffset,
+      dbClient: req._dbClient || db,
+    });
+
+    return res.json(result);
+  } catch (err) {
+    if (err instanceof CursorError) {
+      return next(new AppError({
+        type: 'https://liquifact.com/probs/validation-error',
+        title: 'Validation Error',
+        status: 400,
+        detail: err.message,
+        instance: req.originalUrl,
+      }));
+    }
+    return next(err);
+  }
+}
+
+/**
+ * Handles GET /api/admin/kyc/quarantine/:id to fetch a single quarantined webhook record.
+ *
+ * @param {import('express').Request} req - Express request object
+ * @param {import('express').Response} res - Express response object
+ * @param {import('express').NextFunction} next - Express next function
+ * @returns {Promise<void>}
+ */
+async function _handleGetQuarantineById(req, res, next) {
+  try {
+    const { id } = req.params;
+    const tenantId = req.tenantId;
+    if (!tenantId) {
+      return next(new AppError({
+        type: 'https://liquifact.com/probs/forbidden',
+        title: 'Forbidden',
+        status: 403,
+        detail: 'Tenant context required',
+        instance: req.originalUrl,
+      }));
+    }
+
+    const record = await getQuarantinedWebhookById(id, {
+      tenantId,
+      dbClient: req._dbClient || db,
+    });
+
+    if (!record) {
+      return next(new AppError({
+        type: 'https://liquifact.com/probs/not-found',
+        title: 'Not Found',
+        status: 404,
+        detail: `Quarantine record not found: ${id}`,
+        instance: req.originalUrl,
+      }));
+    }
+
+    return res.json({ data: record });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+router.get('/quarantine', _handleListQuarantine);
+router.get('/webhooks/quarantine', _handleListQuarantine);
+router.get('/quarantine/:id', _handleGetQuarantineById);
+router.get('/webhooks/quarantine/:id', _handleGetQuarantineById);
 
 module.exports = router;

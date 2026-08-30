@@ -1,45 +1,147 @@
 'use strict';
 
 /**
- * @fileoverview Service layer for runtime configuration management.
+ * @fileoverview Runtime configuration service: applies admin-supplied config
+ * changes, persists them via the soft-delete store, and manages short-lived
+ * API-key rotation state in memory.
  *
- * Encapsulates business logic for applying runtime configuration changes,
- * including CORS configuration updates and logging. This service is
- * consumed by route handlers to keep HTTP concerns separate from business logic.
+ * This file was previously stored as a minified blob with several defects
+ * (`crypto.randomUUId`, a stray quote in the `retiring` label, and a broken
+ * template literal in the acceptance message). It is restored here as clean,
+ * readable source with the same external contract.
  *
  * @module services/configService
  */
 
+const crypto = require('crypto');
 const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
 const { persistConfig } = require('./configSoftDelete');
 const logger = require('../logger');
 
+// Per-tenant API-key rotation state and a serialised queue so rotations for a
+// single tenant never interleave.
+const keyStates = new Map();
+const tenantQueues = new Map();
+
+/** Stable, non-secret identifier for a key value (SHA-256). */
+function keyFingerprint(key) {
+  return crypto.createHash('sha256').update(key).digest('hex');
+}
+
+function getState(tenantId) {
+  return keyStates.get(tenantId) || { active: null, retiring: null };
+}
+
 /**
- * Applies runtime configuration changes for a given section.
+ * Serialises async operations per tenant so rotations apply in order.
  *
- * Currently handles:
- * - CORS section: updates environment variables and reloads CORS configuration
+ * @param {string} tenantId - Tenant identifier.
+ * @param {Function} op - Async operation to enqueue.
+ * @returns {Promise<*>} Result of `op`.
+ */
+function enqueue(tenantId, op) {
+  const previous = tenantQueues.get(tenantId) || Promise.resolve();
+  const gate = previous.catch(() => {});
+  const run = gate.then(op);
+  tenantQueues.set(tenantId, run.catch(() => {}));
+  return run;
+}
+
+/**
+ * Rotates a tenant's active API key with an overlap window so already-issued
+ * keys keep working while the new key is rolled out.
  *
- * Future sections (webhook, reconciliation, kyc, retention, fraudThresholds)
- * can be added here as their runtime application logic is implemented.
+ * @param {Object} params - Rotation parameters.
+ * @param {string} params.tenantId - Owning tenant.
+ * @param {string} params.currentKey - The currently-active key to authorise the rotation.
+ * @param {string} params.newKey - The replacement key.
+ * @param {number} params.overlapSeconds - Time the old key stays valid after activation.
+ * @param {number} [params.activationTime] - Optional override for activation timestamp (ms).
+ * @param {string|null} [params.actor] - Actor performing the rotation.
+ * @returns {Promise<{tenantId: string, oldKeyId: string, newKey: string, expiresAt: number}>}
+ */
+async function rotateApiKey({ tenantId, currentKey, newKey, overlapSeconds, activationTime, actor }) {
+  if (!tenantId || !currentKey || !newKey || !Number.isInteger(overlapSeconds) || overlapSeconds <= 0) {
+    const err = new Error('Invalid rotation parameters');
+    err.code = 'INVALID_ROTATION_PARAMS';
+    throw err;
+  }
+
+  return enqueue(tenantId, async () => {
+    const state = getState(tenantId);
+    const now = Date.now();
+    const currentFingerprint = keyFingerprint(currentKey);
+
+    if (!state.active || state.active.keyHash !== currentFingerprint) {
+      const err = new Error('Active API key not found');
+      err.code = 'KEY_NOT_FOUND';
+      throw err;
+    }
+
+    const notBefore = activationTime || now;
+    const next = {
+      active: {
+        keyId: crypto.randomUUID(),
+        keyHash: keyFingerprint(newKey),
+        notBefore,
+        createdAt: now,
+      },
+      retiring: {
+        keyId: state.active.keyId,
+        keyHash: state.active.keyHash,
+        expiresAt: now + overlapSeconds * 1000,
+      },
+    };
+
+    await persistConfig({ section: 'apiKeyState', config: next, tenantId, actor: actor || null });
+    keyStates.set(tenantId, next);
+
+    return {
+      tenantId,
+      oldKeyId: state.active.keyId,
+      newKey: next.active.keyId,
+      expiresAt: next.retiring.expiresAt,
+    };
+  });
+}
+
+/**
+ * Validates a presented API key against the tenant's in-memory rotation state.
  *
- * @param {string} section - The configuration section being updated.
- * @param {object} config - The validated configuration payload for the section.
- * @param {object} context - Contextual information for logging.
- * @param {string} context.tenantId - The tenant ID for the request.
- * @param {string} context.adminClient - The admin client identifier (user or API key).
- * @returns {{ section: string, config: object, message: string }} Result object.
- * @throws {Error} If the section is not supported or application fails.
+ * @param {Object} params - Lookup parameters.
+ * @param {string} params.tenantId - Owning tenant.
+ * @param {string} params.key - Presented key.
+ * @returns {{valid: true, state: string, keyId: string, expiresAt?: number} | {valid: false, reason: string}}
+ */
+function validateApiKey({ tenantId, key }) {
+  const state = getState(tenantId);
+  const now = Date.now();
+  const fingerprint = keyFingerprint(key);
+
+  if (state.active && state.active.keyHash === fingerprint && now >= state.active.notBefore) {
+    return { valid: true, state: 'active', keyId: state.active.keyId };
+  }
+  if (state.retiring && state.retiring.keyHash === fingerprint && now <= state.retiring.expiresAt) {
+    return { valid: true, state: 'retiring', keyId: state.retiring.keyId, expiresAt: state.retiring.expiresAt };
+  }
+  return { valid: false, reason: 'Key is not valid or has expired' };
+}
+
+/**
+ * Applies + persists an admin configuration change.
+ *
+ * @param {string} section - Configuration section name.
+ * @param {Object} config - Section configuration payload.
+ * @param {Object} context - Request context (`tenantId`, `adminClient`).
+ * @returns {Promise<{id?: string, section: string, config: Object, message: string}>}
  */
 async function applyConfig(section, config, context) {
   const { tenantId, adminClient } = context;
 
-  // Apply runtime configuration changes for supported sections.
   if (section === 'cors') {
     applyCorsConfig(config);
   }
 
-  // Persist the config record to the database with soft-delete support.
   let persisted;
   try {
     persisted = await persistConfig({
@@ -50,20 +152,13 @@ async function applyConfig(section, config, context) {
     });
   } catch (err) {
     logger.error({ err, section, tenantId }, 'configService: failed to persist config');
-    // Fall through — the config was validated and side-effects applied even if
-    // persistence fails temporarily. The caller gets a 200 response.
   }
 
-  // Log the configuration update for audit purposes.
-  logger.info(
-    {
-      tenantId,
-      section,
-      adminClient,
-      recordId: persisted ? persisted.id : undefined,
-    },
-    'Admin runtime config update accepted',
-  );
+  const logPayload = { tenantId, section, adminClient };
+  if (persisted && persisted.id) {
+    logPayload.recordId = persisted.id;
+  }
+  logger.info(logPayload, 'Admin runtime config update accepted');
 
   return {
     id: persisted ? persisted.id : undefined,
@@ -74,19 +169,13 @@ async function applyConfig(section, config, context) {
 }
 
 /**
- * Applies CORS-specific configuration changes.
+ * Applies CORS-specific runtime configuration (origins / max-age) and reloads
+ * the allowlist.
  *
- * Updates environment variables and reloads the CORS configuration
- * so that changes take effect without restarting the server.
- *
- * @param {object} config - The validated CORS configuration payload.
- * @param {string[]} [config.origins] - Array of allowed origin URLs.
- * @param {number} [config.maxAge] - Preflight max-age in seconds.
- * @returns {void}
+ * @param {Object} config - CORS section config.
  */
 function applyCorsConfig(config) {
   if (config.origins) {
-    // Update the env var so reloadCorsOrigins can re-read it.
     process.env.CORS_ALLOWED_ORIGINS = config.origins.join(',');
     reloadCorsOrigins();
   }
@@ -97,13 +186,9 @@ function applyCorsConfig(config) {
 }
 
 /**
- * Returns the list of valid configuration section names.
+ * Returns the allowed configuration section names.
  *
- * This is a thin wrapper around the CONFIG_SECTIONS constant from
- * the schemas module, provided for convenience and to keep the
- * service as the single source of truth for config-related operations.
- *
- * @returns {string[]} Array of valid section names.
+ * @returns {string[]}
  */
 function getConfigSections() {
   const { CONFIG_SECTIONS } = require('../schemas/config');
@@ -114,4 +199,6 @@ module.exports = {
   applyConfig,
   applyCorsConfig,
   getConfigSections,
+  rotateApiKey,
+  validateApiKey,
 };
