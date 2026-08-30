@@ -62,7 +62,8 @@ class ApiKeysCache {
     const config = options.config || parseApiKeysCacheConfig();
     this.ttlMs = Math.max(MIN_TTL_MS, Math.min(MAX_TTL_MS, options.ttlMs || config.ttlMs));
     this.maxEntries = Math.max(
-      MIN_MAX_ENTRIES/MAX_ENTRIES /* edit */
+      MIN_MAX_ENTRIES,
+      Math.min(MAX_MAX_ENTRIES, options.maxEntries || config.maxEntries)
     );
     this._cache = new Map();
   }
@@ -144,8 +145,8 @@ module.exports = {
   DEFAULT_TTL_MS,
   MIN_TTL_MS,
   MAX_TTL_MS,
-  DEFAULT_MAX_ENTRIES/MAX_ENTRIES /* edit */
-  MIN_MAX_ENTRIES,/MAX_MAX_ENTRIES /* edit */
-  MAX_MAX_ENTRIES /* edit */
+  DEFAULT_MAX_ENTRIES,
+  MIN_MAX_ENTRIES,
+  MAX_MAX_ENTRIES,
   isKeyActive,
 };

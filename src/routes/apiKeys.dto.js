@@ -162,7 +162,7 @@ function toListApiKeysResponseDto(entries) {
  */
 function toGetApiKeyResponseDto(entry) {
   return {
-    data: toApiKeyResponseDT(entry),
+    data: toApiKeyResponseDto(entry),
   };
 }
 
@@ -186,9 +186,9 @@ function validateCreateApiKeyRequest(body) {
   if (typeof key !== 'string' || key.trim() === '') {
     errors.push({ field: 'body', message: '"key" must be a non-empty string' });
   } else if (!key.startsWith(API_KEY_PREFIX)) {
-    errors.push({ field: 'body', message: `${"key" must start with "{API_KEY_PREFIX}"`} });
+    errors.push({ field: 'body', message: `"key" must start with "${API_KEY_PREFIX}"` });
   } else if (key.length < MIN_KEY_LENGTH) {
-    errors.push({ field: 'body', message: `"key" must be at least {MIN_KEY_LENGTH} characters long` });
+    errors.push({ field: 'body', message: `"key" must be at least ${MIN_KEY_LENGTH} characters long` });
   }
 
   if (typeof clientId !== 'string' || clientId.trim() === '') {
@@ -200,7 +200,7 @@ function validateCreateApiKeyRequest(body) {
   } else {
     for (const scope of scopes) {
       if (!VALID_SCOPES.includes(scope)) {
-        errors.push({ field: 'body', message: `"${scope}" is not a valid scope. Valid: {VALID_SCOPES.join(', ')}` });
+        errors.push({ field: 'body', message: `"${scope}" is not a valid scope. Valid: ${VALID_SCOPES.join(', ')}` });
       }
     }
   }
@@ -212,8 +212,8 @@ module.exports = {
   toApiKeyResponseDto,
   fromCreateApiKeyRequestDto,
   toCreateApiKeyResponseDto,
-  toDuplicateApiKeyResponseDTo,
+  toDuplicateApiKeyResponseDto,
   toListApiKeysResponseDto,
-  toGetApiKeyResponseDT(entry),
+  toGetApiKeyResponseDto,
   validateCreateApiKeyRequest,
 };
