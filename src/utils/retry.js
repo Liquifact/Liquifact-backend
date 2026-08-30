@@ -21,6 +21,7 @@
  * @param {number} [options.baseDelay=500] - Initial delay in milliseconds (capped at 10000ms).
  * @param {number} [options.maxDelay=10000] - Maximum delay between retries in milliseconds (capped at 60000ms).
  * @param {ShouldRetry} [options.shouldRetry] - Function to evaluate if an error is transient (defaults to always true).
+ * @param {Function} [options.retryDelay] - Optional function returning a caller supplied delay in ms.
  * @returns {Promise<any>} The result of the operation if it succeeds.
  * @throws {Error} The last error thrown if all retries are exhausted, or an error that fails the shouldRetry check.
  */
@@ -35,6 +36,7 @@ async function withRetry(operation, options = {}) {
     baseDelay: rawBaseDelay = 500,
     maxDelay: rawMaxDelay = 10000,
     shouldRetry = () => true,
+    retryDelay = null,
     onRetry = null, // optional callback invoked on each failed attempt: ({ attempt, error })
   } = options;
 
@@ -65,6 +67,15 @@ async function withRetry(operation, options = {}) {
         throw error;
       }
 
+      const callerDelay = typeof retryDelay === 'function'
+        ? retryDelay(error, attempt + 1)
+        : null;
+      if (Number.isFinite(callerDelay) && callerDelay >= 0) {
+        attempt++;
+        await new Promise((resolve) => setTimeout(resolve, Math.min(callerDelay, MAX_DELAY_CAP)));
+        continue;
+      }
+
       // Calculate exponential backoff
       const exponentialDelay = baseDelay * Math.pow(2, attempt);
       const delay = Math.min(exponentialDelay, maxDelay);
@@ -76,6 +87,21 @@ async function withRetry(operation, options = {}) {
       await new Promise((resolve) => setTimeout(resolve, jitteredDelay));
     }
   }
+}
+
+function parseRetryAfterMs(value, now = Date.now()) {
+  if (!value || typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (/^\d+$/.test(trimmed)) {
+    return Number(trimmed) * 1000;
+  }
+  const timestamp = Date.parse(trimmed);
+  if (!Number.isFinite(timestamp)) {
+    return null;
+  }
+  return Math.max(0, timestamp - now);
 }
 
 /**
@@ -159,6 +185,7 @@ async function sendMailWithRetry(transport, mailOptions, opts = {}) {
 
 module.exports = {
   withRetry,
+  parseRetryAfterMs,
   sendMailWithRetry,
   isPermanentSmtpError,
 };

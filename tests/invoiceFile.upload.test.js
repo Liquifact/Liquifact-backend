@@ -21,6 +21,8 @@ const express = require('express');
 const crypto = require('crypto');
 
 const {
+  hasCleanAntivirusResult,
+  tenantScopedKeyMatches,
   validatePdfMagicBytes,
   validateMimeType,
   UPLOAD_SIZE_LIMIT: DEFAULT_LIMIT,
@@ -108,6 +110,32 @@ describe('validateMimeType()', () => {
     const result = validateMimeType('application/pdf', Buffer.alloc(0));
     expect(result.valid).toBe(false);
     expect(result.message).toContain('does not match declared MIME type');
+  });
+});
+
+describe('download safety gates', () => {
+  it('accepts only keys bound to the authenticated tenant and invoice', () => {
+    expect(
+      tenantScopedKeyMatches(
+        { s3_key: 'tenants/tenant-a/invoices/inv-1/file.pdf' },
+        'tenant-a',
+        'inv-1'
+      )
+    ).toBe(true);
+    expect(
+      tenantScopedKeyMatches(
+        { s3_key: 'tenants/tenant-b/invoices/inv-1/file.pdf' },
+        'tenant-a',
+        'inv-1'
+      )
+    ).toBe(false);
+  });
+
+  it('requires a clean antivirus result before download exposure', () => {
+    expect(hasCleanAntivirusResult({ av_status: 'clean' })).toBe(true);
+    expect(hasCleanAntivirusResult({ antivirusStatus: 'verified' })).toBe(true);
+    expect(hasCleanAntivirusResult({ virus_scan_status: 'pending' })).toBe(false);
+    expect(hasCleanAntivirusResult({})).toBe(false);
   });
 });
 

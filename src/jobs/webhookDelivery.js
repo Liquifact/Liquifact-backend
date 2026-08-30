@@ -38,7 +38,7 @@
 const logger = require('../logger');
 const crypto = require('crypto');
 const { createSignatureHeader, sortKeys } = require('../services/webhooks');
-const { withRetry } = require('../utils/retry');
+const { withRetry, parseRetryAfterMs } = require('../utils/retry');
 const db = require('../db/knex');
 
 let promClient;
@@ -336,6 +336,9 @@ async function sendWebhookRequest({ webhookUrl, webhookSecret, rawBody, timeoutM
     if (!response.ok) {
       const err = new Error(`Webhook responded with ${response.status}`);
       err.status = response.status;
+      err.retryAfterMs = parseRetryAfterMs(response.headers && response.headers.get
+        ? response.headers.get('retry-after')
+        : null);
       throw err;
     }
 
@@ -465,6 +468,10 @@ function createWebhookDeliveryHandler(deps = {}) {
     } = job.payload;
 
     const maxRetries = Number(process.env.WEBHOOK_MAX_RETRIES || 3);
+    const tenantRetryBudget = Number.isFinite(Number(job.payload.tenantRetryBudget))
+      ? Number(job.payload.tenantRetryBudget)
+      : Number(process.env.WEBHOOK_TENANT_RETRY_BUDGET || maxRetries);
+    const effectiveMaxRetries = Math.max(0, Math.min(maxRetries, tenantRetryBudget));
     const baseDelay = Number(process.env.WEBHOOK_BASE_DELAY || 500);
     const maxDelay = Number(process.env.WEBHOOK_MAX_DELAY || 10000);
     const timeoutMs = Number(process.env.WEBHOOK_TIMEOUT_MS || 5000);
@@ -570,10 +577,11 @@ function createWebhookDeliveryHandler(deps = {}) {
 
     try {
       await withRetry(operation, {
-        maxRetries,
+        maxRetries: effectiveMaxRetries,
         baseDelay,
         maxDelay,
         shouldRetry,
+        retryDelay: (error) => error && Number.isFinite(error.retryAfterMs) ? error.retryAfterMs : null,
         onRetry: ({ attempt, error }) => {
           logger.warn(
             {
