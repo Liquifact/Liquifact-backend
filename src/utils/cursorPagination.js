@@ -11,7 +11,7 @@ const DEV_CURSOR_SECRET = 'dev-cursor-secret-change-in-prod';
 
 const ALLOWED_SORT_FIELDS = Object.freeze([
   // Marketplace / invoice fields
-  'yield_bps', 'maturity_date', 'funded_ratio', 'amount', 'created_at', 'updated_at',
+  'yield_bps', 'maturity_date', 'funded_ratio', 'amount', 'date', 'created_at', 'updated_at',
   // Indexer (escrow_events) fields
   'ledger_sequence', 'observed_at',
 ]);

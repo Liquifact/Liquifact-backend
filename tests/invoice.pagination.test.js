@@ -17,11 +17,14 @@
  * @jest-environment node
  */
 
-const db = require('../src/db/knex');
-const { encodeCursor, decodeCursor, CursorError } = require('../src/utils/cursorPagination');
-
 // ── Knex mock ────────────────────────────────────────────────────────────────
 
+// Replace the broad repository test fixture with the purpose-built query
+// builder below; this suite needs to control count rows and page rows
+// independently to exercise limit+1 keyset behavior.
+let mockTotal = { total: 0 };
+let mockRows = [];
+jest.unmock('../src/db/knex');
 jest.mock('../src/db/knex', () => {
   const buildMockQuery = () => ({
     select: jest.fn().mockReturnThis(),
@@ -32,11 +35,11 @@ jest.mock('../src/db/knex', () => {
     limit: jest.fn().mockReturnThis(),
     offset: jest.fn().mockReturnThis(),
     first: jest.fn().mockResolvedValue({ total: 0 }),
-    count: jest.fn().mockReturnThis(),
+    count: jest.fn(() => Promise.resolve([mockTotal])),
     orWhere: jest.fn().mockReturnThis(),
     then: jest.fn(function (resolve) {
       if (typeof resolve === 'function') {
-        return Promise.resolve([]).then(resolve);
+        return Promise.resolve(mockRows).then(resolve);
       }
       return Promise.resolve([]);
     }),
@@ -51,6 +54,14 @@ jest.mock('../src/db/knex', () => {
 
 // ── Module under test ─────────────────────────────────────────────────────────
 
+const db = require('../src/db/knex');
+const { encodeCursor, decodeCursor, CursorError } = require('../src/utils/cursorPagination');
+const {
+  encodeInvoiceCursor,
+  decodeInvoiceCursor,
+  isAfterInvoiceCursor,
+  normalizeInvoicePageSize,
+} = require('../src/utils/invoicePagination');
 const invoiceService = require('../src/services/invoiceService');
 const { getInvoicesWithPagination } = invoiceService;
 
@@ -85,7 +96,12 @@ function getMockQuery() {
  */
 function mockDbResult(rows, total) {
   const q = getMockQuery();
-  q.first.mockResolvedValue({ total: total ?? rows.length });
+  mockRows = rows;
+  mockTotal = { total: total ?? rows.length };
+  if (typeof db.__setInvoicePaginationFixture === 'function') {
+    db.__setInvoicePaginationFixture(rows, mockTotal.total);
+  }
+  q.first.mockResolvedValue(mockTotal);
   q.then.mockImplementation(function (resolve) {
     return Promise.resolve(rows).then(resolve);
   });
@@ -367,5 +383,44 @@ describe('getInvoicesWithPagination', () => {
       const q = getMockQuery();
       expect(q.orderBy).toHaveBeenCalledWith('created_at', 'desc');
     });
+  });
+});
+
+describe('invoice cursor contract', () => {
+  it('uses the unique id as the deterministic tie-breaker', () => {
+    const cursor = decodeInvoiceCursor(
+      encodeInvoiceCursor({ id: 10, created_at: '2026-08-20T00:00:00.000Z' }, 'created_at'),
+      'created_at',
+    );
+
+    expect(cursor.id).toBe('10');
+    expect(cursor.sortValue).toBe('2026-08-20T00:00:00.000Z');
+  });
+
+  it.each([
+    ['asc', 11, 9],
+    ['desc', 9, 11],
+  ])('orders equal sort values by id in %s mode', (order, idAfter, idBefore) => {
+    const cursor = { sortValue: '2026-08-20T00:00:00.000Z', id: '10' };
+    expect(isAfterInvoiceCursor({ id: idAfter, created_at: cursor.sortValue }, cursor, 'created_at', order)).toBe(true);
+    expect(isAfterInvoiceCursor({ id: idBefore, created_at: cursor.sortValue }, cursor, 'created_at', order)).toBe(false);
+  });
+
+  it('does not repeat existing rows when a newer row is inserted between pages', () => {
+    const cursor = { sortValue: '2026-08-20T00:00:00.000Z', id: '20' };
+    const inserted = { id: 99, created_at: '2026-08-21T00:00:00.000Z' };
+    const remainingExisting = { id: 19, created_at: '2026-08-19T00:00:00.000Z' };
+
+    // The new row is ahead of a descending cursor and belongs to the next
+    // fresh scan, while the older existing row remains eligible exactly once.
+    expect(isAfterInvoiceCursor(inserted, cursor, 'created_at', 'desc')).toBe(false);
+    expect(isAfterInvoiceCursor(remainingExisting, cursor, 'created_at', 'desc')).toBe(true);
+  });
+
+  it('clamps every service caller to the bounded page size', () => {
+    expect(normalizeInvoicePageSize(9999)).toBe(100);
+    expect(normalizeInvoicePageSize('25')).toBe(25);
+    expect(normalizeInvoicePageSize('not-a-number')).toBe(10);
+    expect(normalizeInvoicePageSize(0)).toBe(10);
   });
 });
