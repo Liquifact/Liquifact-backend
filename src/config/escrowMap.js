@@ -26,7 +26,7 @@
  * }
  *
  * Throws EscrowNotFoundError when no active mapping exists for the invoice in
- * the current environment. Callers should translate this to a 404 / 422.
+ * the current environment. Funding callers translate this to a 404.
  */
 
 'use strict';

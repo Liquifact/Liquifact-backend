@@ -35,6 +35,12 @@ const {
 const { listOpportunities } = require('../services/investService');
 const idempotencyMiddleware = require('../middleware/idempotency');
 const { isValidStellarAddress } = require('../utils/validators');
+const { fundingErrorHandler } = require('../middleware/fundingErrorHandler');
+const {
+  createFundingError,
+  FUNDING_ERROR_CODES,
+  fundingValidationError,
+} = require('../errors/fundingErrors');
 
 const router = express.Router();
 
@@ -199,6 +205,14 @@ router.get(
  *         $ref: '#/components/responses/Problem401'
  *       403:
  *         $ref: '#/components/responses/Problem403'
+ *       404:
+ *         description: No escrow mapping exists for the invoice
+ *       409:
+ *         description: Funding commitment conflicts with an existing write
+ *       502:
+ *         description: Escrow transaction preparation failed
+ *       503:
+ *         description: Legal-hold status could not be verified
  */
 router.post(
   '/fund-invoice',
@@ -208,14 +222,7 @@ router.post(
     // 1. Input validation
     const validationErrors = validateFundInvoiceBody(req.body);
     if (validationErrors.length > 0) {
-      return res.status(400).json({
-        error: {
-          code: 'VALIDATION_ERROR',
-          message: validationErrors[0],
-          details: validationErrors,
-          retryable: false,
-        },
-      });
+      throw fundingValidationError(validationErrors);
     }
 
     const { invoiceId, investorAddress } = req.body;
@@ -244,13 +251,11 @@ router.post(
       escrowAddress = resolveEscrowAddress(invoiceId);
     } catch (err) {
       if (err instanceof EscrowNotFoundError) {
-        return res.status(422).json({
-          error: {
-            code: 'ESCROW_NOT_FOUND',
-            message: `No escrow contract is configured for invoice: ${invoiceId}`,
-            retryable: false,
-          },
-        });
+        throw createFundingError(
+          FUNDING_ERROR_CODES.ESCROW_NOT_FOUND,
+          'The escrow contract for this invoice was not found.',
+          { retryable: false },
+        );
       }
       throw err; // unexpected config error → 500 via errorHandler
     }
@@ -272,14 +277,11 @@ router.post(
       });
     } catch (err) {
       if (err instanceof EscrowSubmitError) {
-        return res.status(502).json({
-          error: {
-            code: 'ESCROW_SUBMIT_FAILED',
-            message: 'Failed to prepare the escrow transaction. Please try again.',
-            // Do NOT expose err.message to the client — it may contain RPC details
-            retryable: true,
-          },
-        });
+        throw createFundingError(
+          FUNDING_ERROR_CODES.ESCROW_SUBMIT_FAILED,
+          'The escrow transaction could not be prepared. Please retry.',
+          { retryable: true },
+        );
       }
       throw err;
     }
@@ -314,5 +316,10 @@ router.post(
     });
   })
 );
+
+// Keep all funding failures on one response contract. This must be after the
+// route declarations so errors from auth-adjacent funding middleware and the
+// async handler both reach the same classifier before global middleware.
+router.use(fundingErrorHandler);
 
 module.exports = router;

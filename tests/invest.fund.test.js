@@ -9,6 +9,7 @@
  *   - Happy path: stubbed/delegated/submitted status mapping, error paths
  */
 
+
 // ─── Knex mock ─────────────────────────────────────────────────────────────
 // Override the global setup mock so kyc_records always returns null (no DB
 // record → service falls back to in-memory mockKycRecords).
@@ -16,7 +17,9 @@ jest.mock('../src/db/knex', () => {
   const chain = {
     where: jest.fn().mockReturnThis(),
     first: jest.fn().mockResolvedValue(null), // no DB record → use in-memory mock
-    insert: jest.fn().mockResolvedValue([{ id: 'mock-id' }]),
+    insert: jest.fn().mockReturnThis(),
+    onConflict: jest.fn().mockReturnThis(),
+    merge: jest.fn().mockResolvedValue([]),
     returning: jest.fn().mockReturnThis(),
     update: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
@@ -419,7 +422,7 @@ describe('POST /api/invest/fund-invoice — happy path', () => {
     expect(res.body.ledger).toBe('1234567');
   });
 
-  it('returns 422 when escrow address is not mapped', async () => {
+  it('returns 404 when escrow address is not mapped', async () => {
     resolveEscrowAddress.mockImplementationOnce(() => { throw new EscrowNotFoundError('inv-missing'); });
 
     const res = await agent()
@@ -427,8 +430,9 @@ describe('POST /api/invest/fund-invoice — happy path', () => {
       .set('Authorization', `Bearer ${token()}`)
       .set('x-tenant-id', TENANT_ID)
       .send({ invoiceId: 'inv-missing', investorAddress: VALID_ADDRESS, amountStroops: '100' });
-    expect(res.status).toBe(422);
+    expect(res.status).toBe(404);
     expect(res.body.error.code).toBe('ESCROW_NOT_FOUND');
+    expect(res.body.error.requestId).toBeDefined();
   });
 
   it('returns 502 when escrowSubmit throws EscrowSubmitError', async () => {
@@ -488,7 +492,7 @@ describe('POST /api/invest/fund-invoice — happy path', () => {
       .set('x-tenant-id', TENANT_ID)
       .send({ invoiceId: VALID_INVOICE, investorAddress: VALID_ADDRESS, amountStroops: '500' });
     expect(res.status).toBe(500);
-    expect(res.body.error.code).toBe('INTERNAL_SERVER_ERROR');
+    expect(res.body.error.code).toBe('FUNDING_INTERNAL_ERROR');
     // The actual error message must not leak to the client
     expect(JSON.stringify(res.body)).not.toContain('DB connection lost');
   });
