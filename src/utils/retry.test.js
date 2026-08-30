@@ -1,4 +1,4 @@
-const { withRetry } = require('./retry');
+const { parseRetryAfterMs, withRetry } = require('./retry');
 
 describe('Retry Utility', () => {
   it('should succeed on the first try without retrying', async () => {
@@ -79,5 +79,27 @@ describe('Retry Utility', () => {
     
     // Cap is 10, so 1 initial attempt + 10 retries = 11 attempts total
     expect(operation).toHaveBeenCalledTimes(11);
+  });
+
+  it('parses Retry-After delta seconds and HTTP dates', () => {
+    expect(parseRetryAfterMs('3')).toBe(3000);
+    expect(parseRetryAfterMs('Sun, 30 Aug 2026 12:00:10 GMT', Date.parse('Sun, 30 Aug 2026 12:00:00 GMT'))).toBe(10000);
+    expect(parseRetryAfterMs('not-a-date')).toBeNull();
+  });
+
+  it('uses a caller supplied retry delay when present', async () => {
+    const operation = jest
+      .fn()
+      .mockRejectedValueOnce(Object.assign(new Error('rate limited'), { retryAfterMs: 1 }))
+      .mockResolvedValueOnce('ok');
+
+    await expect(
+      withRetry(operation, {
+        maxRetries: 1,
+        baseDelay: 1000,
+        retryDelay: (error) => error.retryAfterMs,
+      })
+    ).resolves.toBe('ok');
+    expect(operation).toHaveBeenCalledTimes(2);
   });
 });

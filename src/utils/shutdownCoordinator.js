@@ -28,6 +28,7 @@ let serverInstance = null;
  * @private
  */
 let registeredWorker = null;
+const registeredWorkers = [];
 
 /**
  * @type {boolean}
@@ -55,6 +56,9 @@ function register({ server, worker }) {
   }
   if (worker) {
     registeredWorker = worker;
+    if (!registeredWorkers.includes(worker)) {
+      registeredWorkers.push(worker);
+    }
   }
 }
 
@@ -126,10 +130,15 @@ async function executeShutdown(reason) {
     logger.info('[shutdown] Phase 2: In-flight HTTP requests completed/drained.');
 
     // Phase 3: Call background worker stop
-    if (registeredWorker && typeof registeredWorker.stop === 'function') {
-      logger.info('[shutdown] Phase 3: Stopping registered background worker...');
-      await registeredWorker.stop();
-      logger.info('[shutdown] Background worker stopped successfully.');
+    const workers = registeredWorkers.length > 0 ? registeredWorkers : registeredWorker ? [registeredWorker] : [];
+    if (workers.length > 0) {
+      logger.info({ workerCount: workers.length }, '[shutdown] Phase 3: Draining registered background workers...');
+      for (const worker of workers) {
+        if (worker && typeof worker.stop === 'function') {
+          await worker.stop({ drain: true, reason });
+        }
+      }
+      logger.info('[shutdown] Background workers drained successfully.');
     } else {
       logger.info('[shutdown] Phase 3: No background worker registered.');
     }
@@ -199,6 +208,7 @@ function getIsShuttingDown() {
 function _resetState() {
   serverInstance = null;
   registeredWorker = null;
+  registeredWorkers.length = 0;
   isShuttingDown = false;
   listenersRegistered = false;
 }
