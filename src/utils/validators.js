@@ -96,7 +96,7 @@ function validateInvoiceQueryParams(query) {
   }
 
   if (sortBy !== undefined) {
-    const validSortFields = ['amount', 'date'];
+    const validSortFields = ['amount', 'date', 'created_at'];
     if (validSortFields.includes(sortBy)) {
       validatedParams.sorting.sortBy = sortBy;
     } else {
@@ -135,8 +135,10 @@ function validateInvoiceQueryParams(query) {
   // ── Limit (applies to both modes) ──────────────────────────────────────────
   if (limit !== undefined) {
     const val = parseInt(limit, 10);
-    if (!isNaN(val) && val >= 1 && val <= 100) {
-      validatedParams.pagination.limit = val;
+    if (!isNaN(val) && val >= 1) {
+      // Invoice list pagination clamps rather than rejects an oversized page.
+      // The service repeats this bound for non-HTTP callers.
+      validatedParams.pagination.limit = Math.min(val, 100);
     } else {
       fieldErrors.limit = 'limit must be an integer between 1 and 100';
     }

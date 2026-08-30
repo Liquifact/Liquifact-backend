@@ -28,6 +28,12 @@ const { getMetricsCacheStore } = require('./metricsCacheStore');
 const db = require('../db/knex');
 const { applyQueryOptions } = require('../utils/queryBuilder');
 const { encodeCursor, decodeCursor, CursorError } = require('../utils/cursorPagination');
+const {
+  normalizeInvoicePageSize,
+  resolveInvoiceSort,
+  encodeInvoiceCursor,
+  decodeInvoiceCursor,
+} = require('../utils/invoicePagination');
 const logger = require('../logger');
 const AppError = require('../errors/AppError');
 const { LOCKED_STATUSES } = require('../middleware/patchInvoice');
@@ -214,11 +220,11 @@ function _applyInvoiceFilters(query, filters) {
  * @throws {CursorError} When the cursor is malformed, tampered, or has a sort-field mismatch.
  */
 async function getInvoicesWithPagination({ filters = {}, sorting = {}, pagination = {} } = {}) {
-  const limit = Math.max(1, Math.min(100, parseInt(pagination.limit, 10) || 10));
-  const sortField = (sorting.sortBy && INVOICE_PAGINATION_COLUMN_MAP[sorting.sortBy])
-    ? sorting.sortBy
-    : 'created_at';
-  const order = (sorting.order === 'asc') ? 'asc' : 'desc';
+  const limit = normalizeInvoicePageSize(pagination.limit);
+  const resolvedSort = resolveInvoiceSort(sorting.sortBy, sorting.order);
+  const sortField = resolvedSort.alias;
+  const sortColumn = resolvedSort.column;
+  const order = resolvedSort.order;
 
   // -- Base query (exclude soft-deleted records) -----------------------------
   const baseQuery = () => db('invoices').whereNull('deleted_at');
@@ -226,14 +232,15 @@ async function getInvoicesWithPagination({ filters = {}, sorting = {}, paginatio
   // -- Total count (filter-aware, offset-independent) ------------------------
   let countQ = baseQuery();
   _applyInvoiceFilters(countQ, filters);
-  const countRow = await countQ.count('* as total').first();
+  const countResult = await countQ.count('* as total');
+  const countRow = Array.isArray(countResult) ? (countResult[0] || {}) : (countResult || {});
   const total = parseInt(countRow.total ?? countRow['count(*)'] ?? 0, 10);
 
   const useCursor = Boolean(pagination.cursor);
 
   // -- Cursor-based keyset pagination ----------------------------------------
   if (useCursor) {
-    const decoded = decodeCursor(pagination.cursor, sortField);
+    const decoded = decodeInvoiceCursor(pagination.cursor, sortField);
     const { sortValue, id: lastId } = decoded;
 
     let dataQ = baseQuery().select('*');
@@ -244,13 +251,13 @@ async function getInvoicesWithPagination({ filters = {}, sorting = {}, paginatio
     //   DESC: (sortField < lastValue) OR (sortField = lastValue AND id < lastId)
     const gtOp = order === 'asc' ? '>' : '<';
     dataQ.where(function () {
-      this.where(sortField, gtOp, sortValue)
+      this.where(sortColumn, gtOp, sortValue)
         .orWhere(function () {
-          this.where(sortField, '=', sortValue).where('id', gtOp, lastId);
+          this.where(sortColumn, '=', sortValue).where('id', gtOp, lastId);
         });
     });
 
-    dataQ.orderBy(sortField, order).orderBy('id', order);
+    dataQ.orderBy(sortColumn, order).orderBy('id', order);
 
     const rows = await dataQ.limit(limit + 1);
     const hasMore = rows.length > limit;
@@ -259,11 +266,7 @@ async function getInvoicesWithPagination({ filters = {}, sorting = {}, paginatio
     let nextCursor = null;
     if (hasMore && data.length > 0) {
       const lastRow = data[data.length - 1];
-      nextCursor = encodeCursor({
-        sortField,
-        sortValue: lastRow[sortField],
-        id: lastRow.id,
-      });
+      nextCursor = encodeInvoiceCursor(lastRow, sortField);
     }
 
     return { data, meta: { total, limit, hasMore, nextCursor } };
@@ -275,7 +278,7 @@ async function getInvoicesWithPagination({ filters = {}, sorting = {}, paginatio
 
   let dataQ = baseQuery().select('*');
   _applyInvoiceFilters(dataQ, filters);
-  dataQ.orderBy(sortField, order).orderBy('id', order);
+  dataQ.orderBy(sortColumn, order).orderBy('id', order);
 
   const pagedRows = await dataQ.limit(limit + 1).offset(offset);
   const pagedHasMore = pagedRows.length > limit;
@@ -284,11 +287,7 @@ async function getInvoicesWithPagination({ filters = {}, sorting = {}, paginatio
   let pagedNextCursor = null;
   if (pagedHasMore && pagedData.length > 0) {
     const lastRow = pagedData[pagedData.length - 1];
-    pagedNextCursor = encodeCursor({
-      sortField,
-      sortValue: lastRow[sortField],
-      id: lastRow.id,
-    });
+    pagedNextCursor = encodeInvoiceCursor(lastRow, sortField);
   }
 
   return {
