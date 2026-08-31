@@ -163,24 +163,181 @@ function normalizeOptions(options = {}) {
   if (!Number.isInteger(maxRecords) || maxRecords < 1) {
     throw new InvoiceFundingReconciliationError('INVALID_OPTIONS', 'maxRecords must be a positive integer');
   }
-  return { pageSize, maxRecords, runId: String(options.runId || `invoice-funding-${Date.now()}`) };
+  const tenantId = options.tenantId == null ? null : String(options.tenantId);
+  const windowStart = options.windowStart == null ? null : String(options.windowStart);
+  const windowEnd = options.windowEnd == null ? null : String(options.windowEnd);
+  let runId = options.runId ? String(options.runId) : '';
+  if (!runId && tenantId && windowStart && windowEnd) {
+    runId = `invoice-funding:${tenantId}:${windowStart}:${windowEnd}`;
+  }
+  if (!runId) {
+    runId = `invoice-funding-${Date.now()}`;
+  }
+  return { pageSize, maxRecords, runId, tenantId, windowStart, windowEnd };
+}
+
+function assertRunScope(record, options) {
+  if (!record) return;
+  if (options.tenantId != null && record.tenantId != null && options.tenantId !== record.tenantId) {
+    throw new InvoiceFundingReconciliationError('RUN_SCOPE_MISMATCH', 'Run id is already associated with a different tenant');
+  }
+  if (options.windowStart != null && record.windowStart != null && options.windowStart !== record.windowStart) {
+    throw new InvoiceFundingReconciliationError('RUN_SCOPE_MISMATCH', 'Run id is already associated with a different time window');
+  }
+  if (options.windowEnd != null && record.windowEnd != null && options.windowEnd !== record.windowEnd) {
+    throw new InvoiceFundingReconciliationError('RUN_SCOPE_MISMATCH', 'Run id is already associated with a different time window');
+  }
+}
+
+function buildReconciliationReport(runId, startedAt, { scanned, batches, complete, nextCursor, violations }) {
+  const sortedViolations = [...violations].sort((a, b) =>
+    a.invoiceId.localeCompare(b.invoiceId) || a.code.localeCompare(b.code) || a.message.localeCompare(b.message));
+  const offendingIds = [...new Set(sortedViolations.map((item) => item.invoiceId))].sort();
+  const counts = {};
+  for (const item of sortedViolations) {
+    counts[item.code] = (counts[item.code] || 0) + 1;
+  }
+  return {
+    runId,
+    status: sortedViolations.length ? (complete ? REPORT_STATUS.DRIFT : REPORT_STATUS.INCOMPLETE) : (complete ? REPORT_STATUS.CLEAN : REPORT_STATUS.INCOMPLETE),
+    scanned,
+    batches,
+    complete,
+    nextCursor: complete ? null : nextCursor,
+    violationCount: sortedViolations.length,
+    counts,
+    offendingIds,
+    violations: sortedViolations,
+    startedAt,
+    completedAt: new Date().toISOString(),
+  };
+}
+
+function buildInProgressReport(runId, startedAt) {
+  return {
+    runId,
+    status: REPORT_STATUS.INCOMPLETE,
+    scanned: 0,
+    batches: 0,
+    complete: false,
+    nextCursor: null,
+    violationCount: 0,
+    counts: {},
+    offendingIds: [],
+    violations: [],
+    startedAt: startedAt || new Date().toISOString(),
+    completedAt: new Date().toISOString(),
+    inProgress: true,
+  };
+}
+
+class InMemoryRunStore {
+  constructor() {
+    this.runs = new Map();
+  }
+
+  async getRun(runId) {
+    return this.runs.get(runId) || null;
+  }
+
+  async createRun(runId, record) {
+    if (this.runs.has(runId)) return false;
+    this.runs.set(runId, { ...record });
+    return true;
+  }
+
+  async saveProgress(runId, progress) {
+    const run = this.runs.get(runId);
+    if (!run || run.status !== 'in_progress') return false;
+    run.progress = progress;
+    run.updatedAt = new Date().toISOString();
+    return true;
+  }
+
+  async completeRun(runId, result) {
+    const run = this.runs.get(runId);
+    if (!run || run.status !== 'in_progress') return false;
+    run.status = 'completed';
+    run.result = result;
+    run.progress = null;
+    run.updatedAt = new Date().toISOString();
+    return true;
+  }
 }
 
 /**
  * Execute a deterministic, bounded scan. `source.readBatch` must be read-only;
  * neither this function nor the invariant evaluator mutates source records.
  */
-async function runInvoiceFundingReconciliation({ source, ...rawOptions } = {}) {
+async function runInvoiceFundingReconciliation({ source, runStore, ...rawOptions } = {}) {
   if (!source || typeof source.readBatch !== 'function') {
     throw new InvoiceFundingReconciliationError('INVALID_SOURCE', 'source.readBatch is required');
   }
   const options = normalizeOptions(rawOptions);
   const startedAt = new Date().toISOString();
+  const runId = options.runId;
   const allViolations = [];
   let cursor = null;
   let scanned = 0;
   let batches = 0;
   let complete = false;
+  let runStartedAt = startedAt;
+
+  if (runStore) {
+    if (
+      typeof runStore.getRun !== 'function' ||
+      typeof runStore.createRun !== 'function'
+    ) {
+      throw new InvoiceFundingReconciliationError('INVALID_RUN_STORE', 'runStore.getRun and runStore.createRun are required');
+    }
+    const existing = await runStore.getRun(runId);
+    if (existing) {
+      assertRunScope(existing, options);
+    }
+    if (existing && existing.status === 'completed') {
+      return existing.result;
+    }
+    if (existing && existing.status === 'in_progress' && existing.progress) {
+      allViolations.push(...(Array.isArray(existing.progress.violations) ? existing.progress.violations : []));
+      cursor = existing.progress.nextCursor ?? null;
+      scanned = Number(existing.progress.scanned) || 0;
+      batches = Number(existing.progress.batches) || 0;
+      runStartedAt = existing.startedAt || startedAt;
+    } else if (existing && existing.status === 'in_progress') {
+      return buildInProgressReport(runId, existing.startedAt || startedAt);
+    } else {
+      const created = await runStore.createRun(runId, {
+        runId,
+        status: 'in_progress',
+        tenantId: options.tenantId,
+        windowStart: options.windowStart,
+        windowEnd: options.windowEnd,
+        startedAt: runStartedAt,
+        updatedAt: startedAt,
+        progress: null,
+        result: null,
+      });
+      if (!created) {
+        const after = await runStore.getRun(runId);
+        if (after) {
+          assertRunScope(after, options);
+        }
+        if (after && after.status === 'completed') {
+          return after.result;
+        }
+        if (after && after.status === 'in_progress' && after.progress) {
+          allViolations.push(...(Array.isArray(after.progress.violations) ? after.progress.violations : []));
+          cursor = after.progress.nextCursor ?? null;
+          scanned = Number(after.progress.scanned) || 0;
+          batches = Number(after.progress.batches) || 0;
+          runStartedAt = after.startedAt || startedAt;
+        } else {
+          return buildInProgressReport(runId, after?.startedAt || startedAt);
+        }
+      }
+    }
+  }
+
   while (scanned < options.maxRecords) {
     let batch;
     try {
@@ -204,29 +361,28 @@ async function runInvoiceFundingReconciliation({ source, ...rawOptions } = {}) {
       complete = true;
       break;
     }
+    if (runStore && typeof runStore.saveProgress === 'function') {
+      await runStore.saveProgress(runId, {
+        scanned,
+        batches,
+        nextCursor: cursor,
+        violations: allViolations.slice(),
+        startedAt: runStartedAt,
+      });
+    }
   }
 
-  const sortedViolations = allViolations.sort((a, b) =>
-    a.invoiceId.localeCompare(b.invoiceId) || a.code.localeCompare(b.code) || a.message.localeCompare(b.message));
-  const offendingIds = [...new Set(sortedViolations.map((item) => item.invoiceId))].sort();
-  const counts = {};
-  for (const item of sortedViolations) {
-    counts[item.code] = (counts[item.code] || 0) + 1;
-  }
-  return {
-    runId: options.runId,
-    status: sortedViolations.length ? (complete ? REPORT_STATUS.DRIFT : REPORT_STATUS.INCOMPLETE) : (complete ? REPORT_STATUS.CLEAN : REPORT_STATUS.INCOMPLETE),
+  const report = buildReconciliationReport(runId, runStartedAt, {
     scanned,
     batches,
     complete,
-    nextCursor: complete ? null : cursor,
-    violationCount: sortedViolations.length,
-    counts,
-    offendingIds,
-    violations: sortedViolations,
-    startedAt,
-    completedAt: new Date().toISOString(),
-  };
+    nextCursor: cursor,
+    violations: allViolations,
+  });
+  if (runStore && typeof runStore.completeRun === 'function') {
+    await runStore.completeRun(runId, report);
+  }
+  return report;
 }
 
 class InMemoryInvoiceFundingSource {
@@ -259,5 +415,6 @@ module.exports = {
   evaluateInvoiceFundingInvariants,
   normalizeOptions,
   runInvoiceFundingReconciliation,
+  InMemoryRunStore,
   InMemoryInvoiceFundingSource,
 };
