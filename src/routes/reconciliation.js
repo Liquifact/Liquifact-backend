@@ -20,7 +20,10 @@ const { adminStack } = require('../middleware/stacks');
 const responseHelper = require('../utils/responseHelper');
 const logger = require('../logger');
 const { SettlementDryRunError, runSettlementDryRun } = require('../jobs/settlementDryRun');
-const { InvoiceFundingReconciliationError } = require('../jobs/invoiceFundingReconciliation');
+const {
+  InvoiceFundingReconciliationError,
+  runInvoiceFundingReconciliation,
+} = require('../jobs/invoiceFundingReconciliation');
 const { createTenantInvoiceFundingDbSource } = require('../jobs/settlementDryRunDbSource');
 
 /**
@@ -176,6 +179,8 @@ router.get('/runs', async (req, res, next) => {
         .where({ tenant_id: req.tenantId })
         .select(
           'id',
+          'run_key as runKey',
+          'status',
           'total',
           'matches',
           'mismatches',
@@ -210,6 +215,99 @@ router.get('/runs', async (req, res, next) => {
     logger.error(
       { err: error?.message, tenantId: req.tenantId },
       'Failed to fetch reconciliation runs history',
+    );
+    return next(error);
+  }
+});
+
+/**
+ * POST /api/admin/reconciliation/runs
+ *
+ * Creates or resumes an idempotent invoice funding reconciliation run for the
+ * authenticated tenant and time window. When `runId` is omitted it is derived
+ * from the tenant id and the window, so retries with the same window are
+ * naturally idempotent. The reconciliation job is responsible for the durable
+ * completion record and for resuming an interrupted batch instead of starting
+ * a second concurrent run.
+ */
+router.post('/runs', async (req, res, next) => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+
+  try {
+    const dbClient = req._dbClient || db;
+
+    let runId = body.runId !== undefined ? body.runId : body.runKey;
+    if (runId !== undefined && (typeof runId !== 'string' || runId.length === 0 || runId.length > 128)) {
+      return res.status(400).json(
+        responseHelper.error('runId must be a non-empty string no longer than 128 characters', 'INVALID_RUN_ID'),
+      );
+    }
+
+    const windowStart = body.windowStart;
+    const windowEnd = body.windowEnd;
+    if (typeof windowStart !== 'string' || typeof windowEnd !== 'string') {
+      return res.status(400).json(
+        responseHelper.error('windowStart and windowEnd are required ISO timestamp strings', 'INVALID_TIME_WINDOW'),
+      );
+    }
+
+    const start = new Date(windowStart);
+    const end = new Date(windowEnd);
+    if (isNaN(start.getTime()) || isNaN(end.getTime()) || start.getTime() > end.getTime()) {
+      return res.status(400).json(
+        responseHelper.error('windowStart must be an ISO timestamp not later than windowEnd', 'INVALID_TIME_WINDOW'),
+      );
+    }
+
+    if (runId === undefined) {
+      runId = `${req.tenantId}:${start.toISOString()}:${end.toISOString()}`;
+    }
+
+    const source = createTenantInvoiceFundingDbSource({ dbClient, tenantId: req.tenantId });
+
+    const report = await runInvoiceFundingReconciliation({
+      source,
+      tenantId: req.tenantId,
+      runId,
+      windowStart: start.toISOString(),
+      windowEnd: end.toISOString(),
+      pageSize: body.pageSize,
+    });
+
+    logger.info(
+      {
+        requestId: req.id,
+        tenantId: req.tenantId,
+        runId,
+        status: report.status,
+        scanned: report.scanned,
+        matches: report.matches,
+        mismatches: report.mismatches,
+        errors: report.errors,
+      },
+      'Invoice funding reconciliation completed',
+    );
+
+    return res.status(200).json({
+      ...responseHelper.success({ ...report, runId }),
+      message: 'Invoice funding reconciliation completed successfully.',
+    });
+  } catch (error) {
+    if (error instanceof InvoiceFundingReconciliationError && error.code === 'INVALID_OPTIONS') {
+      return res.status(400).json(responseHelper.error(error.message, error.code));
+    }
+    if (error instanceof InvoiceFundingReconciliationError) {
+      logger.error(
+        { requestId: req.id, tenantId: req.tenantId, code: error.code },
+        'Invoice funding reconciliation source read failed',
+      );
+      return res.status(502).json(
+        responseHelper.error('Funding data could not be read for this tenant. Please retry.', error.code),
+      );
+    }
+    logger.error(
+      { requestId: req.id, tenantId: req.tenantId, err: error?.message },
+      'Invoice funding reconciliation failed',
     );
     return next(error);
   }
