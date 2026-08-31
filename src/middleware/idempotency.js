@@ -67,6 +67,15 @@ const ORPHAN_IN_FLIGHT_TIMEOUT_MS = (() => {
 })();
 
 /**
+ * How often to refresh `updated_at` for an in-progress idempotency record.
+ * Keeps long-running reconciliation batches from being mistaken for orphans.
+ */
+const HEARTBEAT_INTERVAL_MS = Math.max(
+  1000,
+  Math.floor(ORPHAN_IN_FLIGHT_TIMEOUT_MS / 3)
+);
+
+/**
  * Build an RFC 7807 problem+json body for an idempotency-key conflict.
  * @param {object} req - Express request
  * @param {string} detail - Human-readable reason
@@ -102,6 +111,51 @@ function fingerprint(body) {
     .createHash('sha256')
     .update(JSON.stringify(body), 'utf8')
     .digest('hex');
+}
+
+/**
+ * Build a durable run identity for an idempotency record.
+ * The key is scoped to the tenant and reconciliation time window so the same
+ * client-supplied Idempotency-Key cannot collide or replay across tenants or
+ * windows.
+ * @param {object} req - Express request
+ * @param {string} key - Client-supplied Idempotency-Key
+ * @returns {string} SHA-256 hex digest used as the idempotency_keys primary key
+ */
+function buildRunKey(req, key) {
+  const body = req.body || {};
+  const query = req.query || {};
+  const tenantId =
+    req.tenantId ||
+    (req.tenant && req.tenant.id) ||
+    (req.auth && req.auth.tenantId) ||
+    'anonymous';
+  const windowStart =
+    body.windowStart || body.startDate || body.start ||
+    query.windowStart || query.start || null;
+  const windowEnd =
+    body.windowEnd || body.endDate || body.end ||
+    query.windowEnd || query.end || null;
+  return crypto
+    .createHash('sha256')
+    .update(JSON.stringify({ tenantId, windowStart, windowEnd, key }), 'utf8')
+    .digest('hex');
+}
+
+/**
+ * Detect a database unique-constraint violation.
+ * @param {Error} err
+ * @returns {boolean}
+ */
+function isUniqueViolation(err) {
+  if (!err) return false;
+  const code = err.code || '';
+  return (
+    code === '23505' ||
+    code === 'SQLITE_CONSTRAINT' ||
+    code === 'SQLITE_CONSTRAINT_UNIQUE' ||
+    /UNIQUE constraint failed|duplicate key value/i.test(err.message || '')
+  );
 }
 
 /**
@@ -228,6 +282,7 @@ function idempotencyMiddleware(req, res, next) {
   }
 
   const bodyFingerprint = fingerprint(req.body);
+  const runKey = buildRunKey(req, key);
   const ttlHours = getTTLHours();
   // Store as an explicit ISO 8601 string. Knex + SQLite + node-sqlite3 may
   // serialise Date objects as numbers or non-ISO strings depending on column
@@ -239,7 +294,7 @@ function idempotencyMiddleware(req, res, next) {
   db.transaction(async (trx) => {
     const now = new Date();
     let existing = await trx('idempotency_keys')
-      .where({ idempotency_key: key })
+      .where({ idempotency_key: runKey })
       .first();
 
     // Retention TTL backstop: purge expired rows so a stale record never
@@ -249,7 +304,7 @@ function idempotencyMiddleware(req, res, next) {
       existing &&
       new Date(String(existing.expires_at)).getTime() <= now.getTime()
     ) {
-      await trx('idempotency_keys').where({ idempotency_key: key }).del();
+      await trx('idempotency_keys').where({ idempotency_key: runKey }).del();
       existing = null;
     }
 
@@ -257,13 +312,16 @@ function idempotencyMiddleware(req, res, next) {
     // timed out, or whose process restarted mid-flight would otherwise
     // remain stuck with response_status=null for the entire retention
     // TTL, permanently 409-ing the same key. Bound the poison window.
+    // Use updated_at (heartbeated by the active worker) instead of
+    // created_at so a slow, legitimate batch is never treated as orphaned.
+    const lastActivity = existing && (existing.updated_at || existing.created_at);
     if (
       existing &&
       existing.response_status === null &&
-      now.getTime() - new Date(String(existing.created_at)).getTime() >
+      now.getTime() - new Date(String(lastActivity)).getTime() >
         ORPHAN_IN_FLIGHT_TIMEOUT_MS
     ) {
-      await trx('idempotency_keys').where({ idempotency_key: key }).del();
+      await trx('idempotency_keys').where({ idempotency_key: runKey }).del();
       existing = null;
     }
 
@@ -321,13 +379,53 @@ function idempotencyMiddleware(req, res, next) {
 
     // New key — insert placeholder on 'In Progress' state
     // response_status = null indicates request is in progress
-    await trx('idempotency_keys').insert({
-      idempotency_key: key,
-      request_fingerprint: bodyFingerprint,
-      response_status: null,
-      response_body: null,
-      expires_at: expiresAt,
-    });
+    try {
+      await trx('idempotency_keys').insert({
+        idempotency_key: runKey,
+        request_fingerprint: bodyFingerprint,
+        response_status: null,
+        response_body: null,
+        expires_at: expiresAt,
+        updated_at: new Date().toISOString(),
+      });
+    } catch (err) {
+      // Two workers can race past the initial SELECT and both attempt the
+      // INSERT. A unique violation means another worker owns this run; do not
+      // execute the handler twice.
+      if (isUniqueViolation(err)) {
+        const conflictError = new Error('idempotency conflict');
+        await trx.rollback(conflictError).catch(() => {});
+        res.setHeader('Content-Type', 'application/problem+json');
+        return res.status(409).json(
+          buildConflict(
+            req,
+            'Idempotency-Key is currently being processed by another worker. Retry after the original request completes.'
+          )
+        );
+      }
+      throw err;
+    }
+
+    let heartbeat = null;
+    const stopHeartbeat = () => {
+      if (heartbeat) {
+        clearInterval(heartbeat);
+        heartbeat = null;
+      }
+    };
+    heartbeat = setInterval(() => {
+      db('idempotency_keys')
+        .where({ idempotency_key: runKey })
+        .update({ updated_at: db.fn.now() })
+        .catch((err) => {
+          logger.warn(
+            { key, error: err.message },
+            'idempotency: heartbeat update failed'
+          );
+        });
+    }, HEARTBEAT_INTERVAL_MS);
+    if (heartbeat.unref) heartbeat.unref();
+    res.once('finish', stopHeartbeat);
 
     // Override res.json to capture the response for future replays.
     // IMPORTANT: use the global `db` (not `trx`) here. The surrounding
@@ -336,10 +434,11 @@ function idempotencyMiddleware(req, res, next) {
     // Calling `trx(...)` after commit throws "Transaction committed".
     const originalJson = res.json.bind(res);
     res.json = function (body) {
+      stopHeartbeat();
       // Persist response with the global `db` (NOT the trx). The trx has
       // already committed by the time res.json() is called, so using it
       // would throw "Transaction query already complete".
-      persistResponse(db, key, res.statusCode, body).catch((err) => {
+      persistResponse(db, runKey, res.statusCode, body).catch((err) => {
         // This catch is for synchronous context errors (shouldn't happen)
         // Background retries are handled inside persistResponse
         logger.error({ key, error: err.message }, 'idempotency: unexpected persistence error');
