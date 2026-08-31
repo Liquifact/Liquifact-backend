@@ -23,6 +23,27 @@ function generateAuditLogId() {
 }
 
 /**
+ * Detects common database unique-constraint violation error codes.
+ *
+ * @param {Error} error The error raised by the database driver.
+ * @returns {boolean} True when the error indicates a duplicate key/unique violation.
+ */
+function isUniqueViolation(error) {
+  return Boolean(error && ['23505', 'SQLITE_CONSTRAINT', 'ER_DUP_ENTRY'].includes(error.code));
+}
+
+async function findAuditLogByIdempotencyKey({ idempotencyKey, resourceId, resourceType, action, tenantId }) {
+  const logs = await getAuditLogs({
+    resourceId,
+    resourceType,
+    action,
+    tenantId,
+    limit: 100,
+  });
+  return logs.find((log) => log.metadata && log.metadata.idempotencyKey === idempotencyKey) || null;
+}
+
+/**
  * Sanitizes sensitive data from objects to prevent logging secrets.
  *
  * @param {*} obj The object or value to sanitize.
@@ -79,6 +100,7 @@ function calculateChanges(before, after) {
  * @param {string} [root0.ipAddress='unknown'] The IP address of the actor.
  * @param {string} [root0.userAgent='unknown'] The user agent of the actor.
  * @param {object} [root0.metadata={}] Additional metadata.
+ * @param {string} [root0.idempotencyKey=null] Optional key to make retried calls return the existing audit entry.
  * @returns {Promise<object>} The created audit log entry.
  */
 async function createAuditLog({
@@ -92,6 +114,7 @@ async function createAuditLog({
   ipAddress = 'unknown',
   userAgent = 'unknown',
   metadata = {},
+  idempotencyKey = null,
 } = {}) {
   if (!actor) { throw new Error('Audit log actor is required'); }
   if (!action) { throw new Error('Audit log action is required'); }
@@ -104,6 +127,19 @@ async function createAuditLog({
   }
 
   const changes = calculateChanges(before, after);
+
+  if (idempotencyKey) {
+    const existing = await findAuditLogByIdempotencyKey({
+      idempotencyKey,
+      resourceId,
+      resourceType,
+      action,
+      tenantId: metadata.tenantId,
+    });
+    if (existing) {
+      return existing;
+    }
+  }
 
   const event = {
     eventType: 'admin_action',
@@ -122,7 +158,36 @@ async function createAuditLog({
     }
   };
 
-  await appendAuditEvent(event);
+  try {
+    await appendAuditEvent(event);
+  } catch (error) {
+    if (idempotencyKey && isUniqueViolation(error)) {
+      const existing = await findAuditLogByIdempotencyKey({
+        idempotencyKey,
+        resourceId,
+        resourceType,
+        action,
+        tenantId: metadata.tenantId,
+      });
+      if (existing) {
+        return existing;
+      }
+    }
+    throw error;
+  }
+
+  if (idempotencyKey) {
+    const created = await findAuditLogByIdempotencyKey({
+      idempotencyKey,
+      resourceId,
+      resourceType,
+      action,
+      tenantId: metadata.tenantId,
+    });
+    if (created) {
+      return created;
+    }
+  }
 
   return Object.freeze({
     id: generateAuditLogId(),
