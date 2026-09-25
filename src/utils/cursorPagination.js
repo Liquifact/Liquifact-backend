@@ -51,13 +51,21 @@ function _sign(payload) {
 /**
  * Encodes a cursor from the last row returned in a page.
  *
+ * `scope` is an optional caller-computed fingerprint of the request the
+ * position is only meaningful for — the tenant and the normalized query. It
+ * travels *inside* the signed payload, so a cursor can be verified against the
+ * request that presents it (see `decodeCursor`). Omit it for endpoints whose
+ * cursor is position-only; pass it whenever the same table is read under more
+ * than one tenant or filter set.
+ *
  * @param {Object} params
  * @param {string} params.sortField
  * @param {*}      params.sortValue
  * @param {string} params.id
+ * @param {string} [params.scope] - Request fingerprint this position belongs to.
  * @returns {string}
  */
-function encodeCursor({ sortField, sortValue, id }) {
+function encodeCursor({ sortField, sortValue, id, scope }) {
   if (!ALLOWED_SORT_FIELDS.includes(sortField)) {
     throw new Error(`encodeCursor: unsupported sortField "${sortField}"`);
   }
@@ -70,6 +78,9 @@ function encodeCursor({ sortField, sortValue, id }) {
     sortValue,
     id,
     iat: Math.floor(Date.now() / 1000),
+    // Absent rather than null for position-only cursors, so their payload stays
+    // byte-identical to the historical format.
+    ...(scope === undefined || scope === null ? {} : { scope: String(scope) }),
   });
 
   const b64 = Buffer.from(payload).toString('base64url');
@@ -80,12 +91,19 @@ function encodeCursor({ sortField, sortValue, id }) {
 /**
  * Decodes and validates an opaque cursor string.
  *
+ * When `expectedScope` is supplied the cursor must carry a matching scope, and
+ * a scope-less cursor is rejected: an unbound position cannot be proven to
+ * belong to this request, which is exactly the mismatch this guards against.
+ * When it is omitted the cursor is accepted as-is, so position-only callers
+ * keep working unchanged.
+ *
  * @param {string} cursor
  * @param {string} expectedSortField
- * @returns {{ sortField: string, sortValue: *, id: string, iat: number }}
+ * @param {string} [expectedScope] - Required request fingerprint, if any.
+ * @returns {{ sortField: string, sortValue: *, id: string, iat: number, scope?: string }}
  * @throws {CursorError}
  */
-function decodeCursor(cursor, expectedSortField) {
+function decodeCursor(cursor, expectedSortField, expectedScope) {
   if (typeof cursor !== 'string' || !cursor.includes('.')) {
     throw new CursorError('Malformed cursor: expected base64url.signature format');
   }
@@ -112,7 +130,7 @@ function decodeCursor(cursor, expectedSortField) {
     throw new CursorError('Malformed cursor: payload is not valid JSON');
   }
 
-  const { sortField, sortValue, id, iat } = parsed;
+  const { sortField, sortValue, id, iat, scope } = parsed;
 
   if (!ALLOWED_SORT_FIELDS.includes(sortField)) {
     throw new CursorError(`Cursor contains unknown sort field "${sortField}"`);
@@ -138,7 +156,18 @@ function decodeCursor(cursor, expectedSortField) {
     );
   }
 
-  return { sortField, sortValue, id, iat };
+  if (expectedScope !== undefined && expectedScope !== null) {
+    // A plain comparison is deliberate: the scope is derived from the caller's
+    // own request, so it is not a secret and a timing signal on it reveals
+    // nothing a caller could not already compute. The message is intentionally
+    // generic — naming the mismatching tenant or filter would leak the scope of
+    // whoever the cursor was minted for.
+    if (typeof scope !== 'string' || scope !== String(expectedScope)) {
+      throw new CursorError('Cursor does not match the requested query');
+    }
+  }
+
+  return { sortField, sortValue, id, iat, scope };
 }
 
 /**

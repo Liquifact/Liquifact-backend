@@ -55,8 +55,9 @@ jest.mock('../src/db/knex', () => {
 // ── Module under test ─────────────────────────────────────────────────────────
 
 const db = require('../src/db/knex');
-const { encodeCursor, decodeCursor, CursorError } = require('../src/utils/cursorPagination');
+const { decodeCursor, CursorError } = require('../src/utils/cursorPagination');
 const {
+  buildInvoiceCursorScope,
   encodeInvoiceCursor,
   decodeInvoiceCursor,
   isAfterInvoiceCursor,
@@ -80,8 +81,22 @@ function makeRow(id, overrides = {}) {
   };
 }
 
-function makeCursor(sortField, row) {
-  return encodeCursor({ sortField, sortValue: row[sortField], id: row.id });
+/**
+ * Mint a cursor bound to the read a case is exercising, mirroring how the
+ * service derives its scope. `context` mirrors the matching
+ * getInvoicesWithPagination options — a cursor only continues the read it was
+ * issued for, so a case that passes the wrong context is asserting a mismatch,
+ * not a page.
+ */
+function makeCursor(sortField, row, context = {}) {
+  const scope = buildInvoiceCursorScope({
+    tenantId: context.tenantId,
+    filters: context.filters || {},
+    sortBy: sortField,
+    order: context.order || 'desc',
+    source: 'invoices',
+  });
+  return encodeInvoiceCursor(row, sortField, scope);
 }
 
 /**
@@ -182,7 +197,7 @@ describe('getInvoicesWithPagination', () => {
 
     it('fetches subsequent pages via cursor', async () => {
       // Simulate cursor pointing to row 'b'
-      const cursor = makeCursor('amount', makeRow('b', { amount: 200 }));
+      const cursor = makeCursor('amount', makeRow('b', { amount: 200 }), { order: 'asc' });
       const rows = [
         makeRow('c', { amount: 300 }),
         makeRow('d', { amount: 400 }),
@@ -211,7 +226,7 @@ describe('getInvoicesWithPagination', () => {
     });
 
     it('throws CursorError for a tampered cursor', async () => {
-      const cursor = makeCursor('amount', makeRow('a'));
+      const cursor = makeCursor('amount', makeRow('a'), { order: 'asc' });
       const tampered = cursor.slice(0, -5) + 'abcde';
 
       await expect(
@@ -223,7 +238,7 @@ describe('getInvoicesWithPagination', () => {
     });
 
     it('throws CursorError when cursor sort field does not match request sort field', async () => {
-      const cursor = makeCursor('amount', makeRow('a'));
+      const cursor = makeCursor('amount', makeRow('a'), { order: 'asc' });
 
       await expect(
         getInvoicesWithPagination({
@@ -234,7 +249,10 @@ describe('getInvoicesWithPagination', () => {
     });
 
     it('applies filters together with cursor pagination', async () => {
-      const cursor = makeCursor('amount', makeRow('b', { amount: 200 }));
+      const cursor = makeCursor('amount', makeRow('b', { amount: 200 }), {
+        filters: { status: 'approved' },
+        order: 'asc',
+      });
       mockDbResult([makeRow('c', { amount: 300 })], 2);
 
       await getInvoicesWithPagination({
@@ -388,9 +406,15 @@ describe('getInvoicesWithPagination', () => {
 
 describe('invoice cursor contract', () => {
   it('uses the unique id as the deterministic tie-breaker', () => {
+    const scope = buildInvoiceCursorScope({ filters: {}, sortBy: 'created_at', order: 'desc' });
     const cursor = decodeInvoiceCursor(
-      encodeInvoiceCursor({ id: 10, created_at: '2026-08-20T00:00:00.000Z' }, 'created_at'),
+      encodeInvoiceCursor(
+        { id: 10, created_at: '2026-08-20T00:00:00.000Z' },
+        'created_at',
+        scope,
+      ),
       'created_at',
+      scope,
     );
 
     expect(cursor.id).toBe('10');

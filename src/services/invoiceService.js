@@ -27,10 +27,11 @@
 const { getMetricsCacheStore } = require('./metricsCacheStore');
 const db = require('../db/knex');
 const { applyQueryOptions } = require('../utils/queryBuilder');
-const { encodeCursor, decodeCursor, CursorError } = require('../utils/cursorPagination');
+const { CursorError } = require('../utils/cursorPagination');
 const {
   normalizeInvoicePageSize,
   resolveInvoiceSort,
+  buildInvoiceCursorScope,
   encodeInvoiceCursor,
   decodeInvoiceCursor,
 } = require('../utils/invoicePagination');
@@ -212,19 +213,41 @@ function _applyInvoiceFilters(query, filters) {
  * Offset mode accepts `page` (1-based) and `limit` for backward compat.
  * Both modes return the same `{ data, meta }` shape.
  *
+ * Cursors are bound to the read they were minted for: the tenant (when the
+ * caller is scoped), the effective filters, and the sort. Replaying one under
+ * a different tenant or filter set is rejected rather than silently skipping
+ * rows.
+ *
  * @param {Object}  options
+ * @param {string}  [options.tenantId]       - Owning tenant, when the read is scoped.
  * @param {Object}  [options.filters={}]     - Validated filters (status, smeId, buyerId, dateFrom, dateTo).
  * @param {Object}  [options.sorting={}]     - Sorting config ({ sortBy, order }).
  * @param {Object}  [options.pagination={}]  - Pagination config ({ cursor, page, limit }).
  * @returns {Promise<{ data: Array, meta: Object }>}
- * @throws {CursorError} When the cursor is malformed, tampered, or has a sort-field mismatch.
+ * @throws {CursorError} When the cursor is malformed, tampered, expired, or does
+ *   not belong to this tenant/filter/sort.
  */
-async function getInvoicesWithPagination({ filters = {}, sorting = {}, pagination = {} } = {}) {
+async function getInvoicesWithPagination({
+  tenantId,
+  filters = {},
+  sorting = {},
+  pagination = {},
+} = {}) {
   const limit = normalizeInvoicePageSize(pagination.limit);
   const resolvedSort = resolveInvoiceSort(sorting.sortBy, sorting.order);
   const sortField = resolvedSort.alias;
   const sortColumn = resolvedSort.column;
   const order = resolvedSort.order;
+
+  // Computed once and signed into every cursor this call mints, so the next
+  // page can prove it is continuing this exact read.
+  const cursorScope = buildInvoiceCursorScope({
+    tenantId,
+    filters,
+    sortBy: sortField,
+    order,
+    source: 'invoices',
+  });
 
   // -- Base query (exclude soft-deleted records) -----------------------------
   const baseQuery = () => db('invoices').whereNull('deleted_at');
@@ -240,7 +263,7 @@ async function getInvoicesWithPagination({ filters = {}, sorting = {}, paginatio
 
   // -- Cursor-based keyset pagination ----------------------------------------
   if (useCursor) {
-    const decoded = decodeInvoiceCursor(pagination.cursor, sortField);
+    const decoded = decodeInvoiceCursor(pagination.cursor, sortField, cursorScope);
     const { sortValue, id: lastId } = decoded;
 
     let dataQ = baseQuery().select('*');
@@ -266,7 +289,7 @@ async function getInvoicesWithPagination({ filters = {}, sorting = {}, paginatio
     let nextCursor = null;
     if (hasMore && data.length > 0) {
       const lastRow = data[data.length - 1];
-      nextCursor = encodeInvoiceCursor(lastRow, sortField);
+      nextCursor = encodeInvoiceCursor(lastRow, sortField, cursorScope);
     }
 
     return { data, meta: { total, limit, hasMore, nextCursor } };
@@ -287,7 +310,7 @@ async function getInvoicesWithPagination({ filters = {}, sorting = {}, paginatio
   let pagedNextCursor = null;
   if (pagedHasMore && pagedData.length > 0) {
     const lastRow = pagedData[pagedData.length - 1];
-    pagedNextCursor = encodeInvoiceCursor(lastRow, sortField);
+    pagedNextCursor = encodeInvoiceCursor(lastRow, sortField, cursorScope);
   }
 
   return {
@@ -923,6 +946,11 @@ async function getSmeInvoiceCounts(tenantId, userId) {
  * is stable under concurrent inserts.  The cursor is opaque and HMAC-signed;
  * malformed or tampered cursors throw {@link CursorError}.
  *
+ * The cursor is also bound to `(tenantId, userId)`. The keyset predicate is
+ * applied to this tenant's rows, so without that binding a cursor minted for
+ * one tenant/user would be accepted here and seek to a position belonging to
+ * someone else's data — skipping rows, and disclosing their ordering.
+ *
  * When no cursor is supplied the first page is returned.
  * The caller controls page size via `limit` (1–100, default 20).
  *
@@ -951,13 +979,24 @@ async function getSmeInvoiceList(tenantId, userId, { cursor, limit = 20 } = {}) 
       .where({ tenant_id: tenantId, sme_id: userId })
       .whereNull('deleted_at');
 
+  // The effective query is `tenant_id = tenantId AND sme_id = userId, newest
+  // first`; the scope states exactly that so a cursor from any other scope is
+  // refused below.
+  const cursorScope = buildInvoiceCursorScope({
+    tenantId,
+    filters: { smeId: userId },
+    sortBy: 'created_at',
+    order: 'desc',
+    source: 'sme-invoices',
+  });
+
   const countRow = await baseQuery().count('* as total').first();
   const total = parseInt(countRow?.total ?? countRow?.['count(*)'] ?? 0, 10);
 
   let cursorData = null;
   if (cursor) {
     try {
-      cursorData = decodeCursor(cursor, 'created_at');
+      cursorData = decodeInvoiceCursor(cursor, 'created_at', cursorScope);
     } catch (err) {
       if (err instanceof CursorError) {
         throw err;
@@ -990,11 +1029,7 @@ async function getSmeInvoiceList(tenantId, userId, { cursor, limit = 20 } = {}) 
   let nextCursor = null;
   if (hasMore && pageRows.length > 0) {
     const lastRow = pageRows[pageRows.length - 1];
-    nextCursor = encodeCursor({
-      sortField: 'created_at',
-      sortValue: lastRow.created_at,
-      id: String(lastRow.id),
-    });
+    nextCursor = encodeInvoiceCursor(lastRow, 'created_at', cursorScope);
   }
 
   return {

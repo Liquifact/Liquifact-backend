@@ -8,6 +8,7 @@ const {
   DEFAULT_INVOICE_PAGE_SIZE,
   INVOICE_SORT_COLUMNS,
   MAX_INVOICE_PAGE_SIZE,
+  buildInvoiceCursorScope,
   decodeInvoiceCursor,
   encodeInvoiceCursor,
   isAfterInvoiceCursor,
@@ -24,6 +25,16 @@ function invoice(id, createdAt, amount = 100) {
     date: createdAt.slice(0, 10),
     amount,
   };
+}
+
+/**
+ * Scope for the unfiltered list under the sort a case is exercising. Every
+ * cursor in this suite is bound to one, mirroring the service, so the cases
+ * below pin ordering behavior rather than the binding (which has its own suite
+ * in tests/invoice.cursor.scope.test.js).
+ */
+function scopeFor(sortBy, order = 'desc') {
+  return buildInvoiceCursorScope({ filters: {}, sortBy, order });
 }
 
 function compareRows(left, right, sortBy, order) {
@@ -56,7 +67,8 @@ function scanPages(rows, limit, sortBy, order, insertedRows = []) {
     }
     if (visibleRows.length <= limit) return pages;
     const last = page[page.length - 1];
-    cursor = decodeInvoiceCursor(encodeInvoiceCursor(last, sortBy), sortBy);
+    const scope = scopeFor(sortBy, order);
+    cursor = decodeInvoiceCursor(encodeInvoiceCursor(last, sortBy, scope), sortBy, scope);
   }
 }
 
@@ -95,8 +107,9 @@ describe('invoice cursor contract integration', () => {
     ['created_at', 'desc'],
   ])('round-trips an opaque cursor for %s/%s', (sortBy, order) => {
     const source = invoice(42, '2026-08-21T00:00:00.000Z', 4200);
-    const encoded = encodeInvoiceCursor(source, sortBy);
-    const decoded = decodeInvoiceCursor(encoded, sortBy);
+    const scope = scopeFor(sortBy, order);
+    const encoded = encodeInvoiceCursor(source, sortBy, scope);
+    const decoded = decodeInvoiceCursor(encoded, sortBy, scope);
 
     expect(encoded).toMatch(/^[A-Za-z0-9_-]+\.[a-f0-9]{64}$/);
     expect(decoded.id).toBe('42');
@@ -106,26 +119,29 @@ describe('invoice cursor contract integration', () => {
   });
 
   it('rejects a row without a unique database id', () => {
-    expect(() => encodeInvoiceCursor({ created_at: sameTimestamp }, 'created_at'))
+    expect(() => encodeInvoiceCursor({ created_at: sameTimestamp }, 'created_at', scopeFor('created_at')))
       .toThrow('unique id tiebreaker');
   });
 
   it('rejects a signed cursor when the requested sort alias changes', () => {
-    const cursor = encodeInvoiceCursor(rows[0], 'created_at');
+    const cursor = encodeInvoiceCursor(rows[0], 'created_at', scopeFor('created_at'));
 
-    expect(() => decodeInvoiceCursor(cursor, 'amount')).toThrow(CursorError);
+    expect(() => decodeInvoiceCursor(cursor, 'amount', scopeFor('created_at')))
+      .toThrow(CursorError);
   });
 
   it('rejects a cursor whose signature was changed', () => {
-    const cursor = encodeInvoiceCursor(rows[0], 'created_at');
+    const cursor = encodeInvoiceCursor(rows[0], 'created_at', scopeFor('created_at'));
     const tampered = `${cursor.slice(0, -1)}${cursor.endsWith('0') ? '1' : '0'}`;
 
     expect(() => decodeCursor(tampered, 'created_at')).toThrow(CursorError);
   });
 
   it('rejects a cursor with an invalid shape before any row can be selected', () => {
-    expect(() => decodeInvoiceCursor('not-a-cursor', 'created_at')).toThrow(CursorError);
-    expect(() => decodeInvoiceCursor('a.', 'created_at')).toThrow(CursorError);
+    const scope = scopeFor('created_at');
+
+    expect(() => decodeInvoiceCursor('not-a-cursor', 'created_at', scope)).toThrow(CursorError);
+    expect(() => decodeInvoiceCursor('a.', 'created_at', scope)).toThrow(CursorError);
   });
 
   it('rejects expired cursors when expiry enforcement is enabled', () => {
@@ -136,11 +152,12 @@ describe('invoice cursor contract integration', () => {
 
     try {
       const now = Date.now();
+      const scope = scopeFor('created_at');
       const clock = jest.spyOn(Date, 'now').mockReturnValue(now - 10000);
-      const staleCursor = encodeInvoiceCursor(rows[0], 'created_at');
+      const staleCursor = encodeInvoiceCursor(rows[0], 'created_at', scope);
       clock.mockRestore();
 
-      expect(() => decodeInvoiceCursor(staleCursor, 'created_at')).toThrow(CursorError);
+      expect(() => decodeInvoiceCursor(staleCursor, 'created_at', scope)).toThrow(CursorError);
     } finally {
       if (previousEnabled === undefined) delete process.env.CURSOR_TTL_ENABLED;
       else process.env.CURSOR_TTL_ENABLED = previousEnabled;
@@ -188,8 +205,7 @@ describe('invoice cursor contract integration', () => {
   it('returns a short final page and never creates a terminal cursor', () => {
     const pages = scanPages(rows.slice(0, 2), 2, 'created_at', 'desc');
 
-    expect(pages).toHaveLength(1);
-    expect(pages[0]).toHaveLength(2);
+    expect(pages).toHaveLength(1);    expect(pages[0]).toHaveLength(2);
     expect(isAfterInvoiceCursor(rows[0], {
       sortValue: rows[1].created_at,
       id: String(rows[1].id),

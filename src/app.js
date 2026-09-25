@@ -272,7 +272,14 @@ function createApp() {
 
     let result;
     try {
-      result = await invoiceService.getInvoicesWithPagination(validatedParams);
+      // `req.tenantId` is set when the request carries tenant context. Passing
+      // it through binds the cursor to this tenant; when the route is served
+      // anonymously the scope simply carries no tenant and the filter set alone
+      // identifies the read.
+      result = await invoiceService.getInvoicesWithPagination({
+        ...validatedParams,
+        tenantId: req.tenantId,
+      });
     } catch (err) {
       if (err instanceof CursorError) {
         return res.status(400).json({
