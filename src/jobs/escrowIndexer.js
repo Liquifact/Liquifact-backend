@@ -222,6 +222,16 @@ function normalizeEvent(rawEvent) {
  *   upsertEvent, and upsertProjection methods.
  */
 function createKnexEscrowEventStore(knex) {
+  /**
+   * Verifies that the given fencing token still holds a live lease, using the
+   * database clock so workers with skewed local clocks cannot steal or extend
+   * a lease incorrectly.
+   *
+   * @param {object|null} trx - Optional transaction to run the check within.
+   * @param {string} token - Fencing token expected to hold the lease.
+   * @returns {Promise<object>} Parsed lease value when the token is valid.
+   * @throws {LeaseLostError} When the lease is missing, stale, or expired.
+   */
   async function assertLease(trx, token) {
     const row = await (trx || knex)('escrow_indexer_state')
       .where({ key: LEASE_KEY })
@@ -296,13 +306,26 @@ function createKnexEscrowEventStore(knex) {
     },
 
     async saveCursor(cursor, fenceToken) {
-      if (fenceToken) {
-        await assertLease(null, fenceToken);
+      const writeCursor = async (trx) => {
+        // Assert the lease inside the same transaction as the write. Asserting
+        // and then writing in separate statements is a TOCTOU race: a worker
+        // whose lease expires between the two could still advance the cursor
+        // after another worker has taken over, regressing the checkpoint.
+        if (fenceToken) {
+          await assertLease(trx, fenceToken);
+        }
+        const q = trx || knex;
+        await q('escrow_indexer_state')
+          .insert({ key: 'horizon_cursor', value: cursor, updated_at: q.fn.now() })
+          .onConflict('key')
+          .merge({ value: cursor, updated_at: q.fn.now() });
+      };
+
+      if (fenceToken && typeof knex.transaction === 'function') {
+        await knex.transaction(writeCursor);
+      } else {
+        await writeCursor(null);
       }
-      await knex('escrow_indexer_state')
-        .insert({ key: 'horizon_cursor', value: cursor, updated_at: knex.fn.now() })
-        .onConflict('key')
-        .merge({ value: cursor, updated_at: knex.fn.now() });
     },
 
     async findProjection(invoiceId) {
@@ -376,6 +399,23 @@ function shouldReplaceProjection(currentProjection, event) {
   const nextToken = String(event.pagingToken || '');
   return nextToken > currentToken;
 }
+/**
+ * Classifies a per-event persistence failure as permanent (skippable) or
+ * transient (must abort the cycle).
+ *
+ * Invariant: only structured validation failures are permanent. A malformed
+ * payload can never become valid on retry, so it is skipped and the cursor may
+ * advance past it. Every other error (database, transaction, network, cache) is
+ * transient and must abort the cycle **before** the cursor advances — otherwise
+ * the unpersisted event is silently lost.
+ *
+ * @param {Error} error - Error thrown while persisting a single event.
+ * @returns {boolean} True when the event may be skipped without aborting.
+ */
+function isSkippableEventError(error) {
+  return Boolean(error) && (error instanceof ValidationError || error.name === 'ValidationError');
+}
+
 /**
  * Persists a single escrow event idempotently and updates the per-invoice
  * projection if the event is newer than the current one.
@@ -478,14 +518,25 @@ async function fetchEscrowEventsFromHorizon({ baseUrl, cursor, limit }) {
  * Runs one indexing cycle: fetches events, persists valid ones, skips invalid
  * ones, and advances the cursor when it changes.
  *
+ * Concurrency invariants:
+ * - Only one worker may run a cycle at a time, enforced by the store lease.
+ *   When the lease is held elsewhere the cycle is a no-op and resolves `null`.
+ * - The cursor only advances after every event in the batch has either been
+ *   persisted or permanently rejected as invalid. A transient persistence
+ *   failure aborts the cycle with the cursor unchanged, so the batch is safely
+ *   retried (event writes are idempotent via `event_id`).
+ * - Cursor writes are fenced by the lease token, so a worker whose lease
+ *   expired cannot regress the checkpoint.
+ *
  * @param {object} deps - Cycle dependencies.
  * @param {object} deps.store - Event store implementation.
  * @param {Function} deps.fetchEscrowEvents - Fetches a batch of events.
  * @param {Function} deps.transactionRunner - Runs a callback within a transaction.
  * @param {object} [deps.log] - Logger with warn/info/error.
  * @param {number} [deps.batchSize] - Max events to fetch per cycle.
- * @returns {Promise<object>} Summary with processed/skipped counts and
- *   cursorBefore/cursorAfter.
+ * @param {number} [deps.leaseDurationMs] - Lease duration in milliseconds.
+ * @returns {Promise<object|null>} Summary with processed/skipped counts and
+ *   cursorBefore/cursorAfter, or `null` when another worker holds the lease.
  */
 async function runEscrowIndexerCycle({
   store,
@@ -545,8 +596,24 @@ async function runEscrowIndexerCycle({
           );
           throw error;
         }
+
+        if (!isSkippableEventError(error)) {
+          // Fail closed. A transient persistence failure must abort the cycle
+          // *before* the cursor advances so that next cycle re-fetches and
+          // retries the same batch. Counting it as "skipped" would advance the
+          // cursor past an unpersisted event and silently drop it.
+          log.error(
+            { err: error, eventId: rawEvent && rawEvent.eventId },
+            'Escrow indexer aborted; event could not be persisted, cursor will not advance.'
+          );
+          throw error;
+        }
+
         skipped += 1;
-        log.warn({ err: error, eventId: rawEvent && rawEvent.eventId }, 'Skipping invalid escrow event.');
+        log.warn(
+          { err: error, eventId: rawEvent && rawEvent.eventId, code: error.code },
+          'Skipping invalid escrow event.'
+        );
       }
     }
 
@@ -619,7 +686,16 @@ function createEscrowIndexer(options = {}) {
         transactionRunner,
         log: options.log || logger,
         batchSize: Number(process.env.ESCROW_INDEXER_BATCH_SIZE || DEFAULT_BATCH_SIZE),
+        leaseDurationMs,
       });
+
+      if (!summary) {
+        // The lease is held by another worker. Under concurrent execution this
+        // is a normal, expected outcome, so it must not be recorded as a cycle
+        // failure or have its (absent) counters dereferenced.
+        return null;
+      }
+
       (options.log || logger).info(summary, 'Escrow indexer cycle completed.');
 
       // Emit metrics
@@ -694,6 +770,7 @@ module.exports = {
   persistEscrowEvent,
   runEscrowIndexerCycle,
   shouldReplaceProjection,
+  isSkippableEventError,
   isValidStellarContractId,
   isValidTxHash,
   ValidationError,
