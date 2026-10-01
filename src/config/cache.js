@@ -62,15 +62,8 @@ const DEFAULT_ESCROW_TTL_SECONDS = 30;
 const DEFAULT_ESCROW_MAX_ENTRIES = 500;
 const DEFAULT_INDEXER_TTL_SECONDS = 10;
 const DEFAULT_INDEXER_MAX_ENTRIES = 200;
-
-const DEFAULT_ESCROW_MAX_ENTRIES = 500;
-// Keep millisecond TTLs within the signed 32-bit interval supported by timers.
-const MAX_TTL_SECONDS = Math.floor(0x7fffffff / 1000);
-
-const MIN_CACHE_TTL_SECONDS = 1;
-const MAX_CACHE_TTL_SECONDS = 86400;
-const MIN_CACHE_MAX_ENTRIES = 1;
-const MAX_CACHE_MAX_ENTRIES = 1000000;
+const DEFAULT_INVOICE_STATE_TTL_SECONDS = 30;
+const DEFAULT_INVOICE_STATE_MAX_ENTRIES = 500;
 
 /**
  * Smallest accepted TTL, in seconds.
