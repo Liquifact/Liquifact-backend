@@ -20,10 +20,26 @@ function resetMetricCounter(counter) {
   if (counter && typeof counter.reset === 'function') {
     counter.reset();
   }
+  // The shared test setup replaces prom-client counters with jest.fn() stubs
+  // whose reset() is inert; clear the inc() call log so each test starts at 0.
+  if (counter && counter.inc && counter.inc.mock && typeof counter.inc.mockClear === 'function') {
+    counter.inc.mockClear();
+  }
 }
 
 function getCounterValue(counter) {
-  return Object.values(counter.hashMap).reduce((sum, entry) => sum + entry.value, 0);
+  if (!counter) {
+    return 0;
+  }
+  // Real prom-client counters expose a hashMap of label combinations.
+  if (counter.hashMap) {
+    return Object.values(counter.hashMap).reduce((sum, entry) => sum + entry.value, 0);
+  }
+  // Test-double counters track calls on .inc().
+  if (counter.inc && counter.inc.mock && Array.isArray(counter.inc.mock.calls)) {
+    return counter.inc.mock.calls.length;
+  }
+  return typeof counter.val === 'number' ? counter.val : 0;
 }
 
 describe('corsCache', () => {
@@ -476,6 +492,265 @@ describe('corsCache', () => {
       
       expect(cache.get('https://a.com')).toBe(true);
       expect(cache.get('https://b.com')).toBe(false);
+    });
+  });
+
+  // ─── Compatibility contract: frozen public surface ─────────────────────
+
+  describe('compatibility contract — frozen exports', () => {
+    it('exposes exactly the documented public surface (sorted keys)', () => {
+      const mod = require('./corsCache');
+      expect(Object.keys(mod).sort()).toEqual([
+        'DEFAULT_MAX_ENTRIES',
+        'DEFAULT_TTL_SECONDS',
+        'MAX_MAX_ENTRIES',
+        'MAX_TTL_SECONDS',
+        'MIN_MAX_ENTRIES',
+        'MIN_TTL_SECONDS',
+        '_setCorsCache',
+        'createCorsCache',
+        'getCorsCache',
+        'isValidCacheInstance',
+        'parseCorsCacheConfig',
+      ]);
+    });
+
+    it('pins the runtime type of every export', () => {
+      const mod = require('./corsCache');
+      const fns = [
+        'createCorsCache',
+        'getCorsCache',
+        'parseCorsCacheConfig',
+        '_setCorsCache',
+        'isValidCacheInstance',
+      ];
+      const numbers = [
+        'DEFAULT_TTL_SECONDS',
+        'DEFAULT_MAX_ENTRIES',
+        'MIN_TTL_SECONDS',
+        'MAX_TTL_SECONDS',
+        'MIN_MAX_ENTRIES',
+        'MAX_MAX_ENTRIES',
+      ];
+      fns.forEach((name) => expect(typeof mod[name]).toBe('function'));
+      numbers.forEach((name) => expect(typeof mod[name]).toBe('number'));
+    });
+
+    it('pins the documented default and clamp constants', () => {
+      const mod = require('./corsCache');
+      expect(mod.DEFAULT_TTL_SECONDS).toBe(5);
+      expect(mod.DEFAULT_MAX_ENTRIES).toBe(256);
+      expect(mod.MIN_TTL_SECONDS).toBe(1);
+      expect(mod.MAX_TTL_SECONDS).toBe(60);
+      expect(mod.MIN_MAX_ENTRIES).toBe(16);
+      expect(mod.MAX_MAX_ENTRIES).toBe(4096);
+    });
+  });
+
+  // ─── Compatibility contract: empty / hostile env ───────────────────────
+
+  describe('compatibility contract — empty and hostile env', () => {
+    it('falls back to documented defaults for an empty env object', () => {
+      const { parseCorsCacheConfig, DEFAULT_TTL_SECONDS, DEFAULT_MAX_ENTRIES } = require('./corsCache');
+      expect(parseCorsCacheConfig({})).toEqual({
+        ttlMs: DEFAULT_TTL_SECONDS * 1000,
+        maxEntries: DEFAULT_MAX_ENTRIES,
+      });
+    });
+
+    it('reads process.env by default and never throws', () => {
+      const { parseCorsCacheConfig } = require('./corsCache');
+      let cfg;
+      expect(() => { cfg = parseCorsCacheConfig(); }).not.toThrow();
+      expect(cfg.ttlMs).toBe(5000);
+      expect(cfg.maxEntries).toBe(256);
+    });
+
+    it.each([
+      ['undefined', undefined],
+      ['empty', ''],
+      ['whitespace', '   '],
+      ['non-numeric', 'not-a-number'],
+      ['NaN literal', 'NaN'],
+      ['null literal', 'null'],
+      ['null value', null],
+      ['array value', []],
+      ['object value', {}],
+    ])('never throws and uses defaults for %s env values', (_label, raw) => {
+      const { parseCorsCacheConfig } = require('./corsCache');
+      let cfg;
+      expect(() => {
+        cfg = parseCorsCacheConfig({
+          CORS_CACHE_TTL_SECONDS: raw,
+          CORS_CACHE_MAX_ENTRIES: raw,
+        });
+      }).not.toThrow();
+      expect(cfg.ttlMs).toBe(5000);
+      expect(cfg.maxEntries).toBe(256);
+    });
+  });
+
+  // ─── Compatibility contract: TTL / MAX_ENTRIES clamps ─────────────────
+
+  describe('compatibility contract — TTL and entry clamps', () => {
+    it('clamps TTL at the inclusive boundaries 1s and 60s', () => {
+      const { parseCorsCacheConfig } = require('./corsCache');
+      expect(parseCorsCacheConfig({ CORS_CACHE_TTL_SECONDS: '1' }).ttlMs).toBe(1000);
+      expect(parseCorsCacheConfig({ CORS_CACHE_TTL_SECONDS: '60' }).ttlMs).toBe(60000);
+    });
+
+    it('clamps TTL below and above range', () => {
+      const { parseCorsCacheConfig } = require('./corsCache');
+      expect(parseCorsCacheConfig({ CORS_CACHE_TTL_SECONDS: '0' }).ttlMs).toBe(1000);
+      expect(parseCorsCacheConfig({ CORS_CACHE_TTL_SECONDS: '-5' }).ttlMs).toBe(1000);
+      expect(parseCorsCacheConfig({ CORS_CACHE_TTL_SECONDS: '61' }).ttlMs).toBe(60000);
+      expect(parseCorsCacheConfig({ CORS_CACHE_TTL_SECONDS: '999999' }).ttlMs).toBe(60000);
+    });
+
+    it('clamps maxEntries at the inclusive boundaries 16 and 4096', () => {
+      const { parseCorsCacheConfig } = require('./corsCache');
+      expect(parseCorsCacheConfig({ CORS_CACHE_MAX_ENTRIES: '16' }).maxEntries).toBe(16);
+      expect(parseCorsCacheConfig({ CORS_CACHE_MAX_ENTRIES: '4096' }).maxEntries).toBe(4096);
+    });
+
+    it('clamps maxEntries below and above range', () => {
+      const { parseCorsCacheConfig } = require('./corsCache');
+      expect(parseCorsCacheConfig({ CORS_CACHE_MAX_ENTRIES: '15' }).maxEntries).toBe(16);
+      expect(parseCorsCacheConfig({ CORS_CACHE_MAX_ENTRIES: '0' }).maxEntries).toBe(16);
+      expect(parseCorsCacheConfig({ CORS_CACHE_MAX_ENTRIES: '4097' }).maxEntries).toBe(4096);
+      expect(parseCorsCacheConfig({ CORS_CACHE_MAX_ENTRIES: '999999' }).maxEntries).toBe(4096);
+    });
+
+    it('applies parsed env knobs when createCorsCache is called without options', () => {
+      const { createCorsCache } = require('./corsCache');
+      process.env.CORS_CACHE_TTL_SECONDS = '1';
+      process.env.CORS_CACHE_MAX_ENTRIES = '16';
+      try {
+        const cache = createCorsCache();
+        for (let i = 0; i < 20; i += 1) {
+          cache.set(`origin-${i}`, true);
+        }
+        expect(cache.size).toBe(16);
+      } finally {
+        delete process.env.CORS_CACHE_TTL_SECONDS;
+        delete process.env.CORS_CACHE_MAX_ENTRIES;
+      }
+    });
+  });
+
+  // ─── Compatibility contract: hit / miss / eviction / invalidation ─────
+
+  describe('compatibility contract — cache semantics', () => {
+    it('distinguishes hits, misses, allow and reject outcomes without throwing', () => {
+      const { createCorsCache } = require('./corsCache');
+      const cache = createCorsCache({ ttlMs: 5000, maxEntries: 16 });
+      expect(cache.get('https://miss.example')).toBeUndefined();
+      cache.set('https://allow.example', true);
+      cache.set('https://deny.example', false);
+      expect(cache.get('https://allow.example')).toBe(true);
+      expect(cache.get('https://deny.example')).toBe(false);
+    });
+
+    it('evicts the least-recently-used entry deterministically at the bound', () => {
+      const { createCorsCache } = require('./corsCache');
+      const cache = createCorsCache({ ttlMs: 5000, maxEntries: 16 });
+      for (let i = 0; i < 16; i += 1) {
+        cache.set(`origin-${i}`, true);
+      }
+      expect(cache.size).toBe(16);
+      expect(cache.get('origin-0')).toBe(true); // promote origin-0
+      cache.set('origin-16', true); // evicts origin-1
+      expect(cache.size).toBe(16);
+      expect(cache.get('origin-1')).toBeUndefined();
+      expect(cache.get('origin-0')).toBe(true);
+      expect(cache.get('origin-16')).toBe(true);
+    });
+
+    it('fully invalidates every entry and lock on clear (allowlist reload hook)', () => {
+      const { createCorsCache } = require('./corsCache');
+      const cache = createCorsCache({ ttlMs: 5000, maxEntries: 256 });
+      for (let i = 0; i < 10; i += 1) {
+        cache.set(`origin-${i}`, i % 2 === 0);
+      }
+      expect(cache.size).toBe(10);
+      cache.clear();
+      expect(cache.size).toBe(0);
+      for (let i = 0; i < 10; i += 1) {
+        expect(cache.get(`origin-${i}`)).toBeUndefined();
+      }
+      // Locks are released too: the same key can be re-set immediately.
+      cache.set('origin-0', true);
+      expect(cache.get('origin-0')).toBe(true);
+    });
+  });
+
+  // ─── Compatibility contract: idempotency + metric isolation ───────────
+
+  describe('compatibility contract — idempotency and metric isolation', () => {
+    it('repeated reads are idempotent and preserve the stored result', () => {
+      const { createCorsCache } = require('./corsCache');
+      const cache = createCorsCache({ ttlMs: 5000, maxEntries: 16 });
+      cache.set('https://a.example', false);
+      expect(cache.get('https://a.example')).toBe(false);
+      expect(cache.get('https://a.example')).toBe(false);
+      expect(cache.size).toBe(1);
+    });
+
+    it('repeated sets of the same key are idempotent', () => {
+      const { createCorsCache } = require('./corsCache');
+      const cache = createCorsCache({ ttlMs: 5000, maxEntries: 16 });
+      cache.set('https://a.example', true);
+      cache.set('https://a.example', true);
+      cache.set('https://a.example', true);
+      expect(cache.size).toBe(1);
+      expect(cache.get('https://a.example')).toBe(true);
+    });
+
+    it('repeated clears are idempotent', () => {
+      const { createCorsCache } = require('./corsCache');
+      const cache = createCorsCache({ ttlMs: 5000, maxEntries: 16 });
+      cache.set('https://a.example', true);
+      cache.clear();
+      cache.clear();
+      expect(cache.size).toBe(0);
+    });
+
+    it('repeated getCorsCache() calls return the same instance', () => {
+      const { getCorsCache, _setCorsCache, isValidCacheInstance } = require('./corsCache');
+      _setCorsCache(null);
+      const first = getCorsCache();
+      expect(isValidCacheInstance(first)).toBe(true);
+      expect(getCorsCache()).toBe(first);
+    });
+
+    it('never lets a throwing metric counter break get/set/clear', () => {
+      const { createCorsCache } = require('./corsCache');
+      const {
+        corsCacheHitsTotal,
+        corsCacheMissesTotal,
+        corsCacheEvictionsTotal,
+        corsCacheInvalidationsTotal,
+      } = require('../metrics');
+      const cache = createCorsCache({ ttlMs: 5000, maxEntries: 16 });
+      const counters = [
+        corsCacheHitsTotal,
+        corsCacheMissesTotal,
+        corsCacheEvictionsTotal,
+        corsCacheInvalidationsTotal,
+      ];
+      const originals = counters.map((counter) => counter.inc);
+      counters.forEach((counter) => {
+        counter.inc = () => { throw new Error('metric backend down'); };
+      });
+      try {
+        expect(() => { cache.set('https://a.example', true); }).not.toThrow();
+        expect(cache.get('https://miss.example')).toBeUndefined();
+        expect(cache.get('https://a.example')).toBe(true);
+        expect(() => { cache.clear(); }).not.toThrow();
+        expect(cache.size).toBe(0);
+      } finally {
+        counters.forEach((counter, index) => { counter.inc = originals[index]; });
+      }
     });
   });
 });

@@ -15,6 +15,54 @@
  * - `CORS_CACHE_TTL_SECONDS` – entry lifetime in seconds (default 5, clamped 1-60).
  * - `CORS_CACHE_MAX_ENTRIES` – hard cap on cached entries (default 256, clamped 16-4096).
  *
+ * ## Compatibility contract
+ *
+ * The public surface below is **frozen**: existing exports keep their names,
+ * types and documented behavior. Changes are **additive-only** (new exports or
+ * new optional options); removing, renaming or changing the semantics of an
+ * existing export is a breaking change and requires a migration plan.
+ *
+ * Frozen exports:
+ * - `createCorsCache({ ttlMs?, maxEntries? })` – builds an independent bounded
+ *   LRU cache and returns `{ get, set, clear, size }`.
+ *   - `get(origin)` → `true`/`false` on a live hit, `undefined` on
+ *     miss/expiry/invalid key. Never throws.
+ *   - `set(origin, allowed)` → stores a boolean result. Invalid keys or
+ *     non-boolean values are ignored without mutating state; entries beyond
+ *     `maxEntries` are evicted LRU-first. Never throws.
+ *   - `clear()` → drops every entry and lock. This is the invalidation entry
+ *     point used when the allowlist changes. Never throws.
+ *   - `size` → number of live entries.
+ * - `getCorsCache()` – returns the process-wide singleton, creating it on first
+ *   use; repeated calls return the same instance.
+ * - `parseCorsCacheConfig(env?)` – resolves `{ ttlMs, maxEntries }` from `env`
+ *   (defaults to `process.env`). Missing, empty or unparseable values fall back
+ *   to the documented defaults. Never throws.
+ * - `_setCorsCache(instance)` – test-only singleton replacement.
+ * - `isValidCacheInstance(instance)` – structural check for the cache shape.
+ * - Numeric constants `DEFAULT_TTL_SECONDS` (5), `DEFAULT_MAX_ENTRIES` (256),
+ *   `MIN_TTL_SECONDS` (1), `MAX_TTL_SECONDS` (60), `MIN_MAX_ENTRIES` (16) and
+ *   `MAX_MAX_ENTRIES` (4096).
+ *
+ * Environment knobs and clamp ranges:
+ * - `CORS_CACHE_TTL_SECONDS` – entry lifetime in seconds; default 5, clamped to
+ *   the inclusive range 1..60.
+ * - `CORS_CACHE_MAX_ENTRIES` – hard entry cap; default 256, clamped to the
+ *   inclusive range 16..4096.
+ * - Explicit `createCorsCache({ ttlMs, maxEntries })` options are honored
+ *   verbatim; the clamp ranges apply only to values resolved through
+ *   `parseCorsCacheConfig`.
+ *
+ * Invariants preserved through errors, empty data and upgrades:
+ * - Cache operations never throw; metric-counter failures are swallowed so a
+ *   metrics outage cannot take the CORS request path down.
+ * - Reads are idempotent, and `set` on an existing key refreshes it in place.
+ * - `clear()` is a full, idempotent invalidation of both entries and locks.
+ *
+ * Not part of this module: `validateCorsOrigin`, `invalidateCorsCache` and
+ * `reloadCorsOrigins` live in `config/cors.js` / `utils/corsValidator.js`; this
+ * module intentionally exposes only the cache surface above.
+ *
  * @module config/corsCache
  */
 
