@@ -19,6 +19,47 @@
  * | `CorsConfigDto`        | env → app  | Resolved CORS policy from env vars   |
  * | `CorsOriginResultDto`  | app → cors | Per-request origin validation result |
  *
+ * ## Compatibility contract
+ *
+ * The section below freezes the public surface of this module and is pinned by
+ * `src/dtos/cors.test.js`. It is **additive-only**: new exports, new optional
+ * fields and newly accepted inputs may be added, but existing export names,
+ * their JavaScript types, the DTO shapes and the error-code string values must
+ * never be removed, renamed or changed. Removing or changing them is a breaking
+ * change and requires a tested migration path.
+ *
+ * ### Exported names (`Object.keys(require('./cors'))`)
+ *
+ * | Export                          | Type     | Signature / value          |
+ * |---------------------------------|----------|----------------------------|
+ * | `corsConfigDtoFromEnv`          | function | `(env?) → CorsConfigDto`   |
+ * | `validateOriginDto`             | function | `(origin, allowedOrigins) → CorsOriginResultDto` |
+ * | `corsConfigDtoToOptions`        | function | `(dto) → cors.CorsOptions` |
+ * | `corsConfigDtoToJson`           | function | `(dto) → JSON-safe DTO`    |
+ * | `corsConfigDtoFromJson`         | function | `(json) → CorsConfigDto`   |
+ * | `CORS_ORIGIN_NOT_ALLOWED_CODE`  | string   | `'CORS_ORIGIN_NOT_ALLOWED'` |
+ * | `CORS_NULL_ORIGIN_CODE`         | string   | `'CORS_NULL_ORIGIN'`       |
+ * | `CORS_CONFIG_DTO_INVALID_CODE`  | string   | `'CORS_CONFIG_DTO_INVALID'` |
+ *
+ * ### Frozen DTO shapes
+ *
+ * - `CorsConfigDto`: `{ allowedOrigins: string[], maxAge: number,
+ *   optionsSuccessStatus: number, isDevelopmentFallback: boolean }`.
+ * - `CorsOriginResultDto`: `{ allowed: true }` on success, or
+ *   `{ allowed: false, reason: string, errorCode: string }` on rejection.
+ *
+ * ### Behavioural guarantees
+ *
+ * - Total on absent/malformed roots: `null`, `undefined`, arrays and primitives
+ *   are treated as empty records and yield the documented defaults — `maxAge`
+ *   600, `optionsSuccessStatus` 204, `isDevelopmentFallback` false — never
+ *   throwing.
+ * - `validateOriginDto(undefined, …)` allows non-browser callers; the literal
+ *   `'null'` origin, non-string/empty origins and empty allowlists fail closed
+ *   with a machine-readable `errorCode` and never throw.
+ * - Returned `allowedOrigins` arrays are fresh, de-duplicated and normalized, so
+ *   callers cannot mutate module state or the input.
+ *
  * @module dtos/cors
  */
 
@@ -64,6 +105,15 @@ const CORS_ORIGIN_NOT_ALLOWED_CODE = 'CORS_ORIGIN_NOT_ALLOWED';
 
 /** @type {string} */
 const CORS_NULL_ORIGIN_CODE = 'CORS_NULL_ORIGIN';
+
+/** @type {string} Machine-readable code for a non-string or empty origin. */
+const CORS_INVALID_ORIGIN_CODE = 'CORS_INVALID_ORIGIN';
+
+/** @type {string} Machine-readable code for validating against an empty allowlist. */
+const CORS_EMPTY_ALLOWLIST_CODE = 'CORS_EMPTY_ALLOWLIST';
+
+/** @type {string} Machine-readable code for an invalid/malformed DTO payload. */
+const CORS_CONFIG_DTO_INVALID_CODE = 'CORS_CONFIG_DTO_INVALID';
 
 const DEFAULT_OPTIONS_SUCCESS_STATUS = 204;
 const MIN_OPTIONS_SUCCESS_STATUS = 200;
@@ -167,7 +217,7 @@ function corsConfigDtoFromEnv(env = process.env) {
   // A custom env is an isolated snapshot: missing max-age means its default,
   // never a value inherited from the process-wide CORS configuration.
   const maxAge = usesProcessEnv
-    ? corsConfig.getMaxAge()
+    ? corsConfig.parseMaxAge(process.env.CORS_MAX_AGE)
     : corsConfig.parseMaxAge(safeEnv.CORS_MAX_AGE);
 
   return {
