@@ -20,6 +20,32 @@
  * 10. Payload-too-large handler → 413 JSON
  * 11. Generic internal-error handler → 500 JSON
  *
+ * ## Failure-recovery invariants
+ *
+ * Terminal error handling is implemented in `middleware/failureRecovery` so the
+ * recovery paths are unit-testable and free of shared state. The invariants
+ * that guarantee deterministic, observable recovery are:
+ *
+ * 1. **Deterministic shapes.** Each failure class has exactly one documented
+ *    response body:
+ *    - blocked CORS origin       → `403 { error, code }`
+ *    - malformed JSON / bare 400 → `400 { error: 'Bad Request' }`
+ *    - status-bearing 4xx        → `4xx { error: { code, message } }`
+ *    - status-bearing 5xx        → `5xx { error: { code, message } }`
+ *    - unhandled (production)    → `500 { error: 'Internal server error' }`
+ *    - unhandled (development)   → `500 { error: { message, stack } }`
+ * 2. **No internal leakage.** Outside `development`, 5xx and unhandled errors
+ *    never serialize stacks, `detail`, `title`, or raw `message` values.
+ * 3. **Single writer / idempotent.** Handlers never write after
+ *    `res.headersSent`; they forward to Express, which terminates the
+ *    connection. Repeated failures therefore produce stable responses and
+ *    cannot leave the response half-written.
+ * 4. **No swallowed errors.** Every handled failure is logged at a level
+ *    matching its class; other failures are forwarded to the next handler.
+ * 5. **Ordered recovery.** `handleCorsError` → `payloadTooLargeHandler` →
+ *    `configErrorHandler` → `handleInternalError`, each recovering only its own
+ *    failure class and passing everything else through.
+ *
  * @module app
  */
 
@@ -37,7 +63,7 @@ const { correlationIdMiddleware } = require('./middleware/correlationId');
 const invoiceService = require('./services/invoiceService');
 const { CursorError } = require('./utils/cursorPagination');
 const { getEscrowRead } = require('./services/escrowReadService');
-const { createCorsOptions, isCorsOriginRejectedError } = require('./config/cors');
+const { buildCorsOptions } = require('./config/cors');
 const { corsObservability } = require('./middleware/corsObservability');
 const { get: getConfig } = require('./config');
 const { validateInvoiceQueryParams } = require('./utils/validators');
@@ -52,7 +78,6 @@ const healthRoutes = require('./routes/health');
 const { performHealthChecks, performReadinessChecks } = require('./services/health');
 const { validateHealthQuery, rejectBodyOnGet } = require('./schemas/health');
 const responseHelper = require('./utils/responseHelper');
-const logger = require('./logger');
 const { metricsAuth, metricsHandler } = require('./metrics');
 const { metricsLimiter } = require('./middleware/rateLimit');
 const { instrumentHealth } = require('./middleware/healthMetrics');
@@ -83,72 +108,12 @@ const {
 const { createCompressionMiddleware } = require('./middleware/compression');
 const { configErrorHandler } = require('./middleware/configErrorHandler');
 const { sanitizeInput } = require('./middleware/sanitizeInput');
+const { handleCorsError, handleInternalError } = require('./middleware/failureRecovery');
 const {
   validateEscrowParamsMiddleware,
   validateApiInfoQuery,
   rejectBodyOnGet: rejectBodyOnGetInfo,
 } = require('./schemas/appBoundary');
-
-/**
- * Returns a 403 JSON response only for the dedicated blocked-origin CORS error.
- *
- * @param {Error} err - Request error.
- * @param {import('express').Request} req - Express request.
- * @param {import('express').Response} res - Express response.
- * @param {import('express').NextFunction} next - Express next callback.
- * @returns {void}
- */
-function handleCorsError(err, req, res, next) {
-  if (isCorsOriginRejectedError(err)) {
-    if (res.locals) res.locals.isCorsOriginRejected = true;
-    res.status(403).json({ error: err.message, code: err.code });
-    return;
-  }
-  next(err);
-}
-
-/**
- * Handles uncaught application errors with a generic 500 response.
- *
- * @param {Error} err - Request error.
- * @param {import('express').Request} req - Express request.
- * @param {import('express').Response} res - Express response.
- * @param {import('express').NextFunction} _next - Express next callback (unused).
- * @returns {void}
- */
-function handleInternalError(err, req, res, _next) {
-  const isDevelopment = process.env.NODE_ENV === 'development';
-
-  if (err && (err.type === 'entity.parse.failed' || err.status === 400)) {
-    res.status(400).json({ error: 'Bad Request' });
-    return;
-  }
-
-  // AppError: use the status it carries (400–599).
-  // This covers both 4xx client errors and 5xx upstream errors (e.g. 502).
-  if (err && err.status && err.status >= 400 && err.status <= 599) {
-    res.status(err.status).json({
-      error: {
-        code: err.code || String(err.status),
-        message: err.detail || err.title || err.message,
-      },
-    });
-    return;
-  }
-
-  logger.error({ err, reqId: req.id }, 'Internal server error');
-  if (isDevelopment) {
-    res.status(500).json({
-      error: {
-        message: err && err.message ? err.message : 'Internal server error',
-        stack: err && err.stack ? err.stack : null,
-      },
-    });
-    return;
-  }
-
-  res.status(500).json({ error: 'Internal server error' });
-}
 
 /**
  * Creates the LiquiFact API application with configured middleware and routes.
@@ -163,7 +128,7 @@ function createApp() {
 
   // ── 1. CORS ──────────────────────────────────────────────────────────────
   app.use(corsObservability);
-  app.use(cors(createCorsOptions()));
+  app.use(cors(buildCorsOptions()));
 
   // ── 1.a. KYC webhook raw body parser ──────────────────────────────────────
   // Incoming provider webhooks must be verified against the raw JSON body.
@@ -447,6 +412,16 @@ function createApp() {
   });
 
   // ── 8 – 10. Error handlers (order matters) ───────────────────────────────
+  // Terminal failure recovery is delegated to `middleware/failureRecovery`,
+  // which owns the canonical response shapes and the invariants documented
+  // there (single writer per response, no internal leakage, observable,
+  // idempotent). The order below is significant: each handler either recovers
+  // from a specific failure class or forwards the error unchanged.
+  //
+  //   handleCorsError       → 403 for blocked origins, otherwise next(err)
+  //   payloadTooLargeHandler→ 413 for oversized bodies, otherwise next(err)
+  //   configErrorHandler    → RFC 7807 body for config AppErrors, else next(err)
+  //   handleInternalError   → stable 400 / 4xx / 5xx / 500 recovery
   app.use(handleCorsError);
   app.use(payloadTooLargeHandler);
   app.use(configErrorHandler);
