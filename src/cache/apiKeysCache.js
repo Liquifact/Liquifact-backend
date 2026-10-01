@@ -100,6 +100,13 @@ function normalizeTimestamp(now) {
   return now;
 }
 
+/**
+ * Resolve the cache TTL and entry bound from the environment, clamped to the
+ * documented safe ranges via {@link parsePositiveInt}.
+ *
+ * @param {NodeJS.ProcessEnv} [env=process.env] Environment variables source.
+ * @returns {{ttlMs: number, maxEntries: number}} Clamped cache configuration.
+ */
 function parseApiKeysCacheConfig(env = process.env) {
   return {
     ttlMs: parsePositiveInt(
@@ -135,6 +142,14 @@ function isKeyActive(keyObject, now) {
 }
 
 class ApiKeysCache {
+  /**
+   * Create a bounded, TTL-scoped registry cache.
+   *
+   * @param {Object} [options={}] Cache options.
+   * @param {Object} [options.config] Pre-parsed config; defaults to the environment.
+   * @param {number} [options.ttlMs] Entry time-to-live in milliseconds.
+   * @param {number} [options.maxEntries] Maximum number of cached registries.
+   */
   constructor(options = {}) {
     const config = options.config || parseApiKeysCacheConfig();
     this.ttlMs = Math.max(MIN_TTL_MS, Math.min(MAX_TTL_MS, options.ttlMs || config.ttlMs));
@@ -145,6 +160,14 @@ class ApiKeysCache {
     this._cache = new Map();
   }
 
+  /**
+   * Validate that a loaded registry is a Map of non-empty string keys to
+   * object (or null/undefined) values before it is cached.
+   *
+   * @param {Map<string, Object>} registry Candidate registry.
+   * @returns {Map<string, Object>} The validated registry.
+   * @throws {TypeError} When the registry is malformed.
+   */
   _validateRegistry(registry) {
     if (!(registry instanceof Map)) {
       throw new TypeError('loader must return a Map');
@@ -162,8 +185,34 @@ class ApiKeysCache {
     return registry;
   }
 
-  getOrLoad(key = 'default', now = Date.now()) {
-    const entry = this._cache.get(key);
+  /**
+   * Return a time-filtered snapshot of the registry for `key`, loading it on a
+   * miss or an expired entry.
+   *
+   * ## Invariant: idempotent under repeated / concurrent calls
+   * Inputs are normalized exactly once, so identity (the key) and expiry (the
+   * timestamp) cannot drift between lookup, eviction, and insertion. This makes
+   * the method idempotent under repeated or replayed calls: the first call in a
+   * window loads the registry, and every subsequent call within the TTL serves
+   * the same cached registry without invoking the loader again.
+   *
+   * ## Invariant: expired / failed loads are never served
+   * An expired entry is evicted *before* the loader runs, so a loader that
+   * throws cannot leave a stale entry behind for a later call to serve as a
+   * hit. A registry is written to the cache only after it has been loaded and
+   * validated successfully. The entry bound is measured against live entries
+   * only, and the TTL boundary is strict: an entry is a hit only while
+   * `expiresAt > now`.
+   *
+   * @param {string} [key='default'] Cache key identifying the registry.
+   * @param {number} [now=Date.now()] Current time in milliseconds.
+   * @returns {Map<string, Object>} Time-filtered registry snapshot.
+   */
+  getOrLoad(key = DEFAULT_CACHE_KEY, now = Date.now()) {
+    // Normalize once: every subsequent lookup, eviction, and insertion uses the
+    // same canonical key and timestamp.
+    const normalizedKey = normalizeCacheKey(key);
+    const normalizedNow = normalizeTimestamp(now);
 
     const entry = this._cache.get(normalizedKey);
 
@@ -175,49 +224,45 @@ class ApiKeysCache {
     }
 
     if (entry) {
-      // Evict expired entries so the bound is always measured against
-      // live entries and stale data cannot be served accidentally.
+      // Expired entry: evict it before loading so a failed load cannot leave a
+      // stale entry that would be served as a hit on the next call.
       this._cache.delete(normalizedKey);
-    }
-
-    if (entry) {
-      // Expired entry: remove it before loading so a failed load cannot leave
-      // a stale entry that would be served as a hit on the next call.
-      this._cache.delete(key);
     }
 
     if (apiKeysCacheMissesTotal) {
       apiKeysCacheMissesTotal.inc();
     }
 
-    let registry;
-    try {
-      registry = loadApiKeyRegistry();
-    } catch (error) {
-      throw error;
-    }
-
-    const validatedRegistry = this._validateRegistry(registry);
-    const snapshot = this._buildSnapshot(validatedRegistry, now);
+    // Load + validate first; the cache is mutated only on success, so a throw
+    // leaves the cache untouched (no stale, unservable entry).
+    const validatedRegistry = this._validateRegistry(loadApiKeyRegistry());
+    const snapshot = this._buildSnapshot(validatedRegistry, normalizedNow);
 
     // Evict the oldest entry only when inserting a new key, so repeated loads
     // for the same key cannot evict unrelated entries.
-    if (!this._cache.has(key) && this._cache.size >= this.maxEntries) {
+    if (!this._cache.has(normalizedKey) && this._cache.size >= this.maxEntries) {
       const oldestKey = this._cache.keys().next().value;
       if (oldestKey !== undefined) {
         this._cache.delete(oldestKey);
       }
     }
 
-    this._cache.set(key, {
+    this._cache.set(normalizedKey, {
       registry: validatedRegistry,
-      expiresAt: now + this.ttlMs,
+      expiresAt: normalizedNow + this.ttlMs,
     });
 
     return snapshot;
   }
 
-  _buildHSnapshot(registry, now) {
+  /**
+   * Build a snapshot containing only the keys active at `now`.
+   *
+   * @param {Map<string, Object>} registry Source registry.
+   * @param {number} now Current time in milliseconds.
+   * @returns {Map<string, Object>} Filtered registry snapshot.
+   */
+  _buildSnapshot(registry, now) {
     const snapshot = new Map();
     for (const [key, value] of registry) {
       if (isKeyActive(value, now)) {
@@ -227,23 +272,51 @@ class ApiKeysCache {
     return snapshot;
   }
 
+  /**
+   * Drop every cached registry.
+   *
+   * @returns {void}
+   */
   invalidateAll() {
     this._cache.clear();
   }
 
+  /**
+   * Drop a single cached registry by key.
+   *
+   * @param {string} key Cache key to evict.
+   * @returns {boolean} True when an entry was removed.
+   */
   invalidate(key) {
     return this._cache.delete(key);
   }
 
+  /**
+   * Number of currently cached (possibly expired) registries.
+   *
+   * @returns {number} Current cache size.
+   */
   get size() {
     return this._cache.size;
   }
 
+  /**
+   * Alias of {@link ApiKeysCache#invalidateAll} retained for callers that use
+   * the reset-style API.
+   *
+   * @returns {void}
+   */
   reset() {
     this._cache.clear();
   }
 }
 
+/**
+ * Validate a registry version identifier.
+ *
+ * @param {*} version Candidate version.
+ * @returns {{valid: boolean, value?: string, reason?: string}} Validation result.
+ */
 function validateVersion(version) {
   if (typeof version !== 'string') {
     return { valid: false, reason: 'version must be a string' };
@@ -274,6 +347,12 @@ function validateVersion(version) {
 
 let defaultCache = null;
 
+/**
+ * Return the process-wide cache singleton, optionally replacing it.
+ *
+ * @param {ApiKeysCache} [instance] Instance to install as the singleton.
+ * @returns {ApiKeysCache} The active cache singleton.
+ */
 function getApiKeysCache(instance) {
   if (instance !== undefined) {
     defaultCache = instance;
