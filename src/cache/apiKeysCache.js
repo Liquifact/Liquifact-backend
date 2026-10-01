@@ -1,5 +1,35 @@
 'use strict';
 
+/**
+ * @fileoverview Bounded, TTL-based cache in front of the API-key registry.
+ *
+ * ## State invariants
+ *
+ * 1. **Expiry is exclusive.** A stored entry is served only while
+ *    `expiresAt > now`. At `expiresAt === now` and beyond it is a miss, so an
+ *    expired registry is never served. The TTL is measured from the load time.
+ * 2. **The cache is bounded.** `size` never exceeds `maxEntries`. Inserting a
+ *    key that is not already present while at capacity evicts the oldest
+ *    (FIFO) entry first. Replacing an existing key neither grows the cache nor
+ *    evicts an unrelated key.
+ * 3. **Failed loads are side-effect free.** `getOrLoad` loads and validates
+ *    into locals before touching the map. If `loadApiKeyRegistry` throws,
+ *    returns a non-Map, or yields a registry that fails validation, the cache
+ *    is left exactly as it was and no entry is published. A previously stored
+ *    (possibly expired) entry is preserved but is never served while expired.
+ * 4. **Keys are validated.** Only non-empty trimmed strings of at most
+ *    {@link MAX_CACHE_KEY_LENGTH} characters are accepted; every other value is
+ *    rejected with a `TypeError`. Equivalent keys are canonicalized, so they
+ *    address a single entry.
+ * 5. **Duplicate keys overwrite deterministically.** Setting a key that is
+ *    already cached replaces its registry and expiry in place, preserving
+ *    insertion order (and therefore FIFO eviction order) and keeping `size`
+ *    stable.
+ * 6. **Snapshots are stable and independent.** Each call returns a fresh `Map`
+ *    holding only the keys active at the supplied timestamp. Mutating a
+ *    returned snapshot cannot affect the cache or any other snapshot.
+ */
+
 const { loadApiKeyRegistry } = require('../config/apiKeys');
 const { apiKeysCacheHitsTotal, apiKeysCacheMissesTotal } = require('../metrics');
 
@@ -163,7 +193,8 @@ class ApiKeysCache {
   }
 
   getOrLoad(key = 'default', now = Date.now()) {
-    const entry = this._cache.get(key);
+    const normalizedKey = normalizeCacheKey(key);
+    const normalizedNow = normalizeTimestamp(now);
 
     const entry = this._cache.get(normalizedKey);
 
@@ -174,50 +205,37 @@ class ApiKeysCache {
       return this._buildSnapshot(entry.registry, normalizedNow);
     }
 
-    if (entry) {
-      // Evict expired entries so the bound is always measured against
-      // live entries and stale data cannot be served accidentally.
-      this._cache.delete(normalizedKey);
-    }
-
-    if (entry) {
-      // Expired entry: remove it before loading so a failed load cannot leave
-      // a stale entry that would be served as a hit on the next call.
-      this._cache.delete(key);
-    }
-
     if (apiKeysCacheMissesTotal) {
       apiKeysCacheMissesTotal.inc();
     }
 
-    let registry;
-    try {
-      registry = loadApiKeyRegistry();
-    } catch (error) {
-      throw error;
-    }
-
+    // Load and validate into locals first: a throwing loader or a registry
+    // that fails validation must not mutate the cache. A previously stored
+    // (now expired) entry is deliberately left untouched so a failed reload
+    // cannot destroy state; it is never served because the TTL check above
+    // already classified this call as a miss.
+    const registry = loadApiKeyRegistry();
     const validatedRegistry = this._validateRegistry(registry);
-    const snapshot = this._buildSnapshot(validatedRegistry, now);
+    const snapshot = this._buildSnapshot(validatedRegistry, normalizedNow);
 
     // Evict the oldest entry only when inserting a new key, so repeated loads
     // for the same key cannot evict unrelated entries.
-    if (!this._cache.has(key) && this._cache.size >= this.maxEntries) {
+    if (!this._cache.has(normalizedKey) && this._cache.size >= this.maxEntries) {
       const oldestKey = this._cache.keys().next().value;
       if (oldestKey !== undefined) {
         this._cache.delete(oldestKey);
       }
     }
 
-    this._cache.set(key, {
+    this._cache.set(normalizedKey, {
       registry: validatedRegistry,
-      expiresAt: now + this.ttlMs,
+      expiresAt: normalizedNow + this.ttlMs,
     });
 
     return snapshot;
   }
 
-  _buildHSnapshot(registry, now) {
+  _buildSnapshot(registry, now) {
     const snapshot = new Map();
     for (const [key, value] of registry) {
       if (isKeyActive(value, now)) {
