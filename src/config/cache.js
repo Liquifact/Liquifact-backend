@@ -53,6 +53,64 @@
  *    particular the logger is resolved lazily and every call into it is guarded:
  *    an observability dependency must not be able to take the process down.
  *
+ * ## Compatibility contract (frozen public surface)
+ *
+ * Everything below is this module's public API. It is **frozen**: changes are
+ * additive-only. Removing or renaming an export, changing its type, or changing
+ * the shape of a value it returns is a breaking change and must ship with a
+ * migration note in this file and a tested migration path. This matters because
+ * callers destructure the module at import time, e.g.
+ * `const { cacheConfig } = require('../config/cache')` in
+ * `services/escrowReadCache`, `services/indexerCache`, and
+ * `routes/invoiceStateRoutes`, and `const { parseCacheConfig } = require('./cache')`
+ * in `config/escrowMap`.
+ *
+ * ### Exported values
+ *
+ * | Export | Type | Shape / guarantee |
+ * | --- | --- | --- |
+ * | `cacheConfig` | frozen `CacheConfig` | Load-time snapshot; six positive-integer keys |
+ * | `parseCacheConfig(env?, options?)` | function | Pure; returns a frozen `CacheConfig`; never throws |
+ * | `describeCacheConfigFallbacks(env?)` | function | Frozen `CacheConfigFallback[]`, declaration order |
+ * | `getCacheConfig()` | function | Most recently published frozen `CacheConfig` |
+ * | `getCacheConfigFallbacks()` | function | Most recent frozen fallback array |
+ * | `reloadCacheConfig(env?)` | function | Re-parses and atomically publishes; returns the new config |
+ * | `CACHE_CONFIG_FIELDS` | frozen array | Frozen descriptors `{ key, variable, defaultValue, min, max, scale }` |
+ * | `CACHE_CONFIG_LIMITS` | frozen object | `{ ttlSeconds: { min, max }, maxEntries: { min, max } }` |
+ * | `CACHE_CONFIG_FALLBACK_REASON` | frozen string enum | Bounded rejection reasons |
+ * | `DEFAULT_ESCROW_TTL_SECONDS` | number | Default escrow TTL, in seconds |
+ * | `DEFAULT_ESCROW_MAX_ENTRIES` | number | Default escrow entry bound |
+ * | `DEFAULT_INDEXER_TTL_SECONDS` | number | Default indexer TTL, in seconds |
+ * | `DEFAULT_INDEXER_MAX_ENTRIES` | number | Default indexer entry bound |
+ * | `DEFAULT_INVOICE_STATE_TTL_SECONDS` | number | Default invoice-state TTL, in seconds |
+ * | `DEFAULT_INVOICE_STATE_MAX_ENTRIES` | number | Default invoice-state entry bound |
+ * | `_resetCacheConfigForTests()` | function | Test-only seam; never for production use |
+ * | `_resetLoggerForTests()` | function | Test-only seam; never for production use |
+ *
+ * ### Guarantees
+ *
+ * 1. **Additive-only.** New exports may be added; existing names, their types,
+ *    and the shape of everything they return are pinned by tests and never
+ *    change without a migration note.
+ * 2. **Never fatal.** Requiring the module and calling {@link reloadCacheConfig}
+ *    never throw, whatever the environment contains (invariant 5). A bad or
+ *    absent variable is always replaced by its documented default.
+ * 3. **Stable defaults and ranges.** The `DEFAULT_*` values and the inclusive
+ *    `[min, max]` bounds in `CACHE_CONFIG_LIMITS` are part of the contract.
+ *
+ * ### Migration notes
+ *
+ * - **2026-10-01 — restored load-time declarations.** A merge left
+ *   `DEFAULT_ESCROW_MAX_ENTRIES` declared twice and the two
+ *   `DEFAULT_INVOICE_STATE_*` defaults undeclared even though
+ *   `CACHE_CONFIG_FIELDS` referenced them, so merely `require`-ing this module
+ *   threw a `SyntaxError` (duplicate `const`) and would then have thrown a
+ *   `ReferenceError`. No public name or value changed: the missing constants
+ *   were restored to the values the field table and the existing tests already
+ *   documented (TTL 30 s, maxEntries 500). This repairs the existing contract
+ *   rather than changing it, and is pinned by the "never throws on load or
+ *   reload" contract test.
+ *
  * @module config/cache
  */
 
@@ -62,8 +120,9 @@ const DEFAULT_ESCROW_TTL_SECONDS = 30;
 const DEFAULT_ESCROW_MAX_ENTRIES = 500;
 const DEFAULT_INDEXER_TTL_SECONDS = 10;
 const DEFAULT_INDEXER_MAX_ENTRIES = 200;
+const DEFAULT_INVOICE_STATE_TTL_SECONDS = 30;
+const DEFAULT_INVOICE_STATE_MAX_ENTRIES = 500;
 
-const DEFAULT_ESCROW_MAX_ENTRIES = 500;
 // Keep millisecond TTLs within the signed 32-bit interval supported by timers.
 const MAX_TTL_SECONDS = Math.floor(0x7fffffff / 1000);
 
