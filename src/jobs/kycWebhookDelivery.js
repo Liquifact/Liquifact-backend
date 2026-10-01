@@ -43,6 +43,7 @@ const {
   KYC_WEBHOOK_DB,
   KYC_WEBHOOK_ERROR_CODES,
   KYC_WEBHOOK_METRICS,
+  KYC_WEBHOOK_RETRY,
 } = require('../constants/kycWebhooks');
 
 let promClient;
@@ -66,7 +67,7 @@ const { registry } = require('../metrics');
 // ---------------------------------------------------------------------------
 
 /** Default maximum serialised payload size in bytes (64 KB). */
-const DEFAULT_MAX_PAYLOAD_BYTES = 64 * 1024;
+const DEFAULT_MAX_PAYLOAD_BYTES = KYC_WEBHOOK_RETRY.MAX_PAYLOAD_BYTES;
 
 // ---------------------------------------------------------------------------
 // Metrics (lazily initialised to avoid duplicate-registration errors in tests)
@@ -192,13 +193,28 @@ async function writeKycDeadLetter({ tenantId, smeId, event, payload, lastError, 
 
 /**
  * Returns the maximum allowed KYC webhook payload size in bytes.
- * Reads from `KYC_WEBHOOK_MAX_PAYLOAD_BYTES` env var; falls back to 64 KB.
+ * Reads from `KYC_WEBHOOK_MAX_PAYLOAD_BYTES` env var; falls back to KYC_WEBHOOK_RETRY.MAX_PAYLOAD_BYTES.
  *
  * @returns {number}
  */
 function getMaxPayloadBytes() {
   const raw = Number(process.env.KYC_WEBHOOK_MAX_PAYLOAD_BYTES);
-  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_MAX_PAYLOAD_BYTES;
+  return Number.isFinite(raw) && raw > 0 ? raw : KYC_WEBHOOK_RETRY.MAX_PAYLOAD_BYTES;
+}
+
+/**
+ * Parses an environment variable as a non-negative number deterministically.
+ * @param {string} key
+ * @param {number} fallback
+ * @returns {number}
+ */
+function getDeterministicEnvNumber(key, fallback) {
+  const val = process.env[key];
+  if (val === undefined || val === null || val.trim() === '') {
+    return fallback;
+  }
+  const num = Number(val);
+  return Number.isFinite(num) && num >= 0 ? num : fallback;
 }
 
 // ---------------------------------------------------------------------------
@@ -248,10 +264,10 @@ function createKycWebhookDeliveryHandler(deps = {}) {
       kycData = {},
     } = job.payload;
 
-    const maxRetries = Number(process.env.WEBHOOK_MAX_RETRIES || 3);
-    const baseDelay = Number(process.env.WEBHOOK_BASE_DELAY || 500);
-    const maxDelay = Number(process.env.WEBHOOK_MAX_DELAY || 10000);
-    const timeoutMs = Number(process.env.WEBHOOK_TIMEOUT_MS || 5000);
+    const maxRetries = getDeterministicEnvNumber('WEBHOOK_MAX_RETRIES', KYC_WEBHOOK_RETRY.MAX_RETRIES);
+    const baseDelay = getDeterministicEnvNumber('WEBHOOK_BASE_DELAY', KYC_WEBHOOK_RETRY.BASE_DELAY_MS);
+    const maxDelay = getDeterministicEnvNumber('WEBHOOK_MAX_DELAY', KYC_WEBHOOK_RETRY.MAX_DELAY_MS);
+    const timeoutMs = getDeterministicEnvNumber('WEBHOOK_TIMEOUT_MS', KYC_WEBHOOK_RETRY.TIMEOUT_MS);
     const maxPayloadBytes = getMaxPayloadBytes();
 
     // Build deterministically-sorted payload

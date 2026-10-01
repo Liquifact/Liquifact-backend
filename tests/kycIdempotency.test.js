@@ -173,6 +173,14 @@ describe('KYC Webhook Idempotency', () => {
 
       expect(res.status).toBe(400);
     });
+
+    it('accepts keys at both inclusive length boundaries', async () => {
+      const minimum = await sendKycRequest(app, { key: 'min-1234', body: validKycBody() });
+      const maximum = await sendKycRequest(app, { key: 'M'.repeat(128), body: validKycBody() });
+
+      expect(minimum.status).toBe(200);
+      expect(maximum.status).toBe(200);
+    });
   });
 
   // ── First write ─────────────────────────────────────────────────────────

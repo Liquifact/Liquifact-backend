@@ -12,6 +12,19 @@
  * deployment that the backend may not yet support, so it must not be noticed
  * silently. See {@link raiseVersionMismatchAlert} and `docs/wasm-ops.md`.
  *
+ * @compatibility Contract
+ * The public surface of this module is a compatibility contract for operators
+ * and automation that consume it:
+ *
+ *   - `runContractListRefresh(contractId?)` always resolves to an object
+ *     with the exact shape `{ onChainVersion: number, knownVersion:
+ *     string | null, status: string }`. Additional fields are additive and
+ *     optional; existing fields are never removed or renamed.
+ *   - A failed on-chain read propagates as an error and is *not* treated as a
+ *     version mismatch (no alert, no state mutation).
+ *   - Alert de-dupe state is keyed by contract id and the `expected|observed`
+ *     signature, so a persistent mismatch does not re-alert on every run.
+ *
  * @module jobs/contractListRefresh
  */
 
@@ -47,6 +60,27 @@ const _alertedMismatches = new Map();
  */
 function dedupeMapKey(contractId) {
   return contractId || '<default>';
+}
+
+/**
+ * Resolves the effective contract identifier for a run.
+ *
+ * The explicit contractId argument takes precedence over the
+ * `ESCROW_CONTRACT_ID` environment variable. A blank/whitespace-only value is
+ * treated as absent so the default contract is used consistently across runs.
+ *
+ * @param {string} [contractId] - Override for ESCROW_CONTRACT_ID.
+ * @returns {string|null} The resolved contract id, or null for the default.
+ */
+function resolveContractId(contractId) {
+  if (typeof contractId === 'string' && contractId.trim() !== '') {
+    return contractId.trim();
+  }
+  const fromEnv = process.env.ESCROW_CONTRACT_ID;
+  if (typeof fromEnv === 'string' && fromEnv.trim() !== '') {
+    return fromEnv.trim();
+  }
+  return null;
 }
 
 /**
@@ -113,48 +147,3 @@ function raiseVersionMismatchAlert({ contractId, observedVersion, expectedVersio
 function resetVersionMismatchAlertState() {
   _alertedMismatches.clear();
 }
-
-/**
- * Runs the contract list refresh job.
- *
- * Reads the on-chain SCHEMA_VERSION and compares it to the registry. On a
- * mismatch (`ahead`/`unknown`) it raises a de-duplicated operator alert; on a
- * `current` match it clears any prior alert state for the contract so a future
- * regression re-alerts. A read failure propagates and is **not** treated as a
- * mismatch (no alert is raised).
- *
- * @param {string} [contractId] - Override for ESCROW_CONTRACT_ID.
- * @returns {Promise<{ onChainVersion: number, knownVersion: string|null, status: string }>}
- * @throws On RPC failure or invalid contract ID.
- */
-async function runContractListRefresh(contractId) {
-  logger.info({ contractId }, 'Starting contract list refresh');
-
-  const onChainVersion = await getOnChainSchemaVersion(contractId);
-  const { status, knownVersion } = compareVersions(onChainVersion);
-
-  const resolvedId = contractId || process.env.ESCROW_CONTRACT_ID || null;
-
-  if (MISMATCH_STATUSES.has(status)) {
-    raiseVersionMismatchAlert({
-      contractId: resolvedId,
-      observedVersion: onChainVersion,
-      expectedVersion: knownVersion,
-      status,
-    });
-  } else {
-    // Versions match — drop any prior alert state so a later regression alerts.
-    _alertedMismatches.delete(dedupeMapKey(resolvedId));
-  }
-
-  logger.info({ onChainVersion, knownVersion, status }, 'Contract list refresh complete');
-
-  return { onChainVersion, knownVersion, status };
-}
-
-module.exports = {
-  runContractListRefresh,
-  raiseVersionMismatchAlert,
-  resetVersionMismatchAlertState,
-  MISMATCH_STATUSES,
-};

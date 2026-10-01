@@ -174,3 +174,42 @@ describe('httpStatusToCode direct coverage — 404', () => {
     expect(mapped.code).toBe('NOT_FOUND');
   });
 });
+
+describe('mapError protects the response contract from malformed metadata', () => {
+  it.each([200, 399, 600, 500.5, '503'])(
+    'normalizes invalid status %p to an internal error',
+    (status) => {
+      const error = new Error('do not expose this for an invalid status');
+      error.status = status;
+
+      expect(mapError(error)).toEqual({
+        status: 500,
+        code: 'INTERNAL_SERVER_ERROR',
+        message: 'An internal server error occurred.',
+        retryable: false,
+        retryHint:
+          'Do not retry until the issue is resolved or support is contacted.',
+      });
+    },
+  );
+
+  it('normalizes malformed AppError metadata without trusting truthy values', () => {
+    const mapped = mapError({
+      name: 'AppError',
+      status: 200,
+      code: { toString: () => 'FORBIDDEN' },
+      detail: { secret: 'internal detail' },
+      message: 'fallback message must also be hidden',
+      retryable: 'yes',
+      retryHint: { secret: 'internal hint' },
+    });
+
+    expect(mapped).toEqual({
+      status: 500,
+      code: 'INTERNAL_SERVER_ERROR',
+      message: 'fallback message must also be hidden',
+      retryable: false,
+      retryHint: '',
+    });
+  });
+});

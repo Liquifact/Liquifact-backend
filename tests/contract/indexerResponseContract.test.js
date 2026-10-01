@@ -311,7 +311,7 @@ describe('DTO response shape contract', () => {
     });
 
     test('offset-mode meta includes page and totalPages', () => {
-      const meta = mapMetaToDTO({ total: 100, limit: 10, hasMore: true, nextCursor: null, page: 2, totalPages: 10 });
+      const meta = mapMetaToDTO({ total: 100, limit: 10, hasMore: true, nextCursor: 'next-cursor', page: 2, totalPages: 10 });
       expect(Object.keys(meta).sort()).toEqual(['hasMore', 'limit', 'nextCursor', 'page', 'total', 'totalPages']);
     });
 

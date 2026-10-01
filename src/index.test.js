@@ -238,6 +238,49 @@ describe('LiquiFact API', () => {
 
       listenSpy.mockRestore();
     });
+
+    it('startServer - is idempotent, returns same instance on duplicate calls', () => {
+      const mockServer = { close: jest.fn() };
+      const listenSpy = jest.spyOn(app, 'listen').mockImplementation((port, cb) => {
+        if (cb) { cb(); }
+        return mockServer;
+      });
+
+      const server1 = startServer();
+      const server2 = startServer();
+      const server3 = startServer();
+
+      expect(listenSpy).toHaveBeenCalledTimes(1);
+      expect(server1).toBe(mockServer);
+      expect(server2).toBe(mockServer);
+      expect(server3).toBe(mockServer);
+
+      listenSpy.mockRestore();
+    });
+
+    it('startServer - handles concurrent calls safely', async () => {
+      const mockServer = { close: jest.fn() };
+      const listenSpy = jest.spyOn(app, 'listen').mockImplementation((port, cb) => {
+        if (cb) { cb(); }
+        return mockServer;
+      });
+
+      // Simulate concurrent startup calls
+      const [s1, s2, s3, s4] = await Promise.all([
+        Promise.resolve(startServer()),
+        Promise.resolve(startServer()),
+        Promise.resolve(startServer()),
+        Promise.resolve(startServer()),
+      ]);
+
+      expect(listenSpy).toHaveBeenCalledTimes(1);
+      expect(s1).toBe(mockServer);
+      expect(s2).toBe(mockServer);
+      expect(s3).toBe(mockServer);
+      expect(s4).toBe(mockServer);
+
+      listenSpy.mockRestore();
+    });
   });
 });
 

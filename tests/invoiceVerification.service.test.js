@@ -946,4 +946,21 @@ describe('verificationThresholds config module', () => {
     _resetThresholdCache();
     expect(resolveThresholds(42).manualReviewThreshold).toBe(500);
   });
+
+  it('coerces a tenantId only once when resolving its override', () => {
+    process.env.INVOICE_TENANT_THRESHOLDS = JSON.stringify({
+      acme: { manualReviewThreshold: 500 },
+    });
+    _resetThresholdCache();
+    let conversions = 0;
+    const tenantId = {
+      toString() {
+        conversions += 1;
+        return conversions === 1 ? 'acme' : 'other';
+      },
+    };
+
+    expect(resolveThresholds(tenantId).manualReviewThreshold).toBe(500);
+    expect(conversions).toBe(1);
+  });
 });

@@ -316,6 +316,35 @@ describe('kycWebhookService', () => {
       });
     });
 
+    it.each(['1.5', '2items', '9007199254740992'])('rejects non-integer or unsafe limits (%s)', async (rawLimit) => {
+      await expect(
+        kycWebhookService.getWebhookAuditLogs({ rawLimit })
+      ).rejects.toMatchObject({
+        status: 400,
+        code: KYC_WEBHOOK_ERROR_CODES.INVALID_PAGINATION,
+      });
+    });
+
+    it('accepts the minimum and maximum limit plus the maximum safe offset', async () => {
+      auditLog.getAuditLogs.mockResolvedValueOnce([]);
+      await kycWebhookService.getWebhookAuditLogs({
+        rawLimit: String(KYC_WEBHOOK_PAGINATION.MIN_LIMIT),
+        rawOffset: String(KYC_WEBHOOK_PAGINATION.MAX_OFFSET),
+      });
+      expect(auditLog.getAuditLogs).toHaveBeenCalledWith(expect.objectContaining({
+        limit: KYC_WEBHOOK_PAGINATION.MIN_LIMIT,
+        offset: KYC_WEBHOOK_PAGINATION.MAX_OFFSET,
+      }));
+
+      auditLog.getAuditLogs.mockResolvedValueOnce([]);
+      await kycWebhookService.getWebhookAuditLogs({
+        rawLimit: String(KYC_WEBHOOK_PAGINATION.MAX_LIMIT),
+      });
+      expect(auditLog.getAuditLogs).toHaveBeenLastCalledWith(expect.objectContaining({
+        limit: KYC_WEBHOOK_PAGINATION.MAX_LIMIT,
+      }));
+    });
+
     it('throws 400 INVALID_PAGINATION for negative offset', async () => {
       await expect(
         kycWebhookService.getWebhookAuditLogs({ rawOffset: '-5' })
@@ -366,6 +395,26 @@ describe('kycWebhookService', () => {
         status: 400,
         code: KYC_WEBHOOK_ERROR_CODES.INVALID_PAGINATION,
       });
+    });
+
+    it.each(['1.5', '2items', '9007199254740992'])('rejects malformed limit values (%s) before querying', async (rawLimit) => {
+      await expect(
+        kycWebhookService.listWebhooks({ rawLimit })
+      ).rejects.toMatchObject({
+        status: 400,
+        code: KYC_WEBHOOK_ERROR_CODES.INVALID_PAGINATION,
+      });
+      expect(db).not.toHaveBeenCalled();
+    });
+
+    it('accepts minimum and maximum list limits', async () => {
+      mockChain.then.mockImplementation((resolve) => resolve([]));
+      await kycWebhookService.listWebhooks({ rawLimit: String(KYC_WEBHOOK_PAGINATION.MIN_LIMIT) });
+      expect(mockChain.limit).toHaveBeenCalledWith(KYC_WEBHOOK_PAGINATION.MIN_LIMIT + 1);
+
+      mockChain.limit.mockClear();
+      await kycWebhookService.listWebhooks({ rawLimit: String(KYC_WEBHOOK_PAGINATION.MAX_LIMIT) });
+      expect(mockChain.limit).toHaveBeenCalledWith(KYC_WEBHOOK_PAGINATION.MAX_LIMIT + 1);
     });
 
     it('throws 400 INVALID_CURSOR for malformed cursor', async () => {

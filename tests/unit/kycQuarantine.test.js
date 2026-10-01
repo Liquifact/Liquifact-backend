@@ -27,6 +27,7 @@ const {
 const {
   KYC_WEBHOOK_ERROR_CODES,
   KYC_WEBHOOK_MESSAGES,
+  KYC_WEBHOOK_VALIDATION,
 } = require('../../src/constants/kycWebhooks');
 const { encodeCursor } = require('../../src/utils/cursorPagination');
 
@@ -136,6 +137,20 @@ describe('kycQuarantineService', () => {
   // ── Envelope validation tests ──────────────────────────────────────────────
 
   describe('validateEnvelope', () => {
+    it('uses the shared payload boundary and accepts the exact byte limit', () => {
+      const maxBytes = KYC_WEBHOOK_VALIDATION.MAX_PAYLOAD_BYTES;
+      const fixedJsonOverhead = Buffer.byteLength('{"note":""}', 'utf8');
+      const exactLimitBody = JSON.stringify({ note: 'x'.repeat(maxBytes - fixedJsonOverhead) });
+
+      expect(getMaxIngestionPayloadBytes()).toBe(maxBytes);
+      expect(Buffer.byteLength(exactLimitBody, 'utf8')).toBe(maxBytes);
+      expect(validateEnvelope(exactLimitBody).valid).toBe(true);
+      expect(validateEnvelope(`${exactLimitBody} `)).toMatchObject({
+        valid: false,
+        errorCode: KYC_WEBHOOK_ERROR_CODES.PAYLOAD_TOO_LARGE,
+      });
+    });
+
     it('Edge Case 1: invalid JSON → returns valid=false with INVALID_PAYLOAD', () => {
       const result = validateEnvelope('{ malformed json body');
       expect(result.valid).toBe(false);

@@ -392,11 +392,6 @@ describe('invoiceStateService', () => {
         tenantId,
         expect.objectContaining({ escrowId: 'escrow-9', reason: 'go', expectedRevision: 2 })
       );
-    });inv-1',
-        'linked_escrow',
-        tenantId,
-        expect.objectContaining({ escrowId: 'escrow-9' })
-      );
 
       // Per-item metadata (action/bulkIndex) merged in without mutating baseContext.
       expect(baseContext.metadata).toEqual({ method: 'POST', path: '/api/invoices/bulk' });

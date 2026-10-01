@@ -33,6 +33,12 @@
  * @module services/indexerService
  */
 
+/**
+ * Error thrown when a cursor is malformed, tampered with, or does not match
+ * the current request's sort field.  The route layer maps this to HTTP 400.
+ */
+class CursorError extends Error {}
+
 const db = require('../db/knex');
 const { get: getConfig } = require('../config');
 const { encodeCursor, decodeCursor } = require('../utils/cursorPagination');
@@ -95,6 +101,293 @@ const DEFAULT_PAGE_SIZE = 20;
  * @type {number}
  */
 const MAX_BULK_BATCH_SIZE = 50;
+
+/**
+ * Maximum length of the `eventId` field accepted by the bulk ingestion path.
+ * Mirrors {@link MAX_EVENT_ID_LENGTH} for the camelCase input shape.
+ * @type {number}
+ */
+const MAX_EVENT_ID_LENGTH_INPUT = 128;
+
+/**
+ * Maximum length of the `event_id` field.
+ * @type {number}
+ */
+const MAX_EVENT_ID_LENGTH = 128;
+
+/**
+ * Maximum length of the `invoiceId` field accepted by the bulk ingestion path.
+ * Mirrors {@link MAX_INVOICE_ID_LENGTH} for the camelCase input shape.
+ * @type {number}
+ */
+const MAX_INVOICE_ID_LENGTH_INPUT = 128;
+
+/**
+ * Maximum length of the `invoice_id` field.
+ * @type {number}
+ */
+const MAX_INVOICE_ID_LENGTH = 128;
+
+/**
+ * Maximum length of the `eventType` field accepted by the bulk ingestion path.
+ * Mirrors {@link MAX_EVENT_TYPE_LENGTH} for the camelCase input shape.
+ * @type {number}
+ */
+const MAX_EVENT_TYPE_LENGTH_INPUT = 64;
+
+/**
+ * Maximum length of the `event_type` field.
+ * @type {number}
+ */
+const MAX_EVENT_TYPE_LENGTH = 64;
+
+/**
+ * Maximum length of the `contractId` field accepted by the bulk ingestion path.
+ * Mirrors {@link MAX_CONTRACT_ID_LENGTH} for the camelCase input shape.
+ * @type {number}
+ */
+const MAX_CONTRACT_ID_LENGTH_INPUT = 128;
+
+/**
+ * Maximum length of the `contract_id` field.
+ * @type {number}
+ */
+const MAX_CONTRACT_ID_LENGTH = 128;
+
+/**
+ * Maximum length of the `txHash` field accepted by the bulk ingestion path.
+ * Mirrors {@link MAX_TX_HASH_LENGTH} for the camelCase input shape.
+ * @type {number}
+ */
+const MAX_TX_HASH_LENGTH_INPUT = 128;
+
+/**
+ * Maximum length of the `tx_hash` field.
+ * @type {number}
+ */
+const MAX_TX_HASH_LENGTH = 128;
+
+/**
+ * Maximum length of the `pagingToken` field accepted by the bulk ingestion path.
+ * Mirrors {@link MAX_PAGING_TOKEN_LENGTH} for the camelCase input shape.
+ * @type {number}
+ */
+const MAX_PAGING_TOKEN_LENGTH_INPUT = 256;
+
+/**
+ * Maximum length of the `paging_token` field.
+ * @type {number}
+ */
+const MAX_PAGING_TOKEN_LENGTH = 256;
+
+/**
+ * Maximum serialized size (in bytes) of an `eventBody` payload accepted by the
+ * bulk ingestion path.  Mirrors {@link MAX_EVENT_BODY_BYTES} for the camelCase
+ * input shape.
+ * @type {number}
+ */
+const MAX_EVENT_BODY_BYTES_INPUT = 64 * 1024;
+
+/**
+ * Maximum serialized size (in bytes) of an `event_body` payload.
+ * Prevents unbounded write amplification and oversized rows.
+ * @type {number}
+ */
+const MAX_EVENT_BODY_BYTES = 64 * 1024;
+
+/**
+ * Maximum allowed `ledgerSequence` value accepted by the bulk ingestion path.
+ * Mirrors {@link MAX_LEDGER_SEQUENCE} for the camelCase input shape.
+ * @type {number}
+ */
+const MAX_LEDGER_SEQUENCE_INPUT = Number.MAX_SAFE_INTEGER;
+
+/**
+ * Maximum allowed `ledger_sequence` value (fits in a signed 64-bit integer).
+ * @type {number}
+ */
+const MAX_LEDGER_SEQUENCE = Number.MAX_SAFE_INTEGER;
+
+/**
+ * Minimum allowed `ledgerSequence` value accepted by the bulk ingestion path.
+ * Mirrors {@link MIN_LEDGER_SEQUENCE} for the camelCase input shape.
+ * @type {number}
+ */
+const MIN_LEDGER_SEQUENCE_INPUT = 0;
+
+/**
+ * Minimum allowed `ledger_sequence` value.
+ * @type {number}
+ */
+const MIN_LEDGER_SEQUENCE = 0;
+
+/**
+ * Validates the shape and boundaries of a single raw (camelCase) indexer event
+ * as received from the bulk ingestion endpoint, before schema parsing and
+ * normalization.  This is the first line of defense: it rejects malformed,
+ * out-of-bounds, and duplicate-shaped inputs deterministically so that the
+ * downstream schema/normalization/persistence layers only ever see well-formed
+ * data.
+ *
+ * Invariants enforced here (must match {@link _validateNormalizedEvent}):
+ * - `eventId`, `invoiceId`, `eventType` are non-empty strings within their
+ *   respective length caps.
+ * - `ledgerSequence` is a finite, integer value in
+ *   `[MIN_LEDGER_SEQUENCE_INPUT, MAX_LEDGER_SEQUENCE_INPUT]`.
+ * - Optional string fields (`pagingToken`, `contractId`, `txHash`) are either
+ *   absent/null or strings within their length caps.
+ * - `eventBody`, when present, serializes to at most
+ *   {@link MAX_EVENT_BODY_BYTES_INPUT} bytes.
+ *
+ * @param {unknown} raw - Raw event payload from the request body.
+ * @returns {{ ok: true } | { ok: false, code: string, details: object }}
+ */
+function _validateRawEvent(raw) {
+  const details = {};
+
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return {
+      ok: false,
+      code: 'VALIDATION_ERROR',
+      details: { _root: 'Event must be a non-null object.' },
+    };
+  }
+
+  if (typeof raw.eventId !== 'string' || raw.eventId.length === 0) {
+    details.eventId = 'eventId must be a non-empty string.';
+  } else if (raw.eventId.length > MAX_EVENT_ID_LENGTH_INPUT) {
+    details.eventId = `eventId must be at most ${MAX_EVENT_ID_LENGTH_INPUT} characters.`;
+  }
+
+  if (typeof raw.invoiceId !== 'string' || raw.invoiceId.length === 0) {
+    details.invoiceId = 'invoiceId must be a non-empty string.';
+  } else if (raw.invoiceId.length > MAX_INVOICE_ID_LENGTH_INPUT) {
+    details.invoiceId = `invoiceId must be at most ${MAX_INVOICE_ID_LENGTH_INPUT} characters.`;
+  }
+
+  if (typeof raw.eventType !== 'string' || raw.eventType.length === 0) {
+    details.eventType = 'eventType must be a non-empty string.';
+  } else if (raw.eventType.length > MAX_EVENT_TYPE_LENGTH_INPUT) {
+    details.eventType = `eventType must be at most ${MAX_EVENT_TYPE_LENGTH_INPUT} characters.`;
+  }
+
+  if (
+    typeof raw.ledgerSequence !== 'number' ||
+    !Number.isFinite(raw.ledgerSequence) ||
+    !Number.isInteger(raw.ledgerSequence) ||
+    raw.ledgerSequence < MIN_LEDGER_SEQUENCE_INPUT ||
+    raw.ledgerSequence > MAX_LEDGER_SEQUENCE_INPUT
+  ) {
+    details.ledgerSequence = `ledgerSequence must be an integer between ${MIN_LEDGER_SEQUENCE_INPUT} and ${MAX_LEDGER_SEQUENCE_INPUT}.`;
+  }
+
+  if (raw.pagingToken !== null && raw.pagingToken !== undefined) {
+    if (typeof raw.pagingToken !== 'string' || raw.pagingToken.length > MAX_PAGING_TOKEN_LENGTH_INPUT) {
+      details.pagingToken = `pagingToken must be a string of at most ${MAX_PAGING_TOKEN_LENGTH_INPUT} characters.`;
+    }
+  }
+
+  if (raw.contractId !== null && raw.contractId !== undefined) {
+    if (typeof raw.contractId !== 'string' || raw.contractId.length > MAX_CONTRACT_ID_LENGTH_INPUT) {
+      details.contractId = `contractId must be a string of at most ${MAX_CONTRACT_ID_LENGTH_INPUT} characters.`;
+    }
+  }
+
+  if (raw.txHash !== null && raw.txHash !== undefined) {
+    if (typeof raw.txHash !== 'string' || raw.txHash.length > MAX_TX_HASH_LENGTH_INPUT) {
+      details.txHash = `txHash must be a string of at most ${MAX_TX_HASH_LENGTH_INPUT} characters.`;
+    }
+  }
+
+  if (raw.eventBody !== null && raw.eventBody !== undefined) {
+    let serialized;
+    try {
+      serialized = JSON.stringify(raw.eventBody);
+    } catch (_e) {
+      details.eventBody = 'eventBody must be JSON-serializable.';
+    }
+    if (serialized !== undefined && Buffer.byteLength(serialized, 'utf8') > MAX_EVENT_BODY_BYTES_INPUT) {
+      details.eventBody = `eventBody must be at most ${MAX_EVENT_BODY_BYTES_INPUT} bytes when serialized.`;
+    }
+  }
+
+  if (Object.keys(details).length > 0) {
+    return { ok: false, code: 'VALIDATION_ERROR', details };
+  }
+  return { ok: true };
+}
+
+/**
+ * Validates the shape and boundaries of a single normalized indexer event
+ * immediately before persistence.  This is a defense-in-depth check that runs
+ * after schema validation and normalization, ensuring that no out-of-bounds
+ * value can reach the database even if the schema is later relaxed.
+ *
+ * @param {object} normalized - Normalized event row (snake_case columns).
+ * @returns {{ ok: true } | { ok: false, code: string, details: object }}
+ */
+function _validateNormalizedEvent(normalized) {
+  const details = {};
+
+  if (typeof normalized.event_id !== 'string' || normalized.event_id.length === 0) {
+    details.event_id = 'event_id must be a non-empty string.';
+  } else if (normalized.event_id.length > MAX_EVENT_ID_LENGTH) {
+    details.event_id = `event_id must be at most ${MAX_EVENT_ID_LENGTH} characters.`;
+  }
+
+  if (typeof normalized.invoice_id !== 'string' || normalized.invoice_id.length === 0) {
+    details.invoice_id = 'invoice_id must be a non-empty string.';
+  } else if (normalized.invoice_id.length > MAX_INVOICE_ID_LENGTH) {
+    details.invoice_id = `invoice_id must be at most ${MAX_INVOICE_ID_LENGTH} characters.`;
+  }
+
+  if (typeof normalized.event_type !== 'string' || normalized.event_type.length === 0) {
+    details.event_type = 'event_type must be a non-empty string.';
+  } else if (normalized.event_type.length > MAX_EVENT_TYPE_LENGTH) {
+    details.event_type = `event_type must be at most ${MAX_EVENT_TYPE_LENGTH} characters.`;
+  }
+
+  if (
+    typeof normalized.ledger_sequence !== 'number' ||
+    !Number.isFinite(normalized.ledger_sequence) ||
+    !Number.isInteger(normalized.ledger_sequence) ||
+    normalized.ledger_sequence < MIN_LEDGER_SEQUENCE ||
+    normalized.ledger_sequence > MAX_LEDGER_SEQUENCE
+  ) {
+    details.ledger_sequence = `ledger_sequence must be an integer between ${MIN_LEDGER_SEQUENCE} and ${MAX_LEDGER_SEQUENCE}.`;
+  }
+
+  if (normalized.paging_token !== null && normalized.paging_token !== undefined) {
+    if (typeof normalized.paging_token !== 'string' || normalized.paging_token.length > MAX_PAGING_TOKEN_LENGTH) {
+      details.paging_token = `paging_token must be a string of at most ${MAX_PAGING_TOKEN_LENGTH} characters.`;
+    }
+  }
+
+  if (normalized.contract_id !== null && normalized.contract_id !== undefined) {
+    if (typeof normalized.contract_id !== 'string' || normalized.contract_id.length > MAX_CONTRACT_ID_LENGTH) {
+      details.contract_id = `contract_id must be a string of at most ${MAX_CONTRACT_ID_LENGTH} characters.`;
+    }
+  }
+
+  if (normalized.tx_hash !== null && normalized.tx_hash !== undefined) {
+    if (typeof normalized.tx_hash !== 'string' || normalized.tx_hash.length > MAX_TX_HASH_LENGTH) {
+      details.tx_hash = `tx_hash must be a string of at most ${MAX_TX_HASH_LENGTH} characters.`;
+    }
+  }
+
+  if (normalized.event_body !== null && normalized.event_body !== undefined) {
+    if (typeof normalized.event_body !== 'string') {
+      details.event_body = 'event_body must be a serialized string.';
+    } else if (Buffer.byteLength(normalized.event_body, 'utf8') > MAX_EVENT_BODY_BYTES) {
+      details.event_body = `event_body must be at most ${MAX_EVENT_BODY_BYTES} bytes when serialized.`;
+    }
+  }
+
+  if (Object.keys(details).length > 0) {
+    return { ok: false, code: 'VALIDATION_ERROR', details };
+  }
+  return { ok: true };
+}
 
 /**
  * Columns selected from `escrow_events`.
@@ -379,6 +672,16 @@ async function bulkIndexerEvents({ events, dbClient } = {}) {
   for (let i = 0; i < events.length; i++) {
     const raw = events[i];
     try {
+      const rawCheck = _validateRawEvent(raw);
+      if (!rawCheck.ok) {
+        results.push({
+          index: i,
+          success: false,
+          error: { code: rawCheck.code, details: rawCheck.details },
+        });
+        continue;
+      }
+
       const parsed = indexerEventSchema.safeParse(raw);
       if (!parsed.success) {
         results.push({ index: i, success: false, error: { code: 'VALIDATION_ERROR', details: parseValidationErrors(parsed.error) } });
@@ -397,6 +700,16 @@ async function bulkIndexerEvents({ events, dbClient } = {}) {
         event_body: d.eventBody !== undefined ? JSON.stringify(d.eventBody) : null,
         observed_at: d.observedAt || new Date().toISOString(),
       };
+
+      const boundaryCheck = _validateNormalizedEvent(normalized);
+      if (!boundaryCheck.ok) {
+        results.push({
+          index: i,
+          success: false,
+          error: { code: boundaryCheck.code, details: boundaryCheck.details },
+        });
+        continue;
+      }
 
       await knex('escrow_events')
         .insert(normalized)
@@ -429,4 +742,16 @@ module.exports = {
   MAX_PAGE_SIZE,
   DEFAULT_PAGE_SIZE,
   MAX_BULK_BATCH_SIZE,
+  MAX_EVENT_ID_LENGTH,
+  MAX_INVOICE_ID_LENGTH,
+  MAX_EVENT_TYPE_LENGTH,
+  MAX_CONTRACT_ID_LENGTH,
+  MAX_TX_HASH_LENGTH,
+  MAX_PAGING_TOKEN_LENGTH,
+  MAX_EVENT_BODY_BYTES,
+  MAX_LEDGER_SEQUENCE,
+  MIN_LEDGER_SEQUENCE,
+  CursorError,
+  _validateRawEvent,
+  _validateNormalizedEvent,
 };

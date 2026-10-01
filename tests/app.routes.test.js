@@ -377,8 +377,8 @@ describe('Mounted feature routers', () => {
   });
 
   it('mounts investor routes under /api/investor exactly once', () => {
-    createApp();
-    const investorMounts = getFeatureRouterMounts().filter(
+    const appInstance = createApp();
+    const investorMounts = getFeatureRouterMounts(appInstance).filter(
       (entry) => entry.basePath === '/api/investor'
     );
 
@@ -426,8 +426,8 @@ describe('Mounted feature routers', () => {
   });
 
   it('has no duplicate router-instance mounts at any base path', () => {
-    createApp();
-    const mounts = getFeatureRouterMounts();
+    const appInstance = createApp();
+    const mounts = getFeatureRouterMounts(appInstance);
 
     for (let i = 0; i < mounts.length; i += 1) {
       for (let j = i + 1; j < mounts.length; j += 1) {

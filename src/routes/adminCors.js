@@ -190,6 +190,8 @@ router.post('/bulk', (req, res) => {
 
   // ── Process batch ────────────────────────────────────────────────────────
 
+  // processBulkCorsOperations owns the allowlist state transition and is
+  // responsible for enforcing per-item validation and atomicity invariants.
   const { results, updatedOrigins } = processBulkCorsOperations(operations);
 
   const succeeded = results.filter((r) => r.success).length;
@@ -214,3 +216,6 @@ router.post('/bulk', (req, res) => {
 });
 
 module.exports = router;
+// Invariant: the live CORS allowlist is only mutated through
+// processBulkCorsOperations, which guarantees deterministic per-item
+// outcomes and prevents partial-failure state corruption.

@@ -23,8 +23,8 @@ describe('knexfile environment config blocks', () => {
     expect(knexfile.test).toBeDefined();
   });
 
-  test('test block uses SQLite :memory:', () => {
-    expect(knexfile.test.client).toBe('sqlite3');
+  test('test block uses better-sqlite3 :memory:', () => {
+    expect(knexfile.test.client).toBe('better-sqlite3');
     expect(knexfile.test.connection.filename).toBe(':memory:');
   });
 
@@ -68,7 +68,7 @@ describe('resolveConfig connection-selection logic', () => {
   test('test env returns the test config block', () => {
     const rc = require('../../src/db/resolveConfig');
     const cfg = rc('test');
-    expect(cfg.client).toBe('sqlite3');
+    expect(cfg.client).toBe('better-sqlite3');
     expect(cfg.connection.filename).toBe(':memory:');
   });
 
@@ -147,6 +147,62 @@ describe('resolveConfig connection-selection logic', () => {
       }));
       const rc = require('../../src/db/resolveConfig');
       expect(() => rc('staging')).toThrow(/No config block found for NODE_ENV="staging"/);
+    });
+  });
+
+  test('rejects null environment', () => {
+    const rc = require('../../src/db/resolveConfig');
+    expect(() => rc(null)).toThrow(/NODE_ENV must be a string/);
+  });
+
+  test('rejects undefined environment', () => {
+    const rc = require('../../src/db/resolveConfig');
+    expect(() => rc(undefined)).toThrow(/NODE_ENV must be a string/);
+  });
+
+  test('rejects number environment', () => {
+    const rc = require('../../src/db/resolveConfig');
+    expect(() => rc(123)).toThrow(/NODE_ENV must be a string/);
+  });
+
+  test('rejects empty string environment', () => {
+    const rc = require('../../src/db/resolveConfig');
+    expect(() => rc('')).toThrow(/NODE_ENV cannot be empty/);
+  });
+
+  test('rejects whitespace-only environment', () => {
+    const rc = require('../../src/db/resolveConfig');
+    expect(() => rc('   ')).toThrow(/NODE_ENV cannot be empty/);
+  });
+
+  test('rejects environment with invalid characters', () => {
+    const rc = require('../../src/db/resolveConfig');
+    expect(() => rc('test env')).toThrow(/invalid characters/);
+  });
+
+  test('rejects environment exceeding 100 characters', () => {
+    const rc = require('../../src/db/resolveConfig');
+    const longEnv = 'a'.repeat(101);
+    expect(() => rc(longEnv)).toThrow(/exceeds maximum length/);
+  });
+
+  test('rejects config missing client field', () => {
+    jest.isolateModules(() => {
+      jest.doMock('../../knexfile', () => ({
+        test: { connection: { filename: ':memory:' } },
+      }));
+      const rc = require('../../src/db/resolveConfig');
+      expect(() => rc('test')).toThrow(/missing required "client" field/);
+    });
+  });
+
+  test('rejects config missing connection field', () => {
+    jest.isolateModules(() => {
+      jest.doMock('../../knexfile', () => ({
+        test: { client: 'sqlite3' },
+      }));
+      const rc = require('../../src/db/resolveConfig');
+      expect(() => rc('test')).toThrow(/missing required "connection" field/);
     });
   });
 });

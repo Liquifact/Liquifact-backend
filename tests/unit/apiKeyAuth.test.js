@@ -234,6 +234,30 @@ describe('config/apiKeys — buildKeyRegistry', () => {
     expect(() => buildKeyRegistry(entries)).toThrow(/duplicate key/);
   });
 
+  it('validates and snapshots direct registry inputs', () => {
+    const source = {
+      key: 'lf_testkey001',
+      clientId: 'test-service',
+      scopes: ['invoices:read'],
+    };
+    const registry = buildKeyRegistry([source]);
+    source.scopes.push('admin');
+    source.clientId = 'changed';
+
+    expect(registry.get('lf_testkey001')).toMatchObject({
+      clientId: 'test-service',
+      scopes: ['invoices:read'],
+      revoked: false,
+    });
+    expect(Object.isFrozen(registry.get('lf_testkey001'))).toBe(true);
+    expect(Object.isFrozen(registry.get('lf_testkey001').scopes)).toBe(true);
+  });
+
+  it('rejects invalid direct registry entries and non-array input', () => {
+    expect(() => buildKeyRegistry([{ key: 'invalid' }])).toThrow(/must start with/);
+    expect(() => buildKeyRegistry(null)).toThrow(/entries must be an array/);
+  });
+
   it('returns an empty Map for an empty entry list', () => {
     expect(buildKeyRegistry([])).toEqual(new Map());
   });

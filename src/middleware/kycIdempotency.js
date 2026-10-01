@@ -18,6 +18,29 @@
  * Keys are stored in the shared `idempotency_keys` table and expire after
  * a configurable TTL (default 24 h, env: IDEMPOTENCY_KEY_TTL_HOURS).
  *
+ * ## Transaction gap fix
+ *
+ * The original implementation intercepted `res.json` inside a `db.transaction`
+ * callback and used the `trx` reference inside the override.  Because
+ * `db.transaction()` commits when its callback resolves, the override fired
+ * **after** the transaction had already committed, meaning:
+ *
+ * - The response-body update used a settled (committed) transaction reference
+ *   whose connection was already returned to the pool — this is undefined
+ *   behaviour in Knex.
+ * - The `trx` update was fire-and-forget: errors were silently swallowed.
+ * - A concurrent identical request that read the placeholder row between the
+ *   commit and the update would see a row with `response_status = null` and
+ *   try to replay `null`, returning `200` with a null body.
+ *
+ * The fix:
+ * - Use `db(table)` (the global pool connection) in the `res.json` override
+ *   rather than the committed `trx` reference.
+ * - Keep the `res.json` override outside the transaction; it runs after the
+ *   response is flushed and after the transaction is long gone.
+ * - The response-capture update is still fire-and-forget (best-effort) but
+ *   now operates on a live connection.
+ *
  * @module middleware/kycIdempotency
  */
 
@@ -87,6 +110,14 @@ function kycIdempotencyMiddleware(req, res, next) {
   const bodyFingerprint = fingerprintRawBody(rawBody);
   const ttlHours = getTTLHours();
 
+  // The transaction only covers the read-then-write-placeholder path.
+  // The response-capture update happens outside this transaction (see below)
+  // using a fresh db() call against the global pool so that:
+  // (a) it is not using a committed/returned transaction connection, and
+  // (b) a crash between the placeholder insert and the response write still
+  //     leaves the placeholder row in place (null response_body) which tells
+  //     the next replay attempt that the request is "in-flight" and it should
+  //     wait rather than immediately replaying null.
   db.transaction(async (trx) => {
     const existing = await trx(KYC_WEBHOOK_DB.TABLE_IDEMPOTENCY_KEYS)
       .where({ idempotency_key: key })
@@ -97,6 +128,17 @@ function kycIdempotencyMiddleware(req, res, next) {
       if (existing.request_fingerprint !== bodyFingerprint) {
         return res.status(409).json({
           error: KYC_WEBHOOK_MESSAGES.IDEMPOTENCY_KEY_REUSED,
+        });
+      }
+
+      // If the placeholder row exists but response_body is still null the
+      // original request has not yet returned (concurrent in-flight or
+      // crashed mid-flight).  Return a 202 Accepted so the caller knows to
+      // poll / retry rather than receiving a misleading 200 with a null body.
+      if (existing.response_body === null || existing.response_body === undefined) {
+        return res.status(202).json({
+          status: 'processing',
+          message: 'Request is being processed. Retry with the same Idempotency-Key to get the final result.',
         });
       }
 
@@ -111,7 +153,8 @@ function kycIdempotencyMiddleware(req, res, next) {
       }
     }
 
-    // New key — insert placeholder row
+    // New key — insert placeholder row (response_body / response_status remain
+    // null until the handler completes and the res.json override fires)
     await trx(KYC_WEBHOOK_DB.TABLE_IDEMPOTENCY_KEYS).insert({
       idempotency_key: key,
       request_fingerprint: bodyFingerprint,
@@ -120,19 +163,43 @@ function kycIdempotencyMiddleware(req, res, next) {
       expires_at: db.raw("NOW() + INTERVAL '?? hours'", [ttlHours]),
     });
 
-    // Intercept res.json to capture and store the response for future replays
+    // The transaction commits here when this callback resolves.
+    // DO NOT use trx inside the res.json override — by the time it fires,
+    // the transaction will already be committed and the connection returned.
+  }).then(() => {
+    // If the transaction callback already sent a response (replay, conflict,
+    // or in-flight 202), headers are already flushed — do not call next()
+    // and do not install the override.
+    if (res.headersSent) {
+      return;
+    }
+
+    // The transaction has committed (new-key path).  Install the res.json
+    // override that captures the handler's response.  This runs on a fresh
+    // db() connection (the global pool), not the committed trx reference.
     const originalJson = res.json.bind(res);
-    res.json = function (body) {
-      trx(KYC_WEBHOOK_DB.TABLE_IDEMPOTENCY_KEYS)
+    res.json = function captureIdempotencyResponse(body) {
+      // Restore immediately so a double-call (e.g. error handler after
+      // handler) does not call captureIdempotencyResponse recursively.
+      res.json = originalJson;
+
+      // Best-effort: store the response for future replays.
+      // Errors here must never prevent the response from reaching the client.
+      db(KYC_WEBHOOK_DB.TABLE_IDEMPOTENCY_KEYS)
         .where({ idempotency_key: key })
         .update({
           response_status: res.statusCode,
           response_body: JSON.stringify(body),
           updated_at: db.fn.now(),
         })
-        .catch(() => {
-          // Best-effort — don't fail the request if storage fails
+        .catch((storeErr) => {
+          // Log but do not re-throw: the request has already been processed
+          // successfully; losing the cached response means the next identical
+          // request will be treated as in-flight (202) rather than replayed,
+          // which is safe behaviour.
+          console.error('[kyc-idempotency] Failed to store idempotency response:', storeErr.message);
         });
+
       return originalJson(body);
     };
 

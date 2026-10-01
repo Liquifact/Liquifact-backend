@@ -7,6 +7,7 @@
  *  - escrowVersions.js: REGISTRY, isValidContractId, compareVersions, getOnChainSchemaVersion
  *  - contractListRefresh.js: runContractListRefresh
  *  - adminEscrow routes: POST /refresh, GET /version (auth + logic)
+ *  - escrowMap.js: compatibility contracts (getEscrowMap, resolveEscrow, invariants)
  */
 
 jest.mock('../services/soroban');
@@ -16,14 +17,53 @@ jest.mock('../middleware/apiKeyAuth', () => ({
   timingSafeStringEqual: (a, b) => a === b,
 }));
 
+const originalRpcUrl = process.env.SOROBAN_RPC_URL;
+beforeEach(() => {
+  process.env.SOROBAN_RPC_URL = 'http://localhost:8000';
+});
+afterAll(() => {
+  if (originalRpcUrl === undefined) {
+    delete process.env.SOROBAN_RPC_URL;
+  } else {
+    process.env.SOROBAN_RPC_URL = originalRpcUrl;
+  }
+});
+
 const { callSorobanContract } = require('../services/soroban');
 
+// Load escrowVersions defensively so a broken/partial module does not abort
+// the entire Jest file at require-time. Missing exports fall back to safe
+// stubs; individual tests will fail with clear assertions instead of a
+// module-load SyntaxError.
+let escrowVersions = {};
+try {
+  escrowVersions = require('../config/escrowVersions') || {};
+} catch (err) {
+  // Surface the load failure through a single, diagnosable test below.
+  escrowVersions = { __loadError: err };
+}
+
 const {
-  REGISTRY,
-  isValidContractId,
-  compareVersions,
-  getOnChainSchemaVersion,
-} = require('../config/escrowVersions');
+  REGISTRY = {},
+  isValidContractId = () => false,
+  compareVersions = () => ({ status: 'unknown', knownVersion: null, onChainVersion: null }),
+  getOnChainSchemaVersion = async () => {
+    const e = new Error('escrowVersions module failed to load');
+    e.code = 'RPC_ERROR';
+    throw e;
+  },
+  getKnownVersion = () => null,
+  getHighestKnownVersion = () => null,
+  normalizeSchemaVersion = () => null,
+  ESCROW_VERSION_ERROR_CODES = {},
+} = escrowVersions;
+
+const {
+  getEscrowMap,
+  resolveEscrow,
+  ESCROW_MAP,
+  ESCROW_MAP_INVARIANTS,
+} = require('../config/escrowMap');
 
 const { runContractListRefresh } = require('../jobs/contractListRefresh');
 
@@ -50,6 +90,15 @@ function makeAdminToken(overrides = {}) {
 
 const adminToken = makeAdminToken();
 const VALID_ID = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+const VALID_ID_2 = 'CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB';
+
+// ─── module load guard ───────────────────────────────────────────────────────
+
+describe('escrowVersions module load', () => {
+  it('loads without a SyntaxError', () => {
+    expect(escrowVersions.__loadError).toBeUndefined();
+  });
+});
 
 // ─── escrowVersions: REGISTRY ─────────────────────────────────────────────────
 
@@ -70,6 +119,78 @@ describe('REGISTRY', () => {
     expect(REGISTRY['1.0.0']).toBe(1);
     expect(REGISTRY['1.1.0']).toBe(2);
     expect(REGISTRY['1.2.0']).toBe(3);
+  });
+
+  it('is frozen to preserve the compatibility contract', () => {
+    expect(Object.isFrozen(REGISTRY)).toBe(true);
+  });
+
+  it('maps each schema version to exactly one semver (no duplicates)', () => {
+    const seen = new Map();
+    for (const [semver, schemaVersion] of Object.entries(REGISTRY)) {
+      expect(seen.has(schemaVersion)).toBe(false);
+      seen.set(schemaVersion, semver);
+    }
+  });
+});
+
+// ─── escrowVersions: getKnownVersion / getHighestKnownVersion ────────────────
+
+describe('getKnownVersion', () => {
+  it('returns the semver for a known schema version', () => {
+    expect(getKnownVersion(1)).toBe('1.0.0');
+    expect(getKnownVersion(2)).toBe('1.1.0');
+    expect(getKnownVersion(3)).toBe('1.2.0');
+  });
+
+  it('returns null for an unknown schema version', () => {
+    expect(getKnownVersion(0)).toBeNull();
+    expect(getKnownVersion(99)).toBeNull();
+  });
+
+  it('returns null for non-integer input', () => {
+    expect(getKnownVersion('3')).toBeNull();
+    expect(getKnownVersion(3.5)).toBeNull();
+    expect(getKnownVersion(null)).toBeNull();
+    expect(getKnownVersion(undefined)).toBeNull();
+  });
+});
+
+describe('getHighestKnownVersion', () => {
+  it('returns the highest registry entry deterministically', () => {
+    expect(getHighestKnownVersion()).toEqual({ semver: '1.2.0', schemaVersion: 3 });
+  });
+});
+
+// ─── escrowVersions: normalizeSchemaVersion ──────────────────────────────────
+
+describe('normalizeSchemaVersion', () => {
+  it('accepts positive integers', () => {
+    expect(normalizeSchemaVersion(1)).toBe(1);
+    expect(normalizeSchemaVersion(3)).toBe(3);
+  });
+
+  it('accepts numeric strings', () => {
+    expect(normalizeSchemaVersion('3')).toBe(3);
+  });
+
+  it('rejects non-integer, negative, and non-numeric values', () => {
+    expect(normalizeSchemaVersion(0)).toBeNull();
+    expect(normalizeSchemaVersion(-1)).toBeNull();
+    expect(normalizeSchemaVersion(1.5)).toBeNull();
+    expect(normalizeSchemaVersion('abc')).toBeNull();
+    expect(normalizeSchemaVersion(null)).toBeNull();
+    expect(normalizeSchemaVersion(undefined)).toBeNull();
+    expect(normalizeSchemaVersion({})).toBeNull();
+  });
+});
+
+// ─── escrowVersions: ESCROW_VERSION_ERROR_CODES ──────────────────────────────
+
+describe('ESCROW_VERSION_ERROR_CODES', () => {
+  it('exposes stable error codes for callers', () => {
+    expect(ESCROW_VERSION_ERROR_CODES.INVALID_CONTRACT_ID).toBe('INVALID_CONTRACT_ID');
+    expect(ESCROW_VERSION_ERROR_CODES.RPC_ERROR).toBe('RPC_ERROR');
   });
 });
 
@@ -130,6 +251,30 @@ describe('compareVersions', () => {
     expect(result.status).toBe('unknown');
     expect(result.knownVersion).toBeNull();
   });
+
+  it('is deterministic for invalid input (null/undefined/NaN)', () => {
+    for (const bad of [null, undefined, NaN, '3', 1.5, -1]) {
+      const result = compareVersions(bad);
+      expect(result.status).toBe('unknown');
+      expect(result.knownVersion).toBeNull();
+      expect(result.onChainVersion).toBeNull();
+    }
+  });
+
+  it('accepts numeric strings for known versions', () => {
+    const result = compareVersions('3');
+    expect(result.status).toBe('current');
+    expect(result.knownVersion).toBe('1.2.0');
+  });
+
+  it('returns a stable shape for every status', () => {
+    for (const input of [0, 1, 3, 99]) {
+      const result = compareVersions(input);
+      expect(Object.keys(result).sort()).toEqual(
+        ['knownVersion', 'onChainVersion', 'status'].sort()
+      );
+    }
+  });
 });
 
 // ─── escrowVersions: getOnChainSchemaVersion ─────────────────────────────────
@@ -170,6 +315,37 @@ describe('getOnChainSchemaVersion', () => {
     const version = await getOnChainSchemaVersion(VALID_ID);
     expect(version).toBe(3);
   });
+
+  it('normalizes numeric-string RPC responses', async () => {
+    callSorobanContract.mockResolvedValueOnce('3');
+    const version = await getOnChainSchemaVersion(VALID_ID);
+    expect(version).toBe(3);
+  });
+
+  it('rejects with RPC_ERROR when RPC returns a malformed value', async () => {
+    callSorobanContract.mockResolvedValueOnce('not-a-version');
+    await expect(getOnChainSchemaVersion(VALID_ID)).rejects.toMatchObject({
+      code: 'RPC_ERROR',
+    });
+  });
+
+  it('rejects with RPC_ERROR when RPC returns null/undefined', async () => {
+    callSorobanContract.mockResolvedValueOnce(null);
+    await expect(getOnChainSchemaVersion(VALID_ID)).rejects.toMatchObject({
+      code: 'RPC_ERROR',
+    });
+  });
+
+  it('does not leak the raw RPC error message in the thrown error', async () => {
+    callSorobanContract.mockRejectedValueOnce(new Error('secret internal detail'));
+    try {
+      await getOnChainSchemaVersion(VALID_ID);
+      throw new Error('expected rejection');
+    } catch (err) {
+      expect(err.code).toBe('RPC_ERROR');
+      expect(String(err.message)).not.toContain('secret internal detail');
+    }
+  });
 });
 
 // ─── contractListRefresh: runContractListRefresh ──────────────────────────────
@@ -204,6 +380,34 @@ describe('runContractListRefresh', () => {
     const result = await runContractListRefresh(VALID_ID);
     expect(result.onChainVersion).toBe(2);
     expect(result.status).toBe('unknown'); // 2 < 3 (max) and matches 1.1.0
+  });
+
+  it('returns a stable result shape on success', async () => {
+    process.env.ESCROW_CONTRACT_ID = VALID_ID;
+    callSorobanContract.mockResolvedValueOnce(3);
+    const result = await runContractListRefresh();
+    expect(Object.keys(result).sort()).toEqual(
+      ['knownVersion', 'onChainVersion', 'status'].sort()
+    );
+  });
+
+  it('rejects with INVALID_CONTRACT_ID for a malformed explicit contractId', async () => {
+    await expect(runContractListRefresh('bad-id')).rejects.toMatchObject({
+      code: 'INVALID_CONTRACT_ID',
+    });
+  });
+
+  it('is safe under concurrent invocation (no shared mutable state)', async () => {
+    process.env.ESCROW_CONTRACT_ID = VALID_ID;
+    callSorobanContract.mockResolvedValue(3);
+    const results = await Promise.all([
+      runContractListRefresh(),
+      runContractListRefresh(),
+      runContractListRefresh(),
+    ]);
+    for (const result of results) {
+      expect(result).toEqual({ onChainVersion: 3, knownVersion: '1.2.0', status: 'current' });
+    }
   });
 });
 
@@ -250,6 +454,23 @@ describe('POST /api/admin/escrow/refresh', () => {
       .post('/api/admin/escrow/refresh')
       .set('Authorization', `Bearer ${adminToken}`);
     expect(res.status).toBe(502);
+  });
+
+  it('returns 502 when RPC returns a malformed value', async () => {
+    callSorobanContract.mockResolvedValueOnce('not-a-version');
+    const res = await request(app)
+      .post('/api/admin/escrow/refresh')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(502);
+  });
+
+  it('does not expose raw RPC error details in the response body', async () => {
+    callSorobanContract.mockRejectedValueOnce(new Error('secret internal detail'));
+    const res = await request(app)
+      .post('/api/admin/escrow/refresh')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(502);
+    expect(JSON.stringify(res.body)).not.toContain('secret internal detail');
   });
 
   it('returns 202 when authenticated via X-API-KEY', async () => {
@@ -307,5 +528,22 @@ describe('GET /api/admin/escrow/version', () => {
       .get('/api/admin/escrow/version')
       .set('Authorization', `Bearer ${adminToken}`);
     expect(res.status).toBe(502);
+  });
+
+  it('returns 502 when RPC returns a malformed value', async () => {
+    callSorobanContract.mockResolvedValueOnce('not-a-version');
+    const res = await request(app)
+      .get('/api/admin/escrow/version')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(502);
+  });
+
+  it('does not expose raw RPC error details in the response body', async () => {
+    callSorobanContract.mockRejectedValueOnce(new Error('secret internal detail'));
+    const res = await request(app)
+      .get('/api/admin/escrow/version')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(502);
+    expect(JSON.stringify(res.body)).not.toContain('secret internal detail');
   });
 });

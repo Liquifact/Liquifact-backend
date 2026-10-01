@@ -272,4 +272,210 @@ describe('corsCache', () => {
       expect(a).toBe(b);
     });
   });
+
+  // ─── Input Validation ───────────────────────────────────────────────────
+
+  describe('input validation', () => {
+    it('rejects empty string origin in get', () => {
+      const { createCorsCache } = require('./corsCache');
+      const cache = createCorsCache({ ttlMs: 5000, maxEntries: 256 });
+      expect(cache.get('')).toBeUndefined();
+    });
+
+    it('rejects null origin in get', () => {
+      const { createCorsCache } = require('./corsCache');
+      const cache = createCorsCache({ ttlMs: 5000, maxEntries: 256 });
+      expect(cache.get(null)).toBeUndefined();
+    });
+
+    it('rejects undefined origin in get', () => {
+      const { createCorsCache } = require('./corsCache');
+      const cache = createCorsCache({ ttlMs: 5000, maxEntries: 256 });
+      expect(cache.get(undefined)).toBeUndefined();
+    });
+
+    it('rejects non-string origin in get', () => {
+      const { createCorsCache } = require('./corsCache');
+      const cache = createCorsCache({ ttlMs: 5000, maxEntries: 256 });
+      expect(cache.get(123)).toBeUndefined();
+      expect(cache.get({})).toBeUndefined();
+      expect(cache.get([])).toBeUndefined();
+    });
+
+    it('rejects oversized origin string in get', () => {
+      const { createCorsCache } = require('./corsCache');
+      const cache = createCorsCache({ ttlMs: 5000, maxEntries: 256 });
+      const longOrigin = 'a'.repeat(501);
+      expect(cache.get(longOrigin)).toBeUndefined();
+    });
+
+    it('rejects empty string origin in set', () => {
+      const { createCorsCache } = require('./corsCache');
+      const cache = createCorsCache({ ttlMs: 5000, maxEntries: 256 });
+      cache.set('', true);
+      expect(cache.size).toBe(0);
+    });
+
+    it('rejects null origin in set', () => {
+      const { createCorsCache } = require('./corsCache');
+      const cache = createCorsCache({ ttlMs: 5000, maxEntries: 256 });
+      cache.set(null, true);
+      expect(cache.size).toBe(0);
+    });
+
+    it('rejects non-boolean allowed value in set', () => {
+      const { createCorsCache } = require('./corsCache');
+      const cache = createCorsCache({ ttlMs: 5000, maxEntries: 256 });
+      cache.set('https://a.com', 'true');
+      cache.set('https://b.com', 1);
+      cache.set('https://c.com', null);
+      cache.set('https://d.com', undefined);
+      expect(cache.size).toBe(0);
+    });
+
+    it('accepts valid origin strings within bounds', () => {
+      const { createCorsCache } = require('./corsCache');
+      const cache = createCorsCache({ ttlMs: 5000, maxEntries: 256 });
+      cache.set('https://a.com', true);
+      cache.set('a', true);
+      cache.set('a'.repeat(500), true);
+      expect(cache.size).toBe(3);
+    });
+  });
+
+  // ─── Concurrent Execution ─────────────────────────────────────────────────
+
+  describe('concurrent execution', () => {
+    it('handles rapid set operations on same key without corruption', () => {
+      const { createCorsCache } = require('./corsCache');
+      const cache = createCorsCache({ ttlMs: 5000, maxEntries: 256 });
+      
+      // Simulate rapid concurrent sets
+      for (let i = 0; i < 100; i++) {
+        cache.set('https://a.com', i % 2 === 0);
+      }
+      
+      // Cache should still be in a valid state
+      expect(cache.size).toBe(1);
+      const result = cache.get('https://a.com');
+      expect(typeof result).toBe('boolean');
+    });
+
+    it('handles rapid get operations during set', () => {
+      const { createCorsCache } = require('./corsCache');
+      const cache = createCorsCache({ ttlMs: 5000, maxEntries: 256 });
+      
+      cache.set('https://a.com', true);
+      
+      // Simulate rapid concurrent gets
+      for (let i = 0; i < 100; i++) {
+        const result = cache.get('https://a.com');
+        expect(typeof result).toBe('boolean');
+      }
+    });
+
+    it('handles eviction during concurrent operations', () => {
+      const { createCorsCache } = require('./corsCache');
+      const cache = createCorsCache({ ttlMs: 5000, maxEntries: 3 });
+      
+      // Fill cache to capacity
+      cache.set('a', true);
+      cache.set('b', true);
+      cache.set('c', true);
+      
+      // Trigger eviction while accessing
+      cache.set('d', true);
+      cache.get('b');
+      cache.set('e', true);
+      
+      // Cache should remain valid
+      expect(cache.size).toBeLessThanOrEqual(3);
+    });
+  });
+
+  // ─── Failure Recovery ───────────────────────────────────────────────────
+
+  describe('failure recovery', () => {
+    it('handles metric counter failures gracefully', () => {
+      const { createCorsCache } = require('./corsCache');
+      const cache = createCorsCache({ ttlMs: 5000, maxEntries: 256 });
+      
+      // Temporarily break metrics
+      const originalInc = corsCacheHitsTotal.inc;
+      corsCacheHitsTotal.inc = () => { throw new Error('Metric error'); };
+      
+      try {
+        cache.set('https://a.com', true);
+        cache.get('https://a.com');
+        // Cache should still work despite metric failure
+        expect(cache.get('https://a.com')).toBe(true);
+      } finally {
+        corsCacheHitsTotal.inc = originalInc;
+      }
+    });
+
+    it('validates cache instance structure', () => {
+      const { createCorsCache, isValidCacheInstance } = require('./corsCache');
+      const cache = createCorsCache({ ttlMs: 5000, maxEntries: 256 });
+      
+      expect(isValidCacheInstance(cache)).toBe(true);
+      expect(isValidCacheInstance(null)).toBe(false);
+      expect(isValidCacheInstance(undefined)).toBe(false);
+      expect(isValidCacheInstance({})).toBe(false);
+      expect(isValidCacheInstance({ get: () => {} })).toBe(false);
+    });
+
+    it('clears locks on cache clear', () => {
+      const { createCorsCache } = require('./corsCache');
+      const cache = createCorsCache({ ttlMs: 5000, maxEntries: 256 });
+      
+      cache.set('https://a.com', true);
+      cache.clear();
+      
+      // Should be able to set again without lock conflicts
+      cache.set('https://a.com', true);
+      expect(cache.get('https://a.com')).toBe(true);
+    });
+  });
+
+  // ─── Boundary Cases ─────────────────────────────────────────────────────
+
+  describe('boundary cases', () => {
+    it('handles origin string at max length', () => {
+      const { createCorsCache } = require('./corsCache');
+      const cache = createCorsCache({ ttlMs: 5000, maxEntries: 256 });
+      const maxOrigin = 'a'.repeat(500);
+      
+      cache.set(maxOrigin, true);
+      expect(cache.get(maxOrigin)).toBe(true);
+    });
+
+    it('handles origin string at max length + 1', () => {
+      const { createCorsCache } = require('./corsCache');
+      const cache = createCorsCache({ ttlMs: 5000, maxEntries: 256 });
+      const tooLongOrigin = 'a'.repeat(501);
+      
+      cache.set(tooLongOrigin, true);
+      expect(cache.get(tooLongOrigin)).toBeUndefined();
+    });
+
+    it('handles single character origin', () => {
+      const { createCorsCache } = require('./corsCache');
+      const cache = createCorsCache({ ttlMs: 5000, maxEntries: 256 });
+      
+      cache.set('a', true);
+      expect(cache.get('a')).toBe(true);
+    });
+
+    it('handles boolean true and false values', () => {
+      const { createCorsCache } = require('./corsCache');
+      const cache = createCorsCache({ ttlMs: 5000, maxEntries: 256 });
+      
+      cache.set('https://a.com', true);
+      cache.set('https://b.com', false);
+      
+      expect(cache.get('https://a.com')).toBe(true);
+      expect(cache.get('https://b.com')).toBe(false);
+    });
+  });
 });

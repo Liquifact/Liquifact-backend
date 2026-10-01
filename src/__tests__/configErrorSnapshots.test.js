@@ -1,5 +1,7 @@
+
 'use strict';
 
+// NOTE: This suite transitively loads src/config/index.js; keep that module syntactically valid.
 /**
  * @fileoverview Snapshot tests for config error-response bodies.
  *
@@ -11,6 +13,7 @@
  * @issue #977
  */
 
+
 process.env.NODE_ENV = 'test';
 process.env.JWT_SECRET = 'test-secret-at-least-32-characters-long-string-for-jest';
 
@@ -19,6 +22,7 @@ jest.mock('../logger', () => ({
   error: jest.fn(),
   info: jest.fn(),
 }));
+
 
 const { validateBody } = require('../schemas/config');
 const { runtimeConfigSchema } = require('../schemas/config');
@@ -31,6 +35,7 @@ const AppError = require('../errors/AppError');
 
 function fakeReq(overrides = {}) {
   return {
+    app: { locals: {} },
     method: 'POST',
     originalUrl: '/api/admin/config',
     headers: {},
@@ -44,6 +49,7 @@ function fakeRes() {
   res.status = (s) => { res._status = s; return res; };
   res.json = (b) => { res._body = b; return res; };
   res.setHeader = (k, v) => { res._headers[k] = v; return res; };
+  res.locals = {};
   return res;
 }
 
@@ -306,5 +312,116 @@ describe('Config error-response snapshots', () => {
       expect(mapped.retryable).toBe(false);
       expect(mapped).toMatchSnapshot();
     });
+  });
+});
+
+// ── resolveConfig: deterministic failure recovery ────────────────────────────
+
+describe('resolveConfig — deterministic failure recovery', () => {
+  const { resolveConfig } = require('../db/resolveConfig');
+
+  const baseEnv = {
+    NODE_ENV: 'test',
+    JWT_SECRET: 'test-secret-at-least-32-characters-long-string-for-jest',
+  };
+
+  let originalEnv;
+
+  beforeEach(() => {
+    originalEnv = { ...process.env };
+    Object.assign(process.env, baseEnv);
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+    jest.restoreAllMocks();
+  });
+
+  it('returns a frozen, deterministic snapshot for identical inputs', () => {
+    const first = resolveConfig({ env: baseEnv });
+    const second = resolveConfig({ env: baseEnv });
+
+    expect(first).toEqual(second);
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(Object.isFrozen(first.values)).toBe(true);
+  });
+
+  it('is idempotent across repeated invocations (no state leakage)', () => {
+    const a = resolveConfig({ env: baseEnv });
+    const b = resolveConfig({ env: baseEnv });
+    const c = resolveConfig({ env: baseEnv });
+
+    expect(a.fingerprint).toBe(b.fingerprint);
+    expect(b.fingerprint).toBe(c.fingerprint);
+  });
+
+  it('rejects invalid input deterministically with a stable error code', () => {
+    const attempt = () => resolveConfig({ env: { ...baseEnv, JWT_SECRET: 'short' } });
+
+    let firstErr;
+    let secondErr;
+    try { attempt(); } catch (e) { firstErr = e; }
+    try { attempt(); } catch (e) { secondErr = e; }
+
+    expect(firstErr).toBeDefined();
+    expect(secondErr).toBeDefined();
+    expect(firstErr.code).toBe(secondErr.code);
+    expect(firstErr.message).toBe(secondErr.message);
+    expect(firstErr.code).toMatch(/^CONFIG_/);
+  });
+
+  it('does not mutate caller-provided env object on success or failure', () => {
+    const env = { ...baseEnv };
+    const snapshot = JSON.stringify(env);
+
+    resolveConfig({ env });
+    expect(JSON.stringify(env)).toBe(snapshot);
+
+    const badEnv = { ...baseEnv, JWT_SECRET: 'short' };
+    const badSnapshot = JSON.stringify(badEnv);
+    try { resolveConfig({ env: badEnv }); } catch (_) { /* expected */ }
+    expect(JSON.stringify(badEnv)).toBe(badSnapshot);
+  });
+
+  it('surfaces a retryable failure without losing the previous good config', () => {
+    const good = resolveConfig({ env: baseEnv });
+    const cache = { current: good };
+
+    const attempt = () => {
+      try {
+        const next = resolveConfig({ env: { ...baseEnv, JWT_SECRET: 'short' } });
+        cache.current = next;
+        return { ok: true, value: next };
+      } catch (err) {
+        return { ok: false, error: err, value: cache.current };
+      }
+    };
+
+    const result = attempt();
+    expect(result.ok).toBe(false);
+    expect(result.value).toBe(good);
+    expect(cache.current).toBe(good);
+    expect(result.error.retryable).toBe(false);
+  });
+
+  it('is safe under concurrent resolution (no shared mutable state)', async () => {
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        Promise.resolve().then(() => resolveConfig({ env: baseEnv })),
+      ),
+    );
+
+    const fingerprints = new Set(results.map((r) => r.fingerprint));
+    expect(fingerprints.size).toBe(1);
+    results.forEach((r) => expect(Object.isFrozen(r)).toBe(true));
+  });
+
+  it('exposes a redacted diagnostic view that never leaks secrets', () => {
+    const resolved = resolveConfig({ env: baseEnv });
+    const diagnostic = resolved.describe();
+
+    expect(diagnostic).toBeDefined();
+    expect(JSON.stringify(diagnostic)).not.toContain(baseEnv.JWT_SECRET);
+    expect(diagnostic.fingerprint).toBe(resolved.fingerprint);
   });
 });

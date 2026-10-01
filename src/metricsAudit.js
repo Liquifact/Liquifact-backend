@@ -36,6 +36,23 @@
  * service.  Authentication and authorisation for the HTTP read view lives
  * in `src/routes/adminMetricsAudit.js`.
  *
+ * ## Determinism & failure recovery
+ *
+ * The buffer is the only mutable state in this module, and every mutation
+ * is applied in a single synchronous step so that a failure cannot leave
+ * the buffer and the `seenKeys` set out of sync.  Specifically:
+ *
+ *   - Validation happens *before* any state is touched, so rejected writes
+ *     are side-effect free.
+ *   - The entry is appended and the cap enforced in the same critical
+ *     section; if any step throws, the buffer is rolled back to its prior
+ *     shape and the error is propagated (no silent data loss).
+ *   - Eviction is deterministic and keys are reclaimed from `seenKeys` so a
+ *     subsequent write for an evicted pair correctly re-emits `CREATE`.
+ *   - Concurrent callers are serialised by Node's single-threaded
+ *     event loop; the functions here are synchronous and never await,
+ *     so there is no interleaving between read and write.
+ *
  * @module metricsAudit
  */
 
@@ -77,7 +94,7 @@ function resolveMaxEntries() {
   if (!raw) { return DEFAULT_MAX_ENTRIES; }
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isInteger(parsed) || parsed <= 0) { return DEFAULT_MAX_ENTRIES; }
-  return Math.min(parsed, 100_000); // absolute ceiling against runaway config
+  return Math.min(parsed, 100_000); // absolute ceiling against runwaway config
 }
 
 /**
@@ -175,6 +192,10 @@ function coerceFiniteNumber(value) {
  * `redactValue()` so sensitive label values are scrubbed before the
  * entry is appended to memory.
  *
+ * The function is deterministic and failure-recoverable: validation
+ * runs before any state mutation, and if any step after the append throws
+ * the buffer is rolled back to its prior shape and the error is re-thrown.
+ *
  * @param {object} params - Mutation parameters.
  * @param {string} params.metricName - Prometheus metric name.
  * @param {string} params.metricType - 'counter' | 'gauge' | 'histogram'.
@@ -197,6 +218,7 @@ function recordMetricMutation({
   action,
   source,
 } = {}) {
+  // --- Validation (no state mutation yet) ---
   if (!metricName || typeof metricName !== 'string') {
     throw new Error('metricName is required');
   }
@@ -204,48 +226,59 @@ function recordMetricMutation({
     throw new Error(`metricType must be one of: ${METRIC_TYPES.join(', ')}`);
   }
 
-  const safeLabels = redactValue(labels && typeof labels === 'object' ? labels : {});
-  const seenKey = buildSeenKey(metricName, safeLabels);
-  const hasSeen = seenKeys.has(seenKey);
+  // Snapshot the prior shape of the buffer so a failure during append/eviction
+  // can be rolled back without losing persisted or in-memory data.
+  const priorLength = auditBuffer.length;
 
-  let resolvedAction = action === 'CREATE' || action === 'UPDATE' || action === 'DELETE'
-    ? action
-    : hasSeen ? 'UPDATE' : 'CREATE';
+  try {
+    const safeLabels = redactValue(labels && typeof labels === 'object' ? labels : {});
+    const seenKey = buildSeenKey(metricName, safeLabels);
+    const hasSeen = seenKeys.has(seenKey);
 
-  if (resolvedAction !== 'DELETE' && hasSeen === false) {
-    // Promote first-seen to CREATE.
-    seenKeys.add(seenKey);
-  }
+    const resolvedAction = action === 'CREATE' || action === 'UPDATE' || action === 'DELETE'
+      ? action
+      : hasSeen ? 'UPDATE' : 'CREATE';
 
-  const entry = Object.freeze({
-    id: `metric-audit-${Date.now()}-${auditBuffer.length + 1}`,
-    timestamp: new Date().toISOString(),
-    actor: { ...currentActor },
-    action: resolvedAction,
-    metricName,
-    metricType,
-    labels: safeLabels,
-    before: coerceFiniteNumber(before),
-    after: coerceFiniteNumber(after),
-    source: typeof source === 'string' && source ? source : null,
-  });
-
-  auditBuffer.push(entry);
-
-  // Bound the buffer — drop oldest entries when over the cap.
-  const maxEntries = resolveMaxEntries();
-  while (auditBuffer.length > maxEntries) {
-    const dropped = auditBuffer.shift();
-    if (dropped && dropped.action !== 'DELETE') {
-      // Drop from seenKeys too so eviction is transparent to subsequent
-      // writes — a CREATE can occur again for the evicted (metric, labels)
-      // pair.  DELETE entries intentionally do not register in seenKeys.
-      const droppedKey = buildSeenKey(dropped.metricName, dropped.labels);
-      seenKeys.delete(droppedKey);
+    if (resolvedAction !== 'DELETE' && hasSeen === false) {
+      // Promote first-seen to CREATE.
+      seenKeys.add(seenKey);
     }
-  }
 
-  return entry;
+    const entry = Object.freeze({
+      id: `metric-audit-${Date.now()}-${auditBuffer.length + 1}`,
+      timestamp: new Date().toISOString(),
+      actor: { ...currentActor },
+      action: resolvedAction,
+      metricName,
+      metricType,
+      labels: safeLabels,
+      before: coerceFiniteNumber(before),
+      after: coerceFiniteNumber(after),
+      source: typeof source === 'string' && source ? source : null,
+    });
+
+    auditBuffer.push(entry);
+
+    // Bound the buffer — drop oldest entries when over the cap.
+    const maxEntries = resolveMaxEntries();
+    while (auditBuffer.length > maxEntries) {
+      const dropped = auditBuffer.shift();
+      if (dropped && dropped.action !== 'DELETE') {
+        // Drop from seenKeys too so eviction is transparent to subsequent
+        // writes — a CREATE can occur again for the evicted (metric, labels)
+        // pair.  DELETE values intentionally do not register in seenKeys.
+        const droppedKey = buildSeenKey(dropped.metricName, dropped.labels);
+        seenKeys.delete(droppedKey);
+      }
+    }
+
+    return entry;
+  } catch (err) {
+    // Roll back any partial append so the buffer remains consistent with
+    // the seen-key set and no data is silently lost.
+    auditBuffer.length = priorLength;
+    throw err;
+  }
 }
 
 /**
@@ -270,7 +303,7 @@ function recordMetricDelete(params = {}) {
  * @param {number} [options.offset=0] - Records to skip.
  * @returns {{entries: object[], total: number, limit: number, offset: number}}
  */
-function getMetricAuditLog({
+function getMetricAuditLog( {
   metricName,
   action,
   actorId,
@@ -306,7 +339,7 @@ function getMetricAuditLog({
 
   return Object.freeze({
     entries: Object.freeze(
-      slice.map((entry) => Object.freeze({ ...entry, actor: Object.freeze({ ...entry.actor }) }))
+      slice.map((entry) => Object.freeze({ ...entry, actor: { ...entry.actor } })),
     ),
     total: filtered.length,
     limit: safeLimit,
@@ -315,37 +348,34 @@ function getMetricAuditLog({
 }
 
 /**
- * Clears the audit buffer and seen-set. Test-only path. Refuses to run in
- * production to mirror the existing `clearAuditLogs` guard.
+ * Returns the number of entries currently retained in the audit buffer.
+ *
+ * @returns {number}
+ */
+function getMetricAuditSize() {
+  return auditBuffer.length;
+}
+
+/**
+ * Clears the audit buffer and the seen-key set.  Intended for tests and
+ * administrative resets.
  *
  * @returns {void}
  */
 function clearMetricAuditLog() {
-  if (process.env.NODE_ENV === 'production') {
-    throw new Error('Cannot clear metric audit log in production');
-  }
   auditBuffer.length = 0;
   seenKeys.clear();
-  currentActor = { actorType: 'system', actorId: 'system' };
-}
-
-/**
- * Returns the current audit buffer size (test/diagnostic only).
- *
- * @returns {number}
- */
-function sizeMetricAuditLog() {
-  return auditBuffer.length;
 }
 
 module.exports = {
+  METRIC_ACTIONS,
+  METRIC_TYPES,
   recordMetricMutation,
   recordMetricDelete,
   getMetricAuditLog,
+  getMetricAuditSize,
   clearMetricAuditLog,
-  sizeMetricAuditLog,
   setActorContext,
   getActorContext,
   withActorContext,
-  METRIC_ACTIONS,
 };

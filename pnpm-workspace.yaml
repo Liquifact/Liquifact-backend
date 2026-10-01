@@ -1,0 +1,8 @@
+allowBuilds:
+  '@parcel/watcher': set this to true or false
+  '@reown/appkit': set this to true or false
+  better-sqlite3: set this to true or false
+  secp256k1: set this to true or false
+  sharp: set this to true or false
+  sqlite3: set this to true or false
+  unrs-resolver: set this to true or false

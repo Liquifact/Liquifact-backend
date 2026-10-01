@@ -6,15 +6,29 @@ const jwt = require('jsonwebtoken');
 
 // 1. Mock DB and API Keys BEFORE requiring anything else
 jest.mock('../src/db/knex');
-jest.mock('../src/config/apiKeys', () => ({
-  loadApiKeyRegistry: () => {
-    return new Map([
-      ['valid-export-key', { clientId: 'client-1', scopes: ['invoices:export'], revoked: false }],
-      ['no-scope-key', { clientId: 'client-2', scopes: ['other:scope'], revoked: false }],
-      ['revoked-key', { clientId: 'client-3', scopes: ['invoices:export'], revoked: true }]
-    ]);
-  }
-}));
+jest.mock('../src/config/apiKeys', () => {
+  const registry = new Map([
+    ['valid-export-key', { clientId: 'client-1', scopes: ['invoices:export'], revoked: false }],
+    ['no-scope-key', { clientId: 'client-2', scopes: ['other:scope'], revoked: false }],
+    ['revoked-key', { clientId: 'client-3', scopes: ['invoices:export'], revoked: true }]
+  ]);
+  const actual = jest.requireActual('../src/config/apiKeys');
+  return {
+    ...actual,
+    loadApiKeyRegistry: () => registry,
+    tryLoadApiKeyRegistry: () => ({
+      ok: true,
+      status: 'ok',
+      registry,
+      entries: [...registry.values()],
+      error: null,
+      errorCode: null,
+      attempts: 1,
+      fallbackUsed: null,
+      source: 'jest-mock',
+    }),
+  };
+});
 jest.mock('../src/services/invoiceService', () => ({
   getInvoiceById: jest.fn(async (id, tenantId) => {
     if (id === 'inv-export-test' && tenantId === 'tenant-test') {

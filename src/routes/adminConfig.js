@@ -26,6 +26,19 @@
  *   Runs the retention purge on demand (the same work the scheduled
  *   maintenance task performs).
  *
+ * Concurrency invariants
+ * ──────────────────────
+ * - POST /  passes through the `optionalIdempotency` middleware so duplicate
+ *   requests carrying the same Idempotency-Key short-circuit before reaching
+ *   applyConfig, preventing double-writes.
+ * - POST /publish enforces optimistic CAS via `expectedVersion`.  The version
+ *   check and the UPDATE are executed inside a single DB transaction in
+ *   configVersioning.publishConfig, so two racing requests can never both
+ *   succeed for the same expectedVersion.
+ * - DELETE /:id and POST /:id/restore both use conditional UPDATE
+ *   (`WHERE deleted_at IS NULL / IS NOT NULL`) in the service layer, so
+ *   concurrent calls are safe — only one will perform the state transition.
+ *
  * @module routes/adminConfig
  */
 
@@ -38,14 +51,23 @@ const {
   validateBody,
 } = require('../schemas/config');
 const { adminConfigLimiter } = require('../middleware/rateLimit');
-const { reloadCorsOrigins, reloadCorsMaxAge } = require('../config/cors');
 const { configErrorHandler } = require('../middleware/configErrorHandler');
-const { saveDraft, publishConfig, getConfigVersion, getConfigHistory } = require('../services/configVersioning');
+const {
+  saveDraft,
+  publishConfig,
+  getConfigVersion,
+  getConfigHistory,
+} = require('../services/configVersioning');
 const optionalIdempotency = require('../middleware/optionalIdempotency');
-const { instrumentConfig } = require('../middleware/configMetrics');
 const { toAdminConfigRequestDto, fromAdminConfigRequestDto } = require('../dto/config');
 const { applyConfig, getConfigSections } = require('../services/configService');
-const { SOFT_DELETE_ERRORS } = require('../services/configSoftDelete');
+const {
+  SOFT_DELETE_ERRORS,
+  softDeleteConfig,
+  restoreConfig,
+  getConfigDeletionState,
+  purgeExpiredConfigSoftDeletes,
+} = require('../services/configSoftDelete');
 const AppError = require('../errors/AppError');
 const logger = require('../logger');
 
@@ -105,11 +127,45 @@ function _mapSoftDeleteError(err, req) {
 }
 
 // ── POST /api/admin/config ────────────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/admin/config:
+ *   post:
+ *     operationId: applyAdminConfig
+ *     summary: Apply a runtime configuration change
+ *     description: |
+ *       Validates and applies a section-scoped configuration payload.
+ *       Idempotency-Key header is supported: duplicate requests with the same
+ *       key and payload return the cached response without re-applying the
+ *       change.
+ *     tags: [AdminConfig]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [section, config]
+ *             properties:
+ *               section: { type: string }
+ *               config: { type: object }
+ *     responses:
+ *       200:
+ *         description: Config applied
+ *       400:
+ *         $ref: '#/components/responses/Problem400'
+ *       401:
+ *         $ref: '#/components/responses/Problem401'
+ *       403:
+ *         $ref: '#/components/responses/Problem403'
+ */
 router.post('/', optionalIdempotency, validateBody(runtimeConfigSchema), async (req, res, next) => {
-  const validatedDto = toAdminConfigRequestDto(req.validated);
-  const { section, config: validatedConfig } = fromAdminConfigRequestDto(validatedDto);
-
   try {
+    const validatedDto = toAdminConfigRequestDto(req.validated);
+    const { section, config: validatedConfig } = fromAdminConfigRequestDto(validatedDto);
+
     const result = await applyConfig(section, validatedConfig, {
       tenantId: req.tenantId,
       adminClient: req.apiClient?.clientId || req.user?.sub,
@@ -247,19 +303,31 @@ router.get('/sections', (req, res) => {
  *       409:
  *         description: Record is already soft-deleted
  */
-router.post('/', optionalIdempotency, validateBody(runtimeConfigSchema), async (req, res, next) => {
+// ── DELETE /api/admin/config/:id ───────────────────────────────────────────────
+router.delete('/:id', async (req, res, next) => {
   try {
-    const validatedDto = toAdminConfigRequestDto(req.validated);
-    const { section, config: validatedConfig } = fromAdminConfigRequestDto(validatedDto);
-
-    const result = await applyConfig(section, validatedConfig, {
+    const reason = req.body && typeof req.body.reason === 'string' ? req.body.reason : undefined;
+    const result = await softDeleteConfig(req.params.id, {
       tenantId: req.tenantId,
-      adminClient: req.apiClient?.clientId || req.user?.sub,
+      deletedBy: req.apiClient?.clientId || req.user?.sub,
+      reason,
     });
-
     return res.status(200).json(result);
-  } catch (error) {
-    return next(error);
+  } catch (err) {
+    return next(_mapSoftDeleteError(err, req));
+  }
+});
+
+// ── POST /api/admin/config/:id/restore ─────────────────────────────────────────
+router.post('/:id/restore', async (req, res, next) => {
+  try {
+    const result = await restoreConfig(req.params.id, {
+      tenantId: req.tenantId,
+      restoredBy: req.apiClient?.clientId || req.user?.sub,
+    });
+    return res.status(200).json(result);
+  } catch (err) {
+    return next(_mapSoftDeleteError(err, req));
   }
 });
 
@@ -294,7 +362,9 @@ router.post('/', optionalIdempotency, validateBody(runtimeConfigSchema), async (
  */
 router.get('/:id/deletion-state', async (req, res, next) => {
   try {
-    const result = await getConfigDeletionState(req.params.id);
+    const result = await getConfigDeletionState(req.params.id, {
+      tenantId: req.tenantId,
+    });
     return res.json(result);
   } catch (err) {
     return next(_mapSoftDeleteError(err, req));
@@ -335,7 +405,7 @@ router.get('/:id/deletion-state', async (req, res, next) => {
  */
 router.post('/purge', async (req, res, next) => {
   try {
-    const summary = await purgeExpiredConfigSoftDeletes();
+    const summary = await purgeExpiredConfigSoftDeletes({ tenantId: req.tenantId });
     logger.info(
       { purged: summary.purged, cutoff: summary.cutoff, requestId: req.id },
       'Admin triggered config retention purge'
@@ -495,6 +565,57 @@ router.post('/publish', validateBody(runtimeConfigSchema), async (req, res, next
   }
 });
 
+// ── POST /api/admin/config/purge ────────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/admin/config/purge:
+ *   post:
+ *     operationId: purgeExpiredConfigs
+ *     summary: Purge config records past their retention window
+ *     description: |
+ *       Hard-deletes soft-deleted config records whose retention window has
+ *       elapsed. Records still inside their window are never touched.
+ *       Requires admin authentication (JWT or API key).
+ *     tags: [AdminConfig]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Purge completed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 purged: { type: integer }
+ *                 batches: { type: integer }
+ *                 cutoff: { type: string, format: date-time }
+ *                 retentionDays: { type: integer }
+ *                 maxBatchesReached: { type: boolean }
+ *       401:
+ *         $ref: '#/components/responses/Problem401'
+ *       403:
+ *         $ref: '#/components/responses/Problem403'
+ */
+router.post('/purge', async (req, res, next) => {
+  try {
+    const summary = await purgeExpiredConfigSoftDeletes();
+    logger.info(
+      { purged: summary.purged, cutoff: summary.cutoff, requestId: req.id },
+      'Admin triggered config retention purge'
+    );
+    return res.json({
+      purged: summary.purged,
+      batches: summary.batches,
+      cutoff: summary.cutoff,
+      retentionDays: summary.retentionDays,
+      maxBatchesReached: summary.maxBatchesReached,
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
 // ── GET /api/admin/config/version/:section ──────────────────────────────────
 /**
  * @swagger
@@ -574,7 +695,164 @@ router.get('/history/:section', async (req, res, next) => {
   }
 });
 
+// ── DELETE /api/admin/config/:id ───────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/admin/config/{id}:
+ *   delete:
+ *     operationId: softDeleteConfig
+ *     summary: Soft-delete a config record
+ *     description: |
+ *       Marks the config record deleted. The row is retained (not purged) and
+ *       excluded from default config reads. The record stays restorable via
+ *       `POST /api/admin/config/{id}/restore` until its retention window
+ *       (`CONFIG_SOFT_DELETE_RETENTION_DAYS`, default 30 days) elapses,
+ *       after which the maintenance purge job removes it permanently.
+ *       Requires admin authentication (JWT or API key).
+ *     tags: [AdminConfig]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               reason:
+ *                 type: string
+ *                 maxLength: 500
+ *                 description: Operator justification, stored for audit.
+ *     responses:
+ *       200:
+ *         description: Record soft-deleted
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id: { type: string }
+ *                 section: { type: string }
+ *                 deleted: { type: boolean }
+ *                 deletedAt: { type: string, format: date-time }
+ *                 deletedBy: { type: string, nullable: true }
+ *                 deleteReason: { type: string, nullable: true }
+ *                 purgeAfter: { type: string, format: date-time }
+ *                 restorable: { type: boolean }
+ *                 retentionDays: { type: integer }
+ *       400:
+ *         $ref: '#/components/responses/Problem400'
+ *       401:
+ *         $ref: '#/components/responses/Problem401'
+ *       403:
+ *         $ref: '#/components/responses/Problem403'
+ *       404:
+ *         description: No config record for the id
+ *       409:
+ *         description: Record is already soft-deleted
+ */
+router.delete('/:id', async (req, res, next) => {
+  try {
+    const actor = req.apiClient?.clientId || req.user?.sub || null;
+    // Reason is optional; cap at 500 chars to match schema doc
+    const reason = typeof req.body?.reason === 'string'
+      ? req.body.reason.slice(0, 500)
+      : null;
+
+    const result = await softDeleteConfig(req.params.id, { actor, reason });
+    return res.json(result);
+  } catch (err) {
+    return next(_mapSoftDeleteError(err, req));
+  }
+});
+
+// ── POST /api/admin/config/:id/restore ─────────────────────────────────────────
+/**
+ * @swagger
+ * /api/admin/config/{id}/restore:
+ *   post:
+ *     operationId: restoreConfig
+ *     summary: Restore a soft-deleted config record
+ *     description: |
+ *       Restores a soft-deleted record while its retention window is open.
+ *       Returns 409 if the record was never deleted.
+ *       Returns 410 if the retention window has expired.
+ *       Requires admin authentication (JWT or API key).
+ *     tags: [AdminConfig]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Record restored
+ *       401:
+ *         $ref: '#/components/responses/Problem401'
+ *       403:
+ *         $ref: '#/components/responses/Problem403'
+ *       404:
+ *         description: No config record for the id
+ *       409:
+ *         description: Record is not deleted
+ *       410:
+ *         description: Retention window expired; record cannot be restored
+ */
+router.post('/:id/restore', async (req, res, next) => {
+  try {
+    const actor = req.apiClient?.clientId || req.user?.sub || null;
+    const result = await restoreConfig(req.params.id, { actor });
+    return res.json(result);
+  } catch (err) {
+    return next(_mapSoftDeleteError(err, req));
+  }
+});
+
+// ── GET /api/admin/config/:id/deletion-state ────────────────────────────────────
+/**
+ * @swagger
+ * /api/admin/config/{id}/deletion-state:
+ *   get:
+ *     operationId: getConfigDeletionState
+ *     summary: Inspect the soft-delete state of a config record
+ *     description: |
+ *       Returns whether the record is soft-deleted, who deleted it and why, when
+ *       it will be purged, and whether it is still restorable.
+ *       Requires admin authentication (JWT or API key).
+ *     tags: [AdminConfig]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Soft-delete state returned
+ *       401:
+ *         $ref: '#/components/responses/Problem401'
+ *       403:
+ *         $ref: '#/components/responses/Problem403'
+ *       404:
+ *         description: No config record for the id
+ */
+router.get('/:id/deletion-state', async (req, res, next) => {
+  try {
+    const result = await getConfigDeletionState(req.params.id);
+    return res.json(result);
+  } catch (err) {
+    return next(_mapSoftDeleteError(err, req));
+  }
+});
+
 router.use(configErrorHandler);
 
 module.exports = router;
-

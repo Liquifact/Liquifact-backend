@@ -11,6 +11,13 @@
  * observed escrow event, so an operator mistake previously meant waiting for a
  * full re-index to recover.
  *
+ * Failure recovery is deterministic: every mutation is guarded by a
+ * compare-and-set predicate on the row's current tombstone state, so retries
+ * and concurrent callers converge on the same observable outcome. Cache
+ * invalidation is best-effort and never blocks or rolls back the durable
+ * state transition; a failed invalidation is logged and retried on the next
+ * read via the cache's own TTL, not by re-applying the mutation.
+ *
  * Model
  * -----
  *   live       → `deleted_at IS NULL`. Served by every read path.
@@ -29,6 +36,12 @@
  * read caches via {@link module:services/escrowRead.invalidateEscrowReadCache}.
  * Without that, a cached summary would keep serving a record that was just
  * tombstoned.
+ *
+ * Purge is idempotent and resumable: each batch deletes by primary key under
+ * the same `deleted_at <= cutoff` predicate used to select it, so a crash
+ * mid-run leaves only rows that still satisfy the predicate for the next run.
+ * A row whose `deleted_at` is unparseable is treated as expired and purged,
+ * never left in an ambiguous "restorable" state.
  *
  * @module services/escrowReadSoftDelete
  */
@@ -81,6 +94,8 @@ const SOFT_DELETE_ERRORS = Object.freeze({
   RETENTION_EXPIRED: 'ESCROW_READ_RETENTION_EXPIRED',
   /** `invoiceId` failed shared validation. */
   INVALID_INVOICE_ID: 'INVALID_INVOICE_ID',
+  /** A concurrent writer changed the row between read and update. */
+  CONCURRENT_MODIFICATION: 'ESCROW_READ_CONCURRENT_MODIFICATION',
 });
 
 /**
@@ -155,7 +170,7 @@ function getPurgeMaxBatches() {
 }
 
 /**
- * Parses a timestamp column into epoch milliseconds. Accepts `Date`, ISO
+ * Parses a timestamp column into epoch milliseconds. Accepts `Date`, IS
  * strings, and epoch numbers because the column round-trips differently under
  * SQLite (string) and Postgres (Date).
  *
@@ -229,181 +244,148 @@ function _toSoftDeleteState(row, options = {}) {
       return restoredMs === null ? null : new Date(restoredMs).toISOString();
     })(),
     restoredBy: row.restored_by || null,
-    purgeAfter: deleted
-      ? new Date(deletedMs + retentionMs).toISOString()
-      : null,
-    restorable: deleted && !isRetentionExpired(row.deleted_at, { now, retentionMs }),
-    retentionDays: Math.round(retentionMs / MS_PER_DAY),
+    purgeAfter: deleted ? new Date(deletedMs + retentionMs).toISOString() : null,
+    restorable: deleted && !isRetentionExpired(deletedMs, { now, retentionMs }),
   };
 }
 
 /**
- * Validates and trims an invoice ID, reusing the canonical escrow-read rule so
- * the soft-delete surface accepts exactly the IDs the read surface accepts.
+ * Validates an invoice id and returns its normalised form. Throws a tagged
+ * error when invalid so route handlers can map it to a 400.
  *
- * @param {unknown} invoiceId - Candidate ID.
- * @returns {string} Trimmed, validated ID.
- * @throws {Error} `INVALID_INVOICE_ID` / 400 when validation fails.
+ * @param {string} invoiceId - Candidate id.
+ * @returns {string} Normalised id.
  */
-function _requireValidInvoiceId(invoiceId) {
-  const { valid, reason } = validateInvoiceId(invoiceId);
-  if (!valid) {
-    throw _softDeleteError(SOFT_DELETE_ERRORS.INVALID_INVOICE_ID, 400, reason);
-  }
-  return String(invoiceId).trim();
-}
-
-/**
- * Loads a projection row regardless of tombstone state.
- *
- * @param {string} safeId - Validated invoice ID.
- * @param {import('knex').Knex} dbClient - Knex instance.
- * @returns {Promise<object|null>} Raw row, or null when absent.
- */
-async function _findRow(safeId, dbClient) {
-  const row = await dbClient(PROJECTION_TABLE)
-    .where('invoice_id', safeId)
-    .first();
-  return row || null;
-}
-
-/**
- * Returns the soft-delete state of an escrow-read record, including records
- * that are currently tombstoned (this is the one read that does not hide
- * them — it exists so operators can see what is recoverable).
- *
- * @param {string} invoiceId - Invoice identifier.
- * @param {object} [options={}]
- * @param {import('knex').Knex} [options.dbClient=db] - Knex instance (tests).
- * @param {number} [options.now=Date.now()] - Clock override (epoch ms).
- * @returns {Promise<object>} Soft-delete envelope (see {@link _toSoftDeleteState}).
- * @throws {Error} `INVALID_INVOICE_ID` (400) or `ESCROW_READ_NOT_FOUND` (404).
- */
-async function getEscrowReadDeletionState(invoiceId, options = {}) {
-  const { dbClient = db, now = Date.now() } = options;
-  const safeId = _requireValidInvoiceId(invoiceId);
-
-  const row = await _findRow(safeId, dbClient);
-  if (!row) {
+function _requireInvoiceId(invoiceId) {
+  const validation = validateInvoiceId(invoiceId);
+  if (!validation || validation.valid !== true) {
     throw _softDeleteError(
-      SOFT_DELETE_ERRORS.NOT_FOUND,
-      404,
-      `No escrow-read record found for invoice '${safeId}'`
+      SOFT_DELETE_ERRORS.INVALID_INVOICE_ID,
+      400,
+      'Invalid invoice id',
+      { invoiceId },
     );
   }
-  return _toSoftDeleteState(row, { now });
+  return validation.normalized || validation.value || invoiceId;
 }
 
 /**
- * Soft-deletes an escrow-read record: marks it tombstoned so every default
- * read path treats the invoice as "not indexed", while the row itself survives
- * for the retention window.
+ * Fetches the projection row for an invoice id, or undefined when absent.
  *
- * Idempotency: re-deleting an already-tombstoned record throws
- * `ESCROW_READ_ALREADY_DELETED` rather than silently refreshing `deleted_at`.
- * Refreshing would extend the retention window on every retry and let a record
- * evade purge indefinitely.
+ * @param {string} invoiceId - Normalised invoice id.
+ * @returns {Promise<object|undefined>} Raw row or undefined.
+ */
+async function _fetchRow(invoiceId) {
+  return db(PROJECTION_TABLE).where({ invoice_id: invoiceId }).first();
+}
+
+/**
+ * Best-effort cache invalidation. Never throws: a failure to invalidate is
+ * logged and the durable state transition still commits. The cache will retry
+ * its own invalidation on the next read.
+ *
+ * @param {string} invoiceId - Normalised invoice id.
+ * @param {string} operation - Operation name for logging.
+ * @returns {Promise<void>}
+ */
+async function _invalidateCachesBestEffort(invoiceId, operation) {
+  try {
+    await invalidateEscrowReadCache(invoiceId);
+  } catch (err) {
+    logger.warn('escrowReadSoftDelete.cacheInvalidationFailed', {
+      invoiceId,
+      operation,
+      error: err && err.message,
+    });
+  }
+}
+
+/**
+ * Soft-deletes an escrow-read record. Idempotent under retries and concurrent
+ * callers: the update is guarded by `deleted_at IS NULL`, so a race loser observes
+ * the same tombstone and receives `ALREADY_DELETED` instead of clobbering the
+ * original deleter's metadata.
  *
  * @param {string} invoiceId - Invoice identifier.
  * @param {object} [options={}]
- * @param {string} [options.actor] - Admin subject / API key id performing the delete.
- * @param {string} [options.reason] - Operator justification (stored for audit).
- * @param {import('knex').Knex} [options.dbClient=db] - Knex instance (tests).
- * @param {number} [options.now=Date.now()] - Clock override (epoch ms).
- * @returns {Promise<object>} Soft-delete envelope for the tombstoned record.
- * @throws {Error} `INVALID_INVOICE_ID` (400), `ESCROW_READ_NOT_FOUND` (404), or
- *   `ESCROW_READ_ALREADY_DELETED` (409).
+ * @param {string} [options.deletedBy] - Actor recorded on the tombstone.
+ * @param {string} [options.reason] - Free-text reason.
+ * @param {number} [options.now] - Clock override (epoch ms).
+ * @returns {Promise<object>} Soft-delete envelope.
  */
 async function softDeleteEscrowRead(invoiceId, options = {}) {
-  const { actor = null, reason = null, dbClient = db, now = Date.now() } = options;
-  const safeId = _requireValidInvoiceId(invoiceId);
+  const normalisedId = _requireInvoiceId(invoiceId);
+  const now = options.now || Date.now();
+  const deletedAt = new Date(now);
 
-  const row = await _findRow(safeId, dbClient);
+  const row = await _fetchRow(normalisedId);
   if (!row) {
     throw _softDeleteError(
       SOFT_DELETE_ERRORS.NOT_FOUND,
       404,
-      `No escrow-read record found for invoice '${safeId}'`
+      'Escrow read record not found',
+      { invoiceId: normalisedId },
     );
   }
+
   if (_toEpochMs(row.deleted_at) !== null) {
     throw _softDeleteError(
       SOFT_DELETE_ERRORS.ALREADY_DELETED,
       409,
-      `Escrow-read record for invoice '${safeId}' is already deleted`,
-      { deletedAt: new Date(_toEpochMs(row.deleted_at)).toISOString() }
+      'Escrow read record is already deleted',
+      { invoiceId: normalisedId },
     );
   }
 
-  const deletedAtIso = new Date(now).toISOString();
-
-  // Guarded by `deleted_at IS NULL` so two concurrent deletes cannot both
-  // stamp the row — the loser updates 0 rows and reports ALREADY_DELETED.
-  const updated = await dbClient(PROJECTION_TABLE)
-    .where('invoice_id', safeId)
-    .whereNull('deleted_at')
+  const updated = await db(PROJECTION_TABLE)
+    .where({ invoice_id: normalisedId, deleted_at: null })
     .update({
-      deleted_at: deletedAtIso,
-      deleted_by: actor,
-      delete_reason: reason,
+      deleted_at: deletedAt,
+      deleted_by: options.deletedBy || null,
+      delete_reason: options.reason || null,
     });
 
-  if (updated === 0) {
+  if (!updated) {
+    // Lost the race: another caller tombstoned the row first. Surface the
+    // same observable outcome as a sequential double delete.
     throw _softDeleteError(
       SOFT_DELETE_ERRORS.ALREADY_DELETED,
       409,
-      `Escrow-read record for invoice '${safeId}' is already deleted`
+      'Escrow read record is already deleted',
+      { invoiceId: normalisedId },
     );
   }
 
-  // Cached summaries would keep serving the record we just hid.
-  await invalidateEscrowReadCache(safeId);
+  await _invalidateCachesBestEffort(normalisedId, 'softDelete');
 
-  logger.info(
-    { invoiceId: safeId, actor, reason, deletedAt: deletedAtIso },
-    'escrowReadSoftDelete: escrow-read record soft-deleted'
-  );
-
-  return _toSoftDeleteState(
-    {
-      ...row,
-      deleted_at: deletedAtIso,
-      deleted_by: actor,
-      delete_reason: reason,
-    },
-    { now }
-  );
+  const refreshed = await _fetchRow(normalisedId);
+  return _toSoftDeleteState(refreshed || row, { now });
 }
 
 /**
- * Restores a soft-deleted escrow-read record, provided its retention window
- * has not elapsed.
- *
- * The window is evaluated against `deleted_at`, not against whether the purge
- * job has run. A record whose window expired is refused with
- * `ESCROW_READ_RETENTION_EXPIRED` even while the row is still physically
- * present, so the API contract does not drift with job scheduling.
+ * Restores a soft-deleted escrow-read record. Refuses once the retention window
+ * has elapsed, even if the purge job has not run yet, so restorability depends
+ * only on the window and not on job scheduling luck.
  *
  * @param {string} invoiceId - Invoice identifier.
  * @param {object} [options={}]
- * @param {string} [options.actor] - Admin subject / API key id performing the restore.
- * @param {import('knex').Knex} [options.dbClient=db] - Knex instance (tests).
- * @param {number} [options.now=Date.now()] - Clock override (epoch ms).
- * @returns {Promise<object>} Soft-delete envelope for the restored (live) record.
- * @throws {Error} `INVALID_INVOICE_ID` (400), `ESCROW_READ_NOT_FOUND` (404),
- *   `ESCROW_READ_NOT_DELETED` (409), or `ESCROW_READ_RETENTION_EXPIRED` (410).
+ * @param {string} [options.restoredBy] - Actor recorded on the restore.
+ * @param {number} [options.now] - Clock override (epoch ms).
+ * @param {number} [options.retentionMs] - Window override.
+ * @returns {Promise<object>} Soft-delete envelope.
  */
 async function restoreEscrowRead(invoiceId, options = {}) {
-  const { actor = null, dbClient = db, now = Date.now() } = options;
-  const safeId = _requireValidInvoiceId(invoiceId);
-  const retentionMs = getRetentionMs();
+  const normalisedId = _requireInvoiceId(invoiceId);
+  const now = options.now || Date.now();
+  const retentionMs = options.retentionMs || getRetentionMs();
 
-  const row = await _findRow(safeId, dbClient);
+  const row = await _fetchRow(normalisedId);
   if (!row) {
     throw _softDeleteError(
       SOFT_DELETE_ERRORS.NOT_FOUND,
       404,
-      `No escrow-read record found for invoice '${safeId}'. It may have been purged after its retention window.`
+      'Escrow read record not found',
+      { invoiceId: normalisedId },
     );
   }
 
@@ -412,185 +394,137 @@ async function restoreEscrowRead(invoiceId, options = {}) {
     throw _softDeleteError(
       SOFT_DELETE_ERRORS.NOT_DELETED,
       409,
-      `Escrow-read record for invoice '${safeId}' is not deleted`
+      'Escrow read record is not deleted',
+      { invoiceId: normalisedId },
     );
   }
 
-  if (isRetentionExpired(row.deleted_at, { now, retentionMs })) {
+  if (isRetentionExpired(deletedMs, { now, retentionMs })) {
     throw _softDeleteError(
       SOFT_DELETE_ERRORS.RETENTION_EXPIRED,
       410,
-      `Retention window for invoice '${safeId}' expired at ${new Date(deletedMs + retentionMs).toISOString()}; the record can no longer be restored.`,
-      {
-        deletedAt: new Date(deletedMs).toISOString(),
-        purgeAfter: new Date(deletedMs + retentionMs).toISOString(),
-      }
+      'Retention window has expired; record cannot be restored',
+      { invoiceId: normalisedId, deletedAt: new Date(deletedMs).toISOString() },
     );
   }
 
-  const restoredAtIso = new Date(now).toISOString();
-
-  // `whereNotNull('deleted_at')` makes the restore a no-op if a concurrent
-  // restore already cleared the tombstone.
-  const updated = await dbClient(PROJECTION_TABLE)
-    .where('invoice_id', safeId)
-    .whereNotNull('deleted_at')
+  const updated = await db(PROJECTION_TABLE)
+    .where({ invoice_id: normalisedId, deleted_at: row.deleted_at })
     .update({
       deleted_at: null,
       deleted_by: null,
       delete_reason: null,
-      restored_at: restoredAtIso,
-      restored_by: actor,
+      restored_at: new Date(now),
+      restored_by: options.restoredBy || null,
     });
 
-  if (updated === 0) {
+  if (!updated) {
+    // A concurrent writer changed the tombstone between our read and update.
+    // Re-read and report the current state deterministically rather than
+    // clobassing it.
+    const current = await _fetchRow(normalisedId);
+    if (!current) {
+      throw _softDeleteError(
+        SOFT_DELETE_ERRORS.NOT_FOUND,
+        404,
+        'Escrow read record not found',
+        { invoiceId: normalisedId },
+      );
+    }
+    if (_toEpochMs(current.deleted_at) === null) {
+      throw _softDeleteError(
+        SOFT_DELETE_ERRORS.NOT_DELETED,
+        409,
+        'Escrow read record is not deleted',
+        { invoiceId: normalisedId },
+      );
+    }
     throw _softDeleteError(
-      SOFT_DELETE_ERRORS.NOT_DELETED,
+      SOFT_DELETE_ERRORS.CONCURRENT_MODIFICATION,
       409,
-      `Escrow-read record for invoice '${safeId}' is not deleted`
+      'Escrow read record was modified concurrently',
+      { invoiceId: normalisedId },
     );
   }
 
-  // The tombstoned read may have been cached as a neutral `not_found` state.
-  await invalidateEscrowReadCache(safeId);
+  await _invalidateCachesBestEffort(normalisedId, 'restore');
 
-  logger.info(
-    { invoiceId: safeId, actor, restoredAt: restoredAtIso },
-    'escrowReadSoftDelete: escrow-read record restored'
-  );
-
-  return _toSoftDeleteState(
-    {
-      ...row,
-      deleted_at: null,
-      deleted_by: null,
-      delete_reason: null,
-      restored_at: restoredAtIso,
-      restored_by: actor,
-    },
-    { now }
-  );
+  const refreshed = await _fetchRow(normalisedId);
+  return _toSoftDeleteState(refreshed || row, { now, retentionMs });
 }
 
 /**
- * Deletes one batch of expired tombstones.
+ * Purges expired soft-deleted escrow-read records in bounded batches.
  *
- * Selects the invoice IDs first and deletes by ID so the delete is bounded by
- * batch size on every engine (SQLite does not support `DELETE ... LIMIT`), and
- * so the purged IDs can be logged and returned.
- *
- * @param {object} params
- * @param {import('knex').Knex} params.dbClient - Knex instance.
- * @param {string} params.cutoffIso - ISO timestamp; tombstones strictly older
- *   than this are purged.
- * @param {number} params.batchSize - Maximum rows to delete.
- * @returns {Promise<{ deleted: number, invoiceIds: string[] }>} Batch result.
- */
-async function _purgeBatch({ dbClient, cutoffIso, batchSize }) {
-  const rows = await dbClient(PROJECTION_TABLE)
-    .whereNotNull('deleted_at')
-    .where('deleted_at', '<=', cutoffIso)
-    .orderBy('deleted_at', 'asc')
-    .limit(batchSize)
-    .select('invoice_id');
-
-  const invoiceIds = (rows || [])
-    .map((row) => row && row.invoice_id)
-    .filter((id) => typeof id === 'string');
-
-  if (invoiceIds.length === 0) {
-    return { deleted: 0, invoiceIds: [] };
-  }
-
-  const deleted = await dbClient(PROJECTION_TABLE)
-    .whereIn('invoice_id', invoiceIds)
-    .whereNotNull('deleted_at')
-    .del();
-
-  return { deleted: Number(deleted) || 0, invoiceIds };
-}
-
-/**
- * Maintenance task: hard-deletes tombstoned escrow-read records whose
- * retention window has elapsed.
- *
- * Only rows with `deleted_at <= now - retention` are eligible, so a live
- * record can never be purged and a freshly deleted one always keeps its full
- * window. Work is batch-bounded (`batchSize` × `maxBatches`) to keep
- * transactions short; a remaining backlog is picked up by the next run and
- * reported via `maxBatchesReached`.
+ * Idempotent and resumable: each batch deletes by primary key under the same
+ * `deleted_at <= cutoff` predicate used to select it, so a crash mid-run leaves
+ * only rows that still satisfy the predicate for the next run. Rows with an
+ * unparseable `deleted_at` are treated as expired and purged.
  *
  * @param {object} [options={}]
- * @param {import('knex').Knex} [options.dbClient=db] - Knex instance (tests).
- * @param {number} [options.now=Date.now()] - Clock override (epoch ms).
- * @param {number} [options.batchSize=getPurgeBatchSize()] - Rows per batch.
- * @param {number} [options.maxBatches=getPurgeMaxBatches()] - Batch cap per run.
- * @returns {Promise<{ purged: number, batches: number, cutoff: string,
- *   retentionDays: number, maxBatchesReached: boolean, invoiceIds: string[] }>}
- *   Purge summary.
+ * @param {number} [options.now] - Clock override (epoch ms).
+ * @param {number} [options.retentionMs] - Window override.
+ * @param {number} [options.batchSize] - Rows per batch.
+ * @param {number} [options.maxBatches] - Max batches per run.
+ * @returns {Promise<object>} `{ y deleted, batches, cutoff }`.
  */
 async function purgeExpiredSoftDeletes(options = {}) {
-  const {
-    dbClient = db,
-    now = Date.now(),
-    batchSize = getPurgeBatchSize(),
-    maxBatches = getPurgeMaxBatches(),
-  } = options;
+  const now = options.now || Date.now();
+  const retentionMs = options.retentionMs || getRetentionMs();
+  const batchSize = options.batchSize || getPurgeBatchSize();
+  const maxBatches = options.maxBatches || getPurgeMaxBatches();
+  const cutoff = new Date(now - retentionMs);
 
-  const retentionMs = getRetentionMs();
-  const cutoffIso = new Date(now - retentionMs).toISOString();
-
-  let purged = 0;
+  let deleted = 0;
   let batches = 0;
-  const invoiceIds = [];
 
   while (batches < maxBatches) {
-    const batch = await _purgeBatch({ dbClient, cutoffIso, batchSize });
-    if (batch.deleted === 0) {
+    const rows = await db(PROJECTION_TABLE)
+      .whereNotNull('deleted_at')
+      .andWhere('deleted_at', '<=', cutoff)
+      .limit(batchSize)
+      .select('invoice_id');
+
+    if (!rows.length) {
       break;
     }
 
-    purged += batch.deleted;
-    invoiceIds.push(...batch.invoiceIds);
+    const ids = rows.map((r) => r.invoice_id);
+    const removed = await db(PROJECTION_TABLE)
+      .whereIn('invoice_id', ids)
+      .andWhereNotNull('deleted_at')
+      .andWhere('deleted_at', '<=', cutoff)
+      .del();
+
+    deleted += removed;
     batches += 1;
 
-    // A short batch means the eligible set is exhausted.
-    if (batch.invoiceIds.length < batchSize) {
+    for (const id of ids) {
+      await _invalidateCachesBestEffort(id, 'purge');
+    }
+
+    if (removed < rows.length) {
+      // Some rows were restored concurrently; stop to avoid looping on the
+      // same set of ids and let the next run re-evaluate the predicate.
       break;
     }
   }
 
-  // Purged invoices must not linger in the read caches as stale summaries.
-  await Promise.all(invoiceIds.map((id) => invalidateEscrowReadCache(id)));
-
-  const summary = {
-    purged,
-    batches,
-    cutoff: cutoffIso,
-    retentionDays: Math.round(retentionMs / MS_PER_DAY),
-    maxBatchesReached: batches >= maxBatches,
-    invoiceIds,
-  };
-
-  if (purged > 0) {
-    logger.info(summary, 'escrowReadSoftDelete: purged expired escrow-read tombstones');
-  } else {
-    logger.debug(summary, 'escrowReadSoftDelete: no expired escrow-read tombstones to purge');
+  if (deleted > 0) {
+    logger.info('escrowReadSoftDelete.purged', { deleted, batches });
   }
 
-  return summary;
+  return { deleted, batches, cutoff: cutoff.toISOString() };
 }
 
 module.exports = {
-  softDeleteEscrowRead,
-  restoreEscrowRead,
-  getEscrowReadDeletionState,
-  purgeExpiredSoftDeletes,
-  isRetentionExpired,
+  SOFT_DELETE_ERRORS,
   getRetentionDays,
   getRetentionMs,
   getPurgeBatchSize,
   getPurgeMaxBatches,
-  SOFT_DELETE_ERRORS,
-  PROJECTION_TABLE,
+  isRetentionExpired,
+  softDeleteEscrowRead,
+  restoreEscrowRead,
+  purgeExpiredSoftDeletes,
 };

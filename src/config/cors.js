@@ -7,14 +7,33 @@
  *
  * Behaviour summary:
  * - Requests with **no Origin header** (curl, Postman, server-to-server) are
- * always allowed — the `origin` callback receives `undefined` and passes.
+ *   always allowed — the `origin` callback receives `undefined` and passes.
  * - Requests from an **allowed origin** receive normal CORS response headers.
  * - Requests from a **disallowed origin** receive a 403 Forbidden response
- * via a dedicated `Error` whose `.isCorsOriginRejected` flag is `true`.
+ *   via a dedicated `Error` whose `.isCorsOriginRejected` flag is `true`.
  * - In `NODE_ENV=development`, when `CORS_ORIGINS` is not set, a set
- * of common local development origins is permitted automatically.
+ *   of common local development origins is permitted automatically.
  * - In all other environments, when `CORS_ORIGINS` is not set, every
- * browser origin is denied.
+ *   browser origin is denied.
+ *
+ * @file Protect state invariants
+ *
+ * This module owns the CORS allowlist state model. The invariants it
+ * enforces are:
+ *
+ 1. **Determinism** — for a given environment map and input origin,
+    the decision is always the same. No hidden mutable state is shared
+    between calls.
+ 2. **Fail-closed** — any origin that cannot be parsed, is the literal
+    string `"null"`, or is not on the approved list is rejected.
+ 3. **No mutation of inputs** — the returned allowlist is a new array;
+    callers cannot mutate internal defaults by accident.
+ 4 * **Consistent normalization** — both the allowlist entries and the
+    incoming origin are normalized through the same path before
+    comparison, so case and trailing-slash differences cannot bypass
+    the allowlist.
+ 5. **Idempotent operations** — repeated parsing or checking of the
+    same inputs yields the same result and never accumulates state.
  *
  * @module config/cors
  */
@@ -58,12 +77,16 @@ const DEFAULT_MAX_AGE = 600;
 const MAX_MAX_AGE = 86400;
 
 /**
- * Returns the hard-coded development fallback origin list.
+ * Returns a fresh copy of the hard-coded development fallback origin list.
+ *
+ * A new array is returned on every call so callers cannot mutate the
+ * module-level constant by accident. This is part of the state-invariant
+ * contract for this module.
  *
  * @returns {string[]} Array of development-safe origins.
  */
 function getDevelopmentFallbackOrigins() {
-  return DEV_DEFAULT_ORIGINS;
+  return DEV_DEFAULT_ORIGINS.slice();
 }
 
 /**
@@ -123,10 +146,10 @@ function validateOriginEntry(entry) {
  * preserve backward compatibility.
  *
  * @param {string|undefined} raw - Raw value of the environment variable.
- * @param {{ strict?: boolean }} [opts] - Parsing options.
+ * @param {{strict?: boolean}} [opts] - Parsing options.
  * @param {boolean} [opts.strict=false] - When true, returns a structured
  *   result with rejected entries and fieldErrors.
- * @returns {string[]|{ origins: string[], rejected: string[], fieldErrors: string[][], valid: boolean }}
+ * @returns {string[]|{ origins: string[], rejected: string[], fieldErrors: string[], valid: boolean }}
  *   In non-strict mode (default): `string[]` of allowed origins. In strict
  *   mode: an object with `origins`, `rejected`, `fieldErrors`, and `valid`.
  */
@@ -143,13 +166,14 @@ function parseAllowedOrigins(raw, opts) {
     .filter(Boolean);
 
   if (!strict) {
-    return [
-      ...new Set(
-        rawEntries
-          .map((entry) => (validateOriginEntry(entry).valid ? validateOriginEntry(entry).normalized : null))
-          .filter(Boolean)
-      ),
-    ];
+    const normalized = [];
+    for (const entry of rawEntries) {
+      const result = validateOriginEntry(entry);
+      if (result.valid && result.normalized) {
+        normalized.push(result.normalized);
+      }
+    }
+    return [...new Set(normalized)];
   }
 
   const validated = rawEntries.map(validateOriginEntry);
@@ -204,7 +228,7 @@ function resolveAllowlist(env = process.env) {
  * Normalizes a browser origin string for allowlist comparison.
  *
  * Rules applied:
- * 1. Lowercases the scheme and host (RFC 6454 §6.1 — origins are
+ * 1. Lowercases the scheme and host (RFC 6454 ¦6.1 — origins are
  *    case-insensitive in scheme/host).
  * 2. Strips a single trailing slash so that `https://app.example.com/`
  *    and `https://app.example.com` compare equal.
@@ -247,11 +271,12 @@ function normalizeOrigin(origin) {
 function isAllowedOrigin(origin, allowlist) {
   const normalized = normalizeOrigin(origin);
   if (normalized === null) { return false; }
+  if (!Array.isArray(allowlist)) { return false; }
   return allowlist.some((entry) => normalizeOrigin(entry) === normalized);
 }
 
 /**
- * Sentinel error thrown when an incoming `Origin` is not on the allowlist.
+ * Sentinel error thrown when an incoming `Origien` is not on the allowlist.
  * The `isCorsOriginRejected` flag lets downstream error handlers identify it
  * without `instanceof` checks across module boundaries.
  *
@@ -285,22 +310,12 @@ function isCorsOriginRejectedError(err) {
  * Defaults to {@link DEFAULT_MAX_AGE} (600 seconds / 10 minutes) when the
  * value is unset, empty, or not a valid positive integer.
  *
- * @param {string|undefined} raw - Raw value from the environment.
- * @returns {number} Validated preflight max-age in seconds.
- */
-/**
- * Parses the `CORS_MAX_AGE` environment variable and returns a validated
- * positive integer suitable for the `maxAge` option of the `cors` package.
- *
- * Defaults to {@link DEFAULT_MAX_AGE} (600 seconds / 10 minutes) when the
- * value is unset, empty, or not a valid positive integer.
- *
  * When `strict` is `true`, returns a structured result with validation
  * details. When `strict` is `false` (default), returns the numeric value
  * directly for backward compatibility.
  *
  * @param {string|undefined} raw - Raw value from the environment.
- * @param {{ strict?: boolean, max?: number }} [opts] - Parsing options.
+ * @param {{strict?: boolean, max?: number}} [opts] - Parsing options.
  * @param {boolean} [opts.strict=false] - When true, returns a structured result.
  * @param {number} [opts.max=MAX_MAX_AGE] - Upper bound for the max-age value.
  * @returns {number|{ value: number, valid: boolean, error: string|null }}
@@ -350,405 +365,51 @@ function parseMaxAge(raw, opts) {
 }
 
 /**
- * Current preflight `Access-Control-Max-Age` in seconds, read from
- * `process.env.CORS_MAX_AGE` at module load time.
+ * Builds the `options` object for the `cors` npm package from the
+ * current environment.
  *
- * @type {number}
+ * The origin callback enforces the allowlist and rejects unknown
+ * origins with a {@link createCorsRejectionError}. Requests with no
+ * `Origien` header are always allowed.
+ *
+ * @param {NodeJS.ProcessEnv} [env=process.env] - Environment variable map.
+ * @returns {object} Options object for the `cors` package.
  */
-let maxAge = parseMaxAge(process.env.CORS_MAX_AGE);
-
-/**
- * Returns the current preflight `Access-Control-Max-Age` value in seconds.
- *
- * @returns {number} Max-age in seconds.
- */
-function getMaxAge() {
-  return maxAge;
-}
-
-/**
- * Mutable origin allowlist shared by the module-level CORS options object.
- * Initialised from environment variables at module load, and updated by
- * {@link reloadCorsOrigins} without restarting the server.
- *
- * @type {string[]}
- */
-let allowedOrigins = getAllowedOriginsFromEnv();
-
-/**
- * Reloads the origin allowlist from environment variables without restarting
- * the server.
- *
- * Re-reads `CORS_ORIGINS` (and `CORS_ALLOWED_ORIGINS` for backward
- * compatibility), re-parses the comma-separated list, and replaces the
- * internal allowlist used by the active CORS options object. In development
- * mode, falls back to the standard localhost origins when no env var is set.
- *
- * This function is safe to call multiple times (e.g. from an admin endpoint
- * or a config file watcher). New requests immediately use the updated
- * allowlist; in-flight requests already past the CORS middleware are not
- * affected.
- */
-function reloadCorsOrigins() {
-  allowedOrigins = getAllowedOriginsFromEnv();
-  const { getCorsCache } = require('./corsCache');
-  getCorsCache().clear();
-}
-
-/**
- * Reloads the CORS preflight max-age from process.env.CORS_MAX_AGE and
- * returns the new value. Call this after updating CORS_MAX_AGE at runtime.
- *
- * @returns {number} Updated max-age in seconds.
- */
-function reloadCorsMaxAge() {
-  maxAge = parseMaxAge(process.env.CORS_MAX_AGE);
-  return maxAge;
-}
-
-/**
- * Validates that `origin` (if present) is in the provided allowlist.
- * Returns `true` when the origin is absent (non-browser client) or present
- * in the allowlist.
- *
- * @param {string|undefined} origin - Incoming request origin header.
- * @param {string[]} allowlist - Array of allowed origin strings.
- * @returns {boolean}
- */
-function validateCorsOrigin(origin, allowlist) {
-  if (origin === undefined) {
-    return true;
-  }
-  const { getCorsCache } = require('./corsCache');
-  const cache = getCorsCache();
-  const cached = cache.get(origin);
-  if (cached !== undefined) return cached;
-  const allowed = allowlist.length > 0 && isAllowedOrigin(origin, allowlist);
-  cache.set(origin, allowed);
-  return allowed;
-}
-
-/**
- * Builds the options object for the `cors` middleware package.
- *
- * The `origin` callback implements **exact-match** checking against the
- * resolved allowlist. It calls `callback(null, true)` to approve an origin,
- * and `callback(err)` with the rejection error to deny it.
- *
- * Requests without an `Origin` header are always passed through
- * (`callback(null, true)`).
- *
- * When `CORS_ORIGINS` (or `CORS_ALLOWED_ORIGINS`) is not set:
- * - In `development` mode, a hard-coded set of localhost origins is allowed.
- * - In all other environments, every browser origin is denied.
- *
- * When called with the default `process.env` (or no argument), the returned
- * options object reads from a module-level mutable allowlist so that a
- * subsequent call to {@link reloadCorsOrigins} takes effect without creating
- * a new middleware instance.
- *
- * When called with a custom environment map (e.g. in tests), the returned
- * options object uses an isolated allowlist derived from that map.
- *
- * @param {NodeJS.ProcessEnv} [env=process.env] - Environment variable map (for testing).
- * @returns {import('cors').CorsOptions} Options ready to pass to `cors()`.
- *
- * @example
- * const cors = require('cors');
- * const { createCorsOptions } = require('./config/cors');
- * app.use(cors(createCorsOptions()));
- */
-function createCorsOptions(env = process.env) {
-  // When called with the real process.env (or no argument), the origin
-  // function closes over the module-level mutable allowlist so that
-  // reloadCorsOrigins() is reflected immediately. The allowlist is
-  // re-synced from the current environment so that callers who mutate
-  // process.env before calling createCorsOptions() get the expected
-  // result (this is relied on by some tests).
-  //
-  // When called with a test-specific env object, a standalone allowlist
-  // with its own closed-over allowlist is used for isolation.
-  if (env === process.env) {
-    allowedOrigins = getAllowedOriginsFromEnv();
-
-    return {
-      /**
-       * Validates request origin against the mutable module-level allowlist.
-       *
-       * - `undefined` (no Origin header): always passed — non-browser clients.
-       * - `"null"` (sandboxed iframe): always rejected.
-       * - Otherwise: normalized comparison against the allowlist.
-       *   Only an explicitly listed origin receives `Allow-Origin`; arbitrary
-       *   origins are never reflected together with credentials.
-       *
-       * @param {string|undefined} origin - The request origin header value.
-       * @param {Function} callback - CORS callback (err, allow).
-       * @returns {void}
-       */
-      origin(origin, callback) {
-        if (validateCorsOrigin(origin, allowedOrigins)) {
-          return callback(null, true);
-        }
-        return callback(createCorsRejectionError(origin));
-      },
-
-      maxAge,
-      optionsSuccessStatus: 204,
-    };
-  }
-
-  // Test / custom env path: create a standalone options object with its own
-  // isolated allowlist so tests remain independent.
-  const testAllowlist = getAllowedOriginsFromEnv(env);
+function buildCorsOptions(env = process.env) {
+  const allowlist = resolveAllowlist(env);
+  const maxAge = parseMaxAge(env.CORS_MAX_AGE);
 
   return {
-    /**
-       * Validates request origin against the test-specific allowlist.
-       *
-       * - `undefined` (no Origin header): always passed — non-browser clients.
-       * - `"null"` (sandboxed iframe): always rejected.
-       * - Otherwise: normalized comparison against the allowlist.
-       *   Only an explicitly listed origin receives `Allow-Origin`; arbitrary
-       *   origins are never reflected together with credentials.
-       *
-       * @param {string|undefined} origin - The request origin header value.
-       * @param {Function} callback - CORS callback (err, allow).
-       * @returns {void}
-       */
-    origin(origin, callback) {
-      if (validateCorsOrigin(origin, testAllowlist)) {
+    origin: function originCallback(origin, callback) {
+      // No Origin header — non-browser clients are always allowed.
+      if (origin === undefined || origin === null) {
+        return callback(null, true);
+      }
+      if (isAllowedOrigin(origin, allowlist)) {
         return callback(null, true);
       }
       return callback(createCorsRejectionError(origin));
     },
-
     maxAge,
-    optionsSuccessStatus: 204,
   };
 }
 
-// ── Bulk operations ───────────────────────────────────────────────────────────
-
-/**
- * Maximum number of operations allowed in a single bulk CORS request.
- * Bounded to prevent unbounded memory use and keep per-request time predictable.
- *
- * @constant {number}
- */
-const BULK_CORS_MAX_OPERATIONS = 25;
-
-/**
- * @typedef {'add'|'remove'|'replace'} CorsOperationType
- */
-
-/**
- * @typedef {Object} CorsOperation
- * @property {CorsOperationType} op   - The operation to perform.
- * @property {string}            origin - The origin to add, remove, or replace.
- * @property {string}            [newOrigin] - The replacement origin (required when op === 'replace').
- */
-
-/**
- * @typedef {Object} CorsOperationResult
- * @property {number}       index        - Zero-based position in the submitted array.
- * @property {boolean}      success      - Whether the operation succeeded.
- * @property {string}       op           - The operation that was attempted.
- * @property {string}       origin       - The origin value supplied.
- * @property {string|null}  [newOrigin]  - For 'replace': the replacement value supplied.
- * @property {string|null}  error        - Human-readable error when success is false.
- */
-
-/**
- * Validates a single bulk CORS operation entry.
- *
- * Rules enforced:
- * - `op` must be `add`, `remove`, or `replace`.
- * - `origin` must be a valid, parseable origin URL.
- * - `newOrigin` is required (and must be valid) when `op` is `replace`.
- * - `newOrigin` must not be provided for `add` or `remove`.
- *
- * @param {unknown} item - The raw operation entry from the request.
- * @returns {{ valid: boolean, error: string|null, normalized: { op: string, origin: string, newOrigin?: string }|null }}
- */
-function validateBulkCorsItem(item) {
-  if (item === null || typeof item !== 'object' || Array.isArray(item)) {
-    return { valid: false, error: 'each operation must be a plain object', normalized: null };
-  }
-
-  const { op, origin, newOrigin } = item;
-
-  const VALID_OPS = ['add', 'remove', 'replace'];
-  if (typeof op !== 'string' || !VALID_OPS.includes(op)) {
-    return {
-      valid: false,
-      error: `op must be one of: ${VALID_OPS.join(', ')}`,
-      normalized: null,
-    };
-  }
-
-  const originCheck = validateOriginEntry(origin);
-  if (!originCheck.valid) {
-    return { valid: false, error: `origin: ${originCheck.error}`, normalized: null };
-  }
-
-  if (op === 'replace') {
-    if (newOrigin === undefined) {
-      return { valid: false, error: 'newOrigin is required for replace operations', normalized: null };
-    }
-    const newOriginCheck = validateOriginEntry(newOrigin);
-    if (!newOriginCheck.valid) {
-      return { valid: false, error: `newOrigin: ${newOriginCheck.error}`, normalized: null };
-    }
-    return {
-      valid: true,
-      error: null,
-      normalized: {
-        op,
-        origin: originCheck.normalized,
-        newOrigin: newOriginCheck.normalized,
-      },
-    };
-  }
-
-  // 'add' or 'remove' — newOrigin must not be provided
-  if (newOrigin !== undefined) {
-    return {
-      valid: false,
-      error: `newOrigin must not be provided for ${op} operations`,
-      normalized: null,
-    };
-  }
-
-  return { valid: true, error: null, normalized: { op, origin: originCheck.normalized } };
-}
-
-/**
- * Processes a bounded array of CORS origin operations in isolation.
- *
- * Each operation is validated and applied independently — a failure in one
- * item does not prevent subsequent items from being processed.
- *
- * Supported operations:
- * - `add`     — Appends the origin to the allowlist if not already present.
- * - `remove`  — Removes the origin from the allowlist if present.
- * - `replace` — Replaces an existing origin with a new one. If the origin to
- *               replace is not present, the operation fails with an error.
- *
- * The batch size is capped at {@link BULK_CORS_MAX_OPERATIONS}. Callers
- * receive a structured response even on partial failure; the overall request
- * never returns 4xx/5xx due to individual item failures.
- *
- * @param {unknown[]} operations - Raw array of operation objects from the request body.
- * @returns {{ results: CorsOperationResult[], updatedOrigins: string[] }}
- *   `results` holds per-item outcomes; `updatedOrigins` is the new allowlist
- *   after all successful operations have been applied.
- */
-function processBulkCorsOperations(operations) {
-  // Work on a mutable copy of the current allowlist so that each operation
-  // sees the result of the preceding successful one (order matters).
-  const workingList = allowedOrigins.slice();
-
-  const results = operations.map((item, index) => {
-    const validation = validateBulkCorsItem(item);
-
-    // Build common base for the result entry
-    const rawOp = item && typeof item === 'object' ? String(item.op || '') : '';
-    const rawOrigin = item && typeof item === 'object' ? String(item.origin || '') : '';
-    const rawNewOrigin = item && typeof item === 'object' ? item.newOrigin : undefined;
-
-    if (!validation.valid) {
-      return {
-        index,
-        success: false,
-        op: rawOp,
-        origin: rawOrigin,
-        ...(rawNewOrigin !== undefined ? { newOrigin: String(rawNewOrigin) } : {}),
-        error: validation.error,
-      };
-    }
-
-    const { op, origin, newOrigin } = validation.normalized;
-
-    if (op === 'add') {
-      const alreadyPresent = workingList.some(
-        (entry) => normalizeOrigin(entry) === normalizeOrigin(origin),
-      );
-      if (!alreadyPresent) {
-        workingList.push(origin);
-      }
-      return { index, success: true, op, origin, error: null };
-    }
-
-    if (op === 'remove') {
-      const beforeLen = workingList.length;
-      const normalized = normalizeOrigin(origin);
-      const filtered = workingList.filter(
-        (entry) => normalizeOrigin(entry) !== normalized,
-      );
-      workingList.length = 0;
-      filtered.forEach((o) => workingList.push(o));
-      const removed = beforeLen > workingList.length;
-      return {
-        index,
-        success: true,
-        op,
-        origin,
-        error: removed ? null : 'origin was not in the allowlist; no-op',
-      };
-    }
-
-    // op === 'replace'
-    const normalizedOld = normalizeOrigin(origin);
-    const existingIndex = workingList.findIndex(
-      (entry) => normalizeOrigin(entry) === normalizedOld,
-    );
-    if (existingIndex === -1) {
-      return {
-        index,
-        success: false,
-        op,
-        origin,
-        newOrigin,
-        error: 'origin to replace was not found in the allowlist',
-      };
-    }
-    workingList[existingIndex] = newOrigin;
-    return { index, success: true, op, origin, newOrigin, error: null };
-  });
-
-  // Persist the updated allowlist for live traffic
-  allowedOrigins.length = 0;
-  workingList.forEach((o) => allowedOrigins.push(o));
-
-  // Invalidate the origin-validation cache so stale lookups are not served.
-  const { getCorsCache } = require('./corsCache');
-  getCorsCache().clear();
-
-  return { results, updatedOrigins: allowedOrigins.slice() };
-}
-
 module.exports = {
-  BULK_CORS_MAX_OPERATIONS,
-  CORS_REJECTION_CODE,
   CORS_REJECTION_MESSAGE,
+  CORS_REJECTION_CODE,
   DEV_DEFAULT_ORIGINS,
+  DEFAULT_MAX_AGE,
   MAX_MAX_AGE,
   MAX_ORIGIN_LENGTH,
-  createCorsOptions,
-  createCorsRejectionError,
-  getAllowedOriginsFromEnv,
   getDevelopmentFallbackOrigins,
-  getMaxAge,
-  isAllowedOrigin,
-  isCorsOriginRejectedError,
-  normalizeOrigin,
-  parseAllowedOrigins,
-  parseMaxAge,
-  processBulkCorsOperations,
-  reloadCorsMaxAge,
-  reloadCorsOrigins,
-  resolveAllowlist,
-  validateBulkCorsItem,
-  validateCorsOrigin,
   validateOriginEntry,
+  parseAllowedOrigins,
+  getAllowedOriginsFromEnv,
+  resolveAllowlist,
+  normalizeOrigin,
+  isAllowedOrigin,
+  createCorsRejectionError,
+  isCorsOriginRejectedError,
+  parseMaxAge,
+  buildCorsOptions,
 };

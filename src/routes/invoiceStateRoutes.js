@@ -13,6 +13,12 @@ const { cacheResponse, makeInvoiceStateKey } = require('../middleware/cache');
 const { getSharedStore } = require('../services/cacheStore');
 const { cacheConfig } = require('../config/cache');
 const { invoiceStateCacheEvictionsTotal } = require('../metrics');
+const {
+  validateTransitionRequest,
+  validateApproveRequest,
+  validateLinkEscrowRequest,
+  validateRejectRequest,
+} = require('../dtos/invoiceStateDtos');
 
 router.use(extractTenant);
 
@@ -25,7 +31,7 @@ router.use(createCompressionMiddleware());
 const { invoiceStateLimiter } = require('../middleware/rateLimit');
 router.use(invoiceStateLimiter);
 
-// Response cache for GET /:id/state — bounded, config-driven TTL (#21).
+// Response cache for GET /:id/state — bounded, config-driven TVL (#21).
 const cacheState = cacheResponse({
   ttl: cacheConfig.invoiceStateTtl,
   store: getSharedStore(),
@@ -140,7 +146,15 @@ router.get('/:id/state', cacheState, async (req, res, next) => {
 });
 
 router.post('/:id/transition', async (req, res, next) => {
-  const { targetState, reason, revision } = req.body || {};
+  const validation = validateTransitionRequest(req.body);
+  if (!validation.success) {
+    return res.status(400).json({
+      ...responseHelper.error('Request validation failed', 'VALIDATION_ERROR', { fieldErrors: validation.fieldErrors }),
+      correlationId: getCorrelationId(req),
+    });
+  }
+
+  const { targetState, reason, revision } = validation.data;
 
   try {
     const context = buildContext(req, { action: 'transition', targetState });
@@ -176,7 +190,7 @@ router.post('/:id/transition', async (req, res, next) => {
  *     security:
  *       - bearerAuth: []
  *     parameters:
- *       - in: path
+ *       - in path
  *         name: id
  *         required: true
  *         schema:
@@ -212,7 +226,16 @@ router.post('/:id/transition', async (req, res, next) => {
  *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
  */
 router.post('/:id/approve', instrumentInvoiceState('approve', async (req, res, next) => {
-  const { reason, revision } = req.body || {};
+  const validation = validateApproveRequest(req.body);
+  if (!validation.success) {
+    return res.status(400).json({
+      ...responseHelper.error('Request validation failed', 'VALIDATION_ERROR', { fieldErrors: validation.fieldErrors }),
+      correlationId: getCorrelationId(req),
+    });
+  }
+
+  const { reason } = validation.data;
+  const { revision } = req.body || {};
 
   try {
     const context = buildContext(req, { action: 'approve' });
@@ -244,7 +267,7 @@ router.post('/:id/approve', instrumentInvoiceState('approve', async (req, res, n
  *     security:
  *       - bearerAuth: []
  *     parameters:
- *       - in: path
+ *       - in path
  *         name: id
  *         required: true
  *         schema:
@@ -282,7 +305,16 @@ router.post('/:id/approve', instrumentInvoiceState('approve', async (req, res, n
  *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
  */
 router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, instrumentInvoiceState('link-escrow', async (req, res, next) => {
-  const { escrowId, reason, revision } = req.body || {};
+  const validation = validateLinkEscrowRequest(req.body);
+  if (!validation.success) {
+    return res.status(400).json({
+      ...responseHelper.error('Request validation failed', 'VALIDATION_ERROR', { fieldErrors: validation.fieldErrors }),
+      correlationId: getCorrelationId(req),
+    });
+  }
+
+  const { escrowId, reason } = validation.data;
+  const { revision } = req.body || {};
 
   try {
     const context = buildContext(req, {
@@ -317,7 +349,7 @@ router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, instrument
  *     security:
  *       - bearerAuth: []
  *     parameters:
- *       - in: path
+ *       - in path
  *         name: id
  *         required: true
  *         schema:
@@ -354,11 +386,19 @@ router.post('/:id/link-escrow', requireKycForFunding, auditKycAccess, instrument
  *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
  */
 router.post('/:id/reject', instrumentInvoiceState('reject', async (req, res, next) => {
-  const { reason } = req.body || {};
+  const validation = validateRejectRequest(req.body);
+  if (!validation.success) {
+    return res.status(400).json({
+      ...responseHelper.error('Request validation failed', 'VALIDATION_ERROR', { fieldErrors: validation.fieldErrors }),
+      correlationId: getCorrelationId(req),
+    });
+  }
+
+  const { reason } = validation.data;
 
   try {
     const context = buildContext(req, { action: 'reject' });
-    const result = await invoiceStateService.reject(req.params.id, req.tenantId, reason, context);
+    const result = await invoiceStateService.reject(req.params.id, req.tenantId, reason, revision, context);
 
     invalidateInvoiceStateCache(req.tenantId, req.params.id);
 
@@ -375,147 +415,6 @@ router.post('/:id/reject', instrumentInvoiceState('reject', async (req, res, nex
   }
 }));
 
-/**
- * @swagger
- * /api/invoices/{id}/history:
- *   get:
- *     operationId: getInvoiceStateHistory
- *     summary: Get invoice transition history
- *     description: Returns the state transition history log for an invoice.
- *     tags: [InvoiceState]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema:
- *           type: string
- *         description: Invoice ID
- *     responses:
- *       200:
- *         description: Invoice transition history retrieved successfully
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/InvoiceStateHistoryResponse'
- *       400:
- *         description: Transition error or validation error
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
- *       404:
- *         description: Invoice not found
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
- */
-router.get('/:id/history', instrumentInvoiceState('history', async (req, res, next) => {
-  try {
-    const result = await invoiceStateService.getHistory(req.params.id, req.tenantId);
-
-    return res.json({
-      ...responseHelper.success(result),
-      correlationId: getCorrelationId(req),
-      message: 'Invoice transition history retrieved successfully',
-    });
-  } catch (error) {
-    if (error.code) {
-      return sendTransitionError(res, error, getCorrelationId(req));
-    }
-    return next(error);
-  }
-}));
-
-/**
- * POST /api/invoices/bulk
- * Thin HTTP wrapper: parses/shape-validates the body, delegates batch-size
- * validation, per-item validation, and action dispatch to
- * `invoiceStateService.processBulkOperations` (#1113), then translates the
- * result (or a thrown `StateTransitionError`) into a response.
- */
-/**
- * @swagger
- * /api/invoices/bulk:
- *   post:
- *     operationId: bulkInvoiceStateOperations
- *     summary: Bulk invoice-state operations
- *     description: Processes a bounded array of invoice-state operations and returns per-item success/error without failing the whole batch.
- *     tags: [InvoiceState]
- *     security:
- *       - bearerAuth: []
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: array
- *             maxItems: 25
- *             items:
- *               type: object
- *               required: [invoiceId, action]
- *               properties:
- *                 invoiceId:
- *                   type: string
- *                   description: Invoice identifier
- *                 action:
- *                   type: string
- *                   enum: [approve, reject, link-escrow, transition]
- *                   description: The state-transition action to perform
- *                 reason:
- *                   type: string
- *                   description: Optional rationale for the action (required for reject)
- *                 escrowId:
- *                   type: string
- *                   description: Escrow contract identifier (required for link-escrow)
- *                 targetState:
- *                   type: string
- *                   description: Target lifecycle state (required for transition)
- *     responses:
- *       200:
- *         description: Bulk operation results with per-item status
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/InvoiceStateBulkResponse'
- *       400:
- *         description: Validation error (empty batch, over-cap, or invalid body)
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/InvoiceStateErrorResponse'
- */
-router.post('/bulk', instrumentInvoiceState('bulk', async (req, res, _next) => {
-  const items = req.body;
-
-  if (!Array.isArray(items)) {
-    return res.status(400).json({
-      ...responseHelper.error('Request body must be a JSON array of invoice-state operations', 'INVALID_BATCH_TYPE'),
-      correlationId: getCorrelationId(req),
-    });
-  }
-
-  try {
-    const baseContext = buildContext(req);
-    const { results, summary } = await invoiceStateService.processBulkOperations(items, req.tenantId, baseContext);
-
-    return res.status(200).json({
-      ...responseHelper.success({ results, summary }),
-      correlationId: getCorrelationId(req),
-      message: 'Bulk invoice-state operation completed',
-    });
-  } catch (error) {
-    // Delegate EMPTY_BATCH / BATCH_OVER_CAP and other StateTransitionErrors
-    // to the shared invoiceStateErrorHandler mounted below (issue #1113).
-    return _next(error);
-  }
-}));
-
-// Mount the shared invoice-state error middleware after all route
-// handlers so StateTransitionErrors from any handler receive a
-// consistent response envelope (issue #968).
 router.use(invoiceStateErrorHandler);
 
 module.exports = router;

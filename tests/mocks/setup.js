@@ -5,10 +5,33 @@ jest.mock('../../src/metrics', () => {
     val: 0,
   });
 
+  // Shared in-memory prom-client registry stub. Returned by getRegistry() so
+  // that job modules using _counter() / new Counter({ registers: [getRegistry()] })
+  // can resolve counters without hitting the real prom-client registry (which
+  // is process-global and throws "already registered" across test suites).
+  const _registryStub = {
+    getSingleMetric: jest.fn().mockReturnValue(null),
+    registerMetric: jest.fn(),
+  };
+
   return {
+    // Registry accessor used by job helpers (_counter, etc.) — must be present
+    // so any job module that calls getRegistry() at load time does not throw.
+    getRegistry: jest.fn().mockReturnValue(_registryStub),
+
     footprintCacheHitsTotal: makeCounter(),
     footprintCacheMissesTotal: makeCounter(),
     footprintCacheEvictionsTotal: makeCounter(),
+    // CORS origin-cache counters used by config/corsCache in CORS policy tests.
+    corsCacheHitsTotal: makeCounter(),
+    corsCacheMissesTotal: makeCounter(),
+    corsCacheEvictionsTotal: makeCounter(),
+    corsCacheInvalidationsTotal: makeCounter(),
+
+    // API-key registry cache counters (issue #1266) — so apiKeysCache.js can
+    // count hits/misses under test exactly as it does in production.
+    apiKeysCacheHitsTotal: makeCounter(),
+    apiKeysCacheMissesTotal: makeCounter(),
 
     // KYC webhook metrics — needed so route handlers can call
     // normalizeKycWebhookStatusClass / normalizeKycWebhookCause
@@ -213,6 +236,52 @@ jest.mock('../../src/db/knex', () => {
   m.fn = { now: jest.fn(() => new Date().toISOString()) };
   m.migrate = { latest: jest.fn().mockResolvedValue([0, []]) };
   m.destroy = jest.fn().mockResolvedValue(undefined);
+
+  // -------------------------------------------------------------------------
+  // Idempotent teardown helpers — mirrors the real src/db/knex.js API added
+  // in issue #1330. destroyOnce() coalesces concurrent destroy calls onto a
+  // single Promise so tests can assert teardown happens exactly once.
+  // -------------------------------------------------------------------------
+  let _destroyOnceCalled = 0;
+  let _destroyOncePromise = null;
+
+  m.destroyOnce = jest.fn(() => {
+    if (_destroyOncePromise !== null) { return _destroyOncePromise; }
+    _destroyOnceCalled += 1;
+    _destroyOncePromise = m.destroy();
+    return _destroyOncePromise;
+  });
+
+  // Health-check snapshot — returns healthy by default.
+  m.getHealthInfo = jest.fn(async () => ({
+    status: 'healthy',
+    latencyMs: 1,
+    lastHealthyAt: new Date().toISOString(),
+    error: null,
+  }));
+
+  // Test-only helpers for introspection and state reset.
+  m._getDestroyCallCount = () => _destroyOnceCalled;
+  m._isDestroyed = () => _destroyOnceCalled > 0;
+  m._setHealthResponse = (response) => {
+    const defaults = { status: 'healthy', latencyMs: 1, lastHealthyAt: new Date().toISOString(), error: null };
+    m.getHealthInfo.mockImplementationOnce(async () => ({ ...defaults, ...response }));
+  };
+  m._reset = () => {
+    _destroyOnceCalled = 0;
+    _destroyOncePromise = null;
+    m.destroy.mockReset();
+    m.destroy.mockResolvedValue(undefined);
+    m.destroyOnce.mockReset();
+    m.destroyOnce.mockImplementation(() => {
+      if (_destroyOncePromise !== null) { return _destroyOncePromise; }
+      _destroyOnceCalled += 1;
+      _destroyOncePromise = m.destroy();
+      return _destroyOncePromise;
+    });
+    m.getHealthInfo.mockReset();
+    m.getHealthInfo.mockResolvedValue({ status: 'healthy', latencyMs: 1, lastHealthyAt: new Date().toISOString(), error: null });
+  };
   m.then = jest.fn((onFulfilled) => {
     if (m._resolveValue) {
       const rv = m._resolveValue;

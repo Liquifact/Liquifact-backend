@@ -565,7 +565,9 @@ describe("Problem JSON Middleware", () => {
     test("AppError response has no unexpected fields", async () => {
       const response = await request(app).get("/app-error").expect(400);
       const keys = Object.keys(response.body).sort();
-      expect(keys).toEqual(["code", "detail", "instance", "retryable", "status", "title", "type"]);
+      // retry_hint is now always included when retryable is explicitly set,
+      // as AppError guarantees retryHint is always a string (never undefined).
+      expect(keys).toEqual(["code", "detail", "instance", "retryable", "retry_hint", "status", "title", "type"]);
     });
 
     test("generic error response has no unexpected fields", async () => {

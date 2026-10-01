@@ -1,3 +1,4 @@
+
 'use strict';
 
 /**
@@ -42,6 +43,8 @@ const {
   LIST_JOBS_MAX_LIMIT,
   LIST_JOBS_SORT_FIELDS,
 } = require('../workers/jobPersistence');
+const { withRetry } = require('../utils/retry');
+const { JobCursorError: _JobCursorError } = require('../workers/jobPersistence');
 
 // Apply admin auth (JWT or API key) + tenant extraction to every route in this file.
 router.use(...adminStack);
@@ -172,6 +175,7 @@ router.use(...adminStack);
  * @param {import('express').NextFunction} next - Express next.
  * @returns {Promise<void>}
  */
+const LIST_JOBS_MAX_ATTEMPTS = 3;
 router.get('/', async (req, res, next) => {
   // ── Input validation ────────────────────────────────────────────────────
   const rawLimit  = req.query.limit;
@@ -221,14 +225,31 @@ router.get('/', async (req, res, next) => {
     const dbClient   = req._dbClient || db;
     const persistence = createJobPersistence(dbClient);
 
-    const result = await persistence.listJobs({
-      limit:  rawLimit  !== undefined ? parseInt(rawLimit, 10)   : LIST_JOBS_DEFAULT_LIMIT,
-      cursor: req.query.cursor,
-      sortBy: rawSortBy,
-      order:  rawOrder,
-      status: rawStatus,
-      type:   req.query.type,
-    });
+    // Deterministic retry: only transient dependency failures are retried.
+    // Cursor errors (JobCursorError) are terminal and must never be retried,
+    // because a tampered cursor will never succeed on retry and would mask
+    // the 400 response. Retries are bounded and use the same cursor/params,
+    // so a partial failure cannot produce a different page than a success.
+    const result = await withRetry(
+      () => persistence.listJobs({
+        limit:  rawLimit  !== undefined ? parseInt(rawLimit, 10)   : LIST_JOBS_DEFAULT_LIMIT,
+        cursor: req.query.cursor,
+        sortBy: rawSortBy,
+        order:  rawOrder,
+        status: rawStatus,
+        type:   req.query.type,
+      }),
+      {
+        maxAttempts: LIST_JOBS_MAX_ATTEMPTS,
+        shouldRetry: (err) => !(err instanceof JobCursorError),
+        onRetry: (err, attempt) => {
+          logger.warn(
+            { err: err?.message, attempt, tenantId: req.tenantId, requestId: req.id },
+            'Retrying admin jobs listing after transient failure',
+          );
+        },
+      },
+    );
 
     logger.info(
       {
@@ -237,6 +258,7 @@ router.get('/', async (req, res, next) => {
         limit:     result.meta.limit,
         hasMore:   result.meta.hasMore,
         count:     result.data.length,
+        attempts:  result.attempts,
       },
       'Admin jobs listing retrieved',
     );
@@ -262,7 +284,7 @@ router.get('/', async (req, res, next) => {
     }
 
     logger.error(
-      { err: err?.message, tenantId: req.tenantId },
+      { err: err?.message, tenantId: req.tenantId, requestId: req.id },
       'Failed to fetch persisted jobs listing',
     );
     return next(err);
@@ -270,3 +292,4 @@ router.get('/', async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.LIST_JOBS_MAX_ATTEMPTS = LIST_JOBS_MAX_ATTEMPTS;

@@ -15,6 +15,12 @@
  * `src/middleware/idempotency.js` and `src/jobs/idempotencyPurge.js`) and are
  * purged automatically once expired.
  *
+ * Compatibility contract: response payloads for both endpoints are produced
+ * exclusively through the `src/dto/metrics.js` mappers. Handlers must never
+ * construct metric response shapes inline, so DTO-level invariants (stable
+ * keys, null-vs-undefined handling, numeric coercion) are preserved across
+ * error, empty, and upgrade paths.
+ *
  * @module routes/sme/metrics
  */
 
@@ -25,6 +31,7 @@ const router = express.Router();
 const { authenticateToken } = require('../../middleware/auth');
 const { extractTenant } = require('../../middleware/tenant');
 const { CursorError } = require('../../utils/cursorPagination');
+const { ValidationError } = require('../../utils/errors');
 const invoiceService = require('../../services/invoiceService');
 const { validateMetricsRequest } = require('../../utils/metricsValidation');
 const optionalIdempotency = require('../../middleware/optionalIdempotency');
@@ -33,10 +40,12 @@ const {
   validateGetMetricsQuery,
 } = require('../../schemas/metrics');
 const {
-  toSmeMetricsResponse,
+  toStrictSmeMetricsResponse,
   toSmeMetricsMeta,
   toSmeMetricsApiResponse,
 } = require('../../dto/metrics');
+
+const MAX_BULK_OPERATIONS = 25;
 
 
 /**
@@ -60,12 +69,12 @@ const {
  *     security:
  *       - bearerAuth: []
  *     parameters:
- *       - in: header
+ *       - in header
  *         name: x-tenant-id
  *         schema:
  *           type: string
  *         description: Tenant identifier (optional if supplied via JWT claim)
- *       - in: query
+ *       - in query
  *         name: cursor
  *         schema:
  *           type: string
@@ -74,7 +83,7 @@ const {
  *         description: |
  *           Opaque cursor from the previous page's `nextCursor` field.
  *           Rejected with `400` when empty or longer than 512 characters.
- *       - in: query
+ *       - in query
  *         name: limit
  *         schema:
  *           type: integer
@@ -82,8 +91,8 @@ const {
  *           maximum: 100
  *           default: 20
  *         description: |
- *           Items per page (1–100, default 20). Must be a bare integer.
- *           Non-integer (`abc`, `1e5`, `20abc`) or out-of-range (`0`, `101`)
+ *            Items per page (1–100, default 20). Must be a bare integer.
+ *           Non-integer (`abc`, `1e5`, `20abc`) or out-of-range (`2`,  `101`)
  *           values are rejected with `400` rather than silently clamped.
  *     responses:
  *       200:
@@ -97,7 +106,7 @@ const {
  *                   type: object
  *                   properties:
  *                     open:
- *                       type: integer
+ *                        type: integer
  *                       description: Number of open invoices
  *                     funded:
  *                       type: integer
@@ -117,7 +126,7 @@ const {
  *                     version:
  *                       type: string
  *                     invoices:
- *                       type: array
+ *                        type: array
  *                       items:
  *                         type: object
  *                       description: Paginated invoice rows (present when cursor or limit is supplied)
@@ -125,7 +134,7 @@ const {
  *                       type: integer
  *                       description: Total matching invoices
  *                     limit:
- *                       type: integer
+ *                        type: integer
  *                       description: Applied page size
  *                     hasMore:
  *                       type: boolean
@@ -162,7 +171,11 @@ router.get(
       const { userId, tenantId } = ctx;
 
       const rawMetrics = await invoiceService.getSmeInvoiceCounts(tenantId, userId);
-      const data = toSmeMetricsResponse(rawMetrics);
+      // The compatibility DTO remains permissive for existing callers, but
+      // this endpoint must not turn malformed service output into zero counts.
+      // Strict validation forwards a bounded, value-free error to the global
+      // handler, which logs it with request correlation and returns a generic 500.
+      const data = toStrictSmeMetricsResponse(rawMetrics);
 
       // Only schema-validated query values are consumed here. `validateGetMetricsQuery`
       // runs ahead of this handler and rejects the request outright on malformed
@@ -264,13 +277,13 @@ router.get(
  *                   required: [tenantId, userId]
  *                   properties:
  *                     tenantId:
- *                       type: string
- *                       minLength: 1
- *                       maxLength: 128
+ *                        type: string
+ *                        minLength: 1
+ *                        maxLength: 128
  *                     userId:
- *                       type: string
- *                       minLength: 1
- *                       maxLength: 128
+ *                        type: string
+ *                        minLength: 1
+ *                        maxLength: 128
  *     responses:
  *       200:
  *         description: Bulk metrics results
@@ -284,7 +297,7 @@ router.get(
  *                   items:
  *                     type: object
  *                     properties:
- *                       tenantId:
+ *                        tenantId:
  *                         type: string
  *                       userId:
  *                         type: string
@@ -301,11 +314,11 @@ router.get(
  *                   type: object
  *                   properties:
  *                     total:
- *                       type: integer
+ *                        type: integer
  *                     succeeded:
  *                       type: integer
  *                     failed:
- *                       type: integer
+ *                        type: integer
  *                     timestamp:
  *                       type: string
  *       400:
@@ -323,36 +336,7 @@ router.get(
  *           application/json:
  *             schema:
  *               type: object
- *               properties:
- *                 type:
- *                   type: string
- *                 title:
- *                   type: string
- *                 status:
- *                   type: integer
- *                 detail:
- *                   type: string
- *                 code:
- *                   type: string
- *                   example: METRICS_VALIDATION_ERROR
- *                 fieldErrors:
- *                   type: object
- *                   additionalProperties:
- *                     type: array
- *                     items:
- *                       type: string
- *                 fieldCodes:
- *                   type: object
- *                   additionalProperties:
- *                     type: array
- *                     items:
- *                       type: string
- *       401:
- *         description: Unauthorized
- *       409:
- *         description: |
- *           Idempotency-Key was reused with a different request body.
- *           Returned as an RFC 7807 problem+json document.
+ *       
  */
 router.post(
   '/metrics/bulk',
@@ -396,7 +380,7 @@ router.post(
             tenantId,
             userId,
             status: 'success',
-            data,
+            data: toSmeMetricsResponse(data, { tenantId, userId }),
             error: null,
           });
           succeeded++;

@@ -4,7 +4,7 @@
  * @fileoverview Admin route for escrow-read configurations/overrides and their audit trails.
  *
  * Write endpoints (POST, PUT, DELETE) support optional idempotency via the
- * `Idempotency-Key` header.  When the header is present the request is handled
+ * `Idempotency-Key` Header.  When the header is present the request is handled
  * by the shared idempotency middleware (replay / conflict detection).  When the
  * header is absent the request passes through unchanged, preserving backward
  * compatibility for callers that do not need idempotency guarantees.
@@ -25,6 +25,7 @@ const {
   escrowReadAuditQuerySchema,
   escrowReadResponseSchema,
 } = require('../schemas/escrowRead');
+const { getEscrowVersion, compareEscrowVersion } = require('../config/escrowVersions');
 
 const router = express.Router();
 
@@ -34,7 +35,7 @@ router.use(...adminStack);
 const escrowReadStore = new Map();
 
 /**
- * GET /api/admin/escrow-read
+ * Get /api/admin/escrow-read
  * Lists all current escrow-read configurations.
  */
 router.get('/', (req, res, next) => {
@@ -64,7 +65,13 @@ router.post('/', optionalIdempotency, validateBody(escrowReadPostSchema), async 
     if (escrowReadStore.has(id)) {
       return next(new AppError({ status: 409, title: 'Conflict', detail: 'Already exists' }));
     }
-    
+
+    // Preserve compatibility contract: validate the escrow version before persisting.
+    const version = await getEscrowVersion(config && config.contractId);
+    const compatibility = compareEscrowVersion(version);
+    if (!compatibility.compatible) {
+      return next(new AppError({ status: 422, title: 'Unable to Process Entity', detail: compatibility.reason }));
+    }
 
     const newData = { config, secretKey };
     escrowReadStore.set(id, newData);
@@ -123,7 +130,13 @@ router.put('/:id', optionalIdempotency, validateBody(escrowReadPutSchema), async
     
     const before = escrowReadStore.get(id);
 
-    
+    // Preserve compatibility contract: validate the escrow version before persisting.
+    const version = await getEscrowVersion(config && config.contractId);
+    const compatibility = compareEscrowVersion(version);
+    if (!compatibility.compatible) {
+      return next(new AppError({ status: 422, title: 'Unable to Process Entity', detail: compatibility.reason }));
+    }
+
     const after = { 
       ...before, 
       config: config !== undefined ? config : before.config, 

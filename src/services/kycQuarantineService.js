@@ -18,6 +18,7 @@ const {
   KYC_WEBHOOK_ERROR_CODES,
   KYC_WEBHOOK_MESSAGES,
   KYC_WEBHOOK_PAGINATION,
+  KYC_WEBHOOK_VALIDATION,
 } = require('../constants/kycWebhooks');
 const {
   parseValidationErrors,
@@ -28,7 +29,7 @@ const { decodeCursor, encodeCursor } = require('../utils/cursorPagination');
 
 const REDACTED = '***REDACTED***';
 const MAX_STORED_BODY_LENGTH = 10000;
-const DEFAULT_MAX_INGESTION_PAYLOAD_BYTES = 65536; // 64 KB default
+const DEFAULT_MAX_INGESTION_PAYLOAD_BYTES = KYC_WEBHOOK_VALIDATION.MAX_PAYLOAD_BYTES;
 
 const SENSITIVE_KEY_PATTERNS = Object.freeze([
   /password/i,

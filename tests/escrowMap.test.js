@@ -320,6 +320,46 @@ describe('escrowMap – config validation (EscrowMapConfigError)', () => {
 
     expect(() => resolveEscrowAddress('inv_001')).toThrow(EscrowMapConfigError);
   });
+
+  it('throws EscrowMapConfigError for duplicate invoiceId within the same environment', () => {
+    process.env.ESCROW_ADDR_BY_INVOICE = JSON.stringify({
+      mappings: [
+        { invoiceId: 'inv_001', escrowAddress: ADDR_A, environment: 'test', isActive: true },
+        { invoiceId: 'inv_001', escrowAddress: ADDR_B, environment: 'test', isActive: true },
+      ],
+      defaultEnvironment: 'test',
+    });
+    _resetCache();
+
+    expect(() => resolveEscrowAddress('inv_001')).toThrow(EscrowMapConfigError);
+  });
+
+  it('throws EscrowMapConfigError for duplicate escrowAddress within the same environment', () => {
+    process.env.ESCROW_ADDR_BY_INVOICE = JSON.stringify({
+      mappings: [
+        { invoiceId: 'inv_001', escrowAddress: ADDR_A, environment: 'test', isActive: true },
+        { invoiceId: 'inv_002', escrowAddress: ADDR_A, environment: 'test', isActive: true },
+      ],
+      defaultEnvironment: 'test',
+    });
+    _resetCache();
+
+    expect(() => resolveEscrowAddress('inv_001')).toThrow(EscrowMapConfigError);
+  });
+
+  it('allows duplicate invoiceId if in different environments', () => {
+    process.env.ESCROW_ADDR_BY_INVOICE = JSON.stringify({
+      mappings: [
+        { invoiceId: 'inv_001', escrowAddress: ADDR_A, environment: 'test', isActive: true },
+        { invoiceId: 'inv_001', escrowAddress: ADDR_B, environment: 'production', isActive: true },
+      ],
+      defaultEnvironment: 'test',
+    });
+    _resetCache();
+
+    expect(() => resolveEscrowAddress('inv_001')).not.toThrow(EscrowMapConfigError);
+    expect(resolveEscrowAddress('inv_001')).toBe(ADDR_A);
+  });
 });
 
 // ---------------------------------------------------------------------------

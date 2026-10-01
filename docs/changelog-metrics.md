@@ -5,6 +5,17 @@ This document tracks all notable changes to the metrics API endpoints, data sche
 > **⚠️ Contribution Policy:** 
 > Any Pull Request (PR) that alters, introduces, deprecates, or removes any metrics API endpoint or data payload MUST append a corresponding entry to this file before it can be merged.
 
+## - Escrow-Read Purge Validation Boundaries (#1397)
+
+### Added
+- `liquifact_escrow_read_purge_rows_deleted_total` — Counter tracking total
+  escrow-read tombstones hard-deleted after their retention window.
+- `liquifact_escrow_read_purge_runs_total` (labels: `status`) — Counter
+  tracking total escrow-read purge job runs by outcome (`success` / `error`).
+
+### Unchanged
+- No existing metrics were modified or removed.
+
 ## - SME Metrics Request Input Validation
 
 ### Added

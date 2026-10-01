@@ -4,6 +4,8 @@ exports[`Persistence error-response body snapshots 400 validation error (retenti
 {
   "detail": "name is required, type must be one of [invoice, document]",
   "instance": "urn:uuid:snap-test-request-id",
+  "retry_hint": "",
+  "retryable": false,
   "status": 400,
   "title": "Validation Error",
   "type": "https://liquifact.com/probs/validation-error",
@@ -14,6 +16,8 @@ exports[`Persistence error-response body snapshots 404 not found (retention poli
 {
   "detail": "Retention policy not found",
   "instance": "urn:uuid:snap-test-request-id",
+  "retry_hint": "",
+  "retryable": false,
   "status": 404,
   "title": "Policy Not Found",
   "type": "https://liquifact.com/probs/not-found",
@@ -24,6 +28,8 @@ exports[`Persistence error-response body snapshots 409 conflict (retention polic
 {
   "detail": "Policy 'default-invoice-policy' already exists for this tenant",
   "instance": "urn:uuid:snap-test-request-id",
+  "retry_hint": "",
+  "retryable": false,
   "status": 409,
   "title": "Policy Already Exists",
   "type": "https://liquifact.com/probs/conflict",
@@ -34,6 +40,8 @@ exports[`Persistence error-response body snapshots 500 internal server error (re
 {
   "detail": "Failed to fetch retention policies",
   "instance": "urn:uuid:snap-test-request-id",
+  "retry_hint": "",
+  "retryable": false,
   "status": 500,
   "title": "Internal Server Error",
   "type": "https://liquifact.com/probs/internal-server-error",

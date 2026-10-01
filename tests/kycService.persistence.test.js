@@ -51,6 +51,48 @@ describe('KYC Service Database Persistence', () => {
     expect(result.status).toBe(kycService.KYC_STATUSES.PENDING);
   });
 
+  it('creates the table and indexes safely under concurrent repeated up runs', async () => {
+    await realDb.schema.dropTableIfExists('kyc_records');
+
+    await Promise.all(Array.from({ length: 8 }, () => migration.up(realDb)));
+
+    expect(await realDb.schema.hasTable('kyc_records')).toBe(true);
+    const indexes = await realDb('sqlite_master')
+      .select('name')
+      .where({ type: 'index', tbl_name: 'kyc_records' });
+    const indexNames = indexes.map((index) => index.name);
+    expect(indexNames).toContain('kyc_records_status_index');
+    expect(indexNames).toContain('kyc_records_deleted_at_index');
+  });
+
+  it('completes missing indexes when retried after partial DDL failure', async () => {
+    await realDb.schema.dropTableIfExists('kyc_records');
+    let failDeletedAtIndexOnce = true;
+    const failOnceKnex = {
+      schema: realDb.schema,
+      fn: realDb.fn,
+      raw(sql, bindings) {
+        if (failDeletedAtIndexOnce && sql.includes('kyc_records_deleted_at_index')) {
+          failDeletedAtIndexOnce = false;
+          return Promise.reject(new Error('simulated index creation failure'));
+        }
+        return realDb.raw(sql, bindings);
+      },
+    };
+
+    await expect(migration.up(failOnceKnex)).rejects.toThrow('simulated index creation failure');
+    expect(await realDb.schema.hasTable('kyc_records')).toBe(true);
+
+    await migration.up(realDb);
+
+    const indexes = await realDb('sqlite_master')
+      .select('name')
+      .where({ type: 'index', tbl_name: 'kyc_records' });
+    const indexNames = indexes.map((index) => index.name);
+    expect(indexNames).toContain('kyc_records_status_index');
+    expect(indexNames).toContain('kyc_records_deleted_at_index');
+  });
+
   it('should persist verification status to the database', async () => {
     const smeId = 'sme_persist_01';
     const verifyResult = await kycService.verifySmeSafe(smeId);

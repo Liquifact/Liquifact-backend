@@ -5,11 +5,20 @@
  * 1. CORS policy (environment-driven allowlist, 403 on blocked origins)
  * 2. Request body-size guardrails (100 KB global JSON, 512 KB invoice limit)
  * 3. URL-encoded body parser (50 KB limit)
- * 4. Application routes (health, api-info, invoices, escrow)
- * 5. 404 catch-all
- * 6. CORS error handler  → 403 JSON
- * 7. Payload-too-large handler → 413 JSON
- * 8. Generic internal-error handler → 500 JSON
+ * 4. Input sanitization (strips control chars, normalises Unicode, removes
+ *    prototype-pollution keys from body / params / query)
+ * 5. Security headers, audit, request-id, correlation-id middleware
+ * 6. Application routes — each with explicit validation boundaries:
+ *    - Health / liveness / readiness probes  (query + body guards)
+ *    - GET /api info                         (query guard + body guard)
+ *    - GET  /api/invoices                    (query param validation)
+ *    - POST /api/invoices                    (Zod body schema + 512 KB limit)
+ *    - GET  /api/escrow/:invoiceId           (param allowlist + length bound)
+ * 7. Feature router mounts (auth, KYC, marketplace, …)
+ * 8. 404 catch-all
+ * 9. CORS error handler  → 403 JSON
+ * 10. Payload-too-large handler → 413 JSON
+ * 11. Generic internal-error handler → 500 JSON
  *
  * @module app
  */
@@ -73,6 +82,12 @@ const {
 } = require('./utils/routeMountRegistry');
 const { createCompressionMiddleware } = require('./middleware/compression');
 const { configErrorHandler } = require('./middleware/configErrorHandler');
+const { sanitizeInput } = require('./middleware/sanitizeInput');
+const {
+  validateEscrowParamsMiddleware,
+  validateApiInfoQuery,
+  rejectBodyOnGet: rejectBodyOnGetInfo,
+} = require('./schemas/appBoundary');
 
 /**
  * Returns a 403 JSON response only for the dedicated blocked-origin CORS error.
@@ -144,7 +159,6 @@ function handleInternalError(err, req, res, _next) {
  * @returns {import('express').Express} Configured Express application.
  */
 function createApp() {
-  resetFeatureRouterMounts();
   const app = express();
 
   // ── 1. CORS ──────────────────────────────────────────────────────────────
@@ -153,11 +167,22 @@ function createApp() {
 
   // ── 1.a. KYC webhook raw body parser ──────────────────────────────────────
   // Incoming provider webhooks must be verified against the raw JSON body.
-  app.use('/api/kyc/webhook', express.raw({ type: 'application/json', limit: '100kb' }));
+  app.use('/api/kyc/webhook', express.raw({
+    type: 'application/json',
+    limit: KYC_WEBHOOK_VALIDATION.MAX_PAYLOAD_BYTES,
+  }));
 
   // ── 2 & 3. Body-size guardrails ──────────────────────────────────────────
   app.use(...jsonBodyLimit());
   app.use(...urlencodedBodyLimit());
+
+  // ── 4. Input sanitization ────────────────────────────────────────────────
+  // Runs after body parsers so req.body / req.params / req.query are already
+  // populated.  Strips control characters, normalises Unicode, and removes
+  // prototype-pollution keys from every user-supplied input container.
+  // Validation schemas then enforce structural correctness on top of this
+  // already-clean input.
+  app.use(sanitizeInput);
 
   // Apply security headers middleware
   app.use(createSecurityMiddleware());
@@ -165,7 +190,7 @@ function createApp() {
   app.use(requestId);
   app.use(correlationIdMiddleware);
 
-  // ── 4. Routes ────────────────────────────────────────────────────────────
+  // ── 5. Routes ────────────────────────────────────────────────────────────
 
   // ── Health / Liveness / Readiness ──────────────────────────────────────
   // Issue #769 — per-client rate limiter before individual handlers.
@@ -237,8 +262,8 @@ function createApp() {
     }
   }));
 
-  // API info
-  app.get('/api', (req, res) => {
+  // API info — read-only metadata; reject query params and bodies (GET invariant)
+  app.get('/api', rejectBodyOnGetInfo, validateApiInfoQuery, (req, res) => {
     res.json({
       name: 'LiquiFact API',
       description: 'Global Invoice Liquidity Network on Stellar',
@@ -320,10 +345,17 @@ function createApp() {
   // Compression middleware: gzip/deflate for large escrow-read responses (issue #961).
   // Threshold: 1 KB (DEFAULT_THRESHOLD). Respects Accept-Encoding; small responses
   // pass through uncompressed. Vary: Accept-Encoding is always set.
-  app.get('/api/escrow/:invoiceId', createCompressionMiddleware(), async (req, res, next) => {
-    const invoiceId = String(req.params.invoiceId || '')
-      .trim()
-      .replace(/\s+/g, '');
+  //
+  // Validation order:
+  //   1. validateEscrowParamsMiddleware — allowlist + length bound on :invoiceId (400 on failure)
+  //   2. createCompressionMiddleware()  — content-encoding negotiation
+  //   3. handler                        — uses req.validatedParams.invoiceId (schema-safe value)
+  app.get('/api/escrow/:invoiceId', validateEscrowParamsMiddleware, createCompressionMiddleware(), async (req, res, next) => {
+    // Use the schema-validated param; fall back to raw only during unit-test
+    // scenarios where the middleware was bypassed explicitly.
+    const invoiceId = req.validatedParams
+      ? req.validatedParams.invoiceId
+      : String(req.params.invoiceId || '').trim().replace(/\s+/g, '');
 
     const { result, escrowAddress, error, code, statusCode } = await getEscrowRead(invoiceId);
 
@@ -401,7 +433,7 @@ function createApp() {
   mountFeatureRouter(app, '/v1', v1Routes);
   mountFeatureRouter(app, '/api', apiKeysRoutes);
 
-  assertNoDuplicateRouterMounts();
+  assertNoDuplicateRouterMounts(app);
 
   // ── 6. Prometheus metrics ────────────────────────────────────────────────
   // Rate limiter mounted BEFORE metricsAuth so unauthenticated attempts

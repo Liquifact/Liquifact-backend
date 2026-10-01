@@ -25,15 +25,15 @@ jest.mock('../../src/logger', () => ({
 const request = require('supertest');
 const express = require('express');
 const { authenticateApiKey, API_KEY_HEADER } = require('../../src/middleware/apiKeyAuth');
+const { getApiKeysCache } = require('../../src/cache/apiKeysCache');
+const errorHandler = require('../../src/middleware/errorHandler');
 let apiKeysRouter = null;
 try {
   apiKeysRouter = require('../../src/routes/apiKeys');
 } catch (_) {}
 const { VALID_SCOPES } = require('../../src/config/apiKeys');
 
-// Route is broken on upstream/main (getApiKeysCache not imported).
-// Skip route-level tests until the route is fixed.
-const describeRoute = describe.skip;
+const describeRoute = describe;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -85,12 +85,11 @@ function makeAuthApp(middleware) {
  */
 function makeKeysApp(apiKeysEnv = '') {
   const app = express();
+  getApiKeysCache().invalidateAll();
   const saved = process.env.API_KEYS;
   process.env.API_KEYS = apiKeysEnv;
   app.use('/api-keys', apiKeysRouter);
-  app.use((err, _req, res, _next) => {
-    res.status(500).json({ error: err.message || 'Internal error' });
-  });
+  app.use(errorHandler);
   app._cleanupEnv = () => {
     if (saved === undefined) {
       delete process.env.API_KEYS;
@@ -337,6 +336,23 @@ describeRoute('Contract: GET /api-keys – empty registry', () => {
     assertExactKeys(res.body, ['data', 'nextCursor']);
     expect(res.body.data).toEqual([]);
     expect(res.body.nextCursor).toBeNull();
+  });
+});
+
+describeRoute('Contract: GET /api-keys – registry load failure', () => {
+  it('returns a sanitized error and recovers after the registry is corrected', async () => {
+    const invalidRegistry = '{"key":"lf_sensitive0001"';
+    const app = makeKeysApp(invalidRegistry);
+
+    const failed = await request(app).get('/api-keys');
+    expect(failed.status).toBe(500);
+    expect(JSON.stringify(failed.body)).not.toContain(invalidRegistry);
+
+    process.env.API_KEYS = REGISTRY_ENV.API_KEYS;
+    getApiKeysCache().invalidateAll();
+    const recovered = await request(app).get('/api-keys');
+    expect(recovered.status).toBe(200);
+    expect(recovered.body.data.map((entry) => entry.key)).toContain(VALID_KEY);
   });
 });
 

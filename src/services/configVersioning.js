@@ -113,6 +113,13 @@ async function saveDraft(section, config, context) {
  * Publishes a draft config record with optimistic concurrency.
  * Validates expected_version matches the current version before publishing.
  *
+ * Concurrency safety: the version check and the UPDATE are executed inside a
+ * single database transaction.  The UPDATE applies a second WHERE clause
+ * (`WHERE version = expectedVersion`) so that, even if two concurrent publish
+ * requests both pass the initial read, only one can commit the UPDATE — the
+ * other will see 0 affected rows and receive a `STALE_VERSION` error.  This
+ * prevents silent last-write-wins overwrites under concurrent load.
+ *
  * @param {string} section - Config section name.
  * @param {object} config - The config to publish (must match the draft).
  * @param {object} context
@@ -121,77 +128,116 @@ async function saveDraft(section, config, context) {
  * @param {number} [context.expectedVersion] - Expected current version for CAS.
  * @returns {Promise<object>} The published record.
  * @throws {Error} With code 'STALE_VERSION' if expectedVersion doesn't match.
- * @throws {Error} With code 'NO_DRAFT' if no draft exists for the section.
+ * @throws {Error} With code 'NO_CONFIG' if no record exists for the section.
+ * @throws {Error} With code 'EMPTY_DIFF' if the config is identical to current.
  */
 async function publishConfig(section, config, context) {
   const { tenantId = '', actor = null, expectedVersion } = context;
   const now = new Date().toISOString();
 
-  // Find the current draft or published record
-  const existing = await db(CONFIG_TABLE)
-    .where({ section, tenant_id: tenantId })
-    .orderBy('version', 'desc')
-    .first();
+  // Wrap the read-check-update cycle in a transaction so no concurrent writer
+  // can slip a version change between our SELECT and our UPDATE.
+  return db.transaction(async (trx) => {
+    // Lock the row for the duration of the transaction so a concurrent
+    // publisher for the same section+tenant is serialised, not interleaved.
+    // NOTE: .forUpdate() must appear before .first() in the Knex builder chain
+    // so it is included in the generated SQL before the query executes.
+    const existing = await trx(CONFIG_TABLE)
+      .where({ section, tenant_id: tenantId })
+      .orderBy('version', 'desc')
+      .forUpdate()
+      .first();
 
-  if (!existing) {
-    const err = new Error(`No configuration found for section '${section}'`);
-    err.code = 'NO_CONFIG';
-    err.status = 404;
-    throw err;
-  }
+    if (!existing) {
+      const err = new Error(`No configuration found for section '${section}'`);
+      err.code = 'NO_CONFIG';
+      err.status = 404;
+      throw err;
+    }
 
-  // Optimistic CAS: check version matches
-  if (expectedVersion !== undefined && existing.version !== expectedVersion) {
-    const err = new Error(
-      `Stale configuration: expected version ${expectedVersion} but found ${existing.version}. ` +
-      'Another operator may have published a newer version. Reload and retry.',
+    // Optimistic CAS: check version matches
+    if (expectedVersion !== undefined && existing.version !== expectedVersion) {
+      const err = new Error(
+        `Stale configuration: expected version ${expectedVersion} but found ${existing.version}. ` +
+        'Another operator may have published a newer version. Reload and retry.',
+      );
+      err.code = 'STALE_VERSION';
+      err.status = 409;
+      throw err;
+    }
+
+    const diffSummary = computeDiffSummary(
+      JSON.parse(existing.config || '{}'),
+      config,
     );
-    err.code = 'STALE_VERSION';
-    err.status = 409;
-    throw err;
-  }
 
-  const diffSummary = computeDiffSummary(
-    JSON.parse(existing.config || '{}'),
-    config,
-  );
+    // Check for empty diff
+    if (diffSummary === 'No changes detected') {
+      const err = new Error('No changes to publish: the configuration is identical to the current version.');
+      err.code = 'EMPTY_DIFF';
+      err.status = 422;
+      throw err;
+    }
 
-  // Check for empty diff
-  if (diffSummary === 'No changes detected') {
-    const err = new Error('No changes to publish: the configuration is identical to the current version.');
-    err.code = 'EMPTY_DIFF';
-    err.status = 422;
-    throw err;
-  }
+    const newVersion = (existing.version || 1) + 1;
 
-  const newVersion = (existing.version || 1) + 1;
+    // Perform the UPDATE inside the transaction.  The WHERE clause includes
+    // `version = existing.version` as a secondary guard: if another concurrent
+    // transaction committed first, this UPDATE will affect 0 rows, and we
+    // re-raise STALE_VERSION rather than silently overwriting.
+    const updateQuery = trx(CONFIG_TABLE)
+      .where('id', existing.id)
+      .where('version', existing.version) // secondary CAS guard
+      .update({
+        config: JSON.stringify(config),
+        draft_status: 'published',
+        version: newVersion,
+        expected_version: existing.version,
+        diff_summary: diffSummary,
+        published_by: actor,
+        published_at: now,
+        draft_actor: actor,
+        updated_at: now,
+      });
 
-  // Mark any existing draft/published as superseded, then create published record
-  const [published] = await db(CONFIG_TABLE)
-    .where('id', existing.id)
-    .update({
-      config: JSON.stringify(config),
-      draft_status: 'published',
+    // Only use .returning('*') on databases that support it (PostgreSQL).
+    // SQLite (used in tests) does not support RETURNING.
+    let published;
+    if (db.client && db.client.config && db.client.config.client === 'sqlite3') {
+      const affected = await updateQuery;
+      if (affected === 0) {
+        const err = new Error(
+          `Stale configuration: version changed concurrently for section '${section}'.`,
+        );
+        err.code = 'STALE_VERSION';
+        err.status = 409;
+        throw err;
+      }
+      published = await trx(CONFIG_TABLE).where('id', existing.id).first();
+    } else {
+      const rows = await updateQuery.returning('*');
+      if (!rows || rows.length === 0) {
+        const err = new Error(
+          `Stale configuration: version changed concurrently for section '${section}'.`,
+        );
+        err.code = 'STALE_VERSION';
+        err.status = 409;
+        throw err;
+      }
+      [published] = rows;
+    }
+
+    logger.info({
+      section,
+      tenantId,
+      id: published.id,
       version: newVersion,
-      expected_version: existing.version,
-      diff_summary: diffSummary,
-      published_by: actor,
-      published_at: now,
-      draft_actor: actor,
-      updated_at: now,
-    })
-    .returning('*');
+      previousVersion: existing.version,
+      actor,
+    }, 'Config published');
 
-  logger.info({
-    section,
-    tenantId,
-    id: published.id,
-    version: newVersion,
-    previousVersion: existing.version,
-    actor,
-  }, 'Config published');
-
-  return published;
+    return published;
+  });
 }
 
 /**

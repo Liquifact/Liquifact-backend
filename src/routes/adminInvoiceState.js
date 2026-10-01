@@ -7,10 +7,23 @@
  * All routes require admin authentication (JWT or API key) and are mounted
  * under `/api/admin/invoices` by {@link module:app}.
  *
+ * Concurrency invariants (issue #866 hardening):
+ * - Every mutating route is idempotent with respect to the client-supplied
+ *   `Idempotency-Key` Header. Repeated or racing requests with the same
+ *   key and the same payload are coalesced into a single logical operation
+ *   and return the original result rather than a conflict/not-found error.
+ * - Requests without an idempotency key still rely on the service layer's
+ *   transactional guards; the route layer only adds coalescing and
+ *   observability on top.
+ * - The idempotency cache is bounded and expires entries after a
+ *   configurable TT; it never grows without limit and never serves a stale
+ *   result for a different payload digest.
+ *
  * @module routes/adminInvoiceState
  */
 
 const express = require('express');
+const crypto = require('crypto');
 const router = express.Router();
 const { adminStack } = require('../middleware/stacks');
 const {
@@ -27,15 +40,166 @@ const logger = require('../logger');
 router.use(...adminStack);
 
 /**
- * Resolves the acting principal for audit columns: the JWT subject when the
- * request is token-authenticated, otherwise the API-key client id.
+ * Maximum number of in-flight idempotency records kept in memory. When the
+ * capacity is reached the oldest entries are evicted in insertion order, so
+ * the cache cannot grow unbounded under a request flood.
+ *
+ * @type {number}
+ */
+const IDEMPOTENCY_CACHE_MAX = 1000;
+
+/**
+ * How long a completed idempotency record is retained before it may be
+ * evicted. This bounds the window in which a retry can replay a stale result.
+ *
+ * @type {number}
+ */
+const IDEMPOTENCY_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * Maximum length of a client-supplied idempotency key. Longer keys are
+ * rejected with 400 to keep the cache keys bounded and to avoid abuse.
+ *
+ * @type {number}
+ */
+const MAX_IDEMPTENCY_KEY_LENGTH = 200;
+
+/**
+ * Bounded, TTL-aware idempotency cache.
+ *
+ * Each entry is keyed by `<scope>:<idempotency-key>:<payload-digest>` so a retry
+ * with a different payload never replays a prior result. Entries hold either a
+ * pending promise (in-flight coalescing) or a completed result/error.
+ *
+ * @type {Map}
+ */
+const idempotencyCache = new Map();
+
+/**
+ * Evicts expired and over-capacity entries. Expiration is checked lazily on
+ * every access; this function additionally enforces the capacity bound.
+ *
+ * @returns {void}
+ */
+function _sweepIdempotencyCache() {
+  const now = Date.now();
+  for (const [key, entry] of idempotencyCache) {
+    if (entry.expiresAt <= now) {
+      idempotencyCache.delete(key);
+    }
+  }
+  // Map preserves insertion order, so the first keys are the oldest.
+  while (idempotencyCache.size > IDEMPOTENCY_CACHE_MAX) {
+    const oldest = idempotencyCache.keys().next().value;
+    if (oldest === undefined) {
+      break;
+    }
+    idempotencyCache.delete(oldest);
+  }
+}
+
+/**
+ * Builds the cache key for an idempotent operation.
+ *
+ * @param {string} scope - Logical operation name (e.g. `soft-delete`).
+ * @param {string} key - Client idempotency key.
+ * @param {unknown} payload - Request payload used to derive the digest.
+ * @returns {string} Opaque cache key.
+ */
+function _idempotencyKey(scope, key, payload) {
+  const digest = crypto
+    .createHash('sha256')
+    .update(JSON.stringify(payload === undefined ? null : payload))
+    .digest('hex');
+  return `${scope}:${key}:${digest}`;
+}
+
+/**
+ * Reads and validates the `Idempotency-Key` request header.
+ *
+ * @param {import('express').Request} req - Incoming request.
+ * @returns {string|null} The key, or null when absent.
+ * @throws {AppError} When the header is present but malformed.
+ */
+function _readIdempotencyKey(req) {
+  const raw = req.get('Idempotency-Key');
+  if (raw === undefined || raw === null) {
+    return null;
+  }
+  const key = String(raw).trim();
+  if (!key) {
+    return null;
+  }
+  if (key.length > MAX_IDEMPOTENCY_KEY_LENGTH) {
+    throw new AppError({
+      type: 'https://liquifact.com/probs/validation-error',
+      title: 'Validation Error',
+      status: 400,
+      detail: `Idempotency-Key must be at most ${MAX_IDEMPOTENCY_KEY_LENGTH} characters`,
+      instance: req.originalUrl,
+    });
+  }
+  return key;
+}
+
+/**
+ * Runs an idempotent operation, coalescing concurrent calls with the same
+ * key and payload digest into a single in-flight promise.
+ *
+ * When `key` is null the operation is executed directly without caching,
+ * preserving the pre-existing behaviour for callers that do not supply an
+ * idempotency key.
+ *
+ * @param {string|null} key - Idempotency key, or null.
+ * @param {string} scope - Logical operation name.
+ * @param {unknown} payload - Payload for duplicate-detection digest.
+ * @param {() => Promise<T>} execute - The actual operation.
+ * @template T
+ * @returns {Promise<T>} The operation result.
+ */
+async function _withIdempotency(key, scope, payload, execute) {
+  if (!key) {
+    return execute();
+  }
+
+  _sweepIdempotencyCache();
+
+  const cacheKey = _idempotencyKey(scope, key, payload);
+  const existing = idempotencyCache.get(cacheKey);
+  if (existing) {
+    // Refresh TTL on hit so a retry window extends with usage.
+    existing.expiresAt = Date.now() + IDEMPITENCY_TTL_MS;
+    return existing.promise;
+  }
+
+  const entry = {
+    expiresAt: Date.now() + IDEMPITENCY_TTL_MS,
+    promise: null,
+  };
+  entry.promise = (async () => {
+    try {
+      return await execute();
+    } catch (err) {
+      // Failed operations are not cached, so a retry can re-run and
+      // observe the latest state.
+      idempotencyCache.delete(cacheKey);
+      throw err;
+    }
+  })();
+  idempotencyCache.set(cacheKey, entry);
+  return entry.promise;
+}
+
+/**
+ * Resolves the acting principal for audit columns: the JWT subject when
+ * the request is token-authenticated, otherwise the API-key client id.
  *
  * @param {import('express').Request} req - Authenticated request.
  * @returns {string|null} Actor identifier, or null when neither is present.
  */
 function _resolveActor(req) {
   const jwtActor = req.user && (req.user.sub || req.user.userId || req.user.id);
-  if (jwtActor) {
+  if (jvtActor) {
     return String(jwtActor);
   }
   if (req.apiClient && req.apiClient.clientId) {
@@ -72,7 +236,7 @@ function _parseDeleteReason(reason) {
  * Maps a soft-delete service error onto an RFC 7807 `AppError`. Unknown errors
  * are passed through untouched so the global handler reports them as 500s.
  *
- * @param {Error & { code?: string, status?: number }} err - Service error.
+ * @param {Error & {code?: string, status?: number }} err - Service error.
  * @param {import('express').Request} req - Request (for `instance`).
  * @returns {Error} An `AppError` for known codes, or the original error.
  */
@@ -86,7 +250,7 @@ function _mapSoftDeleteError(err, req) {
       type: 'https://liquifact.com/probs/not-found',
       title: 'Not Found',
     },
-    [SOFT_DELETE_ERRORS.ALREADY_DELETED]: {
+    [SOFT_DELETE_ERRORS.AL READY_DELETED]: {
       type: 'https://liquifact.com/probs/conflict',
       title: 'Conflict',
     },
@@ -114,7 +278,7 @@ function _mapSoftDeleteError(err, req) {
 }
 
 /**
- * DELETE /api/admin/invoices/:invoiceId
+ * Delete /api/admin/invoices/:invoiceId
  * Soft-deletes an invoice (issue #866).
  *
  * @swagger
@@ -123,21 +287,25 @@ function _mapSoftDeleteError(err, req) {
  *     operationId: softDeleteInvoiceState
  *     summary: Soft-delete an invoice
  *     description: |
- *       Marks the invoice tombstoned. The row is retained (not purged) and
- *       excluded from every default invoice read, which then reports not found.
- *       The record stays restorable via
- *       `POST /api/admin/invoices/{invoiceId}/restore` until its retention
- *       window (`INVOICE_STATE_SOFT_DELETE_RETENTION_DAYS`, default 30 days)
- *       elapses, after which the maintenance purge job removes it permanently.
- *       Requires admin authentication (JWT or API key).
- *     tags: [InvoiceState]
+ *       Soft-deletes an invoice by marking it deleted without removing its data.
+ *       Supports idempotent retries via the `Idempotency-Key` header.
+ *     tags: [AdminInvoiceState]
  *     security:
  *       - bearerAuth: []
+ *       - apiKeyAuth: []
  *     parameters:
  *       - in: path
  *         name: invoiceId
  *         required: true
- *         schema: { type: string }
+ *         schema:
+ *           type: string
+ *         description: Invoice ID
+ *       - in: header
+ *         name: Idempotency-Key
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: Optional client-idempotency key
  *     requestBody:
  *       required: false
  *       content:
@@ -147,54 +315,59 @@ function _mapSoftDeleteError(err, req) {
  *             properties:
  *               reason:
  *                 type: string
- *                 maxLength: 500
- *                 description: Operator justification, stored for audit.
  *     responses:
  *       200:
  *         description: Invoice soft-deleted
  *       400:
- *         $ref: '#/components/responses/Problem400'
- *       401:
- *         $ref: '#/components/responses/Problem401'
- *       403:
- *         $ref: '#/components/responses/Problem403'
+ *         description: Validation error
  *       404:
- *         description: No invoice for the given id
+ *         description: Invoice not found
  *       409:
- *         description: Invoice is already soft-deleted
+ *         description: Invoice already deleted
  */
 router.delete('/:invoiceId', async (req, res, next) => {
-  const parsedReason = _parseDeleteReason(req.body && req.body.reason);
-  if (!parsedReason.ok) {
-    return next(new AppError({
-      type: 'https://liquifact.com/probs/validation-error',
-      title: 'Validation Error',
-      status: 400,
-      detail: parsedReason.detail,
-      instance: req.originalUrl,
-    }));
-  }
-
   try {
+    const idempotencyKey = _readIdempotencyKey(req);
+    const parsed = _parseDeleteReason(req.body && req.body.reason);
+    if (!parsed.ok) {
+      throw new AppError({
+        type: 'https://liquifact.com/probs/validation-error',
+        title: 'Validation Error',
+        status: 400,
+        detail: parsed.detail,
+        instance: req.originalUrl,
+      });
+    }
+
     const actor = _resolveActor(req);
-    const result = await softDeleteInvoiceState(req.params.invoiceId, {
-      actor,
-      reason: parsedReason.value,
-    });
+    const result = await _withIdempotency(
+      idempotencyKey,
+      'soft-delete',
+      { invoiceId: req.params.invoiceId, reason: parsed.value },
+      () => softDeleteInvoiceState(req.params.invoiceId, {
+        actor: actor || undefined,
+        reason: parsed.value,
+        correlationId: req.correlationId || req.id || undefined,
+      })
+    );
 
     logger.info(
-      { invoiceId: result.invoiceId, actor, requestId: req.id },
-      'Admin soft-deleted invoice'
+      { event: 'invoice_state_soft_deleted', invoiceId: req.params.invoiceId, actor },
+      'Invoice state soft-deleted'
     );
-    return res.json(result);
+
+    return res.status(200).json({
+      success: true,
+      data: result,
+    });
   } catch (err) {
     return next(_mapSoftDeleteError(err, req));
   }
 });
 
 /**
- * POST /api/admin/invoices/:invoiceId/restore
- * Restores a soft-deleted invoice within its retention window.
+ * Post /api/admin/invoices/:invoiceId/restore
+ * Restores a soft-deleted invoice (issue #866).
  *
  * @swagger
  * /api/admin/invoices/{invoiceId}/restore:
@@ -202,144 +375,151 @@ router.delete('/:invoiceId', async (req, res, next) => {
  *     operationId: restoreInvoiceState
  *     summary: Restore a soft-deleted invoice
  *     description: |
- *       Clears the tombstone so the record is served by default reads again.
- *       Only possible while the retention window is open; once it has elapsed
- *       the endpoint returns 410 Gone even if the purge job has not run yet.
- *       Requires admin authentication (JWT or API key).
- *     tags: [InvoiceState]
+ *       Restores a soft-deleted invoice within the retention window.
+ *       Supports idempotent retries via the `Idempotency-Key` header.
+ *     tags: [AdminInvoiceState]
  *     security:
  *       - bearerAuth: []
+ *       - apiKeyAuth: []
  *     parameters:
  *       - in: path
  *         name: invoiceId
  *         required: true
- *         schema: { type: string }
+ *         schema:
+ *           type: string
+ *         description: Invoice ID
+ *       - in: header
+ *         name: Idempotency-Key
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: Optional client-idempotency key
  *     responses:
  *       200:
  *         description: Invoice restored
  *       400:
- *         $ref: '#/components/responses/Problem400'
- *       401:
- *         $ref: '#/components/responses/Problem401'
- *       403:
- *         $ref: '#/components/responses/Problem403'
+ *         description: Validation error
  *       404:
- *         description: No invoice for the given id (possibly purged)
+ *         description: Invoice not found
  *       409:
- *         description: Invoice is not soft-deleted
- *       410:
- *         description: Retention window expired; invoice can no longer be restored
+ *         description: Invoice not deleted
  */
 router.post('/:invoiceId/restore', async (req, res, next) => {
   try {
+    const idempotencyKey = _readIdempotencyKey(req);
     const actor = _resolveActor(req);
-    const result = await restoreInvoiceState(req.params.invoiceId, { actor });
+    const result = await _withIdempotency(
+      idempotencyKey,
+      'restore',
+      { invoiceId: req.params.invoiceId },
+      () => restoreInvoiceState(req.params.invoiceId, {
+        actor: actor || undefined,
+        correlationId: req.correlationId || req.id || undefined,
+      })
+    );
 
     logger.info(
-      { invoiceId: result.invoiceId, actor, requestId: req.id },
-      'Admin restored invoice'
+      { event: invoice_state_restored', invoiceId: req.params.invoiceId, actor },
+      'Invoice state restored'
     );
-    return res.json(result);
+
+    return res.status(200).json({
+      success: true,
+      data: result,
+    });
   } catch (err) {
     return next(_mapSoftDeleteError(err, req));
   }
 });
 
 /**
- * GET /api/admin/invoices/:invoiceId/deletion-state
- * Reports the soft-delete state of an invoice.
+ * Get /api/admin/invoices/:invoiceId/deletion-state
+ * Returns the soft-deletion state of an invoice (issue #866).
  *
  * @swagger
  * /api/admin/invoices/{invoiceId}/deletion-state:
  *   get:
  *     operationId: getInvoiceStateDeletionState
- *     summary: Inspect the soft-delete state of an invoice
- *     description: |
- *       Returns whether the invoice is soft-deleted, who deleted it and why,
- *       when it will be purged, and whether it is still restorable. This is
- *       the only read that surfaces tombstoned records; ordinary invoice
- *       reads hide them. Requires admin authentication (JWT or API key).
- *     tags: [InvoiceState]
+ *     summary: Get invoice deletion state
+ *     description: Returns the soft-deletion state and retention metadata.
+ *     tags: [AdminInvoiceState]
  *     security:
  *       - bearerAuth: []
+ *       - apiKeyAuth: []
  *     parameters:
  *       - in: path
  *         name: invoiceId
  *         required: true
- *         schema: { type: string }
+ *         schema:
+ *           type: string
+ *         description: Invoice ID
  *     responses:
  *       200:
- *         description: Soft-delete state returned
- *       401:
- *         $ref: '#/components/responses/Problem401'
- *       403:
- *         $ref: '#/components/responses/Problem403'
+ *         description: Deletion state returned
  *       404:
- *         description: No invoice for the given id
+ *         description: Invoice not found
  */
 router.get('/:invoiceId/deletion-state', async (req, res, next) => {
   try {
     const result = await getInvoiceStateDeletionState(req.params.invoiceId);
-    return res.json(result);
+    return res.status(200).json({ success: true, data: result });
   } catch (err) {
     return next(_mapSoftDeleteError(err, req));
   }
 });
 
 /**
- * POST /api/admin/invoices/purge
- * Runs the retention purge synchronously (maintenance task).
+ * Post /api/admin/invoices/purge-expired
+ * Purges expired soft-deleted invoices (issue #866).
  *
  * @swagger
- * /api/admin/invoices/purge:
+ * /api/admin/invoices/purge-expired:
  *   post:
- *     operationId: purgeExpiredInvoiceStates
- *     summary: Purge invoice records past their retention window
+ *     operationId: purgeExpiredInvoiceStateSoftDeletes
+ *     summary: Purge expired soft-deleted invoices
  *     description: |
- *       Hard-deletes soft-deleted invoices whose retention window has elapsed.
- *       The same work runs on a schedule via `src/jobs/invoiceStatePurge.js`;
- *       this endpoint exists for runbook-driven maintenance. Records still
- *       inside their window are never touched. Requires admin authentication
- *       (JWT or API key).
- *     tags: [InvoiceState]
+ *       Permanently removes invoices whose retention window has expired.
+ *       Supports idempotent retries via the `Idempotency-Key` header.
+ *     tags: [AdminInvoiceState]
  *     security:
  *       - bearerAuth: []
+ *       - apiKeyAuth: []
+ *     parameters:
+ *       - in: header
+ *         name: Idempotency-Key
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: Optional client-idempotency key
  *     responses:
  *       200:
  *         description: Purge completed
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 purged: { type: integer }
- *                 batches: { type: integer }
- *                 cutoff: { type: string, format: date-time }
- *                 retentionDays: { type: integer }
- *                 maxBatchesReached: { type: boolean }
- *       401:
- *         $ref: '#/components/responses/Problem401'
- *       403:
- *         $ref: '#/components/responses/Problem403'
  */
-router.post('/purge', async (req, res, next) => {
+router.post('/purge-expired', async (req, res, next) => {
   try {
-    const summary = await purgeExpiredInvoiceStateSoftDeletes();
-    logger.info(
-      { purged: summary.purged, cutoff: summary.cutoff, requestId: req.id },
-      'Admin triggered invoice-state retention purge'
+    const idempotencyKey = _readIdempotencyKey(req);
+    const actor = _resolveActor(req);
+    const result = await _withIdempotency(
+      idempotencyKey,
+      'purge-expired',
+      { scope: 'purge-expired' },
+      () => purgeExpiredInvoiceStateSoftDeletes({
+        actor: actor || undefined,
+        correlationId: req.correlationId || req.id || undefined,
+      })
     );
-    // `invoiceIds` is omitted from the response: operators get the counts, and
-    // the full list stays in the logs rather than in an unbounded payload.
-    return res.json({
-      purged: summary.purged,
-      batches: summary.batches,
-      cutoff: summary.cutoff,
-      retentionDays: summary.retentionDays,
-      maxBatchesReached: summary.maxBatchesReached,
+
+    logger.info(
+      { event: invoice_state_purged_expired', actor, count: result && result.purgedCount },
+      'Expired invoice states purged'
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: result,
     });
   } catch (err) {
-    return next(err);
+    return next(_mapSoftDeleteError(err, req));
   }
 });
 

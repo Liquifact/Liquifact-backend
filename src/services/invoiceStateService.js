@@ -30,6 +30,15 @@ const MAX_BULK_ITEMS = 25;
 
 /**
  * Retrieves the current state and allowed transitions for an invoice.
+ *
+ * @invariant Returns `revision` from the underlying row so callers can supply it
+ *   back on the next mutation — this closes the read-then-write race window by
+ *   giving the client a token that must match the current optimistic-concurrency
+ *   version before any state-changing write is allowed.
+ *
+ * @param {string} id       - Invoice identifier (public invoice_id).
+ * @param {string} tenantId - Tenant identifier from middleware.
+ * @returns {Promise<{invoiceId: string, currentState: string, allowedTransitions: string[], isTerminal: boolean, revision: number|undefined}>}
  */
 async function getState(id, tenantId) {
   const invoice = await invoiceService.resolveInvoiceForTenant(id, tenantId);
@@ -45,6 +54,10 @@ async function getState(id, tenantId) {
     currentState,
     allowedTransitions,
     isTerminal: allowedTransitions.length === 0,
+    // Expose the optimistic-concurrency revision so callers can supply it on the
+    // next mutation.  Omitted (undefined) when the row pre-dates the versioning
+    // migration so that legacy paths are not broken.
+    revision: invoice.revision !== undefined ? invoice.revision : invoice.version,
   };
 }
 
@@ -78,8 +91,23 @@ function assertTransitionAllowed(invoice, targetState) {
 
 /**
  * Executes a state transition.
+ *
+ * @invariant `revision` must match the invoice's current optimistic-concurrency
+ *   version.  If it is omitted the call is forwarded without an expectedRevision
+ *   guard so the underlying `transitionInvoice` applies its own CAS check.
+ *   Callers that obtain `revision` from `getState` and supply it here are
+ *   protected against concurrent writers: a stale revision is rejected with
+ *   `STALE_REVISION` or `TRANSITION_CONFLICT` (409) before any side effects occur.
+ *
+ * @param {string}      id          - Invoice identifier.
+ * @param {string}      tenantId    - Tenant identifier.
+ * @param {string}      targetState - Desired target state.
+ * @param {string}      [reason]    - Human-readable reason.
+ * @param {number|string} [revision] - Optimistic-concurrency token from getState.
+ * @param {object}      context     - Request context (actor, ipAddress, etc.).
+ * @returns {Promise<object>} Transition result.
  */
-async function transition(id, tenantId, targetState, reason, context) {
+async function transition(id, tenantId, targetState, reason, revision, context) {
   if (!targetState) {
     throw new StateTransitionError('Target state is required', 'MISSING_TARGET_STATE', 400);
   }
@@ -93,7 +121,7 @@ async function transition(id, tenantId, targetState, reason, context) {
     ipAddress: context.ipAddress,
     userAgent: context.userAgent,
     metadata: context.metadata,
-    expectedRevision: invoice.revision,
+    expectedRevision: revision !== undefined ? revision : invoice.revision,
   });
 
   return {
@@ -109,8 +137,19 @@ async function transition(id, tenantId, targetState, reason, context) {
 
 /**
  * Approves an invoice.
+ *
+ * @invariant `revision` must match the invoice's current optimistic-concurrency
+ *   version so two concurrent approvals cannot both succeed.  When omitted, the
+ *   invoice's stored revision is used as the expected version.
+ *
+ * @param {string}      id       - Invoice identifier.
+ * @param {string}      tenantId - Tenant identifier.
+ * @param {string}      [reason] - Optional approval reason.
+ * @param {number|string} [revision] - Optimistic-concurrency token from getState.
+ * @param {object}      context  - Request context.
+ * @returns {Promise<object>} Transition result.
  */
-async function approve(id, tenantId, reason, context) {
+async function approve(id, tenantId, reason, revision, context) {
   const invoice = await resolveInvoiceForMutation(id, tenantId);
   assertTransitionAllowed(invoice, INVOICE_STATES.APPROVED);
 
@@ -120,7 +159,7 @@ async function approve(id, tenantId, reason, context) {
     ipAddress: context.ipAddress,
     userAgent: context.userAgent,
     metadata: context.metadata,
-    expectedRevision: invoice.revision,
+    expectedRevision: revision !== undefined ? revision : invoice.revision,
   });
 
   return {
@@ -136,8 +175,20 @@ async function approve(id, tenantId, reason, context) {
 
 /**
  * Links an approved invoice to escrow.
+ *
+ * @invariant Invoice must be in `approved` state (enforced by `canLinkToEscrow`
+ *   and `assertTransitionAllowed`). `revision` guards against concurrent
+ *   escrow-link attempts from duplicate requests.
+ *
+ * @param {string}      id       - Invoice identifier.
+ * @param {string}      tenantId - Tenant identifier.
+ * @param {string}      [escrowId] - Escrow contract identifier.
+ * @param {string}      [reason]   - Optional reason.
+ * @param {number|string} [revision] - Optimistic-concurrency token from getState.
+ * @param {object}      context    - Request context.
+ * @returns {Promise<object>} Transition result.
  */
-async function linkEscrow(id, tenantId, escrowId, reason, context) {
+async function linkEscrow(id, tenantId, escrowId, reason, revision, context) {
   const invoice = await resolveInvoiceForMutation(id, tenantId);
 
   const linkValidation = canLinkToEscrow(invoice);
@@ -157,7 +208,7 @@ async function linkEscrow(id, tenantId, escrowId, reason, context) {
       ...context.metadata,
       escrowId: escrowId || 'pending',
     },
-    expectedRevision: invoice.revision,
+    expectedRevision: revision !== undefined ? revision : invoice.revision,
   });
 
   return {
@@ -173,8 +224,20 @@ async function linkEscrow(id, tenantId, escrowId, reason, context) {
 
 /**
  * Rejects an invoice.
+ *
+ * @invariant Reason is mandatory for the `rejected` terminal state so there is
+ *   always a traceable justification in the audit log.  `revision` prevents two
+ *   concurrent rejection calls from both succeeding — only the writer whose
+ *   token matches the current version wins.
+ *
+ * @param {string}      id       - Invoice identifier.
+ * @param {string}      tenantId - Tenant identifier.
+ * @param {string}      reason   - Mandatory rejection reason.
+ * @param {number|string} [revision] - Optimistic-concurrency token from getState.
+ * @param {object}      context  - Request context.
+ * @returns {Promise<object>} Transition result.
  */
-async function reject(id, tenantId, reason, context) {
+async function reject(id, tenantId, reason, revision, context) {
   if (!reason || typeof reason !== 'string' || reason.trim().length === 0) {
     throw new StateTransitionError('Reason is required for rejection', 'MISSING_TRANSITION_REASON', 400);
   }
@@ -188,7 +251,7 @@ async function reject(id, tenantId, reason, context) {
     ipAddress: context.ipAddress,
     userAgent: context.userAgent,
     metadata: context.metadata,
-    expectedRevision: invoice.revision,
+    expectedRevision: revision !== undefined ? revision : invoice.revision,
   });
 
   return {
@@ -263,10 +326,11 @@ async function processBulkOperations(items, tenantId, baseContext) {
     let reason;
     let escrowId;
     let targetState;
+    let revision;
 
     try {
       const payload = item || {};
-      ({ invoiceId, action, reason, escrowId, targetState } = payload);
+      ({ invoiceId, action, reason, escrowId, targetState, revision } = payload);
 
       if (!invoiceId || typeof invoiceId !== 'string' || invoiceId.trim().length === 0) {
         throw Object.assign(new Error('invoiceId is required and must be a non-empty string'), { code: 'MISSING_INVOICE_ID' });
@@ -284,17 +348,17 @@ async function processBulkOperations(items, tenantId, baseContext) {
 
       switch (action) {
         case 'approve': {
-          result = await approve(invoiceId.trim(), tenantId, reason, context);
+          result = await approve(invoiceId.trim(), tenantId, reason, revision, context);
           results.push({ index, success: true, action, result });
           break;
         }
         case 'reject': {
-          result = await reject(invoiceId.trim(), tenantId, reason, context);
+          result = await reject(invoiceId.trim(), tenantId, reason, revision, context);
           results.push({ index, success: true, action, result });
           break;
         }
         case 'link-escrow': {
-          result = await linkEscrow(invoiceId.trim(), tenantId, escrowId || null, reason, context);
+          result = await linkEscrow(invoiceId.trim(), tenantId, escrowId || null, reason, revision, context);
           results.push({ index, success: true, action, result });
           break;
         }
@@ -302,7 +366,7 @@ async function processBulkOperations(items, tenantId, baseContext) {
           if (!targetState || typeof targetState !== 'string' || targetState.trim().length === 0) {
             throw Object.assign(new Error('targetState is required for transition action'), { code: 'MISSING_TARGET_STATE' });
           }
-          result = await transition(invoiceId.trim(), tenantId, targetState.trim(), reason, context);
+          result = await transition(invoiceId.trim(), tenantId, targetState.trim(), reason, revision, context);
           results.push({ index, success: true, action, result });
           break;
         }

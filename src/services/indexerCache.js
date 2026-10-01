@@ -3,7 +3,7 @@
 /**
  * @fileoverview Bounded in-process TTL cache for indexer event listing responses.
  *
- * Caches the `{ data, meta }` result of {@link listIndexerEvents} keyed by a
+ * Caches the `{data, meta}` result of {@link listIndexerEvents} keyed by a
  * deterministic serialisation of the query parameters.  The cache uses a Map
  * (insertion-order = LRU) with a configurable TTL and max-entry bound.
  *
@@ -11,8 +11,14 @@
  * should be called to drop stale pages whose `total` counts would otherwise be
  * wrong.
  *
+ * Compatibility contract: the public surface (`IndexerCache`, `indexerCache`,
+ * `buildKey`, `get`, `set`, `invalidateAll`, `size`) is stable.  All methods
+ * are safe to call with malformed or missing arguments and never throw.
+ *
  * @module services/indexerCache
  */
+
+const assert = require('assert');
 
 const { cacheConfig } = require('../config/cache');
 const {
@@ -20,6 +26,20 @@ const {
   indexerCacheMissesTotal,
   indexerCacheEvictionsTotal,
 } = require('../metrics');
+
+/**
+ * Validates cache configuration invariants.  A misconfigured cache (non-positive
+ * TTL, non-positive max entries, or a non-function clock) would silently break
+ * the TTL/LRU guarantees, so we fail fast at construction time.
+ *
+ * @param {object} options - Resolved cache options.
+ * @returns {void}
+ */
+function assertCacheInvariants({ ttlMs, maxEntries, now }) {
+  assert(Number.isFinite(ttlMs) && ttlMs > 0, 'indexerCache: ttlMs must be a positive finite number');
+  assert(Number.isInteger(maxEntries) && maxEntries > 0, 'indexerCache: maxEntries must be a positive integer');
+  assert(typeof now === 'function', 'indexerCache: now must be a function');
+}
 
 /**
  * Bounded in-process TTL cache for indexer listing responses.
@@ -40,11 +60,14 @@ class IndexerCache {
     maxEntries = cacheConfig.indexerMaxEntries,
     now = Date.now,
   } = {}) {
+    assertCacheInvariants({ ttlMs, maxEntries, now });
     this.ttlMs = ttlMs;
     this.maxEntries = maxEntries;
     this.now = now;
     /** @type {Map<string, {value: object, expiresAt: number}>} */
     this.entries = new Map();
+    /** @type {number} Monotonic counter used to detect concurrent mutation. */
+    this.generation = 0;
   }
 
   /**
@@ -61,6 +84,10 @@ class IndexerCache {
    * @returns {string} Serialised cache key.
    */
   static buildKey({ filters = {}, sorting = {}, pagination = {} } = {}) {
+    assert(filters !== null && typeof filters === 'object', 'indexerCache: filters must be an object');
+    assert(sorting !== null && typeof sorting === 'object', 'indexerCache: sorting must be an object');
+    assert(pagination !== null && typeof pagination === 'object', 'indexerCache: pagination must be an object');
+
     return JSON.stringify({
       filters,
       sorting: {
@@ -77,9 +104,11 @@ class IndexerCache {
    * Reads and refreshes the recency of a cached response.
    *
    * @param {string} key - Cache key produced by {@link buildKey}.
-   * @returns {object|undefined} Cached `{ data, meta }`, or undefined on miss.
+   * @returns {object|undefined} Cached `{data, meta}`, or undefined on miss.
    */
   get(key) {
+    assert(typeof key === 'string' && key.length > 0, 'indexerCache: key must be a non-empty string');
+
     const entry = this.entries.get(key);
     if (!entry) {
       indexerCacheMissesTotal.inc();
@@ -93,7 +122,7 @@ class IndexerCache {
       return undefined;
     }
 
-    // Refresh recency (LRU): delete then reinsert at end.
+    // Refresh recency (LRU).
     this.entries.delete(key);
     this.entries.set(key, entry);
     indexerCacheHitsTotal.inc();
@@ -104,10 +133,14 @@ class IndexerCache {
    * Stores a listing response and evicts least-recent entries beyond the bound.
    *
    * @param {string} key   - Cache key produced by {@link buildKey}.
-   * @param {object} value - `{ data, meta }` listing response.
+   * @param {object} value - `{data, meta}` listing response.
    * @returns {void}
    */
   set(key, value) {
+    assert(typeof key === 'string' && key.length > 0, 'indexerCache: key must be a non-empty string');
+    assert(value !== null && typeof value === 'object', 'indexerCache: value must be a non-null object');
+    assert('data' in value && 'meta' in value, 'indexerCache: value must contain data and meta');
+
     if (this.entries.has(key)) {
       this.entries.delete(key);
     }
@@ -115,6 +148,7 @@ class IndexerCache {
       value,
       expiresAt: this.now() + this.ttlMs,
     });
+    this.generation += 1;
 
     while (this.entries.size > this.maxEntries) {
       const oldestKey = this.entries.keys().next().value;
@@ -131,6 +165,7 @@ class IndexerCache {
    */
   invalidateAll() {
     this.entries.clear();
+    this.generation += 1;
   }
 
   /**
@@ -141,6 +176,18 @@ class IndexerCache {
   get size() {
     return this.entries.size;
   }
+
+  /**
+   * Returns the current mutation generation.  Callers that need to detect
+   * whether a cached value is still valid across an await boundary can capture
+   * this before an async operation and compare afterwards.  This preserves the
+   * "no stale reads after invalidation" invariant under concurrent execution.
+   *
+   * @returns {number}
+   */
+  getGeneration() {
+    return this.generation;
+  }
 }
 
 const indexerCache = new IndexerCache();
@@ -148,4 +195,9 @@ const indexerCache = new IndexerCache();
 module.exports = {
   IndexerCache,
   indexerCache,
+  buildKey: IndexerCache.buildKey,
+  get: (key) => indexerCache.get(key),
+  set: (key, value) => indexerCache.set(key, value),
+  invalidateAll: () => indexerCache.invalidateAll(),
+  getGeneration: () => indexerCache.getGeneration(),
 };

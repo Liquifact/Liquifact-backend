@@ -81,6 +81,10 @@ const scopesSchema = z
   .refine(
     (scopes) => scopes.every((s) => VALID_SCOPES.includes(s)),
     { message: `scopes must only contain: ${VALID_SCOPES.join(', ')}` }
+  )
+  .refine(
+    (scopes) => new Set(scopes).size === scopes.length,
+    { message: 'scopes array must not contain duplicates' }
   );
 
 // ── Shared lifecycle schemas ──────────────────────────────────────────────────

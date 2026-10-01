@@ -12,6 +12,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  contracts:
+    name: Soroban contract compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          targets: wasm32v1-none
+
+      - name: Build deployable contract
+        run: cargo build --locked --manifest-path contracts/Cargo.toml --release --target wasm32v1-none
+
+      - name: Run contract and compiled Wasm compatibility tests
+        run: cargo test --locked --manifest-path contracts/Cargo.toml --features wasm-tests
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -92,3 +110,38 @@ jobs:
       - name: Build Check
         # Fast fail if the main entry point is syntactically invalid.
         run: node --check src/index.js
+
+  contract:
+    name: Contract (Soroban)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contracts/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('contracts/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --locked

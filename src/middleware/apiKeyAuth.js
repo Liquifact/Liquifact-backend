@@ -16,7 +16,7 @@
  */
 
 const crypto = require('crypto');
-const { loadApiKeyRegistry } = require('../config/apiKeys');
+const { tryLoadApiKeyRegistry } = require('../config/apiKeys');
 const logger = require('../logger');
 const metrics = require('../metrics');
 
@@ -158,7 +158,28 @@ function authenticateApiKey(options = {}) {
       });
     }
 
-    const registry = loadApiKeyRegistry(env);
+    // A malformed `API_KEYS` value must never be able to silently authenticate
+    // anybody, so the resilient loader is used with the fail-closed default and
+    // its typed error is rethrown: the request fails as a server error (500)
+    // and the existing outcome/error-cause classification keeps working, while
+    // `tryLoadApiKeyRegistry` has already emitted the structured, key-material
+    // free log line describing the failure.
+    const { ok, registry, error, errorCode, attempts } = tryLoadApiKeyRegistry(env);
+    if (!ok) {
+      logger.error(
+        {
+          event: 'api_key.auth',
+          outcome: 'registry_unavailable',
+          error_code: errorCode,
+          attempts,
+          ip: req.ip,
+          path: req.path,
+        },
+        'API key registry unavailable; request rejected'
+      );
+      throw error;
+    }
+
     const entry = findEntry(registry, rawKey.trim());
 
     if (!entry) {

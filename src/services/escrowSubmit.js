@@ -40,6 +40,7 @@ const { Server } = require('@stellar/stellar-sdk/rpc');
 const logger = require('../logger');
 const { escrowPreflightRejectedTotal } = require('../metrics');
 const { validateAmountStroops } = require('./investorCommitment');
+const { KYC_WEBHOOK_VALIDATION } = require('../constants/kycWebhooks');
 
 const SIGNING_MODE = {
   DELEGATED: 'delegated',
@@ -47,7 +48,9 @@ const SIGNING_MODE = {
   STUBBED: 'stubbed',
 };
 
-const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{8,128}$/;
+// Keep the established public export while sourcing the shared key boundary centrally.
+// eslint-disable-next-line security/detect-non-literal-regexp
+const IDEMPOTENCY_KEY_PATTERN = new RegExp(KYC_WEBHOOK_VALIDATION.IDEMPOTENCY_KEY_PATTERN);
 
 /**
  * @typedef {Object} EscrowSubmitResult

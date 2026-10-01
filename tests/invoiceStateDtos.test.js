@@ -24,6 +24,10 @@ const {
   mapApproveRequest,
   mapLinkEscrowRequest,
   mapRejectRequest,
+  validateTransitionRequest,
+  validateApproveRequest,
+  validateLinkEscrowRequest,
+  validateRejectRequest,
   toInvoiceStateResponse,
   toTransitionResponse,
   toLinkEscrowResponse,
@@ -620,5 +624,320 @@ describe('Mapper determinism', () => {
         escrowId: 'esc-1',
       }),
     ).not.toThrow();
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  Validation wrappers — enforce input boundaries at DTO layer       */
+/* ------------------------------------------------------------------ */
+describe('Validation wrappers', () => {
+  describe('validateTransitionRequest', () => {
+    it('accepts valid transition body with targetState and reason', () => {
+      const result = validateTransitionRequest({
+        targetState: 'approved',
+        reason: 'Valid transition',
+        revision: 1,
+      });
+      expect(result.success).toBe(true);
+      expect(result.data.targetState).toBe('approved');
+      expect(result.data.reason).toBe('Valid transition');
+      expect(result.data.revision).toBe(1);
+    });
+
+    it('rejects missing targetState with MISSING_TARGET_STATE', () => {
+      const result = validateTransitionRequest({ reason: 'No target' });
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors.targetState).toBe('MISSING_TARGET_STATE');
+    });
+
+    it('rejects invalid targetState with INVALID_TARGET_STATE', () => {
+      const result = validateTransitionRequest({ targetState: 'invalid_state' });
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors.targetState).toBe('INVALID_TARGET_STATE');
+    });
+
+    it('rejects reason exceeding max length', () => {
+      const longReason = 'x'.repeat(1025);
+      const result = validateTransitionRequest({
+        targetState: 'approved',
+        reason: longReason,
+      });
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors.reason).toBe('TRANSITION_REASON_TOO_LONG');
+    });
+
+    it('rejects negative revision with INVALID_REVISION', () => {
+      const result = validateTransitionRequest({
+        targetState: 'approved',
+        revision: -1,
+      });
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors.revision).toBe('INVALID_REVISION');
+    });
+
+    it('rejects unrecognized fields with UNRECOGNIZED_FIELD', () => {
+      const result = validateTransitionRequest({
+        targetState: 'approved',
+        unexpectedField: 'value',
+      });
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors.unexpectedField).toBe('UNRECOGNIZED_FIELD');
+    });
+
+    it('rejects null body with INVALID_BODY_TYPE', () => {
+      const result = validateTransitionRequest(null);
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors._root).toBe('INVALID_BODY_TYPE');
+    });
+
+    it('rejects array body with INVALID_BODY_TYPE', () => {
+      const result = validateTransitionRequest([1, 2, 3]);
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors._root).toBe('INVALID_BODY_TYPE');
+    });
+
+    it('rejects undefined body with MISSING_BODY', () => {
+      const result = validateTransitionRequest(undefined);
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors._root).toBe('MISSING_BODY');
+    });
+
+    it('catches prototype pollution attempts', () => {
+      const result = validateTransitionRequest({
+        targetState: 'approved',
+        __proto__: { polluted: true },
+        constructor: 'oops',
+      });
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors.__proto__).toBe('UNRECOGNIZED_FIELD');
+      expect(result.fieldErrors.constructor).toBe('UNRECOGNIZED_FIELD');
+    });
+  });
+
+  describe('validateApproveRequest', () => {
+    it('accepts valid approve body with reason', () => {
+      const result = validateApproveRequest({ reason: 'Approved' });
+      expect(result.success).toBe(true);
+      expect(result.data.reason).toBe('Approved');
+    });
+
+    it('accepts approve body without reason', () => {
+      const result = validateApproveRequest({});
+      expect(result.success).toBe(true);
+      expect(result.data.reason).toBeUndefined();
+    });
+
+    it('rejects reason exceeding max length', () => {
+      const longReason = 'x'.repeat(1025);
+      const result = validateApproveRequest({ reason: longReason });
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors.reason).toBe('TRANSITION_REASON_TOO_LONG');
+    });
+
+    it('rejects non-string reason with INVALID_REASON_TYPE', () => {
+      const result = validateApproveRequest({ reason: 123 });
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors.reason).toBe('INVALID_REASON_TYPE');
+    });
+
+    it('rejects unrecognized fields with UNRECOGNIZED_FIELD', () => {
+      const result = validateApproveRequest({ reason: 'ok', extra: 'field' });
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors.extra).toBe('UNRECOGNIZED_FIELD');
+    });
+
+    it('rejects null body with INVALID_BODY_TYPE', () => {
+      const result = validateApproveRequest(null);
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors._root).toBe('INVALID_BODY_TYPE');
+    });
+
+    it('rejects undefined body with MISSING_BODY', () => {
+      const result = validateApproveRequest(undefined);
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors._root).toBe('MISSING_BODY');
+    });
+  });
+
+  describe('validateLinkEscrowRequest', () => {
+    it('accepts valid link-escrow body with escrowId and reason', () => {
+      const result = validateLinkEscrowRequest({
+        escrowId: 'esc-123',
+        reason: 'Linked',
+      });
+      expect(result.success).toBe(true);
+      expect(result.data.escrowId).toBe('esc-123');
+      expect(result.data.reason).toBe('Linked');
+    });
+
+    it('accepts link-escrow body with null escrowId', () => {
+      const result = validateLinkEscrowRequest({ escrowId: null, reason: 'No escrow' });
+      expect(result.success).toBe(true);
+      expect(result.data.escrowId).toBeNull();
+    });
+
+    it('accepts link-escrow body without escrowId (defaults to null)', () => {
+      const result = validateLinkEscrowRequest({ reason: 'Pending' });
+      expect(result.success).toBe(true);
+      expect(result.data.escrowId).toBeNull();
+    });
+
+    it('rejects non-string escrowId with INVALID_ESCROW_ID_TYPE', () => {
+      const result = validateLinkEscrowRequest({ escrowId: 123 });
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors.escrowId).toBe('INVALID_ESCROW_ID_TYPE');
+    });
+
+    it('rejects reason exceeding max length', () => {
+      const longReason = 'x'.repeat(1025);
+      const result = validateLinkEscrowRequest({ escrowId: 'esc-1', reason: longReason });
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors.reason).toBe('TRANSITION_REASON_TOO_LONG');
+    });
+
+    it('rejects unrecognized fields with UNRECOGNIZED_FIELD', () => {
+      const result = validateLinkEscrowRequest({ escrowId: 'esc-1', extra: 'field' });
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors.extra).toBe('UNRECOGNIZED_FIELD');
+    });
+
+    it('rejects null body with INVALID_BODY_TYPE', () => {
+      const result = validateLinkEscrowRequest(null);
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors._root).toBe('INVALID_BODY_TYPE');
+    });
+
+    it('rejects undefined body with MISSING_BODY', () => {
+      const result = validateLinkEscrowRequest(undefined);
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors._root).toBe('MISSING_BODY');
+    });
+  });
+
+  describe('validateRejectRequest', () => {
+    it('accepts valid reject body with reason', () => {
+      const result = validateRejectRequest({ reason: 'Invalid documents' });
+      expect(result.success).toBe(true);
+      expect(result.data.reason).toBe('Invalid documents');
+    });
+
+    it('rejects missing reason with MISSING_TRANSITION_REASON', () => {
+      const result = validateRejectRequest({});
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors.reason).toBe('MISSING_TRANSITION_REASON');
+    });
+
+    it('rejects empty string reason with MISSING_TRANSITION_REASON', () => {
+      const result = validateRejectRequest({ reason: '   ' });
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors.reason).toBe('MISSING_TRANSITION_REASON');
+    });
+
+    it('rejects non-string reason with INVALID_REASON_TYPE', () => {
+      const result = validateRejectRequest({ reason: 123 });
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors.reason).toBe('INVALID_REASON_TYPE');
+    });
+
+    it('rejects reason exceeding max length', () => {
+      const longReason = 'x'.repeat(1025);
+      const result = validateRejectRequest({ reason: longReason });
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors.reason).toBe('TRANSITION_REASON_TOO_LONG');
+    });
+
+    it('rejects unrecognized fields with UNRECOGNIZED_FIELD', () => {
+      const result = validateRejectRequest({ reason: 'Bad', extra: 'field' });
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors.extra).toBe('UNRECOGNIZED_FIELD');
+    });
+
+    it('rejects null body with INVALID_BODY_TYPE', () => {
+      const result = validateRejectRequest(null);
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors._root).toBe('INVALID_BODY_TYPE');
+    });
+
+    it('rejects undefined body with MISSING_BODY', () => {
+      const result = validateRejectRequest(undefined);
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors._root).toBe('MISSING_BODY');
+    });
+  });
+
+  describe('Boundary case handling', () => {
+    it('handles reason at exact max length boundary', () => {
+      const { MAX_TRANSITION_REASON_LENGTH } = require('../src/schemas/invoiceState');
+      const exactLengthReason = 'x'.repeat(MAX_TRANSITION_REASON_LENGTH);
+      
+      const approveResult = validateApproveRequest({ reason: exactLengthReason });
+      expect(approveResult.success).toBe(true);
+      
+      const rejectResult = validateRejectRequest({ reason: exactLengthReason });
+      expect(rejectResult.success).toBe(true);
+    });
+
+    it('handles reason one character over max length', () => {
+      const { MAX_TRANSITION_REASON_LENGTH } = require('../src/schemas/invoiceState');
+      const tooLongReason = 'x'.repeat(MAX_TRANSITION_REASON_LENGTH + 1);
+      
+      const approveResult = validateApproveRequest({ reason: tooLongReason });
+      expect(approveResult.success).toBe(false);
+      expect(approveResult.fieldErrors.reason).toBe('TRANSITION_REASON_TOO_LONG');
+    });
+
+    it('handles empty string reason for optional fields', () => {
+      const approveResult = validateApproveRequest({ reason: '' });
+      expect(approveResult.success).toBe(true);
+      expect(approveResult.data.reason).toBe('');
+    });
+
+    it('handles whitespace-only reason for optional fields', () => {
+      const approveResult = validateApproveRequest({ reason: '   ' });
+      expect(approveResult.success).toBe(true);
+      expect(approveResult.data.reason).toBe('   ');
+    });
+
+    it('handles zero revision value', () => {
+      const result = validateTransitionRequest({
+        targetState: 'approved',
+        revision: 0,
+      });
+      expect(result.success).toBe(true);
+      expect(result.data.revision).toBe(0);
+    });
+
+    it('handles large positive revision value', () => {
+      const result = validateTransitionRequest({
+        targetState: 'approved',
+        revision: 999999,
+      });
+      expect(result.success).toBe(true);
+      expect(result.data.revision).toBe(999999);
+    });
+  });
+
+  describe('Deterministic error codes', () => {
+    it('returns consistent error codes for duplicate validation failures', () => {
+      const body1 = { targetState: 'invalid' };
+      const body2 = { targetState: 'invalid' };
+      
+      const result1 = validateTransitionRequest(body1);
+      const result2 = validateTransitionRequest(body2);
+      
+      expect(result1.fieldErrors.targetState).toBe(result2.fieldErrors.targetState);
+    });
+
+    it('accumulates multiple field errors in a single validation pass', () => {
+      const result = validateApproveRequest({
+        reason: 123,
+        extra1: 'field1',
+        extra2: 'field2',
+      });
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors.reason).toBe('INVALID_REASON_TYPE');
+      expect(result.fieldErrors.extra1).toBe('UNRECOGNIZED_FIELD');
+      expect(result.fieldErrors.extra2).toBe('UNRECOGNIZED_FIELD');
+    });
   });
 });

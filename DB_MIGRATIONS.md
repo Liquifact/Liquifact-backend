@@ -32,6 +32,7 @@ Key components
 | `20260601000001_create_investor_commitments.js` | JS | **node-pg-migrate** | Investor commitments |
 | `20260602000000_create_webhook_dead_letters.sql` | SQL | **node-pg-migrate** | Dead‑letter queue for webhooks |
 | `20260625000000_create_background_jobs.sql` | SQL | **node-pg-migrate** | Durable backing for job queue (opt-in via `JOB_QUEUE_PERSISTENCE_ENABLED`) |
+| `20260425_add_kyc_status.js` | JS | **node-pg-migrate** | Adds `kyc_status` column to users; validated by `src/db/migrations/20260425_add_kyc_status.js` |
 
 **Authoritative scripts**
 - `npm run db:setup` → runs `node-pg-migrate up` (same as `db:migrate`).
@@ -170,6 +171,106 @@ Important guidance
 - Do not modify `db.sqlite3` to propagate schema changes. Instead author migrations and run them against Postgres; if local dev requires a refreshed SQLite, re-create it from migrations but treat Postgres as the source of truth.
 - Prefer SQL or `node-pg-migrate` JS migrations over legacy `knex` JS files.
 - Keep migrations idempotent and reversible (`down` migration) where possible.
+
+KYC status migration validation boundaries
+------------------------------------------
+
+`src/db/migrations/20260425_add_kyc_status.js` adds a `kyc_status` column to
+the `users` table. Because this column drives authorization and compliance
+decisions, the migration and any code that writes to it MUST enforce the
+following validation boundaries. These invariants are part of the schema
+contract and must not be weakened to make tests pass.
+
+Accepted values (canonical enum)
+
+- `'unverified'` — default for new users; no KYC evidence on file.
+- `'pending'` — KYC submission received, awaiting review.
+- `'verified'` — KYC approved; user may access KYC-gated features.
+- `'rejected'` — KYC denied; user must resubmit to change state.
+
+Rejected values
+
+- Any value not in the canonical enum above (including `NULL`, empty string,
+  mixed case such as `'Verified'`, and whitespace-padded values).
+- Non-string types (numbers, booleans, objects, arrays).
+- Values longer than 32 characters (defence-in-depth against oversized input).
+
+State-transition invariants
+
+- The column is `NOT NULL` with `DEFAULT 'unverified'`; existing rows are
+  backfilled to `'unverified'` before the constraint is applied.
+- `'verified'` and `'rejected'` are terminal for a given KYC submission; a
+  subsequent submission transitions back to `'pending'` via an explicit
+  update, never by overwriting a terminal state in place.
+- Writes MUST be idempotent: re-applying the same status to the same row is a
+  no-op and MUST NOT emit a state-change event.
+
+Concurrency and failure handling
+
+- The migration runs inside a single transaction; on any failure it rolls
+  back so the `users` table is never left with a partially-applied column.
+- The `up` migration is safe to re-run: it checks for the column's existence
+  before adding it, and the `CHECK` constraint is added with a guard so a
+  duplicate constraint error cannot abort the transaction.
+- The `down` migration drops the constraint before the column, and is safe to
+  run when the column is already absent.
+
+Observability
+
+- Rejections raise a typed validation error that includes the offending
+  column and a redacted value (never the raw PII payload) so failures are
+  diagnosable without leaking sensitive data.
+- Successful transitions emit a structured log line with `userId`,
+  `fromStatus`, and `toStatus`; no KYC document contents are logged.
+
+Tests for this migration live alongside it and cover accepted input, rejected
+input, duplicate submissions (idempotency), boundary values (empty string,
+32-character limit, mixed case), and rollback behaviour.
+
+Validation error contract
+-------------------------
+
+Rejections from the KYC status validator MUST raise a typed error rather than
+throwing a bare `Error` or returning a falsy value. The error shape is:
+
+- `name: 'KycStatusValidationError'`
+- `column: 'kyc_status'`
+- `reason: 'invalid_enum' | 'invalid_type' | 'too_long' | 'null_value'`
+- `redactedValue` — a short, non-PII descriptor of the offending input
+  (for example `'<string:len=9>'` or `'<number>'`). The raw value MUST NOT
+  be included, because `kyc_status` writes may be triggered by request
+  payloads that also carry KYC document contents.
+
+Callers that need to distinguish validation failures from infrastructure
+failures should branch on `err.name === 'KycStatusValidationError'` rather
+than on message text, so log-scraping and alerting remain stable.
+
+Idempotency and event emission
+------------------------------
+
+Re-applying the current `kyc_status` to the same row is a no-op:
+
+- The UPDATE must be guarded by `WHERE id = $1 AND kyc_status IS DISTINCT FROM $2`
+  so that a duplicate submission does not bump `updated_at`.
+- No state-change event (audit log row, webhook, or metric increment) is
+  emitted when `fromStatus === toStatus`.
+- A successful transition emits exactly one structured log line containing
+  `userId`, `fromStatus`, and `toStatus`. KYC document contents, filenames,
+  and reviewer notes MUST NOT appear in this log line.
+
+Test coverage map
+-----------------
+
+| Scenario | Expected outcome |
+|----------|------------------|
+| `'unverified'`, `'pending'`, `'verified'`, `'rejected'` | accepted |
+| `NULL`, `''`, `'Verified'`, `' verified'`, `'verified '` | rejected (`invalid_enum` / `null_value`) |
+| `42`, `true`, `{}`, `[]` | rejected (`invalid_type`) |
+| 32-character string not in enum | rejected (`invalid_enum`) |
+| 33-character string | rejected (`too_long`) |
+| Same status written twice | second write is a no-op, no event |
+| `up` re-run after success | no-op, no duplicate-constraint error |
+| `down` when column already absent | no-op, no error |
 
 FAQ
 ---

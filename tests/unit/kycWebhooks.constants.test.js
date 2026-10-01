@@ -6,6 +6,7 @@ const {
   KYC_WEBHOOK_ROUTES,
   KYC_WEBHOOK_EVENTS,
   KYC_STATUSES,
+  KYC_WEBHOOK_VALIDATION,
   KYC_WEBHOOK_ERROR_CODES,
   KYC_WEBHOOK_MESSAGES,
   KYC_WEBHOOK_DB,
@@ -21,6 +22,7 @@ describe('src/constants/kycWebhooks.js', () => {
     expect(KYC_WEBHOOK_ROUTES).toBeDefined();
     expect(KYC_WEBHOOK_EVENTS).toBeDefined();
     expect(KYC_STATUSES).toBeDefined();
+    expect(KYC_WEBHOOK_VALIDATION).toBeDefined();
     expect(KYC_WEBHOOK_ERROR_CODES).toBeDefined();
     expect(KYC_WEBHOOK_MESSAGES).toBeDefined();
     expect(KYC_WEBHOOK_DB).toBeDefined();
@@ -35,6 +37,10 @@ describe('src/constants/kycWebhooks.js', () => {
     expect(Object.isFrozen(KYC_WEBHOOK_ROUTES)).toBe(true);
     expect(Object.isFrozen(KYC_WEBHOOK_EVENTS)).toBe(true);
     expect(Object.isFrozen(KYC_STATUSES)).toBe(true);
+    expect(Object.isFrozen(KYC_WEBHOOK_VALIDATION)).toBe(true);
+    expect(Object.isFrozen(KYC_WEBHOOK_VALIDATION.ALLOWED_EVENTS)).toBe(true);
+    expect(typeof KYC_WEBHOOK_VALIDATION.SME_ID_PATTERN).toBe('string');
+    expect(typeof KYC_WEBHOOK_VALIDATION.IDEMPOTENCY_KEY_PATTERN).toBe('string');
     expect(Object.isFrozen(KYC_WEBHOOK_ERROR_CODES)).toBe(true);
     expect(Object.isFrozen(KYC_WEBHOOK_MESSAGES)).toBe(true);
     expect(Object.isFrozen(KYC_WEBHOOK_DB)).toBe(true);
@@ -70,7 +76,34 @@ describe('src/constants/kycWebhooks.js', () => {
     expect(KYC_WEBHOOK_DB.JOB_TYPE_DELIVERY).toBe('kyc_webhook_delivery');
     expect(KYC_WEBHOOK_PAGINATION.MAX_LIMIT).toBe(100);
     expect(KYC_WEBHOOK_PAGINATION.DEFAULT_LIMIT).toBe(20);
+    expect(KYC_WEBHOOK_PAGINATION.MIN_LIMIT).toBe(1);
+    expect(KYC_WEBHOOK_PAGINATION.MIN_OFFSET).toBe(0);
+    expect(KYC_WEBHOOK_PAGINATION.MAX_OFFSET).toBe(Number.MAX_SAFE_INTEGER);
     expect(KYC_WEBHOOK_PAGINATION.SORT_FIELD).toBe('updated_at');
     expect(KYC_WEBHOOK_METRICS.STATUS_CLASS_2XX).toBe('2xx');
+  });
+
+  it('defines explicit payload, idempotency, and request-size boundaries', () => {
+    expect(KYC_WEBHOOK_VALIDATION).toMatchObject({
+      SME_ID_MIN_LENGTH: 1,
+      SME_ID_MAX_LENGTH: 128,
+      STATUS_MIN_LENGTH: 1,
+      STATUS_MAX_LENGTH: 50,
+      RECORD_ID_MAX_LENGTH: 255,
+      IDEMPOTENCY_KEY_MIN_LENGTH: 8,
+      IDEMPOTENCY_KEY_MAX_LENGTH: 128,
+      MAX_PAYLOAD_BYTES: 102_400,
+    });
+    expect(KYC_WEBHOOK_VALIDATION.ALLOWED_EVENTS).toEqual([
+      'kyc.verified',
+      'kyc.rejected',
+      'kyc.exempted',
+      'kyc.pending',
+      'kyc_status_updated',
+      'kyc.status_changed',
+    ]);
+    const idempotencyPattern = new RegExp(KYC_WEBHOOK_VALIDATION.IDEMPOTENCY_KEY_PATTERN);
+    expect(idempotencyPattern.test('12345678')).toBe(true);
+    expect(idempotencyPattern.test('bad key!')).toBe(false);
   });
 });

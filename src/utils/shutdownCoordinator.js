@@ -143,8 +143,13 @@ async function executeShutdown(reason) {
       logger.info('[shutdown] Phase 3: No background worker registered.');
     }
 
-    // Phase 4: Close Knex pool
-    if (db && typeof db.destroy === 'function') {
+    // Phase 4: Close Knex pool — use destroyOnce() when available so that
+    // concurrent SIGTERM + SIGINT sequences never trigger a double-destroy.
+    if (db && typeof db.destroyOnce === 'function') {
+      logger.info('[shutdown] Phase 4: Closing Knex database connection pool (idempotent)...');
+      await db.destroyOnce();
+      logger.info('[shutdown] Knex database connection pool closed successfully.');
+    } else if (db && typeof db.destroy === 'function') {
       logger.info('[shutdown] Phase 4: Closing Knex database connection pool...');
       await db.destroy();
       logger.info('[shutdown] Knex database connection pool closed successfully.');

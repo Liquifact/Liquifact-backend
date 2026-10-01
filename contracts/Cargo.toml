@@ -6,11 +6,20 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Build the release Wasm before enabling this runtime compatibility smoke test.
+wasm-tests = []
+
 [dependencies]
-soroban-sdk = { version = "21.0.0", features = ["alloc"] }
+# SDK 21's alloc feature imports std on Wasm. This contract uses only SDK
+# host-backed values, so keep its guest no_std for the supported Wasm target.
+soroban-sdk = { version = "21.0.0" }
 
 [dev-dependencies]
 soroban-sdk = { version = "21.0.0", features = ["testutils"] }
+
+[features]
+default = []
 
 [profile.release]
 opt-level = "z"

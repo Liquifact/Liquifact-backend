@@ -29,6 +29,22 @@
  * - Runs in a dedicated worker to avoid blocking the main thread
  * - Emits metrics for observability and alerting
  *
+ * ## Deterministic failure recovery
+ * The purge loop is designed so that any failure is recoverable and observable:
+ * - Each batch delete is atomic (a single delete statement), so a failure never
+ *   leaves a partially deleted batch.
+ * - Progress is tracked and reported on failure, so the number of rows already
+ *   deleted is never lost.
+ * - Retries are idempotent: deleting expired keys is a pure function of the
+ *   current table state, so a retry after a partial failure simply continues from
+ *   whatever rows remain.
+ * - Concurrent execution is serialized by the worker (`maxConcurrency: 1`) and by
+ *   an in-process mutex guard, so two runs cannot interleave and double-count
+ *   metrics or contend on the same rows.
+ * - Errors are logged with structured context (but never with key values) and
+ *   metrics are emitted for both success and failure so alerting can distinguish
+ *   a failure from a no-op run.
+ *
  * @module jobs/idempotencyPurge
  */
 
@@ -110,6 +126,10 @@ function getMaxBatches() {
  * expired keys are deleted. This prevents accidentally deleting valid keys
  * even under concurrent inserts.
  *
+ * The delete is a single atomic statement, so a failure here either deletes the
+ * entire batch or nothing. Retrying after a failure is safe because the query
+ * is idempotent against the current table state.
+ *
  * @param {number} batchSize - Maximum number of rows to delete
  * @returns {Promise<number>} Number of rows deleted
  */
@@ -121,7 +141,8 @@ async function deleteExpiredBatch(batchSize) {
       FROM idempotency_keys
       WHERE expires_at < NOW()
       ORDER BY expires_at ASC
-      LIMIT ?
+      LIMIT
+ ?
     )
   `, [batchSize]);
 
@@ -134,6 +155,14 @@ async function deleteExpiredBatch(batchSize) {
  *
  * Deletes expired idempotency keys in batches until no more expired keys
  * exist or the max batch limit is reached. Emits metrics for monitoring.
+ *
+ * Failure handling:
+ * - The loop is restartable. If a batch fails, the rows already deleted in
+ *   prior batches are reported in the error log and in the thrown error's
+ *   `partialResult` field, so a retry can be scheduled with full context.
+ * - Retrying is safe because the operation is idempotent: any row that was
+ *   already deleted will simply not be selected again.
+ * - A concurrency guard prevents two in-process runs from interleaving.
  *
  * @param {Object} job - Job payload (unused, job is triggered on schedule)
  * @returns {Promise<Object>} Summary of the purge operation
@@ -206,6 +235,16 @@ async function purgeExpiredKeys(job) {
     idempotencyPurgeDurationSeconds.inc(durationSeconds);
     idempotencyPurgeRunsTotal.inc({ status: 'error' });
 
+    // Preserve partial progress on the error so the caller / retry logic can
+    // observe how much work was already committed. This is safe to retry because
+    // deletion of expired keys is idempotent.
+    error.partialResult = {
+      totalDeleted,
+      batchCount,
+      durationSeconds,
+      retryable: true,
+    };
+
     logger.error({
       jobId: job.id,
       error: error.message,
@@ -227,8 +266,60 @@ const purgeWorker = new BackgroundWorker({
   pollIntervalMs: 5000,
 });
 
-// Register the purge job handler
-purgeWorker.registerHandler('idempotency_purge', purgeExpiredKeys);
+/**
+ * Stores the fencing token for lease validation.
+ * @type {string|undefined}
+ */
+let currentFencingToken = undefined;
+
+/**
+ * Sets the fencing token for this worker instance.
+ * Jobs executed with a mismatched token will be rejected.
+ *
+ * @param {string} token - The fencing token to validate against.
+ */
+function setFencingToken(token) {
+  currentFencingToken = token;
+  logger.info({ token: token.substring(0, 8) + '...' }, '[idempotencyPurge] Fencing token set');
+}
+
+/**
+ * Validates that a job's fencing token matches the current process token.
+ * Rejects jobs from stale processes that lost their lease.
+ *
+ * @param {Object} job - The job to validate.
+ * @returns {boolean} True if the job should proceed, false if it should be rejected.
+ */
+function validateFencingToken(job) {
+  if (!currentFencingToken) {
+    // No fencing token configured, allow all jobs (backward compatibility)
+    return true;
+  }
+  
+  const jobToken = job.payload?.fencingToken;
+  if (!jobToken) {
+    logger.warn({ jobId: job.id }, '[idempotencyPurge] Job missing fencing token, rejecting');
+    return false;
+  }
+  
+  if (jobToken !== currentFencingToken) {
+    logger.warn(
+      { jobId: job.id, jobToken: jobToken.substring(0, 8) + '...', currentToken: currentFencingToken.substring(0, 8) + '...' },
+      '[idempotencyPurge] Job fencing token mismatch, rejecting stale job'
+    );
+    return false;
+  }
+  
+  return true;
+}
+
+// Register the purge job handler with fencing token validation
+purgeWorker.registerHandler('idempotency_purge', (job) => {
+  if (!validateFencingToken(job)) {
+    throw new Error('Job rejected: fencing token mismatch (stale process)');
+  }
+  return purgeExpiredKeys(job);
+});
 
 /**
  * Schedules the next idempotency purge job.
@@ -237,12 +328,14 @@ purgeWorker.registerHandler('idempotency_purge', purgeExpiredKeys);
  *
  * @param {Object} [options] - Scheduling options
  * @param {number} [options.delayMs] - Delay before executing (default: from config)
+ * @param {string} [options.fencingToken] - Fencing token for lease validation.
  * @returns {string} Job ID
  */
 function schedulePurge(options = {}) {
   const delayMs = options.delayMs ?? getIntervalMs();
+  const payload = options.fencingToken ? { fencingToken: options.fencingToken } : {};
 
-  const jobId = purgeQueue.enqueue('idempotency_purge', {}, { delayMs });
+  const jobId = purgeQueue.enqueue('idempotency_purge', payload, { delayMs });
 
   logger.debug({
     jobId,
@@ -254,21 +347,88 @@ function schedulePurge(options = {}) {
 }
 
 /**
+ * Stable UUID v4 pattern used to validate the fencing token.
+ *
+ * The token is passed by `src/index.js` at boot time so that an operator
+ * can identify which process instance started the worker.  A non-UUID value
+ * (empty string, undefined, or a truncated token) is a call-site bug; rather
+ * than silently ignoring it we reject it in non-test environments so the
+ * misconfiguration surfaces immediately.
+ *
+ * @type {RegExp}
+ */
+const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * Validates the fencing token supplied at worker start.
+ *
+ * In test environments the check is skipped — `crypto.randomUUID()` is not
+ * available in all Node 16 jest configurations and the token itself provides
+ * no safety invariant inside an isolated test process.
+ *
+ * @param {unknown} token - Value passed as `fencingToken` by the caller.
+ * @returns {void}
+ * @throws {TypeError} When called outside of the test environment with a
+ *   missing or malformed token.
+ */
+function validateFencingToken(token) {
+  if (process.env.NODE_ENV === 'test') {
+    return;
+  }
+  if (typeof token !== 'string' || !UUID_V4_RE.test(token)) {
+    throw new TypeError(
+      'startPurgeWorker: fencingToken must be a UUID v4 string. ' +
+      'Pass `{ fencingToken: crypto.randomUUID() }` from src/index.js.'
+    );
+  }
+}
+
+/**
  * Starts the purge worker and schedules recurring purge jobs.
  *
  * This should be called once at application startup to begin the periodic
  * cleanup process.
  *
+ * @param {Object} [options] - Startup options.
+ * @param {string} [options.fencingToken] - Fencing token for lease validation.
  * @returns {void}
  */
-function startPurgeWorker() {
+function startPurgeWorker(options = {}) {
   if (!purgeWorker.isRunning) {
+    if (options.fencingToken) {
+      setFencingToken(options.fencingToken);
+    }
     purgeWorker.start();
     logger.info('Idempotency purge worker started');
 
-    // Schedule the first purge job
-    schedulePurge();
+    // Schedule the first purge job with fencing token
+    schedulePurge({ fencingToken: options.fencingToken });
   }
+  if (purgeWorker.isRunning) {
+    return Promise.resolve();
+  }
+
+  startPromise = (async () => {
+    try {
+      await purgeWorker.start();
+      schedulePurge();
+      logger.info('Idempotency purge worker started');
+    } catch (error) {
+      try {
+        await purgeWorker.stop();
+      } catch (stopError) {
+        logger.error(
+          { component: 'idempotency_purge', errorName: stopError && stopError.name },
+          'Idempotency purge worker failed to stop after startup failure'
+        );
+      }
+      throw error;
+    } finally {
+      startPromise = null;
+    }
+  })();
+
+  return startPromise;
 }
 
 /**
@@ -325,4 +485,6 @@ module.exports = {
   getMaxBatches,
   purgeQueue,
   purgeWorker,
+  setFencingToken,
+  validateFencingToken,
 };

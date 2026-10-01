@@ -304,9 +304,11 @@ function parseValidationErrors(zodError) {
  * otherwise hide *which* field was rejected).
  *
  * @param {z.ZodError} zodError
+ * @param {unknown} [payload] - The original, unparsed payload. Lets the code
+ *   mapper tell an absent field from a wrong-type one on Zod 4.
  * @returns {Object<string, string[]>}
  */
-function parseValidationFieldCodes(zodError) {
+function parseValidationFieldCodes(zodError, payload) {
   const fieldCodes = {};
 
   const push = (path, code) => {
@@ -320,13 +322,27 @@ function parseValidationFieldCodes(zodError) {
 
   for (const issue of zodError.issues) {
     const path = issue.path.join('.');
-    push(path, codeForIssue(issue));
+    push(path, codeForIssue(issue, payload));
 
     // Surface each unrecognised key individually, e.g. `operations.0.extra`.
     if (issue.code === 'unrecognized_keys' && Array.isArray(issue.keys)) {
       for (const key of issue.keys) {
         push(path ? `${path}.${key}` : key, METRICS_VALIDATION_CODES.UNKNOWN_FIELD);
       }
+    }
+  }
+
+  // A type-level failure makes size/format checks on the same path meaningless
+  // (Zod 4 still runs them, e.g. `.min(1)` on an empty array given for a string),
+  // so report only the type-level code for that path.
+  const typeLevel = new Set([
+    METRICS_VALIDATION_CODES.FIELD_REQUIRED,
+    METRICS_VALIDATION_CODES.FIELD_TYPE_INVALID,
+  ]);
+  for (const path of Object.keys(fieldCodes)) {
+    const primary = fieldCodes[path].filter((code) => typeLevel.has(code));
+    if (primary.length > 0) {
+      fieldCodes[path] = primary;
     }
   }
 
@@ -390,7 +406,7 @@ function validateBulkMetricsBody(req, res, next) {
   }
 
   const fieldErrors = parseValidationErrors(result.error);
-  const fieldCodes = parseValidationFieldCodes(result.error);
+  const fieldCodes = parseValidationFieldCodes(result.error, req.body);
 
   return res.status(400).json({
     type: METRICS_VALIDATION_PROBLEM_TYPE,
@@ -463,3 +479,7 @@ module.exports = {
   METRICS_VALIDATION_ERROR_CODE,
   METRICS_VALIDATION_PROBLEM_TYPE,
 };
+
+// Compatibility contract: this module's exported surface is frozen.
+// Do not remove or rename exports without a tested migration path.
+Object.freeze(module.exports);

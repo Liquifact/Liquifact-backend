@@ -6,7 +6,7 @@ Thanks for contributing to the LiquiFact backend. This guide documents the workf
 
 ## Local Setup
 
-Use Node.js 20 and npm 9 or newer.
+Use Node.js 20 and npm 9 or newer. 
 
 ```bash
 npm install --no-package-lock

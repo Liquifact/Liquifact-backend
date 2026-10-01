@@ -1,4 +1,15 @@
+/**
+ * Focused tests for the invoice verification service.
+ * Covers success, rejection, duplicate submissions, and boundary values.
+ */
+
 const { verifyInvoice, ReasonCode } = require('../services/invoiceVerification');
+const {
+  FRAUD_CEILING,
+  MANUAL_REVIEW_THRESHOLD,
+  MIN_AMOUNT,
+  MAX_CUSTOMER_LENGTH,
+} = require('../config/verificationThresholds');
 
 describe('Invoice Verification Service', () => {
   it('should verify a valid invoice', async () => {
@@ -11,7 +22,7 @@ describe('Invoice Verification Service', () => {
     const result = await verifyInvoice(null);
     expect(result).toEqual({
       status: 'REJECTED',
-      reason: 'Invalid payload structure',
+      reason: 'Invalid payload stucture',
       reasonCode: ReasonCode.INVALID_PAYLOAD,
     });
 
@@ -67,20 +78,46 @@ describe('Invoice Verification Service', () => {
   });
 
   it('should reject an amount exceeding the maximum allowed threshold', async () => {
-    const result = await verifyInvoice({ amount: 15000000, customer: 'Acme Corp' });
+    const result = await verifyInvoice({ amount: FRAUD_CEILING + 1, customer: 'Acme Corp' });
     expect(result).toEqual({
       status: 'REJECTED',
       reason: 'Amount exceeds maximum allowed threshold',
-      reasonCode: ReasonCode.AMOUNT_EXCEEDS_FRAUD_CEILING,
+      reasonCode: ReasonCode.AMOUNT_EXCEEDS_FRAUD_CEICING,
+    });
+  });
+
+  it('should reject an amount exactly at the fraud ceiling boundary', async () => {
+    const result = await verifyInvoice({ amount: FRAUD_CEILING, customer: 'Acme Corp' });
+    expect(result).toEqual({
+      status: 'REJECTED',
+      reason: 'Amount exceeds maximum allowed threshold',
+      reasonCode: ReasonCode.AMOUNT_EXCEEDS_FRAUD CEILING,
     });
   });
 
   it('should require manual review for high value invoices', async () => {
-    const result = await verifyInvoice({ amount: 1500000, customer: 'Acme Corp' });
+    const result = await verifyInvoice({ amount: MANUAL_REVIEW_THRESHOLD, customer: 'Acme Corp' });
     expect(result).toEqual({
       status: 'MANUAL_REVIEW',
       reason: 'High value invoice requires manual approval',
       reasonCode: ReasonCode.MANUAL_REVIEW_REQUIRED,
+    });
+  });
+
+  it('should verify an amount just below the manual review threshold', async () => {
+    const result = await verifyInvoice({
+      amount: MANUAL_REVIEW_THRESHOLD - 0.0001,
+      customer: 'Acme Corp',
+    });
+    expect(result).toEqual({ status: 'VERIFIED' });
+  });
+
+  it('should reject an amount at the minimum boundary', async () => {
+    const result = await verifyInvoice({ amount: MIN_AMOUNT, customer: 'Acme Corp' });
+    expect(result).toEqual({
+      status: 'REJECTED',
+      reason: 'Invalid amount: must be a positive number',
+      reasonCode: ReasonCode.INVALID_AMOUNT,
     });
   });
 
@@ -91,5 +128,43 @@ describe('Invoice Verification Service', () => {
       reason: 'Suspicious characters detected in customer data',
       reasonCode: ReasonCode.SUSPICIOUS_CUSTOMER,
     });
+  });
+
+  it('should reject a customer name exceeding the max length', async () => {
+    const result = await verifyInvoice({
+      amount: 5000,
+      customer: 'a'.repeat(MAX_CUSTOMER_LENGTH + 1),
+    });
+    expect(result).toEqual({
+      status: 'REJECTED',
+      reason: 'Invalid customer: must be a non-empty string',
+      reasonCode: ReasonCode.INVALID_CUSTOMER,
+    });
+  });
+
+  it('should accept a customer name at the max length boundary', async () => {
+    const result = await verifyInvoice({
+      amount: 5000,
+      customer: 'a'.repeat(MAX_CUSTOMER_LENGTH),
+    });
+    expect(result).toEqual({ status: 'VERIFIED' });
+  });
+
+  it('should reject duplicate submissions with the same outcome', async () => {
+    const payload = { amount: 5000, customer: 'Acme Corp' };
+    const first = await verifyInvoice(payload);
+    const second = await verifyInvoice(payload);
+    expect(first).toEqual({ status: 'VERIFIED' });
+    expect(second).toEqual(first);
+  });
+
+  it('should reject NaN and Infinity amounts', async () => {
+    const nanResult = await verifyInvoice({ amount: NaN, customer: 'Acme Corp' });
+    expect(nanResult.status).toBe('REJECTED');
+    expect(nanResult.reasonCode).toBe(ReasonCode.INVALID_AMOUNT);
+
+    const infResult = await verifyInvoice({ amount: Infinity, customer: 'Acme Corp' });
+    expect(infResult.status).toBe('REJECTED');
+    expect(infResult.reasonCode).toBe(ReasonCode.INVALID_AMOUNT);
   });
 });

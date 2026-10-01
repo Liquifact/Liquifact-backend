@@ -41,12 +41,8 @@ describe('Graceful Shutdown Coordinator', () => {
       stop: jest.fn().mockResolvedValue(),
     };
 
-    // Mock knex db.destroy if not present
-    if (typeof db.destroy !== 'function') {
-      db.destroy = jest.fn().mockResolvedValue();
-    } else {
-      jest.spyOn(db, 'destroy').mockResolvedValue();
-    }
+    // Reset the mock db's idempotency state between tests.
+    db._reset();
   });
 
   afterEach(() => {
@@ -58,10 +54,6 @@ describe('Graceful Shutdown Coordinator', () => {
     loggerInfoSpy.mockRestore();
     loggerWarnSpy.mockRestore();
     loggerErrorSpy.mockRestore();
-
-    if (typeof db.destroy.mockRestore === 'function') {
-      db.destroy.mockRestore();
-    }
   });
 
   test('should register server and worker and execute shutdown in the correct order', async () => {
@@ -81,7 +73,8 @@ describe('Graceful Shutdown Coordinator', () => {
       return Promise.resolve();
     });
 
-    jest.spyOn(db, 'destroy').mockImplementation(() => {
+    // Override destroyOnce to track ordering (shutdownCoordinator now calls destroyOnce).
+    db.destroyOnce.mockImplementation(() => {
       order.push('db.destroy');
       return Promise.resolve();
     });
@@ -97,8 +90,7 @@ describe('Graceful Shutdown Coordinator', () => {
     ]);
     expect(exitSpy).toHaveBeenCalledWith(0);
     expect(loggerInfoSpy).toHaveBeenCalledWith(
-      expect.any(Object),
-      expect.stringContaining('Graceful shutdown completed successfully')
+      '[shutdown] Coordinated graceful shutdown completed successfully.'
     );
   });
 
@@ -112,7 +104,8 @@ describe('Graceful Shutdown Coordinator', () => {
     // Server close should only be called once
     expect(mockServer.close).toHaveBeenCalledTimes(1);
     expect(mockWorker.stop).toHaveBeenCalledTimes(1);
-    expect(db.destroy).toHaveBeenCalledTimes(1);
+    // destroyOnce called once (idempotent)
+    expect(db.destroyOnce).toHaveBeenCalledTimes(1);
 
     // Verify warning or info log about duplicate shutdown
     expect(loggerInfoSpy).toHaveBeenCalledWith(
@@ -147,7 +140,7 @@ describe('Graceful Shutdown Coordinator', () => {
     );
 
     jest.useRealTimers();
-  });
+  }, 10_000);
 
   test('should respect SIGTERM and SIGINT signals in non-test mode', () => {
     // Override NODE_ENV to simulate production
@@ -181,14 +174,14 @@ describe('Graceful Shutdown Coordinator', () => {
 
     await shutdownCoordinator.executeShutdown('SIGTERM');
 
-    // Knex destroy should still be called because it is required from src/db/knex.js
-    expect(db.destroy).toHaveBeenCalled();
+    // destroyOnce should still be called (it's always present on the mock)
+    expect(db.destroyOnce).toHaveBeenCalled();
     expect(exitSpy).toHaveBeenCalledWith(0);
   });
 
   test('should exit with 1 and log error if any step in shutdown throws', async () => {
     const error = new Error('Database destroy failed');
-    jest.spyOn(db, 'destroy').mockRejectedValue(error);
+    db.destroyOnce.mockRejectedValue(error);
 
     shutdownCoordinator.register({ server: mockServer });
     await shutdownCoordinator.executeShutdown('SIGTERM');

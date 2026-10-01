@@ -10,6 +10,13 @@
  * Non-KycWebhookError values are forwarded to the next error handler in the
  * Express chain.
  *
+ * ## Determinism contract
+ *
+ * Retryability and retry hints are **owned by the error instance** — this
+ * middleware reads `err.retryable` and `err.retryHint` directly rather than
+ * maintaining its own lookup sets.  The single source of truth is the
+ * `KYC_WEBHOOK_ERROR_RECOVERY` table in `src/errors/KycWebhookError.js`.
+ *
  * @module middleware/kycWebhookErrorHandler
  */
 
@@ -19,37 +26,6 @@ const logger = require('../logger');
 const { sanitizeTelemetryString } = require('../utils/telemetryRedaction');
 
 /**
- * HTTP status codes that are considered retryable.
- * @type {Set<number>}
- */
-const RETRYABLE_STATUSES = new Set([429, 503]);
-
-/**
- * Error codes that are explicitly retryable regardless of status.
- * @type {Set<string>}
- */
-const RETRYABLE_CODES = new Set(['missing_secret', 'CIRCUIT_OPEN']);
-
-/**
- * Maps a KycWebhookError to a retry hint string.
- *
- * @param {KycWebhookError} err - The intercepted error.
- * @returns {string} Client-facing retry guidance.
- */
-function resolveRetryHint(err) {
-  if (RETRYABLE_CODES.has(err.code)) {
-    return 'Retry the request in a few moments.';
-  }
-  if (err.status === 429) {
-    return 'Wait for the rate limit window to reset before retrying.';
-  }
-  if (err.status === 503) {
-    return 'Retry the request in a few moments.';
-  }
-  return '';
-}
-
-/**
  * Express error-handling middleware for KYC webhook routes.
  *
  * Only handles {@link KycWebhookError} instances; all other errors are
@@ -57,6 +33,9 @@ function resolveRetryHint(err) {
  *
  * Emits RFC 7807 application/problem+json responses with type, title, status,
  * detail, instance, code, retryable, and retry_hint fields.
+ *
+ * Recovery metadata (`retryable`, `retry_hint`) is read directly from the
+ * error instance — no local lookup sets are maintained here.
  *
  * @param {KycWebhookError} err - The intercepted error.
  * @param {import('express').Request}   req  - Express request.
@@ -70,26 +49,32 @@ function kycWebhookErrorHandler(err, req, res, next) {
   }
 
   const correlationId = req.correlationId || req.id || 'unknown';
-  const retryable = RETRYABLE_CODES.has(err.code) || RETRYABLE_STATUSES.has(err.status);
 
   // `err.message` is redacted here as a final, defense-in-depth choke point
   // for the log line specifically (issue #1200) — the messages that can
   // carry provider-controlled content are already sanitized at the point
   // they are constructed (see kycWebhookService.js), so this is a backstop
-  // rather than the only line of defense. `correlationId` is a value this
+  // rather than the only line of defense.  `correlationId` is a value this
   // service generates itself, never provider input, so it is logged as-is.
+  //
+  // toLogContext() provides structured observability fields (code, status,
+  // smeId, tenantId, requestId) without leaking raw error internals.
   logger.warn(
     {
       err: sanitizeTelemetryString(err.message),
-      code: err.code,
-      status: err.status,
       correlationId,
+      ...err.toLogContext(),
     },
     'kyc-webhook error',
   );
 
   // Store the error code so the post-response metrics hook can read it.
   req._kycErrorCode = err.code;
+
+  // Recovery metadata comes directly from the error instance — computed once
+  // at construction from the canonical KYC_WEBHOOK_ERROR_RECOVERY table.
+  const retryable = err.retryable;
+  const retryHint = err.retryHint ?? '';
 
   const problem = formatProblemDetails({
     type: formatProblemDetails.getProblemType(err.status),
@@ -99,7 +84,7 @@ function kycWebhookErrorHandler(err, req, res, next) {
     instance: req.originalUrl || req.url,
     code: err.code,
     retryable,
-    retryHint: resolveRetryHint(err),
+    retryHint,
   });
 
   res.status(err.status).type('application/problem+json').json(problem);

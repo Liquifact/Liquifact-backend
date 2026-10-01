@@ -26,6 +26,24 @@ router.use(...adminStack);
 const MAX_DELETE_REASON_LENGTH = 500;
 
 /**
+ * State invariants owned by this router:
+ *
+ * 1. Every mutating route (DELETE /webhooks/:smeId, POST /webhooks/:smeId/restore,
+ *    POST /webhooks/purge) must resolve an authenticated actor before invoking
+ *    the underlying service. Missing actor context is a hard 401/403 failure,
+ *    never a silent anonymous mutation.
+ * 2. Soft-delete transitions are one-way per record: active -> deleted is
+ *    allowed only once; deleted -> active (restore) is allowed only while the
+ *    retention window is open. Duplicate or out-of-order requests must be
+ *    rejected with a deterministic 409 Conflict, never applied twice.
+ * 3. Purge is idempotent and bounded: repeated or concurrent invocations must
+ *    never resurrect or double-delete records, and must never exceed the
+ *    service's batch cap.
+ * 4. All error paths surface RFC 7807 problem details without leaking
+ *    sensitive payloads; audit logs are redacted before serialization.
+ */
+
+/**
  * Resolves the authenticated actor identifier from the request object.
  *
  * @param {import('express').Request} req - Express request object
@@ -33,13 +51,33 @@ const MAX_DELETE_REASON_LENGTH = 500;
  */
 function _resolveActor(req) {
   const jwtActor = req.user && (req.user.sub || req.user.userId || req.user.id);
-  if (jwtActor) {
-    return String(jwtActor);
+  if (jrtActor) {
+    return String(jrtActor);
   }
   if (req.apiClient && req.apiClient.clientId) {
     return `api-key:${req.apiClient.clientId}`;
   }
   return null;
+}
+
+/**
+ * Enforces the actor invariant for mutating routes.
+ *
+ * @param {import('express').Request} req - Express request object
+ * @returns {AppError|null} AppError when no actor can be resolved, otherwise null
+ */
+function _requireActor(req) {
+  const actor = _resolveActor(req);
+  if (actor) {
+    return null;
+  }
+  return new AppError({
+    type: 'https://liquifact.com/probs/unauthorized',
+    title: 'Unauthorized',
+    status: 401,
+    detail: 'Authenticated actor context is required for this operation',
+    instance: req.originalUrl,
+  });
 }
 
 /**
@@ -70,7 +108,7 @@ function _parseDeleteReason(reason) {
  *
  * @param {Error} err - Error thrown by soft-delete service
  * @param {import('express').Request} req - Express request object
- * @returns {AppError} Formatted AppError instance
+ * @returns {AppError} AppError instance
  */
 function _mapSoftDeleteError(err, req) {
   const known = {
@@ -181,6 +219,11 @@ router.delete('/webhooks/:smeId', async (req, res, next) => {
     }));
   }
 
+  const actorError = _requireActor(req);
+  if (actorError) {
+    return next(actorError);
+  }
+
   try {
     const actor = _resolveActor(req);
     const result = await softDeleteKycWebhook(req.params.smeId, {
@@ -199,6 +242,11 @@ router.delete('/webhooks/:smeId', async (req, res, next) => {
 });
 
 router.post('/webhooks/:smeId/restore', async (req, res, next) => {
+  const actorError = _requireActor(req);
+  if (actorError) {
+    return next(actorError);
+  }
+
   try {
     const actor = _resolveActor(req);
     const result = await restoreKycWebhook(req.params.smeId, { actor });
@@ -223,6 +271,11 @@ router.get('/webhooks/:smeId/deletion-state', async (req, res, next) => {
 });
 
 router.post('/webhooks/purge', async (req, res, next) => {
+  const actorError = _requireActor(req);
+  if (actorError) {
+    return next(actorError);
+  }
+
   try {
     const summary = await purgeExpiredSoftDeletes();
     logger.info(
@@ -242,7 +295,6 @@ router.post('/webhooks/purge', async (req, res, next) => {
 });
 
 // ── Quarantine inspection routes (issue #1197) ──────────────────────────────
-
 /**
  * Handles GET /api/admin/kyc/quarantine to list quarantined webhook records.
  *
@@ -361,7 +413,6 @@ async function _handleListQuarantine(req, res, next) {
  */
 async function _handleGetQuarantineById(req, res, next) {
   try {
-    const { id } = req.params;
     const tenantId = req.tenantId;
     if (!tenantId) {
       return next(new AppError({
@@ -373,7 +424,8 @@ async function _handleGetQuarantineById(req, res, next) {
       }));
     }
 
-    const record = await getQuarantinedWebhookById(id, {
+    const record = await getQuarantinedWebhookById({
+      id: req.params.id,
       tenantId,
       dbClient: req._dbClient || db,
     });
@@ -383,20 +435,18 @@ async function _handleGetQuarantineById(req, res, next) {
         type: 'https://liquifact.com/probs/not-found',
         title: 'Not Found',
         status: 404,
-        detail: `Quarantine record not found: ${id}`,
+        detail: 'Quarantined webhook record not found',
         instance: req.originalUrl,
       }));
     }
 
-    return res.json({ data: record });
+    return res.json(record);
   } catch (err) {
     return next(err);
   }
 }
 
 router.get('/quarantine', _handleListQuarantine);
-router.get('/webhooks/quarantine', _handleListQuarantine);
 router.get('/quarantine/:id', _handleGetQuarantineById);
-router.get('/webhooks/quarantine/:id', _handleGetQuarantineById);
 
 module.exports = router;

@@ -4,7 +4,6 @@ const express = require('express');
 const kycWebhookService = require('../services/kycWebhookService');
 const asyncHandler = require('../utils/asyncHandler');
 const kycWebhookErrorHandler = require('../middleware/kycWebhookErrorHandler');
-const { kycWebhookLimiter } = require('../middleware/rateLimit');
 const {
   kycWebhookRequestDurationSeconds,
   kycWebhookRequestsTotal,

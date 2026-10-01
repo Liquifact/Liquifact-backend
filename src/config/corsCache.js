@@ -12,8 +12,8 @@
  * invalidation.
  *
  * Configuration (environment variables):
- * - `CORS_CACHE_TTL_SECONDS` – entry lifetime in seconds (default 5, clamped 1–60).
- * - `CORS_CACHE_MAX_ENTRIES` – hard cap on cached entries (default 256, clamped 16–4096).
+ * - `CORS_CACHE_TTL_SECONDS` – entry lifetime in seconds (default 5, clamped 1-60).
+ * - `CORS_CACHE_MAX_ENTRIES` – hard cap on cached entries (default 256, clamped 16-4096).
  *
  * @module config/corsCache
  */
@@ -26,6 +26,44 @@ const {
   corsCacheEvictionsTotal,
   corsCacheInvalidationsTotal,
 } = require('../metrics');
+
+/**
+ * Safely increments a Prometheus counter, swallowing errors to prevent
+ * metric failures from breaking cache operations.
+ *
+ * @param {Object} counter - Prometheus counter with inc() method.
+ * @returns {void}
+ */
+function safeInc(counter) {
+  try {
+    if (counter && typeof counter.inc === 'function') {
+      counter.inc();
+    }
+  } catch (_error) {
+    // Metric emission failures are logged but not propagated
+    // to avoid breaking cache operations.
+  }
+}
+
+/**
+ * Validates that a value is a non-empty string suitable for use as an origin key.
+ *
+ * @param {unknown} value - Value to validate.
+ * @returns {boolean} True if valid origin string.
+ */
+function isValidOriginKey(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= 500;
+}
+
+/**
+ * Validates that a value is a boolean.
+ *
+ * @param {unknown} value - Value to validate.
+ * @returns {boolean} True if boolean.
+ */
+function isValidBoolean(value) {
+  return typeof value === 'boolean';
+}
 
 const DEFAULT_TTL_SECONDS = 5;
 const DEFAULT_MAX_ENTRIES = 256;
@@ -98,26 +136,66 @@ function createCorsCache({ ttlMs, maxEntries } = {}) {
   const map = new Map();
 
   /**
+   * Simple lock to prevent concurrent modifications to the same key.
+   * Maps origin strings to a boolean indicating whether an operation is in progress.
+   * This provides a best-effort mutual exclusion for the single-threaded Node.js event loop.
+   *
+   * @type {Map<string, boolean>}
+   */
+  const locks = new Map();
+
+  /**
+   * Acquires a lock for the given key.
+   * Returns true if lock was acquired, false if already locked.
+   *
+   * @param {string} key - Cache key to lock.
+   * @returns {boolean} True if lock acquired.
+   */
+  function acquireLock(key) {
+    if (locks.has(key)) {
+      return false;
+    }
+    locks.set(key, true);
+    return true;
+  }
+
+  /**
+   * Releases a lock for the given key.
+   *
+   * @param {string} key - Cache key to unlock.
+   * @returns {void}
+   */
+  function releaseLock(key) {
+    locks.delete(key);
+  }
+
+  /**
    * Retrieves a cached validation result.
    *
    * @param {string} origin - The raw origin string.
    * @returns {boolean|undefined} `true`/`false` when cached, `undefined` on miss.
    */
   function get(origin) {
+    // Input validation
+    if (!isValidOriginKey(origin)) {
+      safeInc(corsCacheMissesTotal);
+      return undefined;
+    }
+
     const entry = map.get(origin);
     if (!entry) {
-      corsCacheMissesTotal.inc();
+      safeInc(corsCacheMissesTotal);
       return undefined;
     }
     if (Date.now() > entry.expiresAt) {
       map.delete(origin);
-      corsCacheMissesTotal.inc();
+      safeInc(corsCacheMissesTotal);
       return undefined;
     }
     // Promote to most-recently-used
     map.delete(origin);
     map.set(origin, entry);
-    corsCacheHitsTotal.inc();
+    safeInc(corsCacheHitsTotal);
     return entry.allowed;
   }
 
@@ -129,14 +207,38 @@ function createCorsCache({ ttlMs, maxEntries } = {}) {
    * @returns {void}
    */
   function set(origin, allowed) {
-    if (map.has(origin)) {
-      map.delete(origin);
+    // Input validation
+    if (!isValidOriginKey(origin)) {
+      return;
     }
-    map.set(origin, { allowed, expiresAt: Date.now() + effectiveTtl });
-    while (map.size > effectiveMax) {
-      const lruKey = map.keys().next().value;
-      map.delete(lruKey);
-      corsCacheEvictionsTotal.inc();
+    if (!isValidBoolean(allowed)) {
+      return;
+    }
+
+    // Acquire lock to prevent race conditions
+    if (!acquireLock(origin)) {
+      // If lock cannot be acquired, skip this set operation
+      // to prevent inconsistent state. The next request will retry.
+      return;
+    }
+
+    try {
+      if (map.has(origin)) {
+        map.delete(origin);
+      }
+      map.set(origin, { allowed, expiresAt: Date.now() + effectiveTtl });
+      while (map.size > effectiveMax) {
+        const lruKey = map.keys().next().value;
+        if (lruKey !== undefined) {
+          map.delete(lruKey);
+          safeInc(corsCacheEvictionsTotal);
+        } else {
+          // Map is empty, break to avoid infinite loop
+          break;
+        }
+      }
+    } finally {
+      releaseLock(origin);
     }
   }
 
@@ -147,7 +249,8 @@ function createCorsCache({ ttlMs, maxEntries } = {}) {
    */
   function clear() {
     map.clear();
-    corsCacheInvalidationsTotal.inc();
+    locks.clear();
+    safeInc(corsCacheInvalidationsTotal);
   }
 
   return {
@@ -179,6 +282,24 @@ function getCorsCache() {
 }
 
 /**
+ * Validates that the provided cache instance is properly initialized.
+ * Used for failure recovery and health checks.
+ *
+ * @param {ReturnType<typeof createCorsCache>|null} instance - Cache instance to validate.
+ * @returns {boolean} True if instance is valid.
+ */
+function isValidCacheInstance(instance) {
+  return (
+    instance !== null &&
+    instance !== undefined &&
+    typeof instance.get === 'function' &&
+    typeof instance.set === 'function' &&
+    typeof instance.clear === 'function' &&
+    typeof instance.size === 'number'
+  );
+}
+
+/**
  * Resets the singleton cache instance. Exported for testing only.
  *
  * @param {ReturnType<typeof createCorsCache>|null} instance - Replacement instance or null.
@@ -193,6 +314,7 @@ module.exports = {
   getCorsCache,
   parseCorsCacheConfig,
   _setCorsCache,
+  isValidCacheInstance,
   DEFAULT_TTL_SECONDS,
   DEFAULT_MAX_ENTRIES,
   MIN_TTL_SECONDS,

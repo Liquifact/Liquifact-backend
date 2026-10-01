@@ -10,6 +10,7 @@
  */
 
 const { kycWebhookSchema, parseValidationErrors, SME_ID_REGEX } = require('../../src/schemas/kycWebhook');
+const { KYC_WEBHOOK_VALIDATION } = require('../../src/constants/kycWebhooks');
 
 // ── Schema-level tests ──────────────────────────────────────────────────────
 
@@ -43,6 +44,15 @@ describe('kycWebhookSchema — input validation', () => {
       const result = kycWebhookSchema.safeParse({
         smeId: 'sme_test-123',
         status: 'pending',
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it('accepts every field at its documented maximum boundary', () => {
+      const result = kycWebhookSchema.safeParse({
+        smeId: 's'.repeat(KYC_WEBHOOK_VALIDATION.SME_ID_MAX_LENGTH),
+        status: 's'.repeat(KYC_WEBHOOK_VALIDATION.STATUS_MAX_LENGTH),
+        recordId: 'r'.repeat(KYC_WEBHOOK_VALIDATION.RECORD_ID_MAX_LENGTH),
       });
       expect(result.success).toBe(true);
     });

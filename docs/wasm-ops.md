@@ -25,26 +25,40 @@ Detection flow:
 5. If the RPC call fails, the function rejects with a structured error — the
    caller must handle this and must **not** proceed with a refresh.
 
-Semver ordering follows the `semver` npm package (`semver.gt` / `semver.lt`).
-The registry key with the highest semver is treated as the current known
-version.
+Comparison uses numeric `SCHEMA_VERSION` ordering. The highest registered
+schema version is current; older registered versions retain their semver label
+with `unknown` status. Zero is a valid unregistered version. `compareVersions`
+accepts only primitive integers from 0 through 4294967295 and throws
+`INVALID_SCHEMA_VERSION` for strings, fractions, negative or out-of-range values.
+Callers passing strings must validate and convert them before calling it.
 
-### RPC implementation detail
+`REGISTRY` is read-only at runtime. To add a release, edit its source entry and
+redeploy; runtime assignment, deletion or extension is unsupported.
 
-`getOnChainSchemaVersion` uses `@stellar/stellar-sdk`'s `SorobanRpc.Server` to
-read the persistent `SCHEMA_VERSION` Symbol key directly from contract storage:
+### RPC validation boundary
 
-```js
-const server = new SorobanRpc.Server(process.env.SOROBAN_RPC_URL);
-const key = xdr.ScVal.scvSymbol('SCHEMA_VERSION');
-const ledgerKey = xdr.LedgerKey.contractData({ contract, key, durability: 'persistent' });
-const { entries } = await server.getLedgerEntries(ledgerKey);
-return entries[0].val.contractData().val().u32();
-```
+`getOnChainSchemaVersion` uses `Server` from `@stellar/stellar-sdk/rpc` to
+request the persistent `SCHEMA_VERSION` Symbol ledger key. It accepts exactly
+one contract-data entry matching the requested contract, key and durability,
+and decodes only an XDR `scvU32` value. Missing, duplicate, malformed or
+wrong-type entries fail with `RPC_ERROR`; no comparison or refresh occurs.
 
-The call is wrapped in `callSorobanContract` for automatic exponential-backoff
-retry on transient errors (429, 502, 503, 504, ECONNRESET).  Contract-ID
-validation (`^C[A-Z2-7]{55}$`) runs before any network call.
+An omitted (`undefined`) contract argument uses `ESCROW_CONTRACT_ID`. Explicit
+invalid arguments (including `null` and the empty string) fail with
+`INVALID_CONTRACT_ID` instead of falling back to another contract. Valid
+addresses require the Stellar StrKey checksum, not just a prefix pattern.
+
+`SOROBAN_RPC_URL` must be a nonempty HTTP(S) URL without surrounding whitespace,
+embedded username/password or a fragment. Use the deployment's supported
+credential configuration rather than URL user-info. Invalid configuration
+fails before retries or network access with the existing `RPC_ERROR` API code.
+
+The call remains wrapped in `callSorobanContract` for automatic backoff on
+transient transport errors. Each read is independent: failures and duplicate or
+concurrent requests never update the registry. Errors expose fixed messages;
+logs contain only the public contract ID and a bounded reason code
+(`INVALID_RPC_URL`, `INVALID_RPC_RESPONSE`, `INVALID_SCHEMA_VERSION` or
+`UPSTREAM_FAILURE`), never RPC URLs or upstream response/error text.
 
 ---
 
@@ -117,7 +131,7 @@ Expected response:
 |-------|---------|
 | `current` | On-chain version matches the highest registry entry |
 | `ahead` | On-chain version is higher — refresh required |
-| `unknown` | RPC read failed or version not in registry |
+| `unknown` | Older registered or unregistered version at or below the current schema |
 
 ---
 
@@ -273,7 +287,7 @@ contains RPC-URL credentials and exposes only the whitelisted keys.)
 - The `X-API-KEY` value is hashed with SHA-256 before comparison; the plain
   key is never stored or logged.
 - Input validation: `contractId` path/query parameters are validated against
-  a Stellar contract address pattern (`C[A-Z2-7]{55}`) before any RPC call.
+  a full Stellar contract StrKey including its checksum before any RPC call.
 - Rate limiting: the admin refresh endpoint inherits the global rate limiter.
   Apply `sensitiveLimiter` if the endpoint is exposed publicly.
 - Audit log: every refresh trigger is recorded via `auditMiddleware` with the

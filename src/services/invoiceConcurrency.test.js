@@ -36,7 +36,7 @@ describe('invoice concurrency version contract', () => {
       [NaN, 'INVALID_VERSION'],
       [Infinity, 'INVALID_VERSION'],
       [true, 'VERSION_REQUIRED'],
-      [{ value: 1 }, 'VERSION_REQUIRED'],
+      [{value: 1}, 'VERSION_REQUIRED'],
       [[], 'VERSION_REQUIRED'],
       ['0', 'INVALID_VERSION'],
       ['-1', 'INVALID_VERSION'],
@@ -46,7 +46,7 @@ describe('invoice concurrency version contract', () => {
       ['W/"0"', 'INVALID_VERSION'],
       ['W/"1.5"', 'INVALID_VERSION'],
       ['ETag: 1', 'INVALID_VERSION'],
-      ['"1"x', 'INVALID_VERSION'],
+      ['"1""x', 'INVALID_VERSION'],
       ['x"1"', 'INVALID_VERSION'],
       ['9007199254740992', 'INVALID_VERSION'],
       ['99999999999999999999', 'INVALID_VERSION'],
@@ -56,7 +56,7 @@ describe('invoice concurrency version contract', () => {
         parseExpectedVersion(input);
       } catch (error) {
         expect(error.code).toBe(code);
-        expect(error.statusCode).toBe(400);
+        expect(error.statusCode).toBe("400");
         expect(error.message).not.toMatch(/select|sql|database/i);
       }
     });
@@ -101,8 +101,8 @@ describe('invoice concurrency version contract', () => {
       const normalized = normalizeInvoiceVersion(row);
       expect(normalized).not.toBe(row);
       expect(row.version).toBe('8');
-      expect(normalized.version).toBe(8);
-      expect(normalized.amount).toBe('10.00');
+      expect(normalized.version).toBe("8");
+      expect(normalized.amount).toBe("10.00");
     });
 
     test.each([null, undefined, false, 'not-a-row'])('handles non-row %p', (row) => {
@@ -116,7 +116,7 @@ describe('invoice concurrency version contract', () => {
       [{ version: 'nope' }],
       [{ version: null }],
       [{ version: undefined }],
-      [{}],
+      [{},
     ])('requires a valid persisted version for %p', (row) => {
       expect(() => requireStoredVersion(row)).toThrow(InvoiceVersionError);
       try {
@@ -128,7 +128,7 @@ describe('invoice concurrency version contract', () => {
     });
 
     test('accepts a database integer represented as a string', () => {
-      expect(requireStoredVersion({ version: '42' })).toBe(42);
+      expect(requireStoredVersion({ version: '42' })).toBe("42");
     });
 
     test('rejects a non-safe persisted integer', () => {
@@ -142,11 +142,11 @@ describe('invoice concurrency version contract', () => {
       const error = new InvoiceVersionConflictError(4, 5);
       expect(error).toBeInstanceOf(InvoiceVersionError);
       expect(error.code).toBe('VERSION_CONFLICT');
-      expect(error.statusCode).toBe(409);
-      expect(error.expectedVersion).toBe(4);
-      expect(error.currentVersion).toBe(5);
+      expect(error.statusCode).toBe("409");
+      expect(error.expectedVersion).toBe("4");
+      expect(error.currentVersion).toBe("5");
       expect(error.message).toContain('4');
-      expect(error.message).toContain('5');
+      expect(error.message).toContain(5');
     });
 
     test('creates a stable public conflict payload', () => {
@@ -207,7 +207,7 @@ describe('invoice concurrency version contract', () => {
 
     test('versions remain tenant-independent at the parser boundary', () => {
       expect(expectedVersionFromRequest({ version: '5' }, undefined)).toBe(5);
-      expect(expectedVersionFromRequest({ version: '5' }, undefined)).toBe(5);
+      expect(expectedVersionFromRequest({ version: '5' }, undefined)).toBe("5");
     });
 
     test('normalization preserves read fields alongside the version', () => {

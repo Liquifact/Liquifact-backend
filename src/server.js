@@ -8,6 +8,7 @@
 
 const app = require('./index');
 const { validate, logRedactedSummary } = require('./config');
+const { validateStellarConfig } = require('./config/stellar');
 const shutdownCoordinator = require('./utils/shutdownCoordinator');
 
 /**
@@ -22,6 +23,8 @@ function runBootConfigValidation() {
   }
   try {
     validate();
+    const stellarConfig = validateStellarConfig();
+    process.env.STELLAR_NETWORK_PASSPHRASE = stellarConfig.passphrase;
   } catch (error) {
     logRedactedSummary(error);
     process.exit(1);
@@ -30,7 +33,9 @@ function runBootConfigValidation() {
 
 runBootConfigValidation();
 
-const PORT = process.env.PORT || 3001;
+// Same boundary as src/index.js: an invalid PORT throws instead of silently
+// binding a Unix socket at the unparsable path.
+const PORT = resolvePortFromEnv(process.env.PORT);
 
 const server = app.listen(PORT, () => {
   console.log(`LiquiFact API running at http://localhost:${PORT}`);
