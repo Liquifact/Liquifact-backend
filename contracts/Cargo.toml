@@ -9,6 +9,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 # Build the release Wasm before enabling this runtime compatibility smoke test.
 wasm-tests = []
+default = []
 
 [dependencies]
 # SDK 21's alloc feature imports std on Wasm. This contract uses only SDK
@@ -18,8 +19,6 @@ soroban-sdk = { version = "21.0.0" }
 [dev-dependencies]
 soroban-sdk = { version = "21.0.0", features = ["testutils"] }
 
-[features]
-default = []
 
 [profile.release]
 opt-level = "z"
