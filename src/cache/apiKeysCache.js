@@ -1,3 +1,33 @@
+/**
+ * @fileoverview Bounded, validated in-memory cache for the API-key registry.
+ *
+ * The registry is re-parsed from `API_KEYS` on every miss, which is expensive
+ * on hot authentication paths, so this module memoises it behind a bounded,
+ * TTL-expiring map. Because the cached value is security-relevant (it decides
+ * which keys authenticate), every input is validated against an explicit,
+ * deterministic boundary before it can affect state.
+ *
+ * ## Validation boundaries
+ *
+ * | Input                          | Boundary                                        | Behaviour              |
+ * | ------------------------------ | ----------------------------------------------- | ---------------------- |
+ * | `API_KEYS_CACHE_TTL_MS`        | absent, empty, non-numeric, or outside `[MIN_TTL_MS, MAX_TTL_MS]` | `DEFAULT_TTL_MS` |
+ * | `API_KEYS_CACHE_MAX_ENTRIES`   | absent, empty, non-numeric, or outside `[MIN_MAX_ENTRIES, MAX_MAX_ENTRIES]` | `DEFAULT_MAX_ENTRIES` |
+ * | constructor `ttlMs`            | `< MIN_TTL_MS` or `> MAX_TTL_MS`                | clamped to the nearest bound |
+ * | constructor `maxEntries`       | `< MIN_MAX_ENTRIES` or `> MAX_MAX_ENTRIES`      | clamped to the nearest bound |
+ * | cache key                      | non-string, empty/whitespace-only, or `> MAX_CACHE_KEY_LENGTH` after trimming | `TypeError` |
+ * | `now` timestamp                | non-number or non-finite                        | `TypeError`            |
+ * | expiry                         | hit iff `expiresAt > now`; `expiresAt === now` is expired | reload on miss |
+ *
+ * Keys are trimmed before use, so whitespace variants collapse onto a single
+ * entry. Expired entries are evicted *before* the reload, so a failed loader
+ * cannot leave a stale entry that is later served as a hit; the next call
+ * retries from scratch. Repeated parses and repeated loads are therefore
+ * deterministic and idempotent.
+ *
+ * @module cache/apiKeysCache
+ */
+
 'use strict';
 
 const { loadApiKeyRegistry } = require('../config/apiKeys');
@@ -20,17 +50,19 @@ const DEFAULT_CACHE_KEY = 'default';
 const MAX_CACHE_KEY_LENGTH = 256;
 
 /**
- * Parse an integer environment value and clamp it into [min, max].
+ * Parse an integer environment value and accept it only inside [min, max].
  *
- * Returns the fallback when the value is missing, non-numeric, or not a
- * finite integer. Fractional values are truncated toward zero so that
- * behavior is deterministic across runtimes.
+ * Returns the fallback when the value is missing, empty, non-numeric, not a
+ * finite integer, or outside the inclusive [min, max] range. Out-of-range
+ * values deliberately fall back to the documented default rather than being
+ * clamped, so a mis-set environment variable is observable (the default is
+ * used) instead of silently pinned to a bound.
  *
  * @param {*} rawValue Raw environment value.
- * @param {number} fallback Value used when parsing fails.
+ * @param {number} fallback Value used when parsing fails or is out of range.
  * @param {number} min Inclusive lower bound.
  * @param {number} max Inclusive upper bound.
- * @returns {number} A finite integer within [min, max].
+ * @returns {number} A finite integer within [min, max], or the fallback.
  */
 function parsePositiveInt(rawValue, fallback, min, max) {
   if (rawValue === undefined || rawValue === null) {
@@ -100,6 +132,12 @@ function normalizeTimestamp(now) {
   return now;
 }
 
+/**
+ * Parse API-key cache limits from the environment.
+ *
+ * @param {NodeJS.ProcessEnv} [env=process.env] Environment source.
+ * @returns {{ ttlMs: number, maxEntries: number }} Resolved, validated config.
+ */
 function parseApiKeysCacheConfig(env = process.env) {
   return {
     ttlMs: parsePositiveInt(
@@ -134,17 +172,63 @@ function isKeyActive(keyObject, now) {
   return now >= start && now < end;
 }
 
+/**
+ * Clamp an explicit cache option into [min, max].
+ *
+ * A missing, non-number or non-finite option falls back to the resolved config
+ * value (the documented default); a finite out-of-range value is clamped to the
+ * nearest bound. Unlike {@link parsePositiveInt}, this never rejects:
+ * constructor options are trusted knobs, so an out-of-range value is corrected
+ * rather than substituted wholesale. `null`/`undefined` and `NaN` are treated
+ * as "not supplied" so `0` is honoured as a real (clamped) value.
+ *
+ * @param {*} value Caller-supplied option.
+ * @param {number} fallback Resolved config value used when `value` is absent or non-finite.
+ * @param {number} min Inclusive lower bound.
+ * @param {number} max Inclusive upper bound.
+ * @returns {number} A finite integer within [min, max].
+ */
+function clampToBounds(value, fallback, min, max) {
+  let candidate = value;
+  if (candidate === undefined || candidate === null || !Number.isFinite(candidate)) {
+    candidate = fallback;
+  }
+  if (!Number.isFinite(candidate)) {
+    return min;
+  }
+  return Math.max(min, Math.min(max, candidate));
+}
+
 class ApiKeysCache {
+  /**
+   * Create a bounded API-key registry cache.
+   *
+   * @param {Object} [options={}] Cache options.
+   * @param {number} [options.ttlMs] Entry lifetime in ms; clamped to [MIN_TTL_MS, MAX_TTL_MS].
+   * @param {number} [options.maxEntries] Entry cap; clamped to [MIN_MAX_ENTRIES, MAX_MAX_ENTRIES].
+   * @param {{ ttlMs: number, maxEntries: number }} [options.config] Pre-resolved config for absent options.
+   */
   constructor(options = {}) {
     const config = options.config || parseApiKeysCacheConfig();
-    this.ttlMs = Math.max(MIN_TTL_MS, Math.min(MAX_TTL_MS, options.ttlMs || config.ttlMs));
-    this.maxEntries = Math.max(
+    this.ttlMs = clampToBounds(options.ttlMs, config.ttlMs, MIN_TTL_MS, MAX_TTL_MS);
+    this.maxEntries = clampToBounds(
+      options.maxEntries,
+      config.maxEntries,
       MIN_MAX_ENTRIES,
-      Math.min(MAX_MAX_ENTRIES, options.maxEntries || config.maxEntries)
+      MAX_MAX_ENTRIES
     );
     this._cache = new Map();
   }
 
+  /**
+   * Validate that a loader result is a Map of non-empty string keys to object
+   * (or null/undefined) values. Rejecting malformed registries keeps the cache
+   * from publishing an unusable authentication view.
+   *
+   * @param {*} registry Candidate loader result.
+   * @returns {Map<string, Object>} The validated registry.
+   * @throws {TypeError} When the registry or one of its entries is malformed.
+   */
   _validateRegistry(registry) {
     if (!(registry instanceof Map)) {
       throw new TypeError('loader must return a Map');
@@ -162,8 +246,22 @@ class ApiKeysCache {
     return registry;
   }
 
-  getOrLoad(key = 'default', now = Date.now()) {
-    const entry = this._cache.get(key);
+  /**
+   * Return a time-filtered snapshot of the registry, loading it on a miss.
+   *
+   * A hit requires an unexpired entry and returns a fresh snapshot filtered by
+   * `now`. A miss (or expiry) loads, validates and caches the registry; a failed
+   * load caches nothing, so the next call retries. Concurrent callers observe
+   * either the previous or the next complete snapshot, never a partial one.
+   *
+   * @param {string} [key=DEFAULT_CACHE_KEY] Cache key; trimmed and length-checked.
+   * @param {number} [now=Date.now()] Evaluation time in ms; must be finite.
+   * @returns {Map<string, Object>} Keys active at `now`.
+   * @throws {TypeError} When the key or timestamp is invalid.
+   */
+  getOrLoad(key = DEFAULT_CACHE_KEY, now = Date.now()) {
+    const normalizedKey = normalizeCacheKey(key);
+    const normalizedNow = normalizeTimestamp(now);
 
     const entry = this._cache.get(normalizedKey);
 
@@ -175,15 +273,10 @@ class ApiKeysCache {
     }
 
     if (entry) {
-      // Evict expired entries so the bound is always measured against
-      // live entries and stale data cannot be served accidentally.
+      // Expired entry: evict it before loading so a failed load cannot leave
+      // a stale entry that would be served as a hit on the next call, and so
+      // the entry bound is always measured against live entries.
       this._cache.delete(normalizedKey);
-    }
-
-    if (entry) {
-      // Expired entry: remove it before loading so a failed load cannot leave
-      // a stale entry that would be served as a hit on the next call.
-      this._cache.delete(key);
     }
 
     if (apiKeysCacheMissesTotal) {
@@ -198,26 +291,33 @@ class ApiKeysCache {
     }
 
     const validatedRegistry = this._validateRegistry(registry);
-    const snapshot = this._buildSnapshot(validatedRegistry, now);
+    const snapshot = this._buildSnapshot(validatedRegistry, normalizedNow);
 
     // Evict the oldest entry only when inserting a new key, so repeated loads
     // for the same key cannot evict unrelated entries.
-    if (!this._cache.has(key) && this._cache.size >= this.maxEntries) {
+    if (!this._cache.has(normalizedKey) && this._cache.size >= this.maxEntries) {
       const oldestKey = this._cache.keys().next().value;
       if (oldestKey !== undefined) {
         this._cache.delete(oldestKey);
       }
     }
 
-    this._cache.set(key, {
+    this._cache.set(normalizedKey, {
       registry: validatedRegistry,
-      expiresAt: now + this.ttlMs,
+      expiresAt: normalizedNow + this.ttlMs,
     });
 
     return snapshot;
   }
 
-  _buildHSnapshot(registry, now) {
+  /**
+   * Build a new Map containing only registry entries active at `now`.
+   *
+   * @param {Map<string, Object>} registry Source registry.
+   * @param {number} now Evaluation time in ms.
+   * @returns {Map<string, Object>} Filtered snapshot.
+   */
+  _buildSnapshot(registry, now) {
     const snapshot = new Map();
     for (const [key, value] of registry) {
       if (isKeyActive(value, now)) {
@@ -227,23 +327,51 @@ class ApiKeysCache {
     return snapshot;
   }
 
+  /**
+   * Drop every cached entry.
+   *
+   * @returns {void}
+   */
   invalidateAll() {
     this._cache.clear();
   }
 
+  /**
+   * Drop a single cached entry.
+   *
+   * @param {string} key Cache key to remove.
+   * @returns {boolean} True when an entry was removed.
+   */
   invalidate(key) {
     return this._cache.delete(key);
   }
 
+  /**
+   * Number of entries currently held.
+   *
+   * @returns {number} Cache size.
+   */
   get size() {
     return this._cache.size;
   }
 
+  /**
+   * Clear all entries (alias of {@link ApiKeysCache#invalidateAll}).
+   *
+   * @returns {void}
+   */
   reset() {
     this._cache.clear();
   }
 }
 
+/**
+ * Validate a version identifier against the cache-key length and character
+ * policy, returning a structured result instead of throwing.
+ *
+ * @param {*} version Candidate version string.
+ * @returns {{ valid: boolean, value?: string, reason?: string }} Validation result.
+ */
 function validateVersion(version) {
   if (typeof version !== 'string') {
     return { valid: false, reason: 'version must be a string' };
@@ -274,6 +402,12 @@ function validateVersion(version) {
 
 let defaultCache = null;
 
+/**
+ * Return the process-wide cache singleton, optionally replacing it.
+ *
+ * @param {ApiKeysCache} [instance] Replacement instance (tests/lifecycle wiring).
+ * @returns {ApiKeysCache} The active singleton.
+ */
 function getApiKeysCache(instance) {
   if (instance !== undefined) {
     defaultCache = instance;
