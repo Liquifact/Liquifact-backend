@@ -28,6 +28,31 @@
  *   that names the problematic environment and/or missing variable so the
  *   operator can diagnose the problem without reading source code (CONTRACT 15).
  *
+ * ## State invariants
+ *
+ * The following invariants are pinned by `src/db/resolveConfig.test.js` and
+ * must hold for every call, including adverse inputs:
+ *
+ * - **Normalisation is the single source of truth.** The raw `environment`
+ *   value is never compared directly. `normaliseEnvironment` trims and
+ *   lowercases strings and maps every non-string value (including
+ *   `undefined`, `null`, numbers, and objects) to the empty string. All
+ *   branching and lookups therefore use the normalised key.
+ * - **Deterministic for valid input.** For a valid environment key the same
+ *   input always resolves to the same `knexfile` block reference, regardless
+ *   of call order, repetition, or interleaved invalid calls.
+ * - **Total for missing/empty/malformed input.** A missing, empty,
+ *   whitespace-only, or non-string environment never throws on its own; it
+ *   normalises to `""` and falls back to the `development` block. It only
+ *   throws when no `development` fallback exists in `knexfile.js`.
+ * - **Pure and non-mutating.** Resolution never mutates its argument, the
+ *   `knexfile` blocks, or `process.env` (the production branch only *reads*
+ *   `DATABASE_URL`). The returned object is the exact reference stored in
+ *   `knexfile.js`, so the module stays side-effect-free.
+ * - **Export shape is stable.** The module still exports the bare function
+ *   (`module.exports = resolveConfig`) with `normaliseEnvironment` attached
+ *   as a property.
+ *
  * @module src/db/resolveConfig
  */
 
@@ -67,35 +92,32 @@ function resolveConfig(environment) {
   //     function is invoked.
   //  2. Tests using `jest.isolateModules` get a fresh require cache for
   //     both this module and knexfile, so mock substitutions are scoped.
-  validateEnvironment(environment);
-
   const allConfigs = require('../../knexfile');
+  // Normalise once and use the key everywhere: this is what makes the
+  // resolution deterministic for "PRODUCTION", " test ", and non-string
+  // values, and what keeps unknown/malformed input from ever throwing here.
   const key = normaliseEnvironment(environment);
 
   // ------------------------------------------------------------------
   // test — fully isolated, no fallback permitted (CONTRACT 2, 3, 16)
   // ------------------------------------------------------------------
-  if (environment === 'test') {
+  if (key === 'test') {
     const testConfig = allConfigs.test;
     if (!testConfig) {
-      const err = configError(
-        ERROR_CODES.MISSING_TEST_CONFIG,
+      throw new Error(
         '[db] No "test" config block found in knexfile.js. ' +
           'The test environment must use an isolated database configuration ' +
           '(better-sqlite3 :memory:). Falling back to development or ' +
           'production config in tests is not permitted.'
       );
-      logFailure(err, normalized);
-      throw err;
     }
-    validateConfigStructure(testConfig, environment);
     return testConfig;
   }
 
   // ------------------------------------------------------------------
   // production — DATABASE_URL required, no fallback permitted (CONTRACT 4)
   // ------------------------------------------------------------------
-  if (environment === 'production') {
+  if (key === 'production') {
     // Guard: DATABASE_URL must be set before we even look at the config block.
     // An empty string is treated as absent (falsy check).
     if (!process.env.DATABASE_URL) {
@@ -104,8 +126,6 @@ function resolveConfig(environment) {
           'The application cannot start without a valid PostgreSQL connection string. ' +
           'Never fall back to a SQLite database in production.'
       );
-      logFailure(err, normalized);
-      throw err;
     }
 
     const prodConfig = allConfigs.production;
@@ -116,28 +136,25 @@ function resolveConfig(environment) {
       );
     }
 
-    validateConfigStructure(prodConfig, environment);
     return prodConfig;
   }
 
   // ------------------------------------------------------------------
   // Other environments (development, staging, etc.)
   // Falls back to the "development" block when the exact env key is absent.
+  // Missing/empty/malformed input normalises to "" and lands here, which is
+  // why a safe default is returned instead of a TypeError.
   // ------------------------------------------------------------------
-  const envConfig = allConfigs[environment] || allConfigs.development;
+  const envConfig = allConfigs[key] || allConfigs.development;
   if (!envConfig) {
     throw new Error(
       `[db] No config block found for NODE_ENV="${environment}" in knexfile.js ` +
         'and no "development" fallback block exists. ' +
         `Add a "${environment}" or "development" block to knexfile.js.`
     );
-    logFailure(err, normalized);
-    throw err;
   }
 
   return envConfig;
-  validateConfigStructure(devConfig, environment);
-  return devConfig;
 }
 
 resolveConfig.normaliseEnvironment = normaliseEnvironment;
