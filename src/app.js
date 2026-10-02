@@ -502,7 +502,19 @@ function toStandardEnvelope(statusCode, payload) {
       isObjectPayload && Object.prototype.hasOwnProperty.call(payload, 'data')
         ? payload.data
         : payload;
-    return responseHelper.success(data);
+        
+    const meta =
+      isObjectPayload && Object.prototype.hasOwnProperty.call(payload, 'meta')
+        ? payload.meta
+        : {};
+
+    const env = responseHelper.success(data, meta);
+
+    if (isObjectPayload && Object.prototype.hasOwnProperty.call(payload, 'message')) {
+      env.message = payload.message;
+    }
+
+    return env;
   }
 
   const payloadError =
@@ -510,13 +522,19 @@ function toStandardEnvelope(statusCode, payload) {
       ? payload.error
       : null;
 
+  const isObjectError = payloadError !== null && typeof payloadError === 'object';
+
   let message = 'Internal server error';
   if (typeof payloadError === 'string') {
     message = payloadError;
-  } else if (payloadError && typeof payloadError.message === 'string') {
+  } else if (isObjectError && typeof payloadError.message === 'string') {
     message = payloadError.message;
   } else if (isObjectPayload && typeof payload.message === 'string') {
     message = payload.message;
+  } else if (isObjectPayload && typeof payload.detail === 'string') {
+    message = payload.detail;
+  } else if (isObjectPayload && typeof payload.title === 'string') {
+    message = payload.title;
   }
 
   if (statusCode >= 500 && !isDev) {
@@ -524,14 +542,37 @@ function toStandardEnvelope(statusCode, payload) {
   }
 
   const details = isDev
-    ? (payloadError && payloadError.stack) ||
-      (payloadError && payloadError.details) ||
+    ? (isObjectError && payloadError.stack) ||
+      (isObjectError && payloadError.details) ||
       (isObjectPayload && payload.stack) ||
       (isObjectPayload && payload.message) ||
       message
     : null;
 
-  return responseHelper.error(message, getErrorCode(statusCode), details);
+  let code = getErrorCode(statusCode);
+  if (isObjectError && payloadError.code) {
+    code = payloadError.code;
+  } else if (isObjectPayload && payload.code) {
+    code = payload.code;
+  }
+
+  const meta = isObjectPayload && payload.meta ? payload.meta : {};
+  const env = responseHelper.error(message, code, details);
+  
+  env.meta = { ...env.meta, ...meta };
+
+  if (isObjectPayload) {
+    if (payload.type) env.type = payload.type;
+    if (payload.title) env.title = payload.title;
+    if (payload.status) env.status = payload.status;
+    if (payload.detail) env.detail = payload.detail;
+    if (payload.instance) env.instance = payload.instance;
+    if (payload.fieldErrors) env.fieldErrors = payload.fieldErrors;
+    if (payload.retryable !== undefined) env.retryable = payload.retryable;
+    if (payload.retryHint) env.retryHint = payload.retryHint;
+  }
+
+  return env;
 }
 
 /**
