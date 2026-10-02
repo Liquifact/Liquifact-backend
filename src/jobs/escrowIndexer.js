@@ -696,6 +696,16 @@ function createSafeTransactionRunner(knex, options = {}) {
  *   upsertEvent, and upsertProjection methods.
  */
 function createKnexEscrowEventStore(knex) {
+  /**
+   * Verifies that the given fencing token still holds a live lease, using the
+   * database clock so workers with skewed local clocks cannot steal or extend
+   * a lease incorrectly.
+   *
+   * @param {object|null} trx - Optional transaction to run the check within.
+   * @param {string} token - Fencing token expected to hold the lease.
+   * @returns {Promise<object>} Parsed lease value when the token is valid.
+   * @throws {LeaseLostError} When the lease is missing, stale, or expired.
+   */
   async function assertLease(trx, token) {
     if (!token || typeof token !== 'string') {
       throw new LeaseLostError('Invalid lease token provided.', 'INVALID_TOKEN');
@@ -818,33 +828,49 @@ function createKnexEscrowEventStore(knex) {
       if (cursor !== null && typeof cursor !== 'string') {
         throw new Error('Cursor must be a string value or null.');
       }
-      
-      // Always validate lease before cursor updates to maintain consistency
-      if (fenceToken) {
-        await assertLease(null, fenceToken);
+
+      const writeCursor = async (trx) => {
+        // Assert the lease inside the same transaction as the write. Asserting
+        // and then writing in separate statements is a TOCTOU race: a worker
+        // whose lease expires between the two could still advance the cursor
+        // after another worker has taken over.
+        if (fenceToken) {
+          await assertLease(trx, fenceToken);
+        }
+
+        // Load current cursor for ordering validation inside the same
+        // transaction as the lease assertion and cursor write.
+        const q = trx || knex;
+        const currentRow = await q('escrow_indexer_state')
+          .where({ key: 'horizon_cursor' })
+          .first();
+        const currentCursor = currentRow ? currentRow.value : null;
+
+        // Validate cursor ordering to prevent rollbacks.
+        const orderingCheck = validateCursorOrdering(currentCursor, cursor);
+
+        if (!orderingCheck.isValid) {
+          throw new Error(
+            `Cursor rollback prevented: ${orderingCheck.reason}. ` +
+            `Current: ${orderingCheck.currentCursor}, Proposed: ${orderingCheck.proposedCursor}`
+          );
+        }
+
+        // Only save if the cursor is actually advancing. An unchanged cursor
+        // is already persisted and is therefore safely idempotent.
+        if (orderingCheck.action === 'advance') {
+          await q('escrow_indexer_state')
+            .insert({ key: 'horizon_cursor', value: cursor, updated_at: q.fn.now() })
+            .onConflict('key')
+            .merge({ value: cursor, updated_at: q.fn.now() });
+        }
+      };
+
+      if (fenceToken && typeof knex.transaction === 'function') {
+        await knex.transaction(writeCursor);
+      } else {
+        await writeCursor(null);
       }
-      
-      // Load current cursor for ordering validation
-      const currentCursor = await this.loadCursor();
-      
-      // Validate cursor ordering to prevent rollbacks
-      const orderingCheck = validateCursorOrdering(currentCursor, cursor);
-      
-      if (!orderingCheck.isValid) {
-        throw new Error(
-          `Cursor rollback prevented: ${orderingCheck.reason}. ` +
-          `Current: ${orderingCheck.currentCursor}, Proposed: ${orderingCheck.proposedCursor}`
-        );
-      }
-      
-      // Only save if cursor is actually advancing
-      if (orderingCheck.action === 'advance') {
-        await knex('escrow_indexer_state')
-          .insert({ key: 'horizon_cursor', value: cursor, updated_at: knex.fn.now() })
-          .onConflict('key')
-          .merge({ value: cursor, updated_at: knex.fn.now() });
-      }
-      // If action is 'unchanged', silently skip the update (idempotent behavior)
     },
 
     async findProjection(invoiceId) {
@@ -1611,6 +1637,23 @@ function validateProjectionConsistency(currentProjection, event) {
 }
 
 /**
+ * Classifies a per-event persistence failure as permanent (skippable) or
+ * transient (must abort the cycle).
+ *
+ * Invariant: only structured validation failures are permanent. A malformed
+ * payload can never become valid on retry, so it is skipped and the cursor may
+ * advance past it. Every other error (database, transaction, network, cache) is
+ * transient and must abort the cycle **before** the cursor advances — otherwise
+ * the unpersisted event is silently lost.
+ *
+ * @param {Error} error - Error thrown while persisting a single event.
+ * @returns {boolean} True when the event may be skipped without aborting.
+ */
+function isSkippableEventError(error) {
+  return Boolean(error) && (error instanceof ValidationError || error.name === 'ValidationError');
+}
+
+/**
  * Persists a single escrow event idempotently and updates the per-invoice
  * projection if the event is newer than the current one.
  *
@@ -1887,14 +1930,24 @@ async function fetchEscrowEventsFromHorizon({ baseUrl, cursor, limit }) {
  * Runs one indexing cycle: fetches events, persists valid ones, skips invalid
  * ones, and advances the cursor when it changes.
  *
+ * Concurrency invariants:
+ * - Only one worker may run a cycle at a time, enforced by the store lease.
+ *   When the lease is held elsewhere the cycle is a no-op and resolves `null`.
+ * - The cursor only advances after every event in the batch has either been
+ *   persisted or permanently rejected as invalid. A transient persistence
+ *   failure aborts the cycle with the cursor unchanged, so the batch is safely
+ *   retried (event writes are idempotent via `event_id`).
+ * - Cursor writes are fenced by the lease token, so a worker whose lease
+ *   expired cannot regress the checkpoint.
+ *
  * ## Deterministic failure recovery
  *
  * ### Transient-error retry
  * Both the Horizon fetch and individual event persistence calls are wrapped in
  * {@link withRetry}.  Transient errors (network timeouts, DB connection resets)
  * are retried up to `MAX_RETRY_ATTEMPTS` times with capped exponential backoff
- * and jitter.  `ValidationError` and `LeaseLostError` are never retried — they
- * are permanent failures that do not benefit from a second attempt.
+ * and jitter.  `ValidationError` and `LeaseLostError` are never retried —
+ * they are permanent failures that do not benefit from a second attempt.
  *
  * ### Partial-batch checkpoint
  * If a transient error exhausts all retries mid-batch, the cursor is advanced
@@ -1919,6 +1972,7 @@ async function fetchEscrowEventsFromHorizon({ baseUrl, cursor, limit }) {
  * @returns {Promise<object|null>} Summary with processed/skipped/retriedEvents/
  *   partialCursorSaved counts and cursorBefore/cursorAfter, or null if lease
  *   was not acquired.
+ *
  */
 async function runEscrowIndexerCycle({
   store,
@@ -2073,29 +2127,50 @@ async function runEscrowIndexerCycle({
           throw error;
         }
 
-        // Transient error exhausted retries or permanent ValidationError: skip.
-        skipped += 1;
-        log.warn({ err: error, eventId: rawEvent && rawEvent.eventId }, 'Skipping invalid escrow event.');
-
-        // ── Partial-batch checkpoint on transient exhaustion ───────────────
-        // If this was a transient error (not ValidationError), the retry
-        // budget was exhausted.  Save progress so the next cycle doesn't
-        // redo successfully-processed events.
-        if (!(error instanceof ValidationError) && lastSuccessfulPagingToken && lastSuccessfulPagingToken !== cursor) {
-          try {
-            await store.saveCursor(lastSuccessfulPagingToken, lease && lease.token);
-            partialCursorSaved = true;
-            log.warn(
-              { partialCursor: lastSuccessfulPagingToken, eventId: rawEvent && rawEvent.eventId },
-              'Escrow indexer saved partial-batch checkpoint cursor after transient exhaustion.'
-            );
-          } catch (saveErr) {
-            log.error(
-              { err: saveErr, partialCursor: lastSuccessfulPagingToken },
-              'Escrow indexer failed to save partial-batch checkpoint cursor.'
-            );
+        if (!isSkippableEventError(error)) {
+          // A transient persistence failure has exhausted its retry budget.
+          // Save progress up to the last successfully persisted event so the
+          // next cycle does not re-process already-completed events, but never
+          // advance past the event that failed.
+          if (lastSuccessfulPagingToken && lastSuccessfulPagingToken !== cursor) {
+            try {
+              await store.saveCursor(lastSuccessfulPagingToken, lease && lease.token);
+              partialCursorSaved = true;
+              log.warn(
+                {
+                  partialCursor: lastSuccessfulPagingToken,
+                  eventId: rawEvent && rawEvent.eventId,
+                },
+                'Escrow indexer saved partial-batch checkpoint cursor after transient persistence failure.'
+              );
+            } catch (saveErr) {
+              log.error(
+                {
+                  err: saveErr,
+                  partialCursor: lastSuccessfulPagingToken,
+                  eventId: rawEvent && rawEvent.eventId,
+                },
+                'Escrow indexer failed to save partial-batch checkpoint cursor.'
+              );
+            }
           }
+
+          // Fail closed. Never count an unpersisted event as skipped or advance
+          // the cursor past it. Re-throw so the next cycle can retry it.
+          log.error(
+            { err: error, eventId: rawEvent && rawEvent.eventId },
+            'Escrow indexer aborted; event could not be persisted, cursor will not advance past the failed event.'
+          );
+          throw error;
         }
+
+        // ValidationError represents a permanently invalid event. It is safe
+        // to skip because retrying cannot make the malformed payload valid.
+        skipped += 1;
+        log.warn(
+          { err: error, eventId: rawEvent && rawEvent.eventId, code: error.code },
+          'Skipping invalid escrow event.'
+        );
       }
     }
 
@@ -2248,6 +2323,14 @@ function createEscrowIndexer(options = {}) {
         batchSize: Number(process.env.ESCROW_INDEXER_BATCH_SIZE || DEFAULT_BATCH_SIZE),
         leaseDurationMs,
       });
+
+      if (!summary) {
+        // The lease is held by another worker. Under concurrent execution this
+        // is a normal, expected outcome, so it must not be recorded as a cycle
+        // failure or have its (absent) counters dereferenced.
+        return null;
+      }
+
       (options.log || logger).info(summary, 'Escrow indexer cycle completed.');
 
       // Emit metrics
@@ -2324,6 +2407,7 @@ module.exports = {
   persistEscrowEvent,
   runEscrowIndexerCycle,
   shouldReplaceProjection,
+  isSkippableEventError,
   validateEventConsistency,
   validateProjectionConsistency,
   validateProjectionIntegrity,

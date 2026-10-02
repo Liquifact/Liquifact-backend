@@ -359,41 +359,6 @@ impl BountyContract {
         open_bounty(&env, creator, hunter, token, amount, protocol_fee_bps, None)
     }
 
-        assert!(amount > 0,           "amount must be positive");
-        assert!(protocol_fee_bps <= 10_000, "fee_bps must be <= 10000");
-
-        let id: u64 = env.storage().instance().get(&DataKey::NextId).unwrap_or(0);
-        let next_id = id.checked_add(1).expect("bounty id exhausted");
-        // Never replace a legacy bounty if a counter is missing or inconsistent.
-        // Check before interacting with the token, and keep the existing keys.
-        assert!(
-            !env.storage().persistent().has(&DataKey::Bounty(id)),
-            "bounty id already exists"
-        );
-
-        // Pull funds into the contract.
-        let client = token::Client::new(&env, &token);
-        client.transfer(&creator, &env.current_contract_address(), &amount);
-
-        let bounty = Bounty {
-            creator,
-            hunter,
-            token,
-            amount,
-            protocol_fee_bps,
-            released: false,
-        };
-        env.storage().persistent().set(&DataKey::Bounty(id), &bounty);
-        env.storage().instance().set(&DataKey::NextId, &next_id);
-
-        env.events().publish(
-            (Symbol::new(&env, "bounty_created"), id),
-            amount,
-        );
-
-        id
-    }
-
     /// Release a bounty to the hunter, deducting the protocol fee first.
     ///
     /// Fee is deducted from the payout (not added on top).
