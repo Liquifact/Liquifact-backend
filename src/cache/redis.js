@@ -1,5 +1,6 @@
 'use strict';
 
+const { randomUUID } = require('crypto');
 const { CircuitBreaker } = require('../utils/circuitBreaker');
 const metrics = require('../metrics');
 const { redisCacheFailOpenTotal } = metrics;
@@ -448,13 +449,33 @@ class RedisEscrowSummaryCache {
     const result = await this._execute(() => this.client.get(key));
 
     try {
-      const raw = await this.circuitBreaker.execute(() =>
-        withTimeout(this.client.get(key), this.timeoutMs)
+      const result = await this.circuitBreaker.execute(() =>
+        withTimeout(
+          this.client.eval(
+            READ_CACHE_SCRIPT,
+            2,
+            key,
+            this.generationKey(invoiceId),
+            randomUUID(),
+            String(Math.max(1, this.ttlSeconds * 1000))
+          ),
+          this.timeoutMs
+        )
       );
 
       // Circuit breaker fallback returns null — treat as fail-open miss.
-      if (raw === null) {
+      if (result === null) {
         return { hit: false, reason: 'miss' };
+      }
+
+      if (!Array.isArray(result) || result.length < 2) {
+        throw new Error('Invalid Redis escrow summary response');
+      }
+      const [raw, generationValue] = result;
+      generation = String(generationValue);
+      const miss = (reason) => ({ hit: false, reason, generation });
+      if (raw === null || raw === false) {
+        return miss('miss');
       }
 
       const entry = JSON.parse(raw);
@@ -472,18 +493,25 @@ class RedisEscrowSummaryCache {
       ) {
         // Best-effort eviction — failures here are non-critical.
         try {
-          await withTimeout(this.client.del(key), this.timeoutMs);
+          await withTimeout(
+            this.client.eval(COMPARE_AND_DELETE_SCRIPT, 1, key, raw),
+            this.timeoutMs
+          );
         } catch {
           // Ignore eviction errors; the TTL will handle cleanup.
         }
-        return { hit: false, reason: 'ledger_gap' };
+        return miss('ledger_gap');
       }
 
-      return { hit: true, value: entry.summary };
+      return { hit: true, value: entry.summary, generation };
     } catch {
       // Redis error, timeout, or circuit breaker exception — fail open.
       redisCacheFailOpenTotal.inc();
-      return { hit: false, reason: 'fail_open' };
+      return {
+        hit: false,
+        reason: 'fail_open',
+        ...(generation === undefined ? {} : { generation }),
+      };
     }
 
     const raw = result.value;
@@ -543,10 +571,17 @@ class RedisEscrowSummaryCache {
    * @param {string} invoiceId The invoice ID.
    * @param {Object} summary The summary object to cache.
    * @param {number} [currentLedger] The current ledger sequence.
+   * @param {string} [expectedGeneration] Generation returned by getSummary;
+   *   stale fetches are rejected after invalidation. Omitted for legacy callers.
    * @returns {Promise<boolean>} True if the summary was successfully cached.
    */
-  async setSummary(invoiceId, summary, currentLedger) {
+  async setSummary(invoiceId, summary, currentLedger, expectedGeneration) {
     if (!this.client || !isValidInvoiceId(invoiceId) || summary === undefined) {
+      return false;
+    }
+
+    const hasExpectedGeneration = arguments.length >= 4;
+    if (hasExpectedGeneration && typeof expectedGeneration !== 'string') {
       return false;
     }
 
@@ -558,7 +593,19 @@ class RedisEscrowSummaryCache {
         cachedAt: new Date().toISOString(),
       });
       const result = await this.circuitBreaker.execute(() =>
-        withTimeout(this.client.set(key, payload, 'EX', this.ttlSeconds), this.timeoutMs)
+        withTimeout(
+          this.client.eval(
+            WRITE_CACHE_SCRIPT,
+            2,
+            key,
+            this.generationKey(invoiceId),
+            hasExpectedGeneration ? expectedGeneration : '*',
+            payload,
+            String(this.ttlSeconds),
+            Number.isFinite(currentLedger) ? String(currentLedger) : ''
+          ),
+          this.timeoutMs
+        )
       );
     }
 

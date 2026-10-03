@@ -28,6 +28,36 @@ class FakeRedisClient {
     this.map.delete(key);
     return 1;
   }
+
+  async eval(script, numberOfKeys, ...values) {
+    const keys = values.slice(0, numberOfKeys);
+    const args = values.slice(numberOfKeys);
+    if (script.includes('redis-cache:read')) {
+      let generation = this.map.get(keys[1]);
+      if (!generation) {
+        generation = args[0];
+        this.map.set(keys[1], generation);
+      }
+      return [this.map.get(keys[0]) ?? null, generation];
+    }
+    if (script.includes('redis-cache:write')) {
+      this.map.set(keys[0], args[1]);
+      return 1;
+    }
+    if (script.includes('redis-cache:compare-delete')) {
+      if (this.map.get(keys[0]) === args[0]) {
+        this.map.delete(keys[0]);
+        return 1;
+      }
+      return 0;
+    }
+    if (script.includes('redis-cache:invalidate')) {
+      this.map.set(keys[0], args[0]);
+      this.map.delete(keys[1]);
+      return 1;
+    }
+    throw new Error('Unsupported Redis script');
+  }
 }
 
 describe('Escrow Cache Integration', () => {
@@ -82,7 +112,7 @@ describe('Escrow Cache Integration', () => {
     const cache = new RedisEscrowSummaryCache({ client });
     client.map.set('escrow:summary:inv_malformed', JSON.stringify({ cachedLedger: 10 }));
 
-    await expect(cache.getSummary('inv_malformed')).resolves.toEqual({
+    await expect(cache.getSummary('inv_malformed')).resolves.toMatchObject({
       hit: false,
       reason: 'fail_open',
     });
@@ -93,6 +123,9 @@ describe('Escrow Cache Integration', () => {
       get: () => new Promise((resolve) => setTimeout(() => resolve('data'), 5000)),
       set: () => new Promise((resolve) => setTimeout(() => resolve('OK'), 5000)),
       del: () => Promise.resolve(1),
+      eval: (script) => new Promise((resolve) => setTimeout(() => {
+        resolve(script.includes('redis-cache:read') ? [null, '0'] : 1);
+      }, 5000)),
     };
 
     const cache = new RedisEscrowSummaryCache({

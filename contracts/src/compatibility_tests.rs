@@ -1,5 +1,6 @@
 use super::tests::setup;
 use super::*;
+extern crate std;
 use soroban_sdk::{
     testutils::{Address as _, Events as _},
     token::{Client as TokenClient, StellarAssetClient},
@@ -10,7 +11,7 @@ use soroban_sdk::{
 
 #[cfg(feature = "wasm-tests")]
 #[test]
-fn compiled_wasm_preserves_legacy_lifecycle_and_maximum_amount() {
+fn compiled_wasm_preserves_validated_lifecycle_and_maximum_amount() {
     let env = Env::default();
     env.mock_all_auths();
     let wasm = include_bytes!("../target/wasm32v1-none/release/liquifact_bounty.wasm");
@@ -22,20 +23,21 @@ fn compiled_wasm_preserves_legacy_lifecycle_and_maximum_amount() {
         .register_stellar_asset_contract_v2(Address::generate(&env))
         .address();
     let asset = StellarAssetClient::new(&env, &token);
-    asset.mint(&creator, &i128::MAX);
+    asset.mint(&creator, &MAX_BOUNTY_AMOUNT);
     let client = BountyContractClient::new(&env, &contract);
-    let first = client.create_bounty(&creator, &hunter, &token, &i128::MAX, &500);
     client.initialize(&recipient);
+    let first = client.create_bounty(&creator, &hunter, &token, &MAX_BOUNTY_AMOUNT, &500);
     assert_eq!(first, 0);
     client.release_bounty(&first);
     let balances = TokenClient::new(&env, &token);
-    assert_eq!(balances.balance(&recipient), i128::MAX / 20);
-    assert_eq!(balances.balance(&hunter), i128::MAX - i128::MAX / 20);
+    let fee = MAX_BOUNTY_AMOUNT / 20;
+    assert_eq!(balances.balance(&recipient), fee);
+    assert_eq!(balances.balance(&hunter), MAX_BOUNTY_AMOUNT - fee);
     assert_eq!(balances.balance(&contract), 0);
     assert!(client.get_bounty(&first).released);
     asset.mint(&creator, &1);
     assert_eq!(client.create_bounty(&creator, &hunter, &token, &1, &0), 1);
-    assert_eq!(client.get_bounty(&first).amount, i128::MAX);
+    assert_eq!(client.get_bounty(&first).amount, MAX_BOUNTY_AMOUNT);
 }
 
 // A token that fails on the hunter transfer lets us exercise a failure after
@@ -81,13 +83,26 @@ fn initialization_preserves_preexisting_bounty_counter() {
     let token = env.register_stellar_asset_contract_v2(admin).address();
     StellarAssetClient::new(&env, &token).mint(&creator, &300);
     let client = BountyContractClient::new(&env, &contract);
-    let first = client.create_bounty(&creator, &hunter, &token, &100, &0);
-    // Creation before initialize is part of the old ABI's behavior.
+    env.as_contract(&contract, || {
+        env.storage().instance().set(&DataKey::NextId, &1u64);
+        env.storage().persistent().set(
+            &DataKey::Bounty(0),
+            &Bounty {
+                creator: creator.clone(),
+                hunter: hunter.clone(),
+                token: token.clone(),
+                amount: 100,
+                protocol_fee_bps: 0,
+                released: false,
+            },
+        );
+    });
+    TokenClient::new(&env, &token).transfer(&creator, &contract, &100);
     client.initialize(&recipient);
     let second = client.create_bounty(&creator, &hunter, &token, &200, &0);
-    assert_eq!((first, second), (0, 1));
-    assert_eq!(client.get_bounty(&first).amount, 100);
-    client.release_bounty(&first);
+    assert_eq!(second, 1);
+    assert_eq!(client.get_bounty(&0).amount, 100);
+    client.release_bounty(&0);
     client.release_bounty(&second);
     assert_eq!(TokenClient::new(&env, &token).balance(&hunter), 300);
 }
@@ -106,14 +121,14 @@ fn reinitialization_does_not_change_recipient_or_counter() {
 #[test]
 fn maximum_amount_fee_does_not_overflow() {
     let (env, contract, recipient, creator, hunter, token) = setup();
-    StellarAssetClient::new(&env, &token).mint(&creator, &(i128::MAX - 10_000));
+    StellarAssetClient::new(&env, &token).mint(&creator, &(MAX_BOUNTY_AMOUNT - 10_000));
     let client = BountyContractClient::new(&env, &contract);
-    let id = client.create_bounty(&creator, &hunter, &token, &i128::MAX, &500);
+    let id = client.create_bounty(&creator, &hunter, &token, &MAX_BOUNTY_AMOUNT, &500);
     client.release_bounty(&id);
-    let expected_fee = i128::MAX / 20; // exactly floor(amount * 500 / 10000)
+    let expected_fee = MAX_BOUNTY_AMOUNT / 20;
     let balances = TokenClient::new(&env, &token);
     assert_eq!(balances.balance(&recipient), expected_fee);
-    assert_eq!(balances.balance(&hunter), i128::MAX - expected_fee);
+    assert_eq!(balances.balance(&hunter), MAX_BOUNTY_AMOUNT - expected_fee);
     assert_eq!(balances.balance(&contract), 0);
     assert!(client.get_bounty(&id).released);
 }
@@ -125,7 +140,7 @@ fn rounding_and_fee_boundaries_preserve_total_amount() {
         (1, 1, 0),
         (19, 500, 0),
         (21, 500, 1),
-        (101, 10_000, 101),
+        (101, 9_999, 100),
     ] {
         let (env, contract, recipient, creator, hunter, token) = setup();
         let client = BountyContractClient::new(&env, &contract);
@@ -358,7 +373,25 @@ fn lifecycle_event_topics_and_payloads_remain_compatible() {
 
 #[test]
 fn public_function_specs_keep_legacy_argument_order_and_types() {
-    use soroban_sdk::xdr::{Limits, ReadXdr, ScSpecEntry, ScSpecTypeDef};
+    use soroban_sdk::xdr::{
+        Limits, ReadXdr, ScSpecEntry, ScSpecTypeDef, ScSpecTypeResult, ScSpecTypeTuple,
+        ScSpecTypeUdt,
+    };
+    use std::boxed::Box;
+    let result_void = ScSpecTypeDef::Result(Box::new(ScSpecTypeResult {
+        ok_type: Box::new(ScSpecTypeDef::Tuple(Box::new(ScSpecTypeTuple {
+            value_types: Default::default(),
+        }))),
+        error_type: Box::new(ScSpecTypeDef::Udt(ScSpecTypeUdt {
+            name: "BountyError".try_into().unwrap(),
+        })),
+    }));
+    let result_u64 = ScSpecTypeDef::Result(Box::new(ScSpecTypeResult {
+        ok_type: Box::new(ScSpecTypeDef::U64),
+        error_type: Box::new(ScSpecTypeDef::Udt(ScSpecTypeUdt {
+            name: "BountyError".try_into().unwrap(),
+        })),
+    }));
     fn check(
         bytes: &[u8],
         name: &str,
@@ -381,7 +414,7 @@ fn public_function_specs_keep_legacy_argument_order_and_types() {
         &BountyContract::spec_xdr_initialize(),
         "initialize",
         &[("fee_recipient", ScSpecTypeDef::Address)],
-        &[],
+        std::slice::from_ref(&result_void),
     );
     check(
         &BountyContract::spec_xdr_create_bounty(),
@@ -393,13 +426,13 @@ fn public_function_specs_keep_legacy_argument_order_and_types() {
             ("amount", ScSpecTypeDef::I128),
             ("protocol_fee_bps", ScSpecTypeDef::U32),
         ],
-        &[ScSpecTypeDef::U64],
+        &[result_u64],
     );
     check(
         &BountyContract::spec_xdr_release_bounty(),
         "release_bounty",
         &[("id", ScSpecTypeDef::U64)],
-        &[],
+        &[result_void],
     );
     let ScSpecEntry::FunctionV0(spec) =
         ScSpecEntry::from_xdr(BountyContract::spec_xdr_get_bounty(), Limits::none()).unwrap()

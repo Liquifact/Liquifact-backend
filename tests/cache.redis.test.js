@@ -27,6 +27,54 @@ class FakeRedisClient {
     this.map.delete(key);
     return 1;
   }
+
+  async eval(script, numberOfKeys, ...values) {
+    const keys = values.slice(0, numberOfKeys);
+    const args = values.slice(numberOfKeys);
+    if (script.includes('redis-cache:read')) {
+      let generation = this.map.get(keys[1]);
+      if (!generation) {
+        generation = args[0];
+        this.map.set(keys[1], generation);
+      }
+      return [this.map.get(keys[0]) ?? null, generation];
+    }
+    if (script.includes('redis-cache:write')) {
+      const [expectedGeneration, payload, _ttl, incomingLedger] = args;
+      this.lastSetArgs = {
+        key: keys[0],
+        value: payload,
+        mode: 'EX',
+        ttl: Number(_ttl),
+      };
+      const generation = this.map.get(keys[1]) ?? '0';
+      if (expectedGeneration !== '*' && generation !== expectedGeneration) return 0;
+      const existing = this.map.get(keys[0]);
+      if (existing && incomingLedger !== '') {
+        const cachedLedger = JSON.parse(existing).cachedLedger;
+        if (Number.isFinite(cachedLedger) && cachedLedger > Number(incomingLedger)) return 0;
+      }
+      this.map.set(keys[0], payload);
+      return 1;
+    }
+    if (script.includes('redis-cache:compare-delete')) {
+      if (this.beforeCompareAndDelete) {
+        await this.beforeCompareAndDelete();
+        this.beforeCompareAndDelete = null;
+      }
+      if (this.map.get(keys[0]) === args[0]) {
+        this.map.delete(keys[0]);
+        return 1;
+      }
+      return 0;
+    }
+    if (script.includes('redis-cache:invalidate')) {
+      this.map.set(keys[0], args[0]);
+      this.map.delete(keys[1]);
+      return 1;
+    }
+    throw new Error('Unsupported Redis script');
+  }
 }
 
 describe('redis escrow cache config', () => {
@@ -129,6 +177,43 @@ describe('RedisEscrowSummaryCache', () => {
     expect((await cache.getSummary('inv_write')).hit).toBe(false);
   });
 
+  it('rejects a cache fill that started before invalidation', async () => {
+    const client = new FakeRedisClient();
+    const cache = new RedisEscrowSummaryCache({ client });
+    const miss = await cache.getSummary('inv_race');
+
+    expect(await cache.deleteSummary('inv_race')).toBe(true);
+    expect(await cache.setSummary('inv_race', { status: 'stale' }, 100, miss.generation)).toBe(false);
+    expect((await cache.getSummary('inv_race')).hit).toBe(false);
+  });
+
+  it('rejects lower-ledger writes but accepts idempotent retries at the same ledger', async () => {
+    const client = new FakeRedisClient();
+    const cache = new RedisEscrowSummaryCache({ client });
+    const miss = await cache.getSummary('inv_order');
+
+    expect(await cache.setSummary('inv_order', { status: 'funded' }, 102, miss.generation)).toBe(true);
+    expect(await cache.setSummary('inv_order', { status: 'pending' }, 101, miss.generation)).toBe(false);
+    expect(await cache.setSummary('inv_order', { status: 'funded' }, 102, miss.generation)).toBe(true);
+    expect((await cache.getSummary('inv_order', 102)).value).toEqual({ status: 'funded' });
+  });
+
+  it('does not evict a newer value observed after a ledger-gap read', async () => {
+    const client = new FakeRedisClient();
+    const cache = new RedisEscrowSummaryCache({ client, ledgerGapThreshold: 2 });
+    await cache.setSummary('inv_gap_race', { status: 'old' }, 100);
+    client.beforeCompareAndDelete = async () => {
+      client.map.set(
+        'escrow:summary:inv_gap_race',
+        JSON.stringify({ summary: { status: 'new' }, cachedLedger: 108 })
+      );
+    };
+
+    const gap = await cache.getSummary('inv_gap_race', 110);
+    expect(gap.reason).toBe('ledger_gap');
+    expect((await cache.getSummary('inv_gap_race', 108)).value).toEqual({ status: 'new' });
+  });
+
   it('does not create cache instance when optional redis cache is disabled', () => {
     const cache = createRedisEscrowSummaryCache({
       env: {
@@ -147,6 +232,9 @@ describe('RedisEscrowSummaryCache', () => {
       get: () => new Promise((resolve) => setTimeout(() => resolve('data'), 5000)),
       set: () => Promise.resolve('OK'),
       del: () => Promise.resolve(1),
+      eval: (script) => new Promise((resolve) => setTimeout(() => {
+        resolve(script.includes('redis-cache:read') ? [null, '0'] : 1);
+      }, 5000)),
     };
 
     const cache = new RedisEscrowSummaryCache({
@@ -166,6 +254,7 @@ describe('RedisEscrowSummaryCache', () => {
       get: () => Promise.resolve(null),
       set: () => new Promise((resolve) => setTimeout(() => resolve('OK'), 5000)),
       del: () => Promise.resolve(1),
+      eval: () => new Promise((resolve) => setTimeout(() => resolve(1), 5000)),
     };
 
     const cache = new RedisEscrowSummaryCache({
