@@ -64,6 +64,11 @@ const CORS_ORIGIN_NOT_ALLOWED_CODE = 'CORS_ORIGIN_NOT_ALLOWED';
 
 /** @type {string} */
 const CORS_NULL_ORIGIN_CODE = 'CORS_NULL_ORIGIN';
+const CORS_INVALID_ORIGIN_CODE = 'CORS_INVALID_ORIGIN';
+// Keep the established public rejection code for empty/malformed policies.
+const CORS_EMPTY_ALLOWLIST_CODE = CORS_ORIGIN_NOT_ALLOWED_CODE;
+const CORS_CONFIG_DTO_INVALID_CODE = 'CORS_CONFIG_DTO_INVALID';
+const MAX_ALLOWED_ORIGINS = 100;
 
 const DEFAULT_OPTIONS_SUCCESS_STATUS = 204;
 const MIN_OPTIONS_SUCCESS_STATUS = 200;
@@ -83,7 +88,7 @@ function normalizeAllowedOrigins(origins) {
 
   const normalized = [];
   const seen = new Set();
-  for (const origin of origins) {
+  for (const origin of origins.slice(0, MAX_ALLOWED_ORIGINS)) {
     const result = corsConfig.validateOriginEntry(origin);
     if (result.valid && !seen.has(result.normalized)) {
       seen.add(result.normalized);
@@ -167,7 +172,7 @@ function corsConfigDtoFromEnv(env = process.env) {
   // A custom env is an isolated snapshot: missing max-age means its default,
   // never a value inherited from the process-wide CORS configuration.
   const maxAge = usesProcessEnv
-    ? corsConfig.getMaxAge()
+    ? corsConfig.parseMaxAge(safeEnv.CORS_MAX_AGE)
     : corsConfig.parseMaxAge(safeEnv.CORS_MAX_AGE);
 
   return {
@@ -213,7 +218,7 @@ function validateOriginDto(origin, allowedOrigins) {
   }
 
   // Empty string origin is not a valid browser origin → reject.
-  if (origin.length === 0) {
+  if (origin.length === 0 || origin.length > corsConfig.MAX_ORIGIN_LENGTH) {
     return {
       allowed: false,
       reason: corsConfig.CORS_REJECTION_MESSAGE,
@@ -231,7 +236,8 @@ function validateOriginDto(origin, allowedOrigins) {
   }
 
   // Empty allowlist → reject
-  if (!Array.isArray(allowedOrigins) || allowedOrigins.length === 0) {
+  const normalizedAllowlist = normalizeAllowedOrigins(allowedOrigins);
+  if (normalizedAllowlist.length === 0) {
     return {
       allowed: false,
       reason: corsConfig.CORS_REJECTION_MESSAGE,
@@ -240,7 +246,7 @@ function validateOriginDto(origin, allowedOrigins) {
   }
 
   // Normalised comparison against allowlist
-  if (corsConfig.isAllowedOrigin(origin, allowedOrigins)) {
+  if (corsConfig.isAllowedOrigin(origin, normalizedAllowlist)) {
     return { allowed: true };
   }
 
@@ -344,5 +350,7 @@ module.exports = {
   // Error codes
   CORS_ORIGIN_NOT_ALLOWED_CODE,
   CORS_NULL_ORIGIN_CODE,
+  CORS_INVALID_ORIGIN_CODE,
+  CORS_EMPTY_ALLOWLIST_CODE,
   CORS_CONFIG_DTO_INVALID_CODE,
 };

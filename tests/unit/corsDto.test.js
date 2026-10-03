@@ -187,6 +187,22 @@ describe('CORS DTO layer', () => {
         expect(result.allowed).toBe(true);
       });
     });
+
+    it.each([null, 42, {}, '', 'not-an-origin', 'https://a.com\r\nX: injected'])('rejects malformed origins: %p', (origin) => {
+      jest.isolateModules(() => {
+        const { validateOriginDto } = require('../../src/dtos/cors');
+        expect(validateOriginDto(origin, ['https://app.example.com']).allowed).toBe(false);
+      });
+    });
+
+    it('rejects malformed allowlist entries and duplicate aliases without widening access', () => {
+      jest.isolateModules(() => {
+        const { validateOriginDto } = require('../../src/dtos/cors');
+        const result = validateOriginDto('https://evil.example', [null, 'https://app.example.com', 'https://APP.example.com/']);
+        expect(result).toMatchObject({ allowed: false, errorCode: 'CORS_ORIGIN_NOT_ALLOWED' });
+        expect(validateOriginDto('https://app.example.com', [null, 'https://app.example.com']).allowed).toBe(true);
+      });
+    });
   });
 
   // ─── corsConfigDtoToOptions — DTO → cors options mapping ──────────────────
@@ -207,6 +223,22 @@ describe('CORS DTO layer', () => {
         expect(typeof opts.origin).toBe('function');
         expect(opts.maxAge).toBe(600);
         expect(opts.optionsSuccessStatus).toBe(204);
+      });
+    });
+
+    it('uses safe defaults for out-of-range DTO settings and rejects after the origin cap', () => {
+      jest.isolateModules(() => {
+        const { corsConfigDtoToOptions } = require('../../src/dtos/cors');
+        const opts = corsConfigDtoToOptions({
+          allowedOrigins: [...Array.from({ length: 100 }, (_, i) => `https://host${i}.example`), 'https://late.example'],
+          maxAge: 0,
+          optionsSuccessStatus: 299.5,
+        });
+        expect(opts.maxAge).toBe(600);
+        expect(opts.optionsSuccessStatus).toBe(204);
+        const callback = jest.fn();
+        opts.origin('https://late.example', callback);
+        expect(callback).toHaveBeenCalledWith(expect.any(Error));
       });
     });
 
@@ -604,16 +636,16 @@ describe('CORS DTO layer', () => {
       process.env.NODE_ENV = 'production';
       process.env.CORS_ORIGINS = 'https://app.example.com';
 
-      const { createCorsOptions } = require('../../src/config/cors');
+      const { buildCorsOptions } = require('../../src/config/cors');
       const { corsConfigDtoFromEnv, corsConfigDtoToOptions } = require('../../src/dtos/cors');
 
-      const originalOpts = createCorsOptions();
+      const originalOpts = buildCorsOptions();
       const dto = corsConfigDtoFromEnv();
       const dtoOpts = corsConfigDtoToOptions(dto);
 
       // maxAge should match
       expect(dtoOpts.maxAge).toBe(originalOpts.maxAge);
-      expect(dtoOpts.optionsSuccessStatus).toBe(originalOpts.optionsSuccessStatus);
+      expect(dtoOpts.optionsSuccessStatus).toBe(originalOpts.optionsSuccessStatus || 204);
 
       // Origin behaviour should match for allowed origin
       const cbOrig = jest.fn();
