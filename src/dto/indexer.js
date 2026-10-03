@@ -57,8 +57,6 @@
  * @module dto/indexer
  */
 
-const { indexerEventSchema } = require('../schemas/indexerEvent');
-
 const INDEXER_SORT_FIELDS = new Set(['observed_at', 'ledger_sequence']);
 const MAX_PAGE_SIZE = 100;
 
@@ -216,12 +214,21 @@ function requiredTimestamp(value, label) {
  * @returns {object} Parsed indexer event.
  */
 function validateIngestEvent(event) {
-  const result = indexerEventSchema.safeParse(event);
-  if (!result.success) {
-    const fields = [...new Set(result.error.issues.map((issue) => String(issue.path[0] || '_root')))];
-    throw new TypeError(`Indexer event contains invalid fields: ${fields.join(', ')}`);
-  }
-  return result.data;
+  const source = requireRecord(event, 'event');
+  requireOnlyKeys(source, ['eventId', 'invoiceId', 'eventType', 'ledgerSequence', 'pagingToken', 'contractId', 'txHash', 'eventBody', 'observedAt'], 'event');
+  const eventId = requiredString(source.eventId, 'eventId', false, 256);
+  const invoiceId = requiredString(source.invoiceId, 'invoiceId', false, 128);
+  const eventType = requiredString(source.eventType, 'eventType', false, 128);
+  const ledgerSequence = safeInteger(source.ledgerSequence, 'ledgerSequence', 1);
+  const pagingToken = source.pagingToken === undefined ? '' : source.pagingToken;
+  if (typeof pagingToken !== 'string' || pagingToken.length > 2048) {throw new TypeError('pagingToken is invalid');}
+  const contractId = source.contractId == null ? null : requiredString(source.contractId, 'contractId', false, 56);
+  const txHash = source.txHash == null ? null : requiredString(source.txHash, 'txHash', false, 64);
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(invoiceId)) {throw new TypeError('invoiceId is invalid');}
+  if (contractId !== null && !/^C[A-Z2-7]{55}$/.test(contractId)) {throw new TypeError('contractId is invalid');}
+  if (txHash !== null && !/^[0-9a-fA-F]{64}$/.test(txHash)) {throw new TypeError('txHash is invalid');}
+  const observedAt = requiredTimestamp(source.observedAt, 'observedAt');
+  return { eventId, invoiceId, eventType, ledgerSequence, pagingToken, contractId, txHash, eventBody: source.eventBody, observedAt };
 }
 
 /**
@@ -281,36 +288,6 @@ function deepFreeze(obj) {
   });
 
   return obj;
-}
-
-/**
- * Safe string coercion that preserves undefined.
- *
- * @param {*} value - Value to coerce.
- * @returns {string|undefined}
- */
-function toStringOrUndefined(value) {
-  return value !== undefined ? String(value) : undefined;
-}
-
-/**
- * Safe number coercion that preserves undefined.
- *
- * @param {*} value - Value to coerce.
- * @returns {number|undefined}
- */
-function toNumberOrUndefined(value) {
-  return value !== undefined ? Number(value) : undefined;
-}
-
-/**
- * Validate and normalize a sort order value.
- *
- * @param {*} value - Raw sort order value.
- * @returns {'asc'|'desc'}
- */
-function normalizeSortOrder(value) {
-  return value === 'asc' ? 'asc' : 'desc';
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -373,26 +350,34 @@ function normalizeSortOrder(value) {
  * @returns {IndexerEventsQueryDTO}
  */
 function mapQueryToDTO(params) {
-  // Defensive: treat missing/null params as empty object
-  const safeParams = params && typeof params === 'object' ? params : {};
-  const filters = safeParams.filters && typeof safeParams.filters === 'object' ? safeParams.filters : {};
-  const sorting = safeParams.sorting && typeof safeParams.sorting === 'object' ? safeParams.sorting : {};
-  const pagination = safeParams.pagination && typeof safeParams.pagination === 'object' ? safeParams.pagination : {};
+  const safeParams = requireRecord(params, 'params');
+  requireOnlyKeys(safeParams, ['filters', 'sorting', 'pagination'], 'params');
+  const filters = safeParams.filters === undefined ? {} : requireRecord(safeParams.filters, 'filters');
+  const sorting = safeParams.sorting === undefined ? {} : requireRecord(safeParams.sorting, 'sorting');
+  const pagination = safeParams.pagination === undefined ? {} : requireRecord(safeParams.pagination, 'pagination');
+  requireOnlyKeys(filters, ['invoiceId', 'eventType', 'contractId'], 'filters');
+  requireOnlyKeys(sorting, ['sortBy', 'order'], 'sorting');
+  requireOnlyKeys(pagination, ['cursor', 'page', 'limit'], 'pagination');
+
+  const sortBy = sorting.sortBy === undefined ? 'observed_at' : optionalString(sorting.sortBy, 'sortBy');
+  if (!INDEXER_SORT_FIELDS.has(sortBy)) {throw new TypeError('sortBy is unsupported');}
+  const order = sorting.order === undefined ? 'desc' : sorting.order;
+  if (order !== 'asc' && order !== 'desc') {throw new TypeError('order is unsupported');}
 
   const dto = {
     filters: {
-      invoiceId: toStringOrUndefined(filters.invoiceId),
-      eventType: toStringOrUndefined(filters.eventType),
-      contractId: toStringOrUndefined(filters.contractId),
+      invoiceId: optionalString(filters.invoiceId, 'invoiceId', 128),
+      eventType: optionalString(filters.eventType, 'eventType', 128),
+      contractId: optionalString(filters.contractId, 'contractId', 128),
     },
     sorting: {
-      sortBy: toStringOrUndefined(sorting.sortBy) || 'observed_at',
-      order: normalizeSortOrder(sorting.order),
+      sortBy,
+      order,
     },
     pagination: {
-      cursor: toStringOrUndefined(pagination.cursor),
-      page: toNumberOrUndefined(pagination.page),
-      limit: toNumberOrUndefined(pagination.limit),
+      cursor: optionalString(pagination.cursor, 'cursor', 2048),
+      page: pagination.page === undefined ? undefined : safeInteger(pagination.page, 'page', 1),
+      limit: pagination.limit === undefined ? undefined : safeInteger(pagination.limit, 'limit', 1, MAX_PAGE_SIZE),
     },
   };
 
@@ -517,45 +502,26 @@ function mapDTOToServiceParams(dto) {
  * @throws {TypeError} When required fields are missing.
  */
 function mapRowToEscrowEventDTO(row) {
-  // Defensive: validate row is an object
-  if (!row || typeof row !== 'object') {
-    throw new TypeError('mapRowToEscrowEventDTO: row must be a non-null object');
-  }
-
-  // Validate required fields
-  if (row.event_id === undefined || row.event_id === null) {
-    throw new TypeError('mapRowToEscrowEventDTO: event_id is required');
-  }
-  if (row.invoice_id === undefined || row.invoice_id === null) {
-    throw new TypeError('mapRowToEscrowEventDTO: invoice_id is required');
-  }
-  if (row.event_type === undefined || row.event_type === null) {
-    throw new TypeError('mapRowToEscrowEventDTO: event_type is required');
-  }
-  if (row.ledger_sequence === undefined || row.ledger_sequence === null) {
-    throw new TypeError('mapRowToEscrowEventDTO: ledger_sequence is required');
-  }
-
-  // Helper: convert Date to ISO string or pass through existing string
-  const toISOStringOrNull = (value) => {
-    if (value === null || value === undefined) return null;
-    if (value instanceof Date) return value.toISOString();
-    return String(value);
+  const source = requireRecord(row, 'row');
+  const allowed = ['event_id', 'invoice_id', 'event_type', 'ledger_sequence', 'paging_token', 'contract_id', 'tx_hash', 'observed_at', 'created_at'];
+  requireOnlyKeys(source, allowed, 'row');
+  requireOwnKeys(source, ['event_id', 'invoice_id', 'event_type', 'ledger_sequence', 'observed_at'], 'row');
+  const timestamp = (value, label, nullable) => {
+    if (value == null && nullable) {return null;}
+    return requiredTimestamp(value, label);
   };
-
   const dto = {
-    eventId: String(row.event_id),
-    invoiceId: String(row.invoice_id),
-    eventType: String(row.event_type),
-    ledgerSequence: Number(row.ledger_sequence),
-    pagingToken: row.paging_token != null ? String(row.paging_token) : null,
-    contractId: row.contract_id != null ? String(row.contract_id) : null,
-    txHash: row.tx_hash != null ? String(row.tx_hash) : null,
-    observedAt: toISOStringOrNull(row.observed_at),
-    createdAt: toISOStringOrNull(row.created_at),
+    eventId: requiredString(source.event_id, 'event_id', true, 128),
+    invoiceId: requiredString(source.invoice_id, 'invoice_id', true, 128),
+    eventType: requiredString(source.event_type, 'event_type', false, 128),
+    ledgerSequence: safeInteger(source.ledger_sequence, 'ledger_sequence', 1),
+    pagingToken: nullableString(source.paging_token, 'paging_token'),
+    contractId: nullableString(source.contract_id, 'contract_id'),
+    txHash: nullableString(source.tx_hash, 'tx_hash'),
+    observedAt: timestamp(source.observed_at, 'observed_at', false),
+    createdAt: timestamp(source.created_at, 'created_at', true),
   };
-
-  return Object.freeze(dto);
+  return deepFreeze(dto);
 }
 
 /**
@@ -573,11 +539,20 @@ function mapRowToEscrowEventDTO(row) {
  * @throws {TypeError} When dto is missing or invalid.
  */
 function mapEscrowEventDTOToRow(dto) {
-  // Defensive: validate dto is an object
-  if (!dto || typeof dto !== 'object') {
-    throw new TypeError('mapEscrowEventDTOToRow: dto must be a non-null object');
-  }
-
+  const source = requireRecord(dto, 'dto');
+  requireOnlyKeys(source, ['eventId', 'invoiceId', 'eventType', 'ledgerSequence', 'pagingToken', 'contractId', 'txHash', 'observedAt', 'createdAt'], 'dto');
+  requireOwnKeys(source, ['eventId', 'invoiceId', 'eventType', 'ledgerSequence', 'observedAt'], 'dto');
+  const validated = {
+    eventId: requiredString(source.eventId, 'eventId', false, 128),
+    invoiceId: requiredString(source.invoiceId, 'invoiceId', false, 128),
+    eventType: requiredString(source.eventType, 'eventType', false, 128),
+    ledgerSequence: safeInteger(source.ledgerSequence, 'ledgerSequence', 1),
+    pagingToken: nullableString(source.pagingToken, 'pagingToken'),
+    contractId: nullableString(source.contractId, 'contractId'),
+    txHash: nullableString(source.txHash, 'txHash'),
+    observedAt: requiredTimestamp(source.observedAt, 'observedAt'),
+    createdAt: source.createdAt == null ? null : requiredTimestamp(source.createdAt, 'createdAt'),
+  };
   return {
     event_id: validated.eventId,
     invoice_id: validated.invoiceId,
@@ -631,24 +606,26 @@ function mapEscrowEventDTOToRow(dto) {
  * @throws {TypeError} When rawMeta is missing or invalid.
  */
 function mapMetaToDTO(rawMeta) {
-  // Defensive: validate rawMeta is an object
-  if (!rawMeta || typeof rawMeta !== 'object') {
-    throw new TypeError('mapMetaToDTO: rawMeta must be a non-null object');
-  }
-
+  const source = requireRecord(rawMeta, 'meta');
+  requireOnlyKeys(source, ['total', 'limit', 'hasMore', 'nextCursor', 'page', 'totalPages'], 'meta');
+  requireOwnKeys(source, ['total', 'limit', 'hasMore'], 'meta');
+  if (typeof source.hasMore !== 'boolean') {throw new TypeError('hasMore must be boolean');}
   const dto = {
-    total: Number(rawMeta.total || 0),
-    limit: Number(rawMeta.limit || 0),
-    hasMore: Boolean(rawMeta.hasMore),
-    nextCursor: rawMeta.nextCursor != null ? String(rawMeta.nextCursor) : null,
+    total: safeInteger(source.total, 'total', 0),
+    limit: safeInteger(source.limit, 'limit', 1, MAX_PAGE_SIZE),
+    hasMore: source.hasMore,
+    nextCursor: nullableString(source.nextCursor, 'nextCursor'),
   };
-
+  if (!source.hasMore && dto.nextCursor !== null) {throw new TypeError('nextCursor must be null when hasMore is false');}
+  if (source.hasMore && dto.nextCursor === null) {throw new TypeError('nextCursor is required when hasMore is true');}
+  if ((source.page === undefined) !== (source.totalPages === undefined)) {throw new TypeError('page and totalPages must be supplied together');}
   // Optional offset-mode fields
   if (rawMeta.page !== undefined) {
-    dto.page = Number(rawMeta.page);
+    dto.page = safeInteger(source.page, 'page', 1);
   }
   if (rawMeta.totalPages !== undefined) {
-    dto.totalPages = Number(rawMeta.totalPages);
+    dto.totalPages = safeInteger(source.totalPages, 'totalPages', 0);
+    if (dto.page > Math.max(dto.totalPages, 1) || dto.totalPages !== Math.ceil(dto.total / dto.limit)) {throw new TypeError('pagination metadata is inconsistent');}
   }
 
   return Object.freeze(dto);
@@ -695,13 +672,21 @@ function mapServiceResultToResponseDTO(serviceResult) {
   }
 
   // Defensive: ensure data is an array
-  const dataArray = Array.isArray(serviceResult.data) ? serviceResult.data : [];
+  const envelope = requireRecord(serviceResult, 'serviceResult');
+  requireOnlyKeys(envelope, ['data', 'meta', 'correlationId'], 'serviceResult');
+  if (!Array.isArray(envelope.data)) {throw new TypeError('serviceResult.data must be an array');}
+  const dataArray = envelope.data;
 
   const dto = {
     data: dataArray.map(mapRowToEscrowEventDTO),
     meta: mapMetaToDTO(serviceResult.meta),
   };
 
+  const ids = new Set();
+  for (const row of dto.data) {
+    if (ids.has(row.eventId)) {throw new TypeError('serviceResult.data contains duplicate event IDs');}
+    ids.add(row.eventId);
+  }
   return deepFreeze(dto);
 }
 
@@ -773,32 +758,32 @@ function mapServiceResultToResponseDTO(serviceResult) {
  * @returns {IndexerIngestEventDTO}
  * @throws {TypeError} When raw or invoiceId are missing/invalid.
  */
-function mapRawToIngestDTO(raw, invoiceId) {
-  // Defensive: validate inputs
-  if (!raw || typeof raw !== 'object') {
-    throw new TypeError('mapRawToIngestDTO: raw must be a non-null object');
-  }
-  if (typeof invoiceId !== 'string' || invoiceId.trim().length === 0) {
-    throw new TypeError('mapRawToIngestDTO: invoiceId must be a non-empty string');
-  }
-
+function mapRawToIngestDTO(raw, invoiceId, opts = {}) {
+  const source = requireRecord(raw, 'raw');
+  opts = requireRecord(opts, 'opts');
+  const normalizedInvoiceId = requiredString(invoiceId, 'invoiceId', true, 128);
+  const eventId = resolveAlias(source, 'id', 'eventId', 'eventId');
+  const eventType = resolveAlias(source, 'type', 'eventType', 'eventType');
+  const ledger = resolveAlias(source, 'ledger', 'ledgerSequence', 'ledgerSequence');
+  const pagingToken = resolveAlias(source, 'paging_token', 'pagingToken', 'pagingToken');
+  const contractId = resolveAlias(source, 'contract_id', 'contractId', 'contractId');
+  const txHash = resolveAlias(source, 'tx_hash', 'txHash', 'txHash');
+  const suppliedAt = source.observedAt ?? opts.capturedAt;
+  const observedAt = suppliedAt === undefined ? new Date().toISOString() : requiredTimestamp(suppliedAt, 'observedAt');
+  const body = source.eventBody === undefined ? source : source.eventBody;
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) {throw new TypeError('eventBody must be an object');}
   const dto = {
-    eventId: String(raw.id || raw.eventId || ''),
-    invoiceId: String(invoiceId),
-    eventType: String(raw.type || raw.eventType || 'contract_event'),
-    ledgerSequence: Number(raw.ledger || raw.ledgerSequence || 0),
-    pagingToken: String(raw.paging_token || raw.pagingToken || ''),
-    contractId: (raw.contract_id || raw.contractId) != null
-      ? String(raw.contract_id || raw.contractId)
-      : null,
-    txHash: (raw.tx_hash || raw.txHash) != null
-      ? String(raw.tx_hash || raw.txHash)
-      : null,
-    eventBody: (raw.eventBody !== undefined ? raw.eventBody : raw) || {},
-    observedAt: raw.observedAt || new Date().toISOString(),
+    eventId: eventId == null ? '' : requiredString(eventId, 'eventId', false, 128),
+    invoiceId: normalizedInvoiceId,
+    eventType: eventType == null ? 'contract_event' : requiredString(eventType, 'eventType', false, 128),
+    ledgerSequence: ledger == null ? 0 : safeInteger(ledger, 'ledgerSequence', 1),
+    pagingToken: pagingToken == null ? '' : requiredString(pagingToken, 'pagingToken', false, 256),
+    contractId: contractId == null ? null : requiredString(contractId, 'contractId', false, 128),
+    txHash: txHash == null ? null : requiredString(txHash, 'txHash', false, 128),
+    eventBody: cloneEventBody(body),
+    observedAt,
   };
-
-  return Object.freeze(dto);
+  return Object.freeze(validateIngestEvent(dto));
 }
 
 /**
@@ -826,17 +811,18 @@ function mapIngestDTOToNormalized(dto) {
     throw new TypeError('mapIngestDTOToNormalized: dto must be a non-null object');
   }
 
-  return {
-    eventId: event.eventId,
-    invoiceId: event.invoiceId,
-    eventType: event.eventType,
-    ledgerSequence: event.ledgerSequence,
-    pagingToken: event.pagingToken || '',
-    contractId: event.contractId !== undefined ? event.contractId : null,
-    txHash: event.txHash !== undefined ? event.txHash : null,
-    eventBody: event.eventBody !== undefined ? cloneEventBody(event.eventBody) : {},
-    observedAt: event.observedAt || new Date().toISOString(),
-  };
+  const source = validateIngestEvent(requireRecord(dto, 'dto'));
+  return deepFreeze({
+    eventId: requiredString(source.eventId, 'eventId', false, 128),
+    invoiceId: requiredString(source.invoiceId, 'invoiceId', false, 128),
+    eventType: requiredString(source.eventType, 'eventType', false, 128),
+    ledgerSequence: safeInteger(source.ledgerSequence, 'ledgerSequence', 1),
+    pagingToken: source.pagingToken == null ? '' : source.pagingToken,
+    contractId: source.contractId == null ? null : requiredString(source.contractId, 'contractId', false, 128),
+    txHash: source.txHash == null ? null : requiredString(source.txHash, 'txHash', false, 128),
+    eventBody: source.eventBody == null ? {} : cloneEventBody(source.eventBody),
+    observedAt: requiredTimestamp(source.observedAt, 'observedAt'),
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

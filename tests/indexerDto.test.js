@@ -596,14 +596,14 @@ describe('mapRawToIngestDTO()', () => {
 
   test('capturedAt is used as fallback when raw.observedAt is absent', () => {
     const capturedAt = '2026-09-30T12:00:00.000Z';
-    const dto = mapRawToIngestDTO({}, 'inv_c03', { capturedAt });
+    const dto = mapRawToIngestDTO(makeHorizonRecord({ observedAt: undefined }), 'inv_c03', { capturedAt });
     expect(dto.observedAt).toBe(capturedAt);
   });
 
   test('raw.observedAt takes precedence over capturedAt', () => {
     const rawTs = '2026-01-01T00:00:00.000Z';
     const capturedAt = '2026-09-30T12:00:00.000Z';
-    const dto = mapRawToIngestDTO({ observedAt: rawTs }, 'inv_c04', { capturedAt });
+    const dto = mapRawToIngestDTO(makeHorizonRecord({ observedAt: rawTs }), 'inv_c04', { capturedAt });
     expect(dto.observedAt).toBe(rawTs);
   });
 
@@ -621,7 +621,7 @@ describe('mapRawToIngestDTO()', () => {
   });
 
   test('does not throw for valid non-empty invoiceId', () => {
-    expect(() => mapRawToIngestDTO({}, 'inv_valid')).not.toThrow();
+    expect(() => mapRawToIngestDTO(makeHorizonRecord(), 'inv_valid')).not.toThrow();
   });
 });
 
@@ -704,8 +704,8 @@ describe('mapIngestDTOToNormalized()', () => {
     // Neither can be mutated
     expect(Object.isFrozen(n1)).toBe(true);
     expect(Object.isFrozen(n2)).toBe(true);
-    // Attempting mutation in strict mode throws; in non-strict it is silently ignored
-    expect(() => { n1.eventId = 'hacked'; }).not.toThrow();
+    // Frozen DTOs reject mutation and remain unchanged.
+    expect(() => { n1.eventId = 'hacked'; }).toThrow(TypeError);
     expect(n1.eventId).toBe(dto.eventId); // value unchanged
   });
 });
