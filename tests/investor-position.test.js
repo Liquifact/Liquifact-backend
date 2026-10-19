@@ -64,8 +64,8 @@ test('returns a fully decoded typed position and encodes exact address arg', asy
 
 test('allowlist inactive makes any investor eligible; date becomes ISO', async () => {
   simulate.mockImplementation(async (method) => {
-    if (method === 'is_allowlist_active') return false;
-    if (method === 'get_investor_claim_not_before') return '1700000000';
+    if (method === 'is_allowlist_active') { return false; }
+    if (method === 'get_investor_claim_not_before') { return '1700000000'; }
     return answers[method];
   });
   const res = await request(app).get(url);
@@ -84,7 +84,7 @@ test.each(['invalid', StrKey.encodeMed25519PublicKey(Buffer.concat([Buffer.alloc
 
 test.each(methods)('fails atomically when %s simulation fails', async (failureMethod) => {
   simulate.mockImplementation(async (method) => {
-    if (method === failureMethod) throw new Error('private upstream detail');
+    if (method === failureMethod) { throw new Error('private upstream detail'); }
     return answers[method];
   });
   const res = await request(app).get(url);
@@ -112,7 +112,7 @@ test('GET /openapi.json includes endpoint and InvestorPosition schema', async ()
   expect(res.status).toBe(200);
   const endpoint = res.body.paths['/api/escrow/investors/{address}'].get;
   expect(endpoint.parameters[0].required).toBe(true);
-  for (const status of ['200', '400', '502']) expect(endpoint.responses[status]).toBeDefined();
+  for (const status of ['200', '400', '502']) { expect(endpoint.responses[status]).toBeDefined(); }
   expect(endpoint.responses['200'].content['application/json'].schema.$ref).toBe('#/components/schemas/InvestorPosition');
   expect(res.body.components.schemas.InvestorPosition.properties.allowlist.properties.eligible.type).toBe('boolean');
 });
