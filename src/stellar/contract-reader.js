@@ -30,4 +30,13 @@ async function simulateRead(method, args = [], { timeoutMs = 5000 } = {}) {
   }
 }
 
-module.exports = { simulateRead };
+async function latestLedger() {
+  const server = new rpc.Server(config.rpcUrl);
+  const ledger = await server.getLatestLedger();
+  if (!Number.isSafeInteger(ledger.sequence)) {
+    throw new Error('Invalid latest ledger');
+  }
+  return ledger.sequence;
+}
+
+module.exports = { simulateRead, latestLedger };
