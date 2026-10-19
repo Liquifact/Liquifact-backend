@@ -6,6 +6,7 @@ const helmet = require('helmet');
 const config = require('./config');
 const store = require('./data/store');
 const { buildSpec } = require('./openapi');
+const { computeStats } = require('./services/stats');
 
 const app = express();
 app.disable('x-powered-by');
@@ -85,15 +86,15 @@ app.get('/docs/init.js', (req, res) => {
 });
 
 app.get('/api/stats', (req, res) => {
-  const all = store.list();
-  const sum = (arr, k) => arr.reduce((acc, i) => acc + i[k], 0);
-  res.json({
-    invoices: all.length,
-    open: all.filter((i) => i.status === 'open').length,
-    totalFaceValue: sum(all, 'amount'),
-    totalFunded: sum(all, 'fundedAmount'),
-    averageYieldBps: all.length ? Math.round(sum(all, 'yieldBps') / all.length) : 0,
-  });
+  const { currency } = req.query;
+  if (currency !== undefined && (typeof currency !== 'string' || !/^[a-zA-Z0-9]{1,12}$/.test(currency))) {
+    return res.status(400).json({
+      error: 'currency must be a 1-12 character alphanumeric asset code',
+      code: 'VALIDATION_FAILED',
+      details: { currency: 'Invalid asset code' },
+    });
+  }
+  return res.json(computeStats(store.list(), currency));
 });
 
 app.use('/api/invoices', require('./routes/invoices'));

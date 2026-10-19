@@ -50,7 +50,58 @@ function buildSpec(baseUrl) {
         },
       },
       '/api/stats': {
-        get: { tags: ['System'], summary: 'Marketplace totals', responses: { 200: { description: 'Totals' } } },
+        get: {
+          tags: ['System'],
+          summary: 'Marketplace statistics grouped by asset (no FX conversion)',
+          parameters: [{ name: 'currency', in: 'query', schema: { type: 'string', pattern: '^[a-zA-Z0-9]{1,12}$' }, description: 'Exact asset code; an unknown valid code returns empty statistics. Repeated values are rejected.' }],
+          responses: {
+            200: {
+              description: 'Statistics for the selected currency, or all currencies',
+              ...json({
+                type: 'object',
+                required: ['invoices', 'open', 'byStatus', 'byCurrency', 'generatedAt', 'deprecated'],
+                properties: {
+                  invoices: { type: 'integer', minimum: 0 },
+                  open: { type: 'integer', minimum: 0 },
+                  byStatus: {
+                    type: 'object',
+                    required: ['open', 'funded', 'settled', 'cancelled'],
+                    properties: Object.fromEntries(['open', 'funded', 'settled', 'cancelled'].map((key) => [key, { type: 'integer', minimum: 0 }])),
+                  },
+                  byCurrency: {
+                    type: 'object',
+                    additionalProperties: {
+                      type: 'object',
+                      required: ['invoices', 'faceValue', 'funded', 'outstanding', 'weightedYieldBps'],
+                      properties: {
+                        invoices: { type: 'integer', minimum: 0, description: 'Includes cancelled invoices in this currency' },
+                        faceValue: { type: 'string', pattern: '^\\d+(\\.\\d+)?$', description: 'Non-cancelled principal, as a decimal string' },
+                        funded: { type: 'string', pattern: '^\\d+(\\.\\d+)?$', description: 'Non-cancelled funded principal' },
+                        outstanding: { type: 'string', pattern: '^\\d+(\\.\\d+)?$', description: 'Funded principal of invoices currently in funded status' },
+                        weightedYieldBps: { type: 'integer', minimum: 0, maximum: 10000, description: 'Principal-weighted, rounded basis points; zero for zero principal' },
+                      },
+                    },
+                  },
+                  generatedAt: { type: 'string', format: 'date-time' },
+                  totalFaceValue: { type: 'number', deprecated: true, description: 'Compatibility alias of deprecated.totalFaceValue for one release only' },
+                  totalFunded: { type: 'number', deprecated: true, description: 'Compatibility alias of deprecated.totalFunded for one release only' },
+                  averageYieldBps: { type: 'number', deprecated: true, description: 'Compatibility alias of deprecated.averageYieldBps for one release only' },
+                  deprecated: {
+                    type: 'object', deprecated: true,
+                    description: 'Legacy mixed-currency calculations retained here for one release only. Not meaningful financial totals.',
+                    required: ['totalFaceValue', 'totalFunded', 'averageYieldBps'],
+                    properties: {
+                      totalFaceValue: { type: 'number', deprecated: true },
+                      totalFunded: { type: 'number', deprecated: true },
+                      averageYieldBps: { type: 'number', deprecated: true },
+                    },
+                  },
+                },
+              }),
+            },
+            400: { description: 'Invalid or repeated currency', ...json({ type: 'object', required: ['error', 'code', 'details'], properties: { error: { type: 'string' }, code: { type: 'string', enum: ['VALIDATION_FAILED'] }, details: { type: 'object', properties: { currency: { type: 'string' } } } } }) },
+          },
+        },
       },
       '/api/invoices': {
         get: {

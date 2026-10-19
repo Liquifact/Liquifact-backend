@@ -36,6 +36,34 @@ snapshot as fallback.
 
 ## Development
 
+### Marketplace statistics migration (#1530)
+
+`GET /api/stats` returns `byCurrency`, `byStatus`, `invoices`, `open` and
+`generatedAt`. Each currency contains decimal-string `faceValue`, `funded` and
+`outstanding`, plus an integer `weightedYieldBps`. Cancelled invoices count in
+`invoices`/`byStatus` but are excluded from monetary totals and weighted yields.
+Outstanding principal includes only invoices currently in `funded` status;
+settled principal is not outstanding. A zero principal has yield zero.
+
+Use `?currency=USDC` to scope the entire response, including the legacy counters.
+Asset codes are case-sensitive, 1–12 alphanumeric characters. Unknown valid
+codes return empty groups and zero counts; invalid/repeated codes return 400
+`VALIDATION_FAILED`. No currencies are converted or added together in the new
+groups. See `/openapi.json` for the complete schema.
+
+For this release, the old `totalFaceValue`, `totalFunded` and `averageYieldBps`
+fields are also grouped under `deprecated` with their original mixed-asset
+semantics. Their top-level aliases are retained for this one migration release
+so existing consumers do not break before they can migrate to `byCurrency`.
+Both these aliases and the deprecated object are scheduled for removal in the
+next release. Top-level `invoices` and `open` remain available.
+These legacy mixed-asset fields must not be used as financial totals.
+
+Aggregation uses scaled `BigInt` arithmetic, including the weighted-yield
+numerator and rounding. Decimal strings retain their precision; existing
+JavaScript-number records cannot recover precision already lost before storage.
+This does not change invoice persistence, funding arithmetic or introduce FX.
+
 Requires Node.js 20+.
 
 ```bash
