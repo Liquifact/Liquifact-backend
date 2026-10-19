@@ -9,10 +9,10 @@
     "node": ">=20"
   },
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "node --watch src/index.js",
+    "start": "node api.js && node src/index.js",
+    "dev": "node api.js && node --watch src/index.js",
     "lint": "eslint .",
-    "build": "node scripts/check.js",
+    "build": "node api.js && node scripts/check.js",
     "test": "jest --runInBand"
   },
   "dependencies": {

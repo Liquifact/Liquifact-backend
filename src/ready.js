@@ -54,7 +54,9 @@ function createReadiness(opts = {}) {
     const started = Date.now();
     const health = await timed(() => server.getHealth());
     const latencyMs = Date.now() - started;
-    if (!health || health.status !== 'healthy') throw new CheckError('RPC_ERROR', { latencyMs });
+    if (!health || health.status !== 'healthy') {
+      throw new CheckError('RPC_ERROR', { latencyMs });
+    }
     return { ok: true, latencyMs };
   }
 
@@ -75,10 +77,14 @@ function createReadiness(opts = {}) {
       closeTime = page && page.ledgers && page.ledgers[0] && page.ledgers[0].ledgerCloseTime;
     }
     const closed = Number(closeTime);
-    if (!latest || !Number.isFinite(closed)) throw new CheckError('RPC_ERROR');
+    if (!latest || !Number.isFinite(closed)) {
+      throw new CheckError('RPC_ERROR');
+    }
     const ageSeconds = Math.max(0, Math.floor(Date.now() / 1000 - closed));
     const info = { sequence: latest.sequence, ageSeconds };
-    if (ageSeconds > s.maxLedgerAgeSeconds) throw new CheckError('STALE_LEDGER', info);
+    if (ageSeconds > s.maxLedgerAgeSeconds) {
+      throw new CheckError('STALE_LEDGER', info);
+    }
     return { ok: true, ...info };
   }
 
@@ -89,19 +95,21 @@ function createReadiness(opts = {}) {
         server.getContractData(contractId, xdr.ScVal.scvLedgerKeyContractInstance(), rpc.Durability.Persistent),
       );
     } catch (err) {
-      if (err instanceof CheckError) throw err;
+      if (err instanceof CheckError) {
+        throw err;
+      }
       const notFound = err && (err.code === 404 || /not found/i.test(String(err.message)));
       throw new CheckError(notFound ? 'CONTRACT_NOT_FOUND' : 'RPC_ERROR');
     }
     return { ok: true };
   }
 
-  async function run(name, fn, server) {
+  async function run(fn, server) {
     try {
       return await fn(server);
     } catch (err) {
       const code = err instanceof CheckError ? err.code : 'RPC_ERROR';
-      return { ok: false, ...(err instanceof CheckError ? err.extra : {}), error: code, _name: name };
+      return { ok: false, ...(err instanceof CheckError ? err.extra : {}), error: code };
     }
   }
 
@@ -109,25 +117,26 @@ function createReadiness(opts = {}) {
     let server;
     try {
       server = getServer();
-    } catch (err) {
+    } catch {
       server = null;
     }
     const defs = { rpc: rpcCheck, network: networkCheck, ledger: ledgerCheck, contract: contractCheck };
     const names = Object.keys(defs);
     const results = await Promise.all(
-      names.map((n) => (server ? run(n, defs[n], server) : { ok: false, error: 'RPC_ERROR' })),
+      names.map((n) => (server ? run(defs[n], server) : { ok: false, error: 'RPC_ERROR' })),
     );
     const checks = {};
     names.forEach((n, i) => {
-      const { _name, ...rest } = results[i];
-      checks[n] = rest;
+      checks[n] = results[i];
     });
     const ready = names.every((n) => checks[n].ok);
     return { statusCode: ready ? 200 : 503, body: { status: ready ? 'ready' : 'not_ready', checks } };
   }
 
   async function check() {
-    if (cached && Date.now() - cached.at < s.cacheSeconds * 1000) return cached.result;
+    if (cached && Date.now() - cached.at < s.cacheSeconds * 1000) {
+      return cached.result;
+    }
     if (!inflight) {
       inflight = compute()
         .then((result) => {
