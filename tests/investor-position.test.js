@@ -118,6 +118,8 @@ test('GET /openapi.json includes endpoint and InvestorPosition schema', async ()
 });
 
 test('simulation reader enforces its per-read timeout', async () => {
+  // Restore the real reader: the suite-wide mock would otherwise bypass the timeout.
+  simulate.mockRestore();
   const { rpc } = require('@stellar/stellar-sdk');
   const pending = jest.spyOn(rpc.Server.prototype, 'simulateTransaction')
     .mockImplementation(() => new Promise(() => {}));
