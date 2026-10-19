@@ -8,7 +8,7 @@ const config = require('../config');
 const { toMinor, fromMinor, couponMinor, daysBetween, annualisedBps } = require('../domain/returns');
 const {
   CreateInvoiceBody,
-  FundInvoiceBody,
+  FundInvoiceBodyValidate,
   InvoiceIdParam,
   ListInvoicesQuery,
 } = require('../schemas');
@@ -131,7 +131,7 @@ router.post('/', validate({ body: CreateInvoiceBody }), (req, res) => {
   return res.status(201).json({ data: store.create(value) });
 });
 
-router.post('/:id/fund', validate({ params: InvoiceIdParam, body: FundInvoiceBody }), (req, res) => {
+router.post('/:id/fund', validate({ params: InvoiceIdParam, body: FundInvoiceBodyValidate }), (req, res) => {
   const invoice = store.get(req.validatedParams.id);
   if (!invoice) {
     return res.status(404).json({ error: 'Invoice not found' });
@@ -140,6 +140,9 @@ router.post('/:id/fund', validate({ params: InvoiceIdParam, body: FundInvoiceBod
     return res.status(409).json({ error: `Invoice is ${invoice.status}; only open invoices can be funded` });
   }
   const { amount, investor } = req.validatedBody;
+  if (investor === undefined || investor === null || investor === '') {
+    return res.status(400).json({ error: 'INVESTOR_REQUIRED' });
+  }
   if (typeof investor !== 'string' || !StrKey.isValidEd25519PublicKey(investor)) {
     return res.status(400).json({ error: 'INVALID_INVESTOR_ADDRESS' });
   }

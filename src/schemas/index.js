@@ -87,7 +87,8 @@ const CreateInvoiceBody = registry.register(
 );
 
 // ---------------------------------------------------------------------------
-// FundInvoiceBody
+// FundInvoiceBody  — used for OpenAPI schema generation only
+// Route validates investor manually to produce specific error codes.
 // ---------------------------------------------------------------------------
 const FundInvoiceBody = registry.register(
   'FundInvoiceBody',
@@ -97,10 +98,21 @@ const FundInvoiceBody = registry.register(
         .number()
         .gt(0, 'amount must be a positive number')
         .openapi({ description: 'Contribution amount', example: 5000 }),
+      investor: z
+        .string()
+        .openapi({ description: 'Stellar public key of the investor', example: 'GA7TXEBMEPQCLHIYCWDN7RKAO5IMRD2UV7O7TZXMEW6VZUMEXNR4XBB5' }),
     })
     .strict()
     .openapi('FundInvoiceBody'),
 );
+
+// Middleware-only schema: validates amount + rejects unknown keys; investor checked in route.
+const FundInvoiceBodyValidate = z
+  .object({
+    amount: z.number().gt(0, 'amount must be a positive number'),
+    investor: z.unknown().optional(),
+  })
+  .strict();
 
 // ---------------------------------------------------------------------------
 // Invoice  (response schema)
@@ -154,6 +166,7 @@ module.exports = {
   ListInvoicesQuery,
   CreateInvoiceBody,
   FundInvoiceBody,
+  FundInvoiceBodyValidate,
   Invoice,
   ErrorResponse,
   STATUSES,

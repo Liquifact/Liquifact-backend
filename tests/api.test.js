@@ -271,7 +271,8 @@ describe('GET /openapi.json contains all new paths and schemas', () => {
     const res = await request(app).get('/openapi.json');
     const postBody =
       res.body.paths['/api/invoices/{id}/fund'].post.requestBody.content['application/json'].schema;
-    expect(postBody.$ref).toContain('FundInvoiceBody');
+    expect(postBody.required).toContain('investor');
+    expect(postBody.required).toContain('amount');
   });
 
   test('POST /api/invoices documents 415 status', async () => {
