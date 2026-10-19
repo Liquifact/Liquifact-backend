@@ -149,7 +149,7 @@ router.post('/:id/escrow', requireAdminToken, async (req, res) => {
   let escrow;
   try {
     escrow = await escrowReader.readEscrowOnChain(contractId);
-  } catch (_err) {
+  } catch {
     return res.status(422).json({ code: 'ESCROW_NOT_FOUND', error: 'Contract escrow could not be read' });
   }
   if (!escrow || typeof escrow !== 'object' || Array.isArray(escrow)) {
@@ -174,7 +174,7 @@ router.get('/:id/escrow', async (req, res) => {
   try {
     const escrow = await escrowReader.readEscrowOnChain(invoice.escrowContractId);
     return res.json({ contractId: invoice.escrowContractId, escrow });
-  } catch (_err) {
+  } catch {
     return res.status(422).json({ code: 'ESCROW_NOT_FOUND', error: 'Linked escrow could not be read' });
   }
 });
