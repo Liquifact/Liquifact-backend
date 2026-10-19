@@ -20,6 +20,40 @@ const Invoice = {
   },
 };
 
+const Health = {
+  type: 'object',
+  properties: {
+    status: { type: 'string', example: 'ok' },
+    service: { type: 'string' },
+    version: { type: 'string' },
+    uptimeSeconds: { type: 'integer' },
+    timestamp: { type: 'string', format: 'date-time' },
+  },
+};
+
+const checkError = { type: 'string', enum: ['TIMEOUT', 'PASSPHRASE_MISMATCH', 'STALE_LEDGER', 'CONTRACT_NOT_FOUND', 'RPC_ERROR'] };
+const Readiness = {
+  type: 'object',
+  properties: {
+    status: { type: 'string', enum: ['ready', 'not_ready'] },
+    checks: {
+      type: 'object',
+      properties: {
+        rpc: { type: 'object', properties: { ok: { type: 'boolean' }, latencyMs: { type: 'integer' }, error: checkError } },
+        network: {
+          type: 'object',
+          properties: { ok: { type: 'boolean' }, expected: { type: 'string' }, actual: { type: 'string', nullable: true }, error: checkError },
+        },
+        ledger: {
+          type: 'object',
+          properties: { ok: { type: 'boolean' }, sequence: { type: 'integer' }, ageSeconds: { type: 'integer' }, error: checkError },
+        },
+        contract: { type: 'object', properties: { ok: { type: 'boolean' }, error: checkError } },
+      },
+    },
+  },
+};
+
 const json = (schema) => ({ content: { 'application/json': { schema } } });
 const ErrorBody = { type: 'object', properties: { error: { type: 'string' } } };
 
@@ -41,12 +75,26 @@ function buildSpec(baseUrl) {
     },
     servers: [{ url: baseUrl }],
     tags: [{ name: 'System' }, { name: 'Invoices' }, { name: 'Escrow' }],
+    components: { schemas: { Health, Readiness } },
     paths: {
       '/health': {
         get: {
           tags: ['System'],
           summary: 'Liveness probe',
-          responses: { 200: { description: 'Service is up', ...json({ type: 'object' }) } },
+          responses: { 200: { description: 'Service is up', ...json({ $ref: '#/components/schemas/Health' }) } },
+        },
+      },
+      '/ready': {
+        get: {
+          tags: ['System'],
+          summary: 'Readiness probe: Soroban RPC health, network passphrase, ledger freshness, contract existence',
+          responses: {
+            200: { description: 'All checks passed', ...json({ $ref: '#/components/schemas/Readiness' }) },
+            503: {
+              description: 'At least one check failed (error codes: TIMEOUT, PASSPHRASE_MISMATCH, STALE_LEDGER, CONTRACT_NOT_FOUND, RPC_ERROR)',
+              ...json({ $ref: '#/components/schemas/Readiness' }),
+            },
+          },
         },
       },
       '/api/stats': {

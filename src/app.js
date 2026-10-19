@@ -6,6 +6,7 @@ const helmet = require('helmet');
 const config = require('./config');
 const store = require('./data/store');
 const { buildSpec } = require('./openapi');
+const { createReadiness } = require('./ready');
 
 const app = express();
 app.disable('x-powered-by');
@@ -38,6 +39,7 @@ function baseUrl(req) {
 const ENDPOINTS = [
   { method: 'GET', path: '/', description: 'This index' },
   { method: 'GET', path: '/health', description: 'Liveness probe' },
+  { method: 'GET', path: '/ready', description: 'Readiness probe (Soroban RPC, network, ledger, contract)' },
   { method: 'GET', path: '/docs', description: 'Interactive API docs (Swagger UI)' },
   { method: 'GET', path: '/openapi.json', description: 'OpenAPI 3 document' },
   { method: 'GET', path: '/api/stats', description: 'Marketplace totals' },
@@ -63,9 +65,19 @@ app.get('/', (req, res) => {
 });
 
 const health = (req, res) =>
-  res.json({ status: 'ok', service: 'liquifact-api', version: config.version, timestamp: new Date().toISOString() });
+  res.json({
+    status: 'ok',
+    service: 'liquifact-api',
+    version: config.version,
+    uptimeSeconds: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+  });
 app.get('/health', health);
 app.get('/healthz', health);
+
+const readiness = createReadiness();
+app.get('/ready', readiness.handler);
+app.locals.readiness = readiness;
 
 app.get('/openapi.json', (req, res) => res.json(buildSpec(baseUrl(req))));
 

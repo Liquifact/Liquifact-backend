@@ -14,6 +14,11 @@ module.exports = {
   networkPassphrase:
     process.env.STELLAR_NETWORK_PASSPHRASE || 'Test SDF Network ; September 2015',
   contractId: CONTRACT_ID,
+  ready: {
+    checkTimeoutMs: Number(process.env.READY_CHECK_TIMEOUT_MS) || 2000,
+    maxLedgerAgeSeconds: Number(process.env.READY_MAX_LEDGER_AGE_SECONDS) || 60,
+    cacheSeconds: process.env.READY_CACHE_SECONDS === undefined ? 10 : Number(process.env.READY_CACHE_SECONDS) || 0,
+  },
   explorerUrl: `https://stellar.expert/explorer/testnet/contract/${CONTRACT_ID}`,
   frontendUrl: process.env.FRONTEND_URL || 'https://liquifact-frontend.vercel.app',
   corsOrigins: (process.env.CORS_ALLOWED_ORIGINS || '*')
