@@ -73,7 +73,7 @@ test('allowlist inactive makes any investor eligible; date becomes ISO', async (
   expect(res.body.claimNotBeforeIso).toBe(new Date(1700000000 * 1000).toISOString());
 });
 
-test.each(['invalid', StrKey.encodeMed25519PublicKey(Buffer.alloc(32, 3), BigInt(123))])(
+test.each(['invalid', StrKey.encodeMed25519PublicKey(Buffer.concat([Buffer.alloc(32, 3), Buffer.alloc(8)]))])(
   'rejects invalid or muxed address: %s', async (address) => {
     const res = await request(app).get('/api/escrow/investors/' + address);
     expect(res.status).toBe(400);
@@ -115,4 +115,16 @@ test('GET /openapi.json includes endpoint and InvestorPosition schema', async ()
   for (const status of ['200', '400', '502']) expect(endpoint.responses[status]).toBeDefined();
   expect(endpoint.responses['200'].content['application/json'].schema.$ref).toBe('#/components/schemas/InvestorPosition');
   expect(res.body.components.schemas.InvestorPosition.properties.allowlist.properties.eligible.type).toBe('boolean');
+});
+
+test('simulation reader enforces its per-read timeout', async () => {
+  const { rpc } = require('@stellar/stellar-sdk');
+  const pending = jest.spyOn(rpc.Server.prototype, 'simulateTransaction')
+    .mockImplementation(() => new Promise(() => {}));
+  try {
+    await expect(reader.simulateRead('get_contribution', [new Address(investor).toScVal()], { timeoutMs: 10 }))
+      .rejects.toThrow('RPC timeout');
+  } finally {
+    pending.mockRestore();
+  }
 });
