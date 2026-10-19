@@ -13,13 +13,18 @@
     "dev": "node --watch src/index.js",
     "lint": "eslint .",
     "build": "node scripts/check.js",
-    "test": "jest --runInBand"
+    "test": "jest --runInBand",
+    "db:migrate": "knex migrate:latest",
+    "db:rollback": "knex migrate:rollback",
+    "db:seed": "knex seed:run"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^14.6.1",
     "cors": "^2.8.5",
     "express": "^5.1.0",
-    "helmet": "^8.1.0"
+    "helmet": "^8.1.0",
+    "knex": "^3.1.0",
+    "pg": "^8.13.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",

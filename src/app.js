@@ -4,10 +4,12 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const config = require('./config');
-const store = require('./data/store');
+const { createRepository } = require('./data');
+const { toUnits, fromUnits } = require('./data/money');
 const { buildSpec } = require('./openapi');
 
 const app = express();
+app.locals.repo = createRepository();
 app.disable('x-powered-by');
 app.set('trust proxy', true);
 
@@ -84,15 +86,16 @@ app.get('/docs/init.js', (req, res) => {
   res.type('application/javascript').send("window.ui=SwaggerUIBundle({url:'/openapi.json',dom_id:'#swagger-ui'});");
 });
 
-app.get('/api/stats', (req, res) => {
-  const all = store.list();
-  const sum = (arr, k) => arr.reduce((acc, i) => acc + i[k], 0);
+app.get('/api/stats', async (req, res) => {
+  const all = await req.app.locals.repo.list();
+  const sumMoney = (k) => fromUnits(all.reduce((acc, i) => acc + toUnits(i[k]), 0n));
+  const sumYield = all.reduce((acc, i) => acc + i.yieldBps, 0);
   res.json({
     invoices: all.length,
     open: all.filter((i) => i.status === 'open').length,
-    totalFaceValue: sum(all, 'amount'),
-    totalFunded: sum(all, 'fundedAmount'),
-    averageYieldBps: all.length ? Math.round(sum(all, 'yieldBps') / all.length) : 0,
+    totalFaceValue: sumMoney('amount'),
+    totalFunded: sumMoney('fundedAmount'),
+    averageYieldBps: all.length ? Math.round(sumYield / all.length) : 0,
   });
 });
 
@@ -103,7 +106,11 @@ app.use((req, res) => res.status(404).json({ error: 'Not found', path: req.path,
 
 app.use((err, req, res, _next) => {
   const status = err.status || err.statusCode || 500;
-  res.status(status).json({ error: status === 500 ? 'Internal server error' : err.message });
+  const body = { error: status === 500 ? 'Internal server error' : err.message };
+  if (err.name === 'RepoError') {
+    body.code = err.code;
+  }
+  res.status(status).json(body);
 });
 
 module.exports = app;

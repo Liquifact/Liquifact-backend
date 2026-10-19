@@ -1,7 +1,7 @@
 'use strict';
 
 const express = require('express');
-const store = require('../data/store');
+const { STATUSES } = require('../data/repository');
 
 const router = express.Router();
 
@@ -47,44 +47,39 @@ function validateInvoice(body) {
   };
 }
 
-router.get('/', (req, res) => {
+// Express 5 forwards rejected async handlers to the error middleware, which
+// maps RepoError (404/409/503 ...) to JSON responses.
+router.get('/', async (req, res) => {
   const { status } = req.query;
-  if (status && !store.STATUSES.includes(status)) {
-    return res.status(400).json({ error: `status must be one of ${store.STATUSES.join(', ')}` });
+  if (status && !STATUSES.includes(status)) {
+    return res.status(400).json({ error: `status must be one of ${STATUSES.join(', ')}` });
   }
-  const data = status ? store.list().filter((i) => i.status === status) : store.list();
+  const data = await req.app.locals.repo.list(status ? { status } : {});
   return res.json({ data, count: data.length });
 });
 
-router.get('/:id', (req, res) => {
-  const invoice = store.get(req.params.id);
+router.get('/:id', async (req, res) => {
+  const invoice = await req.app.locals.repo.get(req.params.id);
   if (!invoice) {
     return res.status(404).json({ error: 'Invoice not found' });
   }
   return res.json({ data: invoice });
 });
 
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   const { value, errors } = validateInvoice(req.body);
   if (errors) {
     return res.status(400).json({ error: 'Validation failed', details: errors });
   }
-  return res.status(201).json({ data: store.create(value) });
+  return res.status(201).json({ data: await req.app.locals.repo.create(value) });
 });
 
-router.post('/:id/fund', (req, res) => {
-  const invoice = store.get(req.params.id);
-  if (!invoice) {
-    return res.status(404).json({ error: 'Invoice not found' });
-  }
+router.post('/:id/fund', async (req, res) => {
   const amount = req.body && req.body.amount;
   if (typeof amount !== 'number' || !(amount > 0)) {
     return res.status(400).json({ error: 'amount must be a positive number' });
   }
-  if (invoice.status !== 'open') {
-    return res.status(409).json({ error: `Invoice is ${invoice.status}; only open invoices can be funded` });
-  }
-  return res.json({ data: store.fund(invoice, amount) });
+  return res.json({ data: await req.app.locals.repo.fund(req.params.id, amount) });
 });
 
 module.exports = router;
