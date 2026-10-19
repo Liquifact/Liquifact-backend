@@ -6,62 +6,56 @@ const store = require('../data/store');
 const contributions = require('../data/contributions');
 const config = require('../config');
 const { toMinor, fromMinor, couponMinor, daysBetween, annualisedBps } = require('../domain/returns');
+const {
+  CreateInvoiceBody,
+  FundInvoiceBody,
+  InvoiceIdParam,
+  ListInvoicesQuery,
+} = require('../schemas');
+const { validate } = require('../middleware/validate');
 
 const router = express.Router();
 
-/**
- * Validates a create-invoice payload.
- *
- * @param {object} body request body
- * @returns {{ value?: object, errors?: string[] }} validated fields or errors
- */
+// ---------------------------------------------------------------------------
+// Backward-compatible validateInvoice wrapper
+// Wraps the Zod schema so that code importing this function still works.
+//
+// Returns { value, errors } matching the original API:
+//   errors – undefined on success, string[] on failure
+//   value  – validated+transformed object on success
+// ---------------------------------------------------------------------------
 function validateInvoice(body) {
-  const errors = [];
-  const b = body || {};
-  const str = (k, max = 120) => {
-    if (typeof b[k] !== 'string' || !b[k].trim() || b[k].length > max) {
-      errors.push(`${k} must be a non-empty string (max ${max} chars)`);
-    }
-  };
-  str('sme');
-  str('debtor');
-  if (typeof b.amount !== 'number' || !(b.amount > 0) || b.amount > 1e12) {
-    errors.push('amount must be a positive number');
-  }
-  const yieldBps = b.yieldBps === undefined ? 800 : b.yieldBps;
-  if (!Number.isInteger(yieldBps) || yieldBps < 0 || yieldBps > 10000) {
-    errors.push('yieldBps must be an integer between 0 and 10000');
-  }
-  if (typeof b.dueDate !== 'string' || Number.isNaN(Date.parse(b.dueDate))) {
-    errors.push('dueDate must be an ISO date (YYYY-MM-DD)');
-  }
-  if (errors.length) {
+  const result = CreateInvoiceBody.safeParse(body || {});
+  if (!result.success) {
+    const errors = result.error.issues.map((i) => i.message);
     return { errors };
   }
+  const d = result.data;
   return {
     value: {
-      sme: b.sme.trim(),
-      debtor: b.debtor.trim(),
-      smeAddress: typeof b.smeAddress === 'string' ? b.smeAddress : null,
-      amount: b.amount,
-      currency: typeof b.currency === 'string' ? b.currency.toUpperCase().slice(0, 12) : 'USDC',
-      yieldBps,
-      dueDate: b.dueDate,
+      sme: d.sme.trim(),
+      debtor: d.debtor.trim(),
+      smeAddress: typeof d.smeAddress === 'string' ? d.smeAddress : null,
+      amount: d.amount,
+      currency: typeof d.currency === 'string' ? d.currency.toUpperCase().slice(0, 12) : 'USDC',
+      yieldBps: d.yieldBps === undefined ? 800 : d.yieldBps,
+      dueDate: d.dueDate,
     },
   };
 }
 
-router.get('/', (req, res) => {
-  const { status } = req.query;
-  if (status && !store.STATUSES.includes(status)) {
-    return res.status(400).json({ error: `status must be one of ${store.STATUSES.join(', ')}` });
-  }
+// ---------------------------------------------------------------------------
+// Routes
+// ---------------------------------------------------------------------------
+
+router.get('/', validate({ query: ListInvoicesQuery }), (req, res) => {
+  const { status } = req.validatedQuery;
   const data = status ? store.list().filter((i) => i.status === status) : store.list();
   return res.json({ data, count: data.length });
 });
 
-router.get('/:id', (req, res) => {
-  const invoice = store.get(req.params.id);
+router.get('/:id', validate({ params: InvoiceIdParam }), (req, res) => {
+  const invoice = store.get(req.validatedParams.id);
   if (!invoice) {
     return res.status(404).json({ error: 'Invoice not found' });
   }
@@ -123,34 +117,34 @@ router.get('/:id/quote', (req, res) => {
   });
 });
 
-router.post('/', (req, res) => {
-  const { value, errors } = validateInvoice(req.body);
-  if (errors) {
-    return res.status(400).json({ error: 'Validation failed', details: errors });
-  }
+router.post('/', validate({ body: CreateInvoiceBody }), (req, res) => {
+  const d = req.validatedBody;
+  const value = {
+    sme: d.sme.trim(),
+    debtor: d.debtor.trim(),
+    smeAddress: typeof d.smeAddress === 'string' ? d.smeAddress : null,
+    amount: d.amount,
+    currency: typeof d.currency === 'string' ? d.currency.toUpperCase().slice(0, 12) : 'USDC',
+    yieldBps: d.yieldBps === undefined ? 800 : d.yieldBps,
+    dueDate: d.dueDate,
+  };
   return res.status(201).json({ data: store.create(value) });
 });
 
-router.post('/:id/fund', (req, res) => {
-  const invoice = store.get(req.params.id);
+router.post('/:id/fund', validate({ params: InvoiceIdParam, body: FundInvoiceBody }), (req, res) => {
+  const invoice = store.get(req.validatedParams.id);
   if (!invoice) {
     return res.status(404).json({ error: 'Invoice not found' });
   }
-  const { amount, investor } = req.body || {};
-  if (investor === undefined || investor === null || investor === '') {
-    return res.status(400).json({ error: 'INVESTOR_REQUIRED' });
+  if (invoice.status !== 'open') {
+    return res.status(409).json({ error: `Invoice is ${invoice.status}; only open invoices can be funded` });
   }
+  const { amount, investor } = req.validatedBody;
   if (typeof investor !== 'string' || !StrKey.isValidEd25519PublicKey(investor)) {
     return res.status(400).json({ error: 'INVALID_INVESTOR_ADDRESS' });
   }
   if (invoice.smeAddress && investor === invoice.smeAddress) {
     return res.status(422).json({ error: 'SELF_FUNDING_NOT_ALLOWED' });
-  }
-  if (typeof amount !== 'number' || !(amount > 0) || !Number.isFinite(amount)) {
-    return res.status(400).json({ error: 'amount must be a positive number' });
-  }
-  if (invoice.status !== 'open') {
-    return res.status(409).json({ error: `Invoice is ${invoice.status}; only open invoices can be funded` });
   }
   return res.json({ data: store.fund(invoice, amount, investor) });
 });

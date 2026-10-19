@@ -1,27 +1,13 @@
 'use strict';
 
+const { OpenApiGeneratorV3 } = require('@asteasolutions/zod-to-openapi');
 const config = require('./config');
+const { registry } = require('./schemas');
 
-const Invoice = {
-  type: 'object',
-  properties: {
-    id: { type: 'string', example: 'INV_0001' },
-    sme: { type: 'string', example: 'Acme Components Ltd' },
-    smeAddress: { type: 'string', nullable: true },
-    debtor: { type: 'string', example: 'Globex Retail' },
-    amount: { type: 'number', example: 25000 },
-    currency: { type: 'string', example: 'USDC' },
-    fundedAmount: { type: 'number', example: 0 },
-    yieldBps: { type: 'integer', example: 800 },
-    dueDate: { type: 'string', format: 'date' },
-    status: { type: 'string', enum: ['open', 'funded', 'settled', 'cancelled'] },
-    onChain: { type: 'boolean' },
-    createdAt: { type: 'string', format: 'date-time' },
-  },
-};
-
-const json = (schema) => ({ content: { 'application/json': { schema } } });
-const ErrorBody = { type: 'object', properties: { error: { type: 'string' } } };
+// ---------------------------------------------------------------------------
+// Cache: one built spec per baseUrl
+// ---------------------------------------------------------------------------
+const _cache = new Map();
 
 /** Raw stroop amount as a decimal integer string (7 decimals). */
 const StroopString = { type: 'string', pattern: '^\\d+$', example: '1000000000' };
@@ -95,12 +81,28 @@ const EscrowLiveResponse = {
 
 /**
  * Builds the OpenAPI document for the given public base URL.
+ * The result is memoised so schemas are not regenerated on every request.
  *
  * @param {string} baseUrl server URL to advertise
  * @returns {object} OpenAPI 3.0 document
  */
 function buildSpec(baseUrl) {
-  return {
+  if (_cache.has(baseUrl)) {
+    return _cache.get(baseUrl);
+  }
+
+  // Generate components.schemas from the Zod registry
+  const generator = new OpenApiGeneratorV3(registry.definitions);
+  const components = generator.generateComponents();
+
+  // Convenience ref helper
+  const ref = (name) => ({ $ref: `#/components/schemas/${name}` });
+  const json = (schemaOrRef) => ({ content: { 'application/json': { schema: schemaOrRef } } });
+
+  const errorRef = json(ref('ErrorResponse'));
+  const validationErrorRef = json(ref('ErrorResponse'));
+
+  const spec = {
     openapi: '3.0.3',
     info: {
       title: 'LiquiFact API',
@@ -112,7 +114,9 @@ function buildSpec(baseUrl) {
     servers: [{ url: baseUrl }],
     tags: [{ name: 'System' }, { name: 'Invoices' }, { name: 'Investors' }, { name: 'Escrow' }],
     components: {
+      ...components.components,
       schemas: {
+        ...components.components?.schemas,
         EscrowState,
         EscrowLiveResponse,
       },
@@ -122,7 +126,12 @@ function buildSpec(baseUrl) {
         get: {
           tags: ['System'],
           summary: 'Liveness probe',
-          responses: { 200: { description: 'Service is up', ...json({ type: 'object' }) } },
+          responses: {
+            200: {
+              description: 'Service is up',
+              ...json({ type: 'object', properties: { status: { type: 'string' }, version: { type: 'string' } } }),
+            },
+          },
         },
       },
       '/api/stats': {
@@ -184,11 +193,25 @@ function buildSpec(baseUrl) {
           tags: ['Invoices'],
           summary: 'List invoices',
           parameters: [
-            { name: 'status', in: 'query', schema: { type: 'string', enum: ['open', 'funded', 'settled', 'cancelled'] } },
+            {
+              name: 'status',
+              in: 'query',
+              schema: { type: 'string', enum: ['open', 'funded', 'settled', 'cancelled'] },
+              description: 'Filter by invoice status',
+            },
           ],
           responses: {
-            200: { description: 'Invoices', ...json({ type: 'object', properties: { data: { type: 'array', items: Invoice }, count: { type: 'integer' } } }) },
-            400: { description: 'Invalid filter', ...json(ErrorBody) },
+            200: {
+              description: 'List of invoices',
+              ...json({
+                type: 'object',
+                properties: {
+                  data: { type: 'array', items: ref('Invoice') },
+                  count: { type: 'integer' },
+                },
+              }),
+            },
+            400: { description: 'Invalid status filter', ...errorRef },
           },
         },
         post: {
@@ -196,34 +219,38 @@ function buildSpec(baseUrl) {
           summary: 'Submit an invoice for financing',
           requestBody: {
             required: true,
-            ...json({
-              type: 'object',
-              required: ['sme', 'debtor', 'amount', 'dueDate'],
-              properties: {
-                sme: { type: 'string' },
-                debtor: { type: 'string' },
-                amount: { type: 'number' },
-                currency: { type: 'string', default: 'USDC' },
-                yieldBps: { type: 'integer', default: 800 },
-                dueDate: { type: 'string', format: 'date' },
-                smeAddress: { type: 'string' },
-              },
-            }),
+            ...json(ref('CreateInvoiceBody')),
           },
           responses: {
-            201: { description: 'Created', ...json({ type: 'object', properties: { data: Invoice } }) },
-            400: { description: 'Validation failed', ...json(ErrorBody) },
+            201: {
+              description: 'Invoice created',
+              ...json({ type: 'object', properties: { data: ref('Invoice') } }),
+            },
+            400: { description: 'Validation failed', ...validationErrorRef },
+            415: { description: 'Content-Type must be application/json', ...errorRef },
           },
         },
       },
       '/api/invoices/{id}': {
         get: {
           tags: ['Invoices'],
-          summary: 'Get an invoice',
-          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          summary: 'Get an invoice by id',
+          parameters: [
+            {
+              name: 'id',
+              in: 'path',
+              required: true,
+              schema: { type: 'string', pattern: '^[A-Za-z0-9_]{1,32}$' },
+              description: 'Invoice identifier (1–32 alphanumeric/underscore characters)',
+            },
+          ],
           responses: {
-            200: { description: 'Invoice', ...json({ type: 'object', properties: { data: Invoice } }) },
-            404: { description: 'Not found', ...json(ErrorBody) },
+            200: {
+              description: 'Invoice found',
+              ...json({ type: 'object', properties: { data: ref('Invoice') } }),
+            },
+            400: { description: 'Invalid id format', ...errorRef },
+            404: { description: 'Invoice not found', ...errorRef },
           },
         },
       },
@@ -263,112 +290,21 @@ function buildSpec(baseUrl) {
         post: {
           tags: ['Invoices'],
           summary: 'Record an investor contribution (demo, off-chain)',
-          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', pattern: '^[A-Za-z0-9_]{1,32}$' }, description: 'Invoice identifier' }],
           requestBody: {
             required: true,
-            ...json({
-              type: 'object',
-              required: ['amount', 'investor'],
-              properties: {
-                amount: { type: 'number', example: 1000 },
-                investor: { type: 'string', example: 'GA7TXEBMEPQCLHIYCWDN7RKAO5IMRD2UV7O7TZXMEW6VZUMEXNR4XBB5' },
-              },
-            }),
+            ...json(ref('FundInvoiceBody')),
           },
-          responses: {
-            200: { description: 'Updated invoice', ...json({ type: 'object', properties: { data: Invoice } }) },
-            400: { description: 'Invalid amount or missing/invalid investor', ...json(ErrorBody) },
-            404: { description: 'Not found', ...json(ErrorBody) },
-            409: { description: 'Invoice not open', ...json(ErrorBody) },
-            422: { description: 'Self-funding not allowed', ...json(ErrorBody) },
-          },
-        },
-      },
-      '/api/invoices/{id}/contributions': {
-        get: {
-          tags: ['Invoices'],
-          summary: 'List contributions for an invoice',
-          parameters: [
-            { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
-            { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 } },
-            { name: 'cursor', in: 'query', schema: { type: 'string' } },
-          ],
           responses: {
             200: {
-              description: 'Contributions and totals',
-              ...json({
-                type: 'object',
-                properties: {
-                  data: {
-                    type: 'array',
-                    items: {
-                      type: 'object',
-                      properties: {
-                        investor: { type: 'string' },
-                        amount: { type: 'number' },
-                        createdAt: { type: 'string', format: 'date-time' },
-                      },
-                    },
-                  },
-                  totals: {
-                    type: 'object',
-                    properties: {
-                      funded: { type: 'number' },
-                      investors: { type: 'integer' },
-                    },
-                  },
-                  nextCursor: { type: 'string' },
-                },
-              }),
+              description: 'Invoice updated after funding',
+              ...json({ type: 'object', properties: { data: ref('Invoice') } }),
             },
-            400: { description: 'Invalid limit or cursor', ...json(ErrorBody) },
-            404: { description: 'Not found', ...json(ErrorBody) },
-          },
-        },
-      },
-      '/api/investors/{address}/portfolio': {
-        get: {
-          tags: ['Investors'],
-          summary: 'Investor portfolio summary and expected returns',
-          parameters: [{ name: 'address', in: 'path', required: true, schema: { type: 'string' } }],
-          responses: {
-            200: {
-              description: 'Investor portfolio',
-              ...json({
-                type: 'object',
-                properties: {
-                  investor: { type: 'string' },
-                  positions: {
-                    type: 'array',
-                    items: {
-                      type: 'object',
-                      properties: {
-                        invoiceId: { type: 'string' },
-                        status: { type: 'string', enum: ['open', 'funded', 'settled', 'cancelled'] },
-                        currency: { type: 'string' },
-                        principal: { type: 'number' },
-                        yieldBps: { type: 'integer' },
-                        dueDate: { type: 'string', format: 'date' },
-                        expectedCoupon: { oneOf: [{ type: 'number' }, { type: 'string' }] },
-                        expectedPayout: { type: 'number' },
-                      },
-                    },
-                  },
-                  totalsByCurrency: {
-                    type: 'object',
-                    additionalProperties: {
-                      type: 'object',
-                      properties: {
-                        principal: { type: 'number' },
-                        expectedCoupon: { type: 'number' },
-                        expectedPayout: { type: 'number' },
-                      },
-                    },
-                  },
-                },
-              }),
-            },
-            400: { description: 'Invalid investor address', ...json(ErrorBody) },
+            400: { description: 'Validation failed', ...validationErrorRef },
+            404: { description: 'Invoice not found', ...errorRef },
+            409: { description: 'Invoice is not open', ...errorRef },
+            415: { description: 'Content-Type must be application/json', ...errorRef },
+            422: { description: 'Self-funding not allowed', ...errorRef },
           },
         },
       },
@@ -422,147 +358,14 @@ function buildSpec(baseUrl) {
               }),
             },
           },
-        },
-      },
-      '/api/escrow/attestations': {
-        get: {
-          tags: ['Escrow'],
-          summary: 'On-chain attestation log (paginated)',
-          description:
-            'Returns the primary attestation hash and a page of the append-only attestation log. ' +
-            'Page size is capped at 20 (MAX_ATTESTATION_READ_PAGE). Use `nextCursor` to fetch subsequent pages.',
-          parameters: [
-            {
-              name: 'cursor',
-              in: 'query',
-              description: 'Zero-based start index for the log page (default: 0)',
-              schema: { type: 'integer', minimum: 0, default: 0 },
-            },
-            {
-              name: 'limit',
-              in: 'query',
-              description: 'Number of log entries to return (1–20, default: 20)',
-              schema: { type: 'integer', minimum: 1, maximum: 20, default: 20 },
-            },
-          ],
-          responses: {
-            200: {
-              description: 'Attestation state',
-              ...json({
-                type: 'object',
-                properties: {
-                  primary: {
-                    type: 'string',
-                    nullable: true,
-                    description: 'Lowercase hex SHA-256 of the primary attestation, or null if not set',
-                    example: 'a'.repeat(64),
-                  },
-                  log: {
-                    type: 'array',
-                    items: {
-                      type: 'object',
-                      properties: {
-                        index: { type: 'integer', description: 'Zero-based position in the append log' },
-                        digest: { type: 'string', description: 'Lowercase 64-char hex SHA-256' },
-                        revoked: { type: 'boolean' },
-                      },
-                      required: ['index', 'digest', 'revoked'],
-                    },
-                  },
-                  total: {
-                    type: 'integer',
-                    nullable: true,
-                    description: 'Total number of log entries, or null if unavailable',
-                  },
-                  nextCursor: {
-                    type: 'integer',
-                    nullable: true,
-                    description: 'Start index for the next page, or null if this is the last page',
-                  },
-                },
-                required: ['primary', 'log', 'total', 'nextCursor'],
-              }),
-            },
-            400: { description: 'Invalid cursor or limit', ...json(ErrorBody) },
-            502: { description: 'Soroban RPC read failed', ...json(ErrorBody) },
-          },
-        },
-      },
-      '/api/escrow/attestations/verify': {
-        post: {
-          tags: ['Escrow'],
-          summary: 'Verify a document digest against on-chain attestations',
-          description:
-            'Accepts either a JSON body `{ sha256: "<64 hex>" }` or a `multipart/form-data` upload ' +
-            '(file ≤ 5 MiB, hashed with SHA-256 while streaming — the file is never stored). ' +
-            'Returns whether the digest matches the primary hash or a non-revoked log entry.',
-          requestBody: {
-            required: true,
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  required: ['sha256'],
-                  properties: {
-                    sha256: {
-                      type: 'string',
-                      description: '64-character hex SHA-256 digest to verify',
-                      example: 'a'.repeat(64),
-                    },
-                  },
-                },
-              },
-              'multipart/form-data': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    file: {
-                      type: 'string',
-                      format: 'binary',
-                      description: 'Document file (≤ 5 MiB). The server hashes it with SHA-256 and discards the bytes.',
-                    },
-                  },
-                },
-              },
-            },
-          },
-          responses: {
-            200: {
-              description: 'Verification result',
-              ...json({
-                type: 'object',
-                properties: {
-                  sha256: { type: 'string', description: 'The digest that was checked (normalised to lowercase)' },
-                  match: {
-                    type: 'string',
-                    enum: ['primary', 'log', 'none'],
-                    description: '"primary" if it matches the primary hash, "log" if found in the append log, "none" otherwise',
-                  },
-                  index: {
-                    type: 'integer',
-                    nullable: true,
-                    description: 'Zero-based log index when match is "log"; omitted otherwise',
-                  },
-                  revoked: {
-                    type: 'boolean',
-                    description: 'true if the matched log entry has been revoked',
-                  },
-                  verified: {
-                    type: 'boolean',
-                    description: 'true when match !== "none" && !revoked',
-                  },
-                },
-                required: ['sha256', 'match', 'revoked', 'verified'],
-              }),
-            },
-            400: { description: 'Invalid or missing digest (INVALID_DIGEST / NO_FILE)', ...json(ErrorBody) },
-            413: { description: 'Uploaded file exceeds 5 MiB', ...json(ErrorBody) },
-            502: { description: 'Soroban RPC read failed', ...json(ErrorBody) },
           },
         },
       },
     },
   };
+
+  _cache.set(baseUrl, spec);
+  return spec;
 }
 
 module.exports = { buildSpec };
