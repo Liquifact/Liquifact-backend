@@ -37,7 +37,7 @@ function buildSpec(baseUrl) {
       version: config.version,
       description:
         'Invoice liquidity network on Stellar. SMEs tokenize invoices, investors fund them, and a Soroban escrow ' +
-        `contract holds funds until settlement. Escrow contract (testnet): ${config.contractId}`,
+        `contract holds funds until settlement. Escrow contract (${config.network}): ${config.contractId}`,
     },
     servers: [{ url: baseUrl }],
     tags: [{ name: 'System' }, { name: 'Invoices' }, { name: 'Escrow' }],
