@@ -7,7 +7,26 @@
 const CONTRACT_ID =
   process.env.ESCROW_CONTRACT_ID || 'CDQCKR2YU6IVQ4GYPBMXBPZ4FGFQB5H25AI7ZSETHS2CZ5ZRCWQDSO6P';
 
+/**
+ * Parses SUPPORTED_ASSETS ("XLM,USDC:GA5Z...") once at startup.
+ *
+ * @param {string} raw comma separated asset list
+ * @returns {{ code: string, issuer: string|null }[]} supported assets
+ */
+function parseAssets(raw) {
+  return raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const [code, issuer] = entry.split(':');
+      return { code: code.trim().toUpperCase(), issuer: issuer ? issuer.trim().toUpperCase() : null };
+    })
+    .filter((a) => /^[A-Z0-9]{1,12}$/.test(a.code));
+}
+
 module.exports = {
+  supportedAssets: parseAssets(process.env.SUPPORTED_ASSETS || 'XLM,USDC'),
   port: Number(process.env.PORT) || 3001,
   network: process.env.STELLAR_NETWORK || 'testnet',
   rpcUrl: process.env.SOROBAN_RPC_URL || 'https://soroban-testnet.stellar.org',
