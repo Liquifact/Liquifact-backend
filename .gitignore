@@ -1,7 +1,6 @@
 node_modules/
 coverage/
-.env
-.env.*
 !.env.example
 .vercel
 .DS_Store
+config.bat

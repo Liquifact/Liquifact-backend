@@ -6,13 +6,26 @@
  * intentional for the public demo (no database required).
  */
 
+const crypto = require('crypto');
+const { StrKey } = require('@stellar/stellar-sdk');
+
 const STATUSES = ['open', 'funded', 'settled', 'cancelled'];
+
+/**
+ * Deterministic demo public key (G...) derived from a label. Only the public
+ * key is ever produced; no secret exists for these demo accounts.
+ *
+ * @param {string} label demo account label
+ * @returns {string} valid ed25519 public key StrKey
+ */
+const demoAddress = (label) =>
+  StrKey.encodeEd25519PublicKey(crypto.createHash('sha256').update(`liquifact-demo:${label}`).digest());
 
 const seed = () => [
   {
     id: 'INV_0001',
     sme: 'Acme Components Ltd',
-    smeAddress: 'GA7TXEBMEPQCLHIYCWDN7RKAO5IMRD2UV7O7TZXMEW6VZUMEXNR4XBB5',
+    smeAddress: demoAddress('acme'),
     debtor: 'Globex Retail',
     amount: 100,
     currency: 'XLM',
@@ -26,7 +39,7 @@ const seed = () => [
   {
     id: 'INV_0002',
     sme: 'Northwind Textiles',
-    smeAddress: 'GBNORTHWINDDEMOADDRESSXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
+    smeAddress: demoAddress('northwind'),
     debtor: 'Initech Wholesale',
     amount: 25000,
     currency: 'USDC',
@@ -40,7 +53,7 @@ const seed = () => [
   {
     id: 'INV_0003',
     sme: 'Blue Harbor Logistics',
-    smeAddress: 'GBBLUEHARBORDEMOADDRESSXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
+    smeAddress: demoAddress('blue-harbor'),
     debtor: 'Umbrella Foods',
     amount: 42000,
     currency: 'USDC',
@@ -54,7 +67,7 @@ const seed = () => [
   {
     id: 'INV_0004',
     sme: 'Sunrise Agritech',
-    smeAddress: 'GBSUNRISEDEMOADDRESSXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
+    smeAddress: demoAddress('sunrise'),
     debtor: 'Stark Industries',
     amount: 12500,
     currency: 'USDC',

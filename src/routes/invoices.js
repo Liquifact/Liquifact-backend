@@ -2,18 +2,54 @@
 
 const express = require('express');
 const store = require('../data/store');
+const config = require('../config');
+const stellar = require('../lib/stellar-validate');
 
 const router = express.Router();
+
+const allowedCurrencies = () =>
+  config.supportedAssets.map((a) => (a.issuer ? `${a.code}:${a.issuer}` : a.code));
+
+/**
+ * Resolves a requested currency against the configured supported assets.
+ *
+ * @param {unknown} input requested currency (undefined means default USDC)
+ * @returns {string|null} normalised currency, or null if unsupported
+ */
+function resolveCurrency(input) {
+  const raw = input === undefined ? 'USDC' : input;
+  if (typeof raw !== 'string') {
+    return null;
+  }
+  const [code, issuer] = raw.trim().toUpperCase().split(':');
+  const match = config.supportedAssets.find(
+    (a) => a.code === code && (issuer === undefined ? true : a.issuer === issuer),
+  );
+  return match ? (issuer === undefined ? match.code : `${match.code}:${match.issuer}`) : null;
+}
 
 /**
  * Validates a create-invoice payload.
  *
  * @param {object} body request body
- * @returns {{ value?: object, errors?: string[] }} validated fields or errors
+ * @returns {{ value?: object, errors?: string[], code?: string }} validated fields or errors
  */
 function validateInvoice(body) {
   const errors = [];
   const b = body || {};
+  if (b.smeAddress !== undefined && b.smeAddress !== null) {
+    const check = stellar.checkAddress(b.smeAddress);
+    if (!check.ok) {
+      return { errors: [check.message], code: check.code };
+    }
+  }
+  const currency = resolveCurrency(b.currency);
+  if (currency === null) {
+    return {
+      errors: [`currency must be one of ${allowedCurrencies().join(', ')}`],
+      code: 'UNSUPPORTED_CURRENCY',
+    };
+  }
   const str = (k, max = 120) => {
     if (typeof b[k] !== 'string' || !b[k].trim() || b[k].length > max) {
       errors.push(`${k} must be a non-empty string (max ${max} chars)`);
@@ -40,7 +76,7 @@ function validateInvoice(body) {
       debtor: b.debtor.trim(),
       smeAddress: typeof b.smeAddress === 'string' ? b.smeAddress : null,
       amount: b.amount,
-      currency: typeof b.currency === 'string' ? b.currency.toUpperCase().slice(0, 12) : 'USDC',
+      currency,
       yieldBps,
       dueDate: b.dueDate,
     },
@@ -48,11 +84,20 @@ function validateInvoice(body) {
 }
 
 router.get('/', (req, res) => {
-  const { status } = req.query;
+  const { status, smeAddress } = req.query;
   if (status && !store.STATUSES.includes(status)) {
     return res.status(400).json({ error: `status must be one of ${store.STATUSES.join(', ')}` });
   }
-  const data = status ? store.list().filter((i) => i.status === status) : store.list();
+  if (smeAddress !== undefined) {
+    const check = stellar.checkAddress(smeAddress);
+    if (!check.ok) {
+      return res.status(400).json({ error: check.message, code: check.code });
+    }
+  }
+  let data = status ? store.list().filter((i) => i.status === status) : store.list();
+  if (smeAddress !== undefined) {
+    data = data.filter((i) => i.smeAddress === smeAddress);
+  }
   return res.json({ data, count: data.length });
 });
 
@@ -65,7 +110,14 @@ router.get('/:id', (req, res) => {
 });
 
 router.post('/', (req, res) => {
-  const { value, errors } = validateInvoice(req.body);
+  const { value, errors, code } = validateInvoice(req.body);
+  if (code) {
+    const body = { error: errors[0], code };
+    if (code === 'UNSUPPORTED_CURRENCY') {
+      body.allowed = allowedCurrencies();
+    }
+    return res.status(400).json(body);
+  }
   if (errors) {
     return res.status(400).json({ error: 'Validation failed', details: errors });
   }

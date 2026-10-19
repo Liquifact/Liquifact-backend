@@ -22,6 +22,15 @@ const Invoice = {
 
 const json = (schema) => ({ content: { 'application/json': { schema } } });
 const ErrorBody = { type: 'object', properties: { error: { type: 'string' } } };
+const CodedError = {
+  type: 'object',
+  properties: {
+    error: { type: 'string' },
+    code: { type: 'string', enum: ['INVALID_STELLAR_ADDRESS', 'SECRET_KEY_SUBMITTED', 'UNSUPPORTED_CURRENCY'] },
+    allowed: { type: 'array', items: { type: 'string' }, description: 'Supported currencies (UNSUPPORTED_CURRENCY only)' },
+  },
+};
+const supportedAssets = config.supportedAssets.map((a) => (a.issuer ? `${a.code}:${a.issuer}` : a.code));
 
 /**
  * Builds the OpenAPI document for the given public base URL.
@@ -58,10 +67,16 @@ function buildSpec(baseUrl) {
           summary: 'List invoices',
           parameters: [
             { name: 'status', in: 'query', schema: { type: 'string', enum: ['open', 'funded', 'settled', 'cancelled'] } },
+            {
+              name: 'smeAddress',
+              in: 'query',
+              description: 'Only invoices for this Stellar account (G...) or contract (C...) address',
+              schema: { type: 'string', minLength: 56, maxLength: 56 },
+            },
           ],
           responses: {
             200: { description: 'Invoices', ...json({ type: 'object', properties: { data: { type: 'array', items: Invoice }, count: { type: 'integer' } } }) },
-            400: { description: 'Invalid filter', ...json(ErrorBody) },
+            400: { description: 'Invalid filter (code INVALID_STELLAR_ADDRESS or SECRET_KEY_SUBMITTED for smeAddress)', ...json(CodedError) },
           },
         },
         post: {
@@ -76,16 +91,25 @@ function buildSpec(baseUrl) {
                 sme: { type: 'string' },
                 debtor: { type: 'string' },
                 amount: { type: 'number' },
-                currency: { type: 'string', default: 'USDC' },
+                currency: { type: 'string', default: 'USDC', enum: supportedAssets, description: 'Supported asset (SUPPORTED_ASSETS)' },
                 yieldBps: { type: 'integer', default: 800 },
                 dueDate: { type: 'string', format: 'date' },
-                smeAddress: { type: 'string' },
+                smeAddress: {
+                  type: 'string',
+                  minLength: 56,
+                  maxLength: 56,
+                  description: 'Stellar public key (G...) or contract id (C...); secret seeds and muxed addresses are rejected',
+                },
               },
             }),
           },
           responses: {
             201: { description: 'Created', ...json({ type: 'object', properties: { data: Invoice } }) },
-            400: { description: 'Validation failed', ...json(ErrorBody) },
+            400: {
+              description:
+                'Validation failed; code is INVALID_STELLAR_ADDRESS, SECRET_KEY_SUBMITTED or UNSUPPORTED_CURRENCY when applicable',
+              ...json(CodedError),
+            },
           },
         },
       },
