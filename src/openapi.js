@@ -20,6 +20,27 @@ const Invoice = {
   },
 };
 
+const InvestorPosition = {
+  type: 'object',
+  required: ['investor', 'contractId', 'contribution', 'contributionDecimal', 'claimablePayout', 'claimablePayoutDecimal', 'claimed', 'effectiveYieldBps', 'claimNotBefore', 'claimNotBeforeIso', 'allowlist', 'latestLedger'],
+  properties: {
+    investor: { type: 'string' },
+    contractId: { type: 'string' },
+    contribution: { type: 'string', description: 'Raw stroops' },
+    contributionDecimal: { type: 'string', description: 'Amount with 7 decimals applied' },
+    claimablePayout: { type: 'string', description: 'Raw stroops' },
+    claimablePayoutDecimal: { type: 'string' },
+    claimed: { type: 'boolean' },
+    effectiveYieldBps: { type: 'integer' },
+    claimNotBefore: { type: 'integer' },
+    claimNotBeforeIso: { type: 'string', format: 'date-time', nullable: true },
+    allowlist: { type: 'object', required: ['active', 'allowlisted', 'eligible'], properties: {
+      active: { type: 'boolean' }, allowlisted: { type: 'boolean' }, eligible: { type: 'boolean' },
+    } },
+    latestLedger: { type: 'integer' },
+  },
+};
+
 const json = (schema) => ({ content: { 'application/json': { schema } } });
 const ErrorBody = { type: 'object', properties: { error: { type: 'string' } } };
 
@@ -41,6 +62,7 @@ function buildSpec(baseUrl) {
     },
     servers: [{ url: baseUrl }],
     tags: [{ name: 'System' }, { name: 'Invoices' }, { name: 'Escrow' }],
+    components: { schemas: { InvestorPosition } },
     paths: {
       '/health': {
         get: {
@@ -116,6 +138,19 @@ function buildSpec(baseUrl) {
       },
       '/api/escrow': {
         get: { tags: ['Escrow'], summary: 'Deployed escrow contract metadata', responses: { 200: { description: 'Contract info' } } },
+      },
+      '/api/escrow/investors/{address}': {
+        get: {
+          tags: ['Escrow'],
+          summary: 'Query an investor position from the deployed Soroban escrow',
+          description: 'Seven read-only contract view simulations plus the latest ledger; responses are cached for 5 seconds per address (maximum 1000 addresses).',
+          parameters: [{ name: 'address', in: 'path', required: true, schema: { type: 'string' }, description: 'Stellar G-account or C-contract address (muxed addresses rejected)' }],
+          responses: {
+            200: { description: 'Investor position snapshot', ...json({ $ref: '#/components/schemas/InvestorPosition' }) },
+            400: { description: 'INVALID_ADDRESS', ...json({ type: 'object', properties: { code: { type: 'string', enum: ['INVALID_ADDRESS'] } } }) },
+            502: { description: 'ESCROW_READ_FAILED (no partial data)', ...json({ type: 'object', required: ['code', 'method'], properties: { code: { type: 'string', enum: ['ESCROW_READ_FAILED'] }, method: { type: 'string' } } }) },
+          },
+        },
       },
       '/api/escrow/live': {
         get: {
