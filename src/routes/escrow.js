@@ -2,6 +2,7 @@
 
 const express = require('express');
 const config = require('../config');
+const logger = require('../logger');
 
 const router = express.Router();
 
@@ -55,10 +56,19 @@ router.get('/', (req, res) => {
 });
 
 router.get('/live', async (req, res) => {
+  const startedAt = Date.now();
   try {
     const escrow = await readEscrowOnChain();
     res.json({ source: 'soroban-rpc', contractId: config.contractId, escrow });
   } catch (err) {
+    const durationMs = Date.now() - startedAt;
+    logger.warn({
+      reqId: req.id,
+      rpcUrl: config.rpcUrl,
+      contractId: config.contractId,
+      err: err.message,
+      durationMs,
+    }, 'escrow live read failed; falling back to snapshot');
     res.json({
       source: 'snapshot',
       contractId: config.contractId,

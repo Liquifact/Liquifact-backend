@@ -6,10 +6,14 @@ const helmet = require('helmet');
 const config = require('./config');
 const store = require('./data/store');
 const { buildSpec } = require('./openapi');
+const { logger, requestIdMiddleware, httpLogger } = require('./logger');
 
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', true);
+
+app.use(requestIdMiddleware);
+app.use(httpLogger);
 
 app.use(
   helmet({
@@ -103,7 +107,12 @@ app.use((req, res) => res.status(404).json({ error: 'Not found', path: req.path,
 
 app.use((err, req, res, _next) => {
   const status = err.status || err.statusCode || 500;
-  res.status(status).json({ error: status === 500 ? 'Internal server error' : err.message });
+  const reqId = req.id;
+  logger.error({ reqId, err }, 'request failed');
+  res.status(status).json({
+    error: status === 500 ? 'Internal server error' : err.message,
+    requestId: reqId,
+  });
 });
 
 module.exports = app;

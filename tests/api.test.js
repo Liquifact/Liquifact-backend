@@ -3,6 +3,7 @@
 const request = require('supertest');
 const app = require('../src/app');
 const store = require('../src/data/store');
+const { logger } = require('../src/logger');
 
 beforeEach(() => store.reset());
 
@@ -32,6 +33,51 @@ describe('system', () => {
   test('unknown route is a JSON 404', async () => {
     const res = await request(app).get('/nope');
     expect(res.status).toBe(404);
+  });
+
+  test('echoes a valid inbound X-Request-Id', async () => {
+    const res = await request(app).get('/api/invoices').set('X-Request-Id', 'demo-req-123');
+    expect(res.headers['x-request-id']).toBe('demo-req-123');
+  });
+
+  test('replaces an invalid inbound X-Request-Id', async () => {
+    const res = await request(app).get('/api/invoices').set('X-Request-Id', 'bad id!');
+    expect(res.headers['x-request-id']).toBeDefined();
+    expect(res.headers['x-request-id']).not.toBe('bad id!');
+    expect(res.headers['x-request-id']).toMatch(/^[A-Za-z0-9._-]{8,128}$/);
+  });
+
+  test('emits an access log line with templated route and reqId', async () => {
+    const lines = [];
+    const stream = { write: (line) => lines.push(line) };
+    const original = logger[Symbol.for('pino.stream')];
+    logger[Symbol.for('pino.stream')] = stream;
+    try {
+      await request(app).get('/api/invoices/INV_0001').set('X-Request-Id', 'access-log-123');
+    } finally {
+      logger[Symbol.for('pino.stream')] = original;
+    }
+    const access = lines.map((l) => JSON.parse(l)).find((l) => l.reqId === 'access-log-123');
+    expect(access).toBeDefined();
+    expect(access.route).toBe('/api/invoices/:id');
+    expect(access.method).toBe('GET');
+    expect(access.status).toBe(200);
+  });
+
+  test('never logs the Authorization header value', async () => {
+    const lines = [];
+    const stream = { write: (line) => lines.push(line) };
+    const original = logger[Symbol.for('pino.stream')];
+    logger[Symbol.for('pino.stream')] = stream;
+    try {
+      await request(app)
+        .get('/api/invoices')
+        .set('X-Request-Id', 'auth-log-123')
+        .set('Authorization', 'Bearer super-secret-token-value');
+    } finally {
+      logger[Symbol.for('pino.stream')] = original;
+    }
+    expect(lines.join('')).not.toContain('super-secret-token-value');
   });
 });
 
@@ -74,5 +120,26 @@ describe('escrow', () => {
     const res = await request(app).get('/api/escrow');
     expect(res.status).toBe(200);
     expect(res.body.explorer).toContain('stellar.expert');
+  });
+
+  test('GET /api/escrow/live logs a warn when RPC fails and falls back', async () => {
+    const escrow = require('../src/services/escrow');
+    const spy = jest
+      .spyOn(escrow, 'readEscrowOnChain')
+      .mockRejectedValue(new Error('rpc down'));
+    const lines = [];
+    const stream = { write: (line) => lines.push(line) };
+    const original = logger[Symbol.for('pino.stream')];
+    logger[Symbol.for('pino.stream')] = stream;
+    try {
+      const res = await request(app).get('/api/escrow/live').set('X-Request-Id', 'rpc-warn-123');
+      expect(res.status).toBe(200);
+    } finally {
+      logger[Symbol.for('pino.stream')] = original;
+      spy.mockRestore();
+    }
+    const warn = lines.map((l) => JSON.parse(l)).find((l) => l.level === 40 && l.reqId === 'rpc-warn-123');
+    expect(warn).toBeDefined();
+    expect(warn.err).toBe('rpc down');
   });
 });
