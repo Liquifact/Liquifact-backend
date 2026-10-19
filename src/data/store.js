@@ -6,7 +6,7 @@
  * intentional for the public demo (no database required).
  */
 
-const STATUSES = ['open', 'funded', 'settled', 'cancelled'];
+const { STATUSES, InvalidTransitionError, transition } = require('../domain/invoice-state');
 
 const seed = () => [
   {
@@ -65,7 +65,7 @@ const seed = () => [
     onChain: false,
     createdAt: '2026-07-01T08:00:00.000Z',
   },
-];
+].map((i) => ({ ...i, history: [] }));
 
 let invoices = seed();
 
@@ -95,6 +95,7 @@ function create(invoice) {
     onChain: false,
     createdAt: new Date().toISOString(),
     ...invoice,
+    history: [],
   };
   invoices.push(record);
   return record;
@@ -108,9 +109,12 @@ function create(invoice) {
  * @returns {object} updated invoice
  */
 function fund(invoice, amount) {
+  if (invoice.status !== 'open') {
+    throw new InvalidTransitionError(invoice.status, 'funded');
+  }
   invoice.fundedAmount = Math.min(invoice.amount, invoice.fundedAmount + amount);
   if (invoice.fundedAmount >= invoice.amount) {
-    invoice.status = 'funded';
+    transition(invoice, 'funded', { reason: 'fully funded' });
   }
   return invoice;
 }
