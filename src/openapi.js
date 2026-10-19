@@ -1,6 +1,7 @@
 'use strict';
 
 const config = require('./config');
+const { SORTS } = require('./services/invoice-query');
 
 const Invoice = {
   type: 'object',
@@ -184,11 +185,20 @@ function buildSpec(baseUrl) {
           tags: ['Invoices'],
           summary: 'List invoices',
           parameters: [
-            { name: 'status', in: 'query', schema: { type: 'string', enum: ['open', 'funded', 'settled', 'cancelled'] } },
+            { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 } },
+            { name: 'cursor', in: 'query', schema: { type: 'string', maxLength: 2048 }, description: 'Opaque base64url cursor from nextCursor; bound to sort. Reuse the same filters.' },
+            { name: 'status', in: 'query', schema: { type: 'string', pattern: '^(open|funded|settled|cancelled)(,(open|funded|settled|cancelled))*$' }, description: 'Comma-separated invoice statuses' },
+            { name: 'currency', in: 'query', schema: { type: 'string', pattern: '^[a-zA-Z0-9]{1,12}$' }, description: 'Case-sensitive asset code' },
+            { name: 'sme', in: 'query', schema: { type: 'string', minLength: 1, maxLength: 120 }, description: 'Case-insensitive name substring' },
+            ...['minAmount', 'maxAmount'].map((name) => ({ name, in: 'query', schema: { type: 'string', pattern: '^\\d+(\\.\\d+)?$', maxLength: 128 }, description: 'Inclusive exact decimal bound, without exponent notation' })),
+            ...['minYieldBps', 'maxYieldBps'].map((name) => ({ name, in: 'query', schema: { type: 'integer', minimum: 0, maximum: 10000 }, description: 'Inclusive yield bound in basis points' })),
+            ...['dueBefore', 'dueAfter'].map((name) => ({ name, in: 'query', schema: { type: 'string', format: 'date' }, description: 'Inclusive real calendar date, YYYY-MM-DD' })),
+            { name: 'onChain', in: 'query', schema: { type: 'boolean' } },
+            { name: 'sort', in: 'query', schema: { type: 'string', enum: SORTS, default: '-createdAt' }, description: 'Primary order; ties always use ascending id. Unknown and repeated query parameters are rejected.' },
           ],
           responses: {
-            200: { description: 'Invoices', ...json({ type: 'object', properties: { data: { type: 'array', items: Invoice }, count: { type: 'integer' } } }) },
-            400: { description: 'Invalid filter', ...json(ErrorBody) },
+            200: { description: 'Filtered invoice page', ...json({ type: 'object', required: ['data', 'count', 'total', 'nextCursor'], properties: { data: { type: 'array', maxItems: 100, items: Invoice }, count: { type: 'integer', minimum: 0, description: 'Page length (legacy meaning preserved)' }, total: { type: 'integer', minimum: 0, description: 'Filtered count before applying cursor and limit' }, nextCursor: { type: 'string', nullable: true, description: 'Null when no further records remain' } } }) },
+            400: { description: 'Invalid/unknown/repeated query parameter or malformed/sort-mismatched cursor', ...json({ type: 'object', required: ['error', 'code', 'details'], properties: { error: { type: 'string' }, code: { type: 'string', enum: ['VALIDATION_FAILED', 'INVALID_CURSOR'] }, details: { type: 'object', additionalProperties: { type: 'string' } } } }) },
           },
         },
         post: {

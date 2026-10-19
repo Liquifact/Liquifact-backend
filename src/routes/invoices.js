@@ -6,6 +6,7 @@ const store = require('../data/store');
 const contributions = require('../data/contributions');
 const config = require('../config');
 const { toMinor, fromMinor, couponMinor, daysBetween, annualisedBps } = require('../domain/returns');
+const { parseInvoiceQuery, queryInvoices, InvoiceQueryError } = require('../services/invoice-query');
 
 const router = express.Router();
 
@@ -52,12 +53,15 @@ function validateInvoice(body) {
 }
 
 router.get('/', (req, res) => {
-  const { status } = req.query;
-  if (status && !store.STATUSES.includes(status)) {
-    return res.status(400).json({ error: `status must be one of ${store.STATUSES.join(', ')}` });
+  try {
+    const query = parseInvoiceQuery(req.query);
+    return res.json(queryInvoices(store.list(), query));
+  } catch (error) {
+    if (!(error instanceof InvoiceQueryError)) {
+      throw error;
+    }
+    return res.status(400).json({ error: error.message, code: error.code, details: error.details });
   }
-  const data = status ? store.list().filter((i) => i.status === status) : store.list();
-  return res.json({ data, count: data.length });
 });
 
 router.get('/:id', (req, res) => {
