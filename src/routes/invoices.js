@@ -3,7 +3,28 @@
 const express = require('express');
 const store = require('../data/store');
 
+const { InvalidTransitionError, TRANSITIONS, transition } = require('../domain/invoice-state');
+
 const router = express.Router();
+
+/**
+ * Maps an InvalidTransitionError to a 409 response; rethrows anything else.
+ *
+ * @param {Error} err caught error
+ * @param {object} res express response
+ * @returns {object} the response
+ */
+function handleTransitionError(err, res) {
+  if (err instanceof InvalidTransitionError) {
+    return res.status(409).json({
+      error: `Invoice is ${err.from}; cannot move to ${err.to}`,
+      code: err.code,
+      from: err.from,
+      to: err.to,
+    });
+  }
+  throw err;
+}
 
 /**
  * Validates a create-invoice payload.
@@ -81,10 +102,78 @@ router.post('/:id/fund', (req, res) => {
   if (typeof amount !== 'number' || !(amount > 0)) {
     return res.status(400).json({ error: 'amount must be a positive number' });
   }
-  if (invoice.status !== 'open') {
-    return res.status(409).json({ error: `Invoice is ${invoice.status}; only open invoices can be funded` });
+  // TODO(auth)
+  try {
+    return res.json({ data: store.fund(invoice, amount) });
+  } catch (err) {
+    return handleTransitionError(err, res);
   }
-  return res.json({ data: store.fund(invoice, amount) });
+});
+
+router.post('/:id/cancel', (req, res) => {
+  // TODO(auth)
+  const invoice = store.get(req.params.id);
+  if (!invoice) {
+    return res.status(404).json({ error: 'Invoice not found' });
+  }
+  const reason = req.body && req.body.reason;
+  if (typeof reason !== 'string' || !reason.trim() || reason.length > 280) {
+    return res.status(400).json({ error: 'reason must be a non-empty string (max 280 chars)' });
+  }
+  const refundDue = invoice.fundedAmount > 0 ? invoice.fundedAmount : undefined;
+  try {
+    transition(invoice, 'cancelled', { reason });
+  } catch (err) {
+    return handleTransitionError(err, res);
+  }
+  const body = { data: invoice };
+  if (refundDue !== undefined) {
+    body.refundDue = refundDue;
+  }
+  return res.json(body);
+});
+
+router.post('/:id/withdraw', (req, res) => {
+  // TODO(auth)
+  const invoice = store.get(req.params.id);
+  if (!invoice) {
+    return res.status(404).json({ error: 'Invoice not found' });
+  }
+  try {
+    transition(invoice, 'withdrawn', { reason: 'SME withdrew liquidity' });
+  } catch (err) {
+    return handleTransitionError(err, res);
+  }
+  return res.json({ data: invoice });
+});
+
+router.post('/:id/settle', (req, res) => {
+  // TODO(auth)
+  const invoice = store.get(req.params.id);
+  if (!invoice) {
+    return res.status(404).json({ error: 'Invoice not found' });
+  }
+  const settledAmount = req.body && req.body.settledAmount;
+  if (typeof settledAmount !== 'number' || !Number.isFinite(settledAmount) || settledAmount < 0) {
+    return res.status(400).json({ error: 'settledAmount must be a non-negative number' });
+  }
+  if (!TRANSITIONS[invoice.status].includes('settled')) {
+    return handleTransitionError(new InvalidTransitionError(invoice.status, 'settled'), res);
+  }
+  const required = invoice.fundedAmount + Math.floor((invoice.fundedAmount * invoice.yieldBps) / 10000);
+  if (settledAmount < required) {
+    return res.status(422).json({
+      error: `settledAmount must be at least ${required} (funded amount + coupon)`,
+      code: 'INSUFFICIENT_SETTLEMENT',
+      required,
+    });
+  }
+  try {
+    transition(invoice, 'settled', { reason: `settled with ${settledAmount}` });
+  } catch (err) {
+    return handleTransitionError(err, res);
+  }
+  return res.json({ data: invoice });
 });
 
 module.exports = router;
