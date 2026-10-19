@@ -24,14 +24,14 @@ const DEPLOY_SNAPSHOT = {
  * @param {number} timeoutMs abort after this many milliseconds
  * @returns {Promise<object>} the decoded escrow struct
  */
-async function readEscrowOnChain(timeoutMs = 6000) {
+async function readEscrowOnChain(contractId = config.contractId, timeoutMs = 6000) {
   const sdk = require('@stellar/stellar-sdk');
   const { rpc, Contract, TransactionBuilder, Account, BASE_FEE, scValToNative } = sdk;
   const server = new rpc.Server(config.rpcUrl);
   // Simulation does not need a real or funded source account.
   const source = new Account('GA7TXEBMEPQCLHIYCWDN7RKAO5IMRD2UV7O7TZXMEW6VZUMEXNR4XBB5', '0');
   const tx = new TransactionBuilder(source, { fee: BASE_FEE, networkPassphrase: config.networkPassphrase })
-    .addOperation(new Contract(config.contractId).call('get_escrow'))
+    .addOperation(new Contract(contractId).call('get_escrow'))
     .setTimeout(30)
     .build();
   const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('RPC timeout')), timeoutMs));
@@ -70,3 +70,5 @@ router.get('/live', async (req, res) => {
 
 module.exports = router;
 module.exports.DEPLOY_SNAPSHOT = DEPLOY_SNAPSHOT;
+
+module.exports.readEscrowOnChain = readEscrowOnChain;
