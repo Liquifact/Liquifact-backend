@@ -1,7 +1,9 @@
 'use strict';
 
 const express = require('express');
+const { StrKey } = require('@stellar/stellar-sdk');
 const store = require('../data/store');
+const contributions = require('../data/contributions');
 
 const router = express.Router();
 
@@ -77,14 +79,73 @@ router.post('/:id/fund', (req, res) => {
   if (!invoice) {
     return res.status(404).json({ error: 'Invoice not found' });
   }
-  const amount = req.body && req.body.amount;
-  if (typeof amount !== 'number' || !(amount > 0)) {
+  const { amount, investor } = req.body || {};
+  if (investor === undefined || investor === null || investor === '') {
+    return res.status(400).json({ error: 'INVESTOR_REQUIRED' });
+  }
+  if (typeof investor !== 'string' || !StrKey.isValidEd25519PublicKey(investor)) {
+    return res.status(400).json({ error: 'INVALID_INVESTOR_ADDRESS' });
+  }
+  if (invoice.smeAddress && investor === invoice.smeAddress) {
+    return res.status(422).json({ error: 'SELF_FUNDING_NOT_ALLOWED' });
+  }
+  if (typeof amount !== 'number' || !(amount > 0) || !Number.isFinite(amount)) {
     return res.status(400).json({ error: 'amount must be a positive number' });
   }
   if (invoice.status !== 'open') {
     return res.status(409).json({ error: `Invoice is ${invoice.status}; only open invoices can be funded` });
   }
-  return res.json({ data: store.fund(invoice, amount) });
+  return res.json({ data: store.fund(invoice, amount, investor) });
+});
+
+router.get('/:id/contributions', (req, res) => {
+  const invoice = store.get(req.params.id);
+  if (!invoice) {
+    return res.status(404).json({ error: 'Invoice not found' });
+  }
+
+  let limit = 50;
+  if (req.query.limit !== undefined) {
+    limit = Number(req.query.limit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      return res.status(400).json({ error: 'limit must be an integer between 1 and 100' });
+    }
+  }
+
+  const all = contributions.listByInvoice(invoice.id);
+  let startIndex = 0;
+  if (req.query.cursor) {
+    const idx = all.findIndex((c) => c.id === req.query.cursor);
+    if (idx === -1) {
+      return res.status(400).json({ error: 'Invalid cursor' });
+    }
+    startIndex = idx + 1;
+  }
+
+  const page = all.slice(startIndex, startIndex + limit);
+  const data = page.map((c) => ({
+    investor: c.investor,
+    amount: c.amount,
+    createdAt: c.createdAt,
+  }));
+
+  const uniqueInvestors = new Set(all.map((c) => c.investor)).size;
+  const totalFunded = invoice.fundedAmount;
+
+  const nextCursor = startIndex + limit < all.length && page.length > 0 ? page[page.length - 1].id : null;
+
+  const response = {
+    data,
+    totals: {
+      funded: totalFunded,
+      investors: uniqueInvestors,
+    },
+  };
+  if (nextCursor) {
+    response.nextCursor = nextCursor;
+  }
+
+  return res.json(response);
 });
 
 module.exports = router;

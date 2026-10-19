@@ -40,7 +40,7 @@ function buildSpec(baseUrl) {
         `contract holds funds until settlement. Escrow contract (testnet): ${config.contractId}`,
     },
     servers: [{ url: baseUrl }],
-    tags: [{ name: 'System' }, { name: 'Invoices' }, { name: 'Escrow' }],
+    tags: [{ name: 'System' }, { name: 'Invoices' }, { name: 'Investors' }, { name: 'Escrow' }],
     paths: {
       '/health': {
         get: {
@@ -105,12 +105,111 @@ function buildSpec(baseUrl) {
           tags: ['Invoices'],
           summary: 'Record an investor contribution (demo, off-chain)',
           parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
-          requestBody: { required: true, ...json({ type: 'object', properties: { amount: { type: 'number' } } }) },
+          requestBody: {
+            required: true,
+            ...json({
+              type: 'object',
+              required: ['amount', 'investor'],
+              properties: {
+                amount: { type: 'number', example: 1000 },
+                investor: { type: 'string', example: 'GA7TXEBMEPQCLHIYCWDN7RKAO5IMRD2UV7O7TZXMEW6VZUMEXNR4XBB5' },
+              },
+            }),
+          },
           responses: {
-            200: { description: 'Updated invoice' },
-            400: { description: 'Invalid amount' },
-            404: { description: 'Not found' },
-            409: { description: 'Invoice not open' },
+            200: { description: 'Updated invoice', ...json({ type: 'object', properties: { data: Invoice } }) },
+            400: { description: 'Invalid amount or missing/invalid investor', ...json(ErrorBody) },
+            404: { description: 'Not found', ...json(ErrorBody) },
+            409: { description: 'Invoice not open', ...json(ErrorBody) },
+            422: { description: 'Self-funding not allowed', ...json(ErrorBody) },
+          },
+        },
+      },
+      '/api/invoices/{id}/contributions': {
+        get: {
+          tags: ['Invoices'],
+          summary: 'List contributions for an invoice',
+          parameters: [
+            { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+            { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 } },
+            { name: 'cursor', in: 'query', schema: { type: 'string' } },
+          ],
+          responses: {
+            200: {
+              description: 'Contributions and totals',
+              ...json({
+                type: 'object',
+                properties: {
+                  data: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        investor: { type: 'string' },
+                        amount: { type: 'number' },
+                        createdAt: { type: 'string', format: 'date-time' },
+                      },
+                    },
+                  },
+                  totals: {
+                    type: 'object',
+                    properties: {
+                      funded: { type: 'number' },
+                      investors: { type: 'integer' },
+                    },
+                  },
+                  nextCursor: { type: 'string' },
+                },
+              }),
+            },
+            400: { description: 'Invalid limit or cursor', ...json(ErrorBody) },
+            404: { description: 'Not found', ...json(ErrorBody) },
+          },
+        },
+      },
+      '/api/investors/{address}/portfolio': {
+        get: {
+          tags: ['Investors'],
+          summary: 'Investor portfolio summary and expected returns',
+          parameters: [{ name: 'address', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            200: {
+              description: 'Investor portfolio',
+              ...json({
+                type: 'object',
+                properties: {
+                  investor: { type: 'string' },
+                  positions: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        invoiceId: { type: 'string' },
+                        status: { type: 'string', enum: ['open', 'funded', 'settled', 'cancelled'] },
+                        currency: { type: 'string' },
+                        principal: { type: 'number' },
+                        yieldBps: { type: 'integer' },
+                        dueDate: { type: 'string', format: 'date' },
+                        expectedCoupon: { oneOf: [{ type: 'number' }, { type: 'string' }] },
+                        expectedPayout: { type: 'number' },
+                      },
+                    },
+                  },
+                  totalsByCurrency: {
+                    type: 'object',
+                    additionalProperties: {
+                      type: 'object',
+                      properties: {
+                        principal: { type: 'number' },
+                        expectedCoupon: { type: 'number' },
+                        expectedPayout: { type: 'number' },
+                      },
+                    },
+                  },
+                },
+              }),
+            },
+            400: { description: 'Invalid investor address', ...json(ErrorBody) },
           },
         },
       },

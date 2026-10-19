@@ -30,9 +30,15 @@ snapshot as fallback.
 | GET | `/api/invoices` | List invoices (`?status=open\|funded\|settled\|cancelled`) |
 | GET | `/api/invoices/:id` | Get one invoice |
 | POST | `/api/invoices` | Submit an invoice (`sme`, `debtor`, `amount`, `dueDate`, optional `currency`, `yieldBps`, `smeAddress`) |
-| POST | `/api/invoices/:id/fund` | Record an investor contribution (`{ "amount": 100 }`) |
+| POST | `/api/invoices/:id/fund` | Record an investor contribution (`{ "amount": 100, "investor": "G..." }`) |
+| GET | `/api/invoices/:id/contributions` | List contributions for an invoice (`?limit=50&cursor=...`) |
+| GET | `/api/investors/:address/portfolio` | Investor portfolio summary and expected returns |
 | GET | `/api/escrow` | Deployed escrow contract metadata |
 | GET | `/api/escrow/live` | Live `get_escrow` read from Soroban RPC |
+
+## Known Limitations
+
+- **Wallet authentication:** Verification/cryptographic signatures for the `investor` address field on funding are tracked separately. Contributions currently trust the submitted Stellar address.
 
 ## Development
 

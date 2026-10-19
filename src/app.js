@@ -45,6 +45,8 @@ const ENDPOINTS = [
   { method: 'GET', path: '/api/invoices/:id', description: 'Get one invoice' },
   { method: 'POST', path: '/api/invoices', description: 'Submit an invoice for financing' },
   { method: 'POST', path: '/api/invoices/:id/fund', description: 'Record an investor contribution' },
+  { method: 'GET', path: '/api/invoices/:id/contributions', description: 'List contributions for an invoice' },
+  { method: 'GET', path: '/api/investors/:address/portfolio', description: 'Investor portfolio summary and expected returns' },
   { method: 'GET', path: '/api/escrow', description: 'Deployed Soroban escrow contract metadata' },
   { method: 'GET', path: '/api/escrow/live', description: 'Live escrow state from Soroban RPC' },
 ];
@@ -97,6 +99,7 @@ app.get('/api/stats', (req, res) => {
 });
 
 app.use('/api/invoices', require('./routes/invoices'));
+app.use('/api/investors', require('./routes/investors'));
 app.use('/api/escrow', require('./routes/escrow'));
 
 app.use((req, res) => res.status(404).json({ error: 'Not found', path: req.path, docs: '/docs' }));
