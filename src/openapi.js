@@ -1,6 +1,7 @@
 'use strict';
 
 const config = require('./config');
+const { STATUSES } = require('./domain/invoice-state');
 
 const Invoice = {
   type: 'object',
@@ -14,7 +15,19 @@ const Invoice = {
     fundedAmount: { type: 'number', example: 0 },
     yieldBps: { type: 'integer', example: 800 },
     dueDate: { type: 'string', format: 'date' },
-    status: { type: 'string', enum: ['open', 'funded', 'settled', 'cancelled'] },
+    status: { type: 'string', enum: STATUSES },
+    history: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          from: { type: 'string', enum: STATUSES },
+          to: { type: 'string', enum: STATUSES },
+          at: { type: 'string', format: 'date-time' },
+          reason: { type: 'string', nullable: true },
+        },
+      },
+    },
     onChain: { type: 'boolean' },
     createdAt: { type: 'string', format: 'date-time' },
   },
@@ -22,6 +35,15 @@ const Invoice = {
 
 const json = (schema) => ({ content: { 'application/json': { schema } } });
 const ErrorBody = { type: 'object', properties: { error: { type: 'string' } } };
+const TransitionErrorBody = {
+  type: 'object',
+  properties: {
+    error: { type: 'string' },
+    code: { type: 'string', enum: ['INVALID_TRANSITION'] },
+    from: { type: 'string', enum: STATUSES },
+    to: { type: 'string', enum: STATUSES },
+  },
+};
 
 /**
  * Builds the OpenAPI document for the given public base URL.
@@ -57,7 +79,7 @@ function buildSpec(baseUrl) {
           tags: ['Invoices'],
           summary: 'List invoices',
           parameters: [
-            { name: 'status', in: 'query', schema: { type: 'string', enum: ['open', 'funded', 'settled', 'cancelled'] } },
+            { name: 'status', in: 'query', schema: { type: 'string', enum: STATUSES } },
           ],
           responses: {
             200: { description: 'Invoices', ...json({ type: 'object', properties: { data: { type: 'array', items: Invoice }, count: { type: 'integer' } } }) },
@@ -110,7 +132,75 @@ function buildSpec(baseUrl) {
             200: { description: 'Updated invoice' },
             400: { description: 'Invalid amount' },
             404: { description: 'Not found' },
-            409: { description: 'Invoice not open' },
+            409: { description: 'Invoice not open', ...json(TransitionErrorBody) },
+          },
+        },
+      },
+      '/api/invoices/{id}/cancel': {
+        post: {
+          tags: ['Invoices'],
+          summary: 'Cancel an open invoice (refundDue is returned when funds were contributed)',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          requestBody: {
+            required: true,
+            ...json({
+              type: 'object',
+              required: ['reason'],
+              properties: { reason: { type: 'string', minLength: 1, maxLength: 280 } },
+            }),
+          },
+          responses: {
+            200: {
+              description: 'Cancelled invoice',
+              ...json({ type: 'object', properties: { data: Invoice, refundDue: { type: 'number' } } }),
+            },
+            400: { description: 'Invalid body', ...json(ErrorBody) },
+            404: { description: 'Not found', ...json(ErrorBody) },
+            409: { description: 'Invalid transition', ...json(TransitionErrorBody) },
+          },
+        },
+      },
+      '/api/invoices/{id}/withdraw': {
+        post: {
+          tags: ['Invoices'],
+          summary: 'SME draws the funded liquidity (funded -> withdrawn)',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            200: { description: 'Withdrawn invoice', ...json({ type: 'object', properties: { data: Invoice } }) },
+            404: { description: 'Not found', ...json(ErrorBody) },
+            409: { description: 'Invalid transition', ...json(TransitionErrorBody) },
+          },
+        },
+      },
+      '/api/invoices/{id}/settle': {
+        post: {
+          tags: ['Invoices'],
+          summary: 'Settle a funded or withdrawn invoice',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          requestBody: {
+            required: true,
+            ...json({
+              type: 'object',
+              required: ['settledAmount'],
+              properties: { settledAmount: { type: 'number', minimum: 0 } },
+            }),
+          },
+          responses: {
+            200: { description: 'Settled invoice', ...json({ type: 'object', properties: { data: Invoice } }) },
+            400: { description: 'Invalid body', ...json(ErrorBody) },
+            404: { description: 'Not found', ...json(ErrorBody) },
+            409: { description: 'Invalid transition', ...json(TransitionErrorBody) },
+            422: {
+              description: 'settledAmount below funded amount plus coupon',
+              ...json({
+                type: 'object',
+                properties: {
+                  error: { type: 'string' },
+                  code: { type: 'string', enum: ['INSUFFICIENT_SETTLEMENT'] },
+                  required: { type: 'number' },
+                },
+              }),
+            },
           },
         },
       },
