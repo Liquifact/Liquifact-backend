@@ -133,8 +133,8 @@ function reset() {
 }
 
 function linkEscrow(invoice, contractId) {
-  if (invoice.escrowContractId && invoice.escrowContractId !== contractId) return 'ALREADY_LINKED';
-  if (invoices.some((other) => other !== invoice && other.escrowContractId === contractId)) return 'CONTRACT_IN_USE';
+  if (invoice.escrowContractId && invoice.escrowContractId !== contractId) { return 'ALREADY_LINKED'; }
+  if (invoices.some((other) => other !== invoice && other.escrowContractId === contractId)) { return 'CONTRACT_IN_USE'; }
   invoice.escrowContractId = contractId;
   return null;
 }
