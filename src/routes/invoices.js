@@ -155,6 +155,11 @@ router.post('/:id/escrow', requireAdminToken, async (req, res) => {
   if (!escrow || typeof escrow !== 'object' || Array.isArray(escrow)) {
     return res.status(422).json({ code: 'ESCROW_NOT_FOUND', error: 'Contract is not an escrow' });
   }
+  // Reject arbitrary contract return values masquerading as escrow structs.
+  if (['invoice_id', 'amount', 'yield_bps', 'status'].some((key) => escrow[key] === undefined || escrow[key] === null)
+    || (invoice.smeAddress && (escrow.sme_address === undefined || escrow.sme_address === null))) {
+    return res.status(422).json({ code: 'ESCROW_NOT_FOUND', error: 'Contract returned an invalid escrow' });
+  }
   const mismatches = validateEscrowTerms(invoice, escrow);
   if (mismatches.length) { return res.status(422).json({ code: 'ESCROW_TERMS_MISMATCH', mismatches }); }
   const conflict = store.linkEscrow(invoice, contractId);
