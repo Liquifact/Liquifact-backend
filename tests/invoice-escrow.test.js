@@ -146,7 +146,7 @@ describe('verified invoice escrow linking (#1553)', () => {
     for (const status of ['200', '400', '401', '404', '409', '422', '503']) {
       expect(paths.post.responses[status]).toBeDefined();
     }
-    for (const status of ['200', '404', '422']) expect(paths.get.responses[status]).toBeDefined();
+    for (const status of ['200', '404', '422']) { expect(paths.get.responses[status]).toBeDefined(); }
     expect(res.body.components.schemas).toHaveProperty('Invoice');
     expect(res.body.components.schemas).toHaveProperty('Escrow');
     expect(res.body.components.schemas).toHaveProperty('LinkError');
