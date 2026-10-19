@@ -97,16 +97,17 @@ router.get('/investors/:address', async (req, res) => {
     'is_investor_allowlisted',
   ];
   try {
-    const values = await Promise.all(methods.map(async (method) => {
+    const reads = methods.map(async (method) => {
       try {
         return await contractReader.simulateRead(method,
           method === 'is_allowlist_active' ? [] : [addressScVal], { timeoutMs: 5000 });
       } catch {
         throw new Error(method);
       }
-    }));
+    });
+    reads.push(contractReader.latestLedger().catch(() => { throw new Error('latestLedger'); }));
     const [contribution, claimablePayout, claimed, effectiveYieldBps,
-      claimNotBefore, active, allowlisted] = values;
+      claimNotBefore, active, allowlisted, latestLedger] = await Promise.all(reads);
     const snapshot = {
       investor,
       contractId: config.contractId,
@@ -119,7 +120,7 @@ router.get('/investors/:address', async (req, res) => {
       claimNotBefore: Number(claimNotBefore),
       claimNotBeforeIso: unixIso(claimNotBefore),
       allowlist: { active: Boolean(active), allowlisted: Boolean(allowlisted), eligible: !active || Boolean(allowlisted) },
-      latestLedger: null,
+      latestLedger,
     };
     // Preserve the verified snapshot for five seconds, bounding memory usage.
     positionCache.delete(investor);
@@ -129,7 +130,7 @@ router.get('/investors/:address', async (req, res) => {
     }
     return res.json(snapshot);
   } catch (err) {
-    return res.status(502).json({ code: 'ESCROW_READ_FAILED', method: methods.includes(err.message) ? err.message : 'decode' });
+    return res.status(502).json({ code: 'ESCROW_READ_FAILED', method: [...methods, 'latestLedger'].includes(err.message) ? err.message : 'decode' });
   }
 });
 
