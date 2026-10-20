@@ -93,6 +93,52 @@ const EscrowLiveResponse = {
   },
 };
 
+const Mismatch = {
+  type: 'object',
+  properties: {
+    field: { type: 'string', example: 'fundedAmount' },
+    offChain: { example: '1000000000' },
+    onChain: { example: '0' },
+    severity: { type: 'string', enum: ['critical', 'warning'] },
+  },
+  required: ['field', 'offChain', 'onChain', 'severity'],
+};
+
+const ReconciliationResult = {
+  type: 'object',
+  properties: {
+    invoiceId: { type: 'string', example: 'INV_0001' },
+    contractId: { type: 'string', example: 'CDQCKR2YU...' },
+    status: {
+      type: 'string',
+      enum: ['in_sync', 'drift', 'missing_on_chain', 'error'],
+    },
+    code: { type: 'string', example: 'RPC_ERROR', description: 'Only present when status is error' },
+    detail: { type: 'string', description: 'Human-readable error detail (status=error only)' },
+    mismatches: { type: 'array', items: Mismatch },
+  },
+  required: ['invoiceId', 'contractId', 'status', 'mismatches'],
+};
+
+const ReconciliationReport = {
+  type: 'object',
+  properties: {
+    checkedAt: { type: 'string', format: 'date-time' },
+    summary: {
+      type: 'object',
+      properties: {
+        inSync: { type: 'integer' },
+        drift: { type: 'integer' },
+        missing: { type: 'integer' },
+        error: { type: 'integer' },
+      },
+      required: ['inSync', 'drift', 'missing', 'error'],
+    },
+    results: { type: 'array', items: ReconciliationResult },
+  },
+  required: ['checkedAt', 'summary', 'results'],
+};
+
 /**
  * Builds the OpenAPI document for the given public base URL.
  *
@@ -110,7 +156,7 @@ function buildSpec(baseUrl) {
         `contract holds funds until settlement. Escrow contract (testnet): ${config.contractId}`,
     },
     servers: [{ url: baseUrl }],
-    tags: [{ name: 'System' }, { name: 'Invoices' }, { name: 'Investors' }, { name: 'Escrow' }],
+    tags: [{ name: 'System' }, { name: 'Invoices' }, { name: 'Investors' }, { name: 'Escrow' }, { name: 'Reconciliation' }],
     components: {
       schemas: {
         EscrowState,
@@ -558,6 +604,43 @@ function buildSpec(baseUrl) {
             400: { description: 'Invalid or missing digest (INVALID_DIGEST / NO_FILE)', ...json(ErrorBody) },
             413: { description: 'Uploaded file exceeds 5 MiB', ...json(ErrorBody) },
             502: { description: 'Soroban RPC read failed', ...json(ErrorBody) },
+          },
+        },
+      },
+      '/api/reconciliation': {
+        get: {
+          tags: ['Reconciliation'],
+          summary: 'Reconcile all on-chain invoices against escrow state',
+          description:
+            'For every invoice with onChain: true, reads get_escrow from the Soroban RPC and reports ' +
+            'field-level mismatches. RPC reads are deduplicated per contract and bounded to 4 concurrent calls. ' +
+            'Always returns 200; individual RPC failures are reported per-invoice with status "error".',
+          responses: {
+            200: {
+              description: 'Reconciliation report',
+              ...json(ReconciliationReport),
+            },
+          },
+        },
+      },
+      '/api/reconciliation/{invoiceId}': {
+        get: {
+          tags: ['Reconciliation'],
+          summary: 'Reconcile one invoice against escrow state',
+          parameters: [{ name: 'invoiceId', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            200: {
+              description: 'Reconciliation result for the invoice',
+              ...json(ReconciliationResult),
+            },
+            404: { description: 'Invoice not found', ...json(ErrorBody) },
+            409: {
+              description: 'Invoice is not tracked on-chain (onChain: false)',
+              ...json({
+                type: 'object',
+                properties: { error: { type: 'string', example: 'NOT_ON_CHAIN' }, detail: { type: 'string' } },
+              }),
+            },
           },
         },
       },

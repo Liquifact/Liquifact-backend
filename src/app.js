@@ -53,6 +53,8 @@ const ENDPOINTS = [
   { method: 'GET', path: '/api/escrow/live', description: 'Live escrow state from Soroban RPC' },
   { method: 'GET', path: '/api/escrow/attestations', description: 'On-chain attestation log (paginated)' },
   { method: 'POST', path: '/api/escrow/attestations/verify', description: 'Verify a document digest against on-chain attestations' },
+  { method: 'GET', path: '/api/reconciliation', description: 'Reconcile all on-chain invoices against escrow state' },
+  { method: 'GET', path: '/api/reconciliation/:id', description: 'Reconcile one invoice against escrow state' },
 ];
 
 app.get('/', (req, res) => {
@@ -105,6 +107,7 @@ app.get('/api/stats', (req, res) => {
 app.use('/api/invoices', require('./routes/invoices'));
 app.use('/api/investors', require('./routes/investors'));
 app.use('/api/escrow', require('./routes/escrow'));
+app.use('/api/reconciliation', require('./routes/reconciliation'));
 
 app.use((req, res) => res.status(404).json({ error: 'Not found', path: req.path, docs: '/docs' }));
 
