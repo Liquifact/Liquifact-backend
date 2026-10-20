@@ -7,6 +7,7 @@ const { auditContext } = require('../audit/middleware');
 const contributions = require('../data/contributions');
 const config = require('../config');
 const { toMinor, fromMinor, couponMinor, daysBetween, annualisedBps } = require('../domain/returns');
+const { parseIsoDate } = require('../lib/dates');
 const { ApiError, badRequest, notFound, conflict, unprocessable, sendProblem } = require('../errors');
 const { parseInvoiceQuery, queryInvoices, InvoiceQueryError } = require('../services/invoice-query');
 const { requireAdminToken } = require('../middleware/require-admin-token');
@@ -55,6 +56,7 @@ function toInvoiceValue(d) {
     currency: typeof d.currency === 'string' ? d.currency.toUpperCase().slice(0, 12) : 'USDC',
     yieldBps: d.yieldBps == null ? 800 : d.yieldBps,
     dueDate: d.dueDate,
+    maturity: parseIsoDate(d.dueDate).unixSeconds,
     confirmNotDuplicate: d.confirmNotDuplicate === true,
   };
 }

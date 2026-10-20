@@ -10,6 +10,8 @@ const { extendZodWithOpenApi, OpenAPIRegistry } = require('@asteasolutions/zod-t
 const { StrKey } = require('@stellar/stellar-sdk');
 const { STATUSES, normalizeIdentity } = require('../data/store');
 const { parseAmount } = require('../lib/money');
+const { parseIsoDate } = require('../lib/dates');
+const config = require('../config');
 
 // Money on the API boundary: a decimal string (preferred) or a JSON number,
 // at most 7 fractional digits, > 0 and <= MAX_INVOICE_AMOUNT (2^63-1 minor units).
@@ -39,6 +41,18 @@ const registry = new OpenAPIRegistry();
 const INVOICE_ID = /^[A-Za-z0-9_]{1,32}$/;
 const INVOICE_NUMBER = /^[A-Za-z0-9._/-]{1,64}$/;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const DAY_MS = 86_400_000;
+
+/**
+ * Start of the current UTC day in epoch milliseconds.
+ *
+ * @param {number} nowMs current epoch milliseconds
+ * @returns {number} epoch milliseconds of 00:00:00 UTC today
+ */
+function todayUtcMs(nowMs) {
+  const now = new Date(nowMs);
+  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+}
 
 // ---------------------------------------------------------------------------
 // InvoiceIdParam — matches the Soroban contract's invoice-id rule
@@ -96,7 +110,7 @@ const nameField = (key) => {
 
 const AMOUNT_MESSAGE = 'amount must be a positive number';
 const YIELD_MESSAGE = 'yieldBps must be an integer between 0 and 10000';
-const DUE_DATE_MESSAGE = 'dueDate must be an ISO date (YYYY-MM-DD)';
+const DUE_DATE_MESSAGE = 'dueDate must be a real calendar date in YYYY-MM-DD format';
 const INVOICE_NUMBER_MESSAGE = 'invoiceNumber must be 1-64 characters using letters, digits, ., _, /, or -';
 
 const CreateInvoiceBody = registry.register(
@@ -141,8 +155,31 @@ const CreateInvoiceBody = registry.register(
       dueDate: z
         .string({ required_error: DUE_DATE_MESSAGE, invalid_type_error: DUE_DATE_MESSAGE })
         .regex(ISO_DATE, DUE_DATE_MESSAGE)
-        .refine((v) => !Number.isNaN(Date.parse(v)), DUE_DATE_MESSAGE)
-        .openapi({ description: 'Payment due date', example: '2027-01-01', format: 'date' }),
+        .refine((v) => parseIsoDate(v) !== null, DUE_DATE_MESSAGE)
+        .superRefine((v, ctx) => {
+          const parsed = parseIsoDate(v);
+          if (!parsed) {
+            return;
+          }
+          const todayMs = todayUtcMs(Date.now());
+          const dueDateMs = parsed.date.getTime();
+          if (dueDateMs < todayMs + config.minTenorDays * DAY_MS) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: `dueDate must be at least ${config.minTenorDays} day(s) in the future (received ${v})`,
+            });
+          } else if (dueDateMs > todayMs + config.maxTenorDays * DAY_MS) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: `dueDate must be within ${config.maxTenorDays} days from today (max ~${Math.round(config.maxTenorDays / 365)} years)`,
+            });
+          }
+        })
+        .openapi({
+          description: 'Payment due date (real calendar date, at least MIN_TENOR_DAYS and at most MAX_TENOR_DAYS from today UTC)',
+          example: '2027-01-01',
+          format: 'date',
+        }),
       smeAddress: z
         .string()
         .nullable()
@@ -212,6 +249,11 @@ const Invoice = registry.register(
       decimals: z.number().int().openapi({ example: 7, description: 'Fractional digits of the amount strings (minor units)' }),
       yieldBps: z.number().int().openapi({ example: 800 }),
       dueDate: z.string().openapi({ format: 'date', example: '2027-01-17' }),
+      maturity: z
+        .number()
+        .int()
+        .nonnegative()
+        .openapi({ description: 'Maturity as Unix seconds (00:00:00 UTC on dueDate)', example: 1800144000 }),
       status: z.enum(STATUSES),
       escrowContractId: z.string().nullable().openapi({ description: 'Verified linked escrow contract (null when off-chain)' }),
       onChain: z.boolean().openapi({ description: 'Derived from escrowContractId !== null', readOnly: true }),
