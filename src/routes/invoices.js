@@ -2,8 +2,10 @@
 
 const express = require('express');
 const store = require('../data/store');
+const { auditContext } = require('../audit/middleware');
 
 const router = express.Router();
+router.use(auditContext());
 
 /**
  * Validates a create-invoice payload.
@@ -67,24 +69,63 @@ router.get('/:id', (req, res) => {
 router.post('/', (req, res) => {
   const { value, errors } = validateInvoice(req.body);
   if (errors) {
+    req.audit({
+      action: 'invoice.create',
+      resourceType: 'invoice',
+      outcome: 'rejected',
+      statusCode: 400,
+      metadata: { errors },
+    });
     return res.status(400).json({ error: 'Validation failed', details: errors });
   }
-  return res.status(201).json({ data: store.create(value) });
+  const invoice = store.create(value);
+  req.audit({
+    action: 'invoice.create',
+    resourceType: 'invoice',
+    resourceId: invoice.id,
+    outcome: 'success',
+    statusCode: 201,
+    after: invoice,
+  });
+  return res.status(201).json({ data: invoice });
 });
 
 router.post('/:id/fund', (req, res) => {
+  const record = (details) =>
+    req.audit({ action: 'invoice.fund', resourceType: 'invoice', resourceId: req.params.id, ...details });
+  const reject = (statusCode, error, details) => {
+    record({ outcome: 'rejected', statusCode, metadata: { error, ...details.metadata }, before: details.before });
+    return res.status(statusCode).json({ error });
+  };
+
   const invoice = store.get(req.params.id);
   if (!invoice) {
-    return res.status(404).json({ error: 'Invoice not found' });
+    return reject(404, 'Invoice not found', {});
   }
   const amount = req.body && req.body.amount;
+  const before = { fundedAmount: invoice.fundedAmount, status: invoice.status };
+  const requested = {
+    requestedAmount: typeof amount === 'number' && Number.isFinite(amount) ? amount : null,
+    requestedAmountType: typeof amount,
+  };
   if (typeof amount !== 'number' || !(amount > 0)) {
-    return res.status(400).json({ error: 'amount must be a positive number' });
+    return reject(400, 'amount must be a positive number', { before, metadata: requested });
   }
   if (invoice.status !== 'open') {
-    return res.status(409).json({ error: `Invoice is ${invoice.status}; only open invoices can be funded` });
+    return reject(409, `Invoice is ${invoice.status}; only open invoices can be funded`, {
+      before,
+      metadata: requested,
+    });
   }
-  return res.json({ data: store.fund(invoice, amount) });
+  const updated = store.fund(invoice, amount);
+  record({
+    outcome: 'success',
+    statusCode: 200,
+    before,
+    after: { fundedAmount: updated.fundedAmount, status: updated.status },
+    metadata: requested,
+  });
+  return res.json({ data: updated });
 });
 
 module.exports = router;

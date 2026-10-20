@@ -7,6 +7,16 @@
 const CONTRACT_ID =
   process.env.ESCROW_CONTRACT_ID || 'CDQCKR2YU6IVQ4GYPBMXBPZ4FGFQB5H25AI7ZSETHS2CZ5ZRCWQDSO6P';
 
+/**
+ * @param {string|undefined} raw environment value
+ * @param {number} fallback value used when raw is missing or not a positive integer
+ * @returns {number} parsed positive integer
+ */
+function positiveInt(raw, fallback) {
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+}
+
 module.exports = {
   port: Number(process.env.PORT) || 3001,
   network: process.env.STELLAR_NETWORK || 'testnet',
@@ -20,5 +30,6 @@ module.exports = {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean),
+  auditMaxEntries: positiveInt(process.env.AUDIT_MAX_ENTRIES, 10000),
   version: require('../package.json').version,
 };
