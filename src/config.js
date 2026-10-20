@@ -30,4 +30,6 @@ module.exports = {
   txWaitMs: TX_WAIT_MS,
   protocolFeeBps: PROTOCOL_FEE_BPS,
   version: require('../package.json').version,
+  // Admin API token for webhook management. No default — must be set to use admin routes.
+  adminApiToken: process.env.ADMIN_API_TOKEN || '',
 };

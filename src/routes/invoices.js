@@ -6,6 +6,7 @@ const store = require('../data/store');
 const contributions = require('../data/contributions');
 const config = require('../config');
 const { toMinor, fromMinor, couponMinor, daysBetween, annualisedBps } = require('../domain/returns');
+const emitter = require('../webhooks/emitter');
 
 const router = express.Router();
 
@@ -128,7 +129,9 @@ router.post('/', (req, res) => {
   if (errors) {
     return res.status(400).json({ error: 'Validation failed', details: errors });
   }
-  return res.status(201).json({ data: store.create(value) });
+  const invoice = store.create(value);
+  emitter.emit('invoice.created', invoice);
+  return res.status(201).json({ data: invoice });
 });
 
 router.post('/:id/fund', (req, res) => {
@@ -152,7 +155,14 @@ router.post('/:id/fund', (req, res) => {
   if (invoice.status !== 'open') {
     return res.status(409).json({ error: `Invoice is ${invoice.status}; only open invoices can be funded` });
   }
-  return res.json({ data: store.fund(invoice, amount, investor) });
+  const wasFunded = invoice.status === 'funded';
+  const updated = store.fund(invoice, amount, investor);
+  // Emit funding_received for every contribution; emit funded when status flips to funded
+  emitter.emit('invoice.funding_received', updated);
+  if (!wasFunded && updated.status === 'funded') {
+    emitter.emit('invoice.funded', updated);
+  }
+  return res.json({ data: updated });
 });
 
 router.get('/:id/contributions', (req, res) => {

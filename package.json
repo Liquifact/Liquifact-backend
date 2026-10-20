@@ -13,7 +13,7 @@
     "dev": "node --watch src/index.js",
     "lint": "eslint .",
     "build": "node scripts/check.js",
-    "test": "jest --runInBand"
+    "test": "jest --runInBand --forceExit"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^14.6.1",
