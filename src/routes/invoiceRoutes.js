@@ -3,6 +3,47 @@ const router = express.Router();
 const invoiceService = require('../services/invoiceService');
 
 /**
+ * @swagger
+ * /api/invoices:
+ *   post:
+ *     operationId: createInvoice
+ *     summary: Create an invoice
+ *     description: When REQUIRE_SME_VERIFICATION is true, a verified smeId is required and SME identity values come from the record.
+ *     tags: [Invoices]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/CreateInvoiceRequest'
+ *     responses:
+ *       '201':
+ *         description: Invoice created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/CreateInvoiceResponse'
+ *       '400':
+ *         description: Invalid invoice data or missing smeId
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiError'
+ *       '403':
+ *         description: SME is not verified
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiError'
+ *       '404':
+ *         description: SME not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiError'
+ */
+
+/**
  * GET /api/invoices/:id
  * Retrieve a single invoice by its ID.
  * Performs robust validation and authorization checks.

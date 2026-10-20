@@ -46,6 +46,8 @@ const logger = require('./logger');
 const { metricsAuth, metricsHandler } = require('./metrics');
 const { instrumentHealth } = require('./middleware/healthMetrics');
 const smeRoutes = require('./routes/sme');
+const smeOnboardingRoutes = require('./routes/smes');
+const smeData = require('./data/smes');
 const invoiceFileRoutes = require('./routes/invoiceFile');
 const auditTrailRoutes = require('./routes/auditTrail');
 const investRoutes = require('./routes/invest');
@@ -246,6 +248,11 @@ function createApp() {
     });
   });
 
+  app.get('/openapi.json', (req, res) => {
+    const { buildOpenApiSpec } = require('./openapi/openapiSpec');
+    return res.json(buildOpenApiSpec());
+  });
+
   // Invoices — GET (list) with cursor pagination
   app.get('/api/invoices', async (req, res) => {
     const { isValid, fieldErrors, validatedParams } = validateInvoiceQueryParams(req.query);
@@ -299,8 +306,39 @@ function createApp() {
       });
     }
 
-    res.status(201).json({
-      data: { id: 'placeholder', status: 'pending_verification' },
+    const invoice = { id: 'placeholder', status: 'pending_verification' };
+    if (process.env.REQUIRE_SME_VERIFICATION === 'true') {
+      if (!result.data.smeId) {
+        return res.status(400).json({
+          error: { code: 'SME_ID_REQUIRED', message: 'smeId is required when SME verification is enabled.' },
+        });
+      }
+      const sme = smeData.getSme(result.data.smeId);
+      if (!sme) {
+        return res.status(404).json({ error: { code: 'SME_NOT_FOUND', message: 'SME not found.' } });
+      }
+      if (sme.status !== 'verified') {
+        return res.status(403).json({
+          error: { code: 'SME_NOT_VERIFIED', message: 'Only verified SMEs may create invoices.' },
+        });
+      }
+      invoice.smeId = sme.id;
+      invoice.sme = sme.legalName;
+      invoice.smeAddress = sme.stellarAddress;
+    } else {
+      if (result.data.smeId) {
+        invoice.smeId = result.data.smeId;
+      }
+      if (result.data.sme !== undefined) {
+        invoice.sme = result.data.sme;
+      }
+      if (result.data.smeAddress !== undefined) {
+        invoice.smeAddress = result.data.smeAddress;
+      }
+    }
+
+    return res.status(201).json({
+      data: invoice,
       message: 'Invoice upload will be implemented with verification and tokenization.',
     });
   });
@@ -380,6 +418,7 @@ function createApp() {
    * @see docs/request-lifecycle-middleware-order.md
    */
   mountFeatureRouter(app, '/api/sme', smeRoutes);
+  mountFeatureRouter(app, '/api/smes', smeOnboardingRoutes);
   mountFeatureRouter(app, '/api/invoices', invoiceFileRoutes);
   mountFeatureRouter(app, '/api/invoices', invoiceStateRoutes);
   mountFeatureRouter(app, '/api/invest', investRoutes);

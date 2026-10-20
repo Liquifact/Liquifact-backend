@@ -113,6 +113,12 @@ const invoiceCreateSchema = z
       .string({ invalid_type_error: 'invoiceNumber must be a string' })
       .max(100, { message: 'invoiceNumber must not exceed 100 characters' })
       .optional(),
+
+    /** Optional SME identity used when verified-SME gating is enabled. */
+    smeId: z.string().min(1).max(100).optional(),
+    /** Legacy free-text SME fields; ignored when verified-SME gating is enabled. */
+    sme: z.string().max(200).optional(),
+    smeAddress: z.string().max(56).optional(),
   })
   .strict() // ← reject unknown keys
   .superRefine((data, ctx) => {

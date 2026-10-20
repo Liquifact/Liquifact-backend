@@ -151,8 +151,127 @@ const baseDefinition = {
   components: {
     securitySchemes: {
       bearerAuth: { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' },
+      adminBearerAuth: { type: 'http', scheme: 'bearer', bearerFormat: 'Admin API token' },
     },
     schemas: {
+      ApiError: {
+        type: 'object',
+        required: ['error'],
+        properties: {
+          error: {
+            type: 'object',
+            required: ['code', 'message'],
+            properties: {
+              code: { type: 'string' },
+              message: { type: 'string' },
+              fieldErrors: { type: 'object', additionalProperties: { type: 'string' } },
+            },
+            additionalProperties: false,
+          },
+        },
+        additionalProperties: false,
+      },
+      CreateSmeRequest: {
+        type: 'object',
+        required: ['legalName', 'registrationNumber', 'country', 'stellarAddress', 'contactEmail'],
+        properties: {
+          legalName: { type: 'string', minLength: 2, maxLength: 200 },
+          registrationNumber: { type: 'string', minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9/ -]+$' },
+          country: { type: 'string', pattern: '^[A-Za-z]{2}$', description: 'ISO 3166-1 alpha-2 country code.' },
+          stellarAddress: { type: 'string', pattern: '^G[A-Z2-7]{55}$' },
+          contactEmail: { type: 'string', format: 'email' },
+        },
+        additionalProperties: false,
+      },
+      ReviewSmeRequest: {
+        type: 'object',
+        required: ['decision'],
+        properties: {
+          decision: { type: 'string', enum: ['verify', 'reject', 'suspend'] },
+          note: { type: 'string', maxLength: 500 },
+        },
+        additionalProperties: false,
+      },
+      SmeRecord: {
+        type: 'object',
+        required: ['id', 'legalName', 'country', 'stellarAddress', 'status', 'createdAt', 'reviewHistory'],
+        properties: {
+          id: { type: 'string', pattern: '^SME_' },
+          legalName: { type: 'string' },
+          registrationNumber: { type: 'string', description: 'PII; returned only to admins.' },
+          country: { type: 'string', pattern: '^[A-Z]{2}$' },
+          stellarAddress: { type: 'string', pattern: '^G[A-Z2-7]{55}$' },
+          contactEmail: { type: 'string', format: 'email', description: 'PII; returned only to admins.' },
+          status: { type: 'string', enum: ['pending', 'verified', 'rejected', 'suspended'] },
+          createdAt: { type: 'string', format: 'date-time' },
+          reviewHistory: {
+            type: 'array',
+            items: {
+              type: 'object',
+              required: ['decision', 'note', 'reviewedAt'],
+              properties: {
+                decision: { type: 'string', enum: ['verify', 'reject', 'suspend'] },
+                note: { type: 'string', maxLength: 500 },
+                reviewedAt: { type: 'string', format: 'date-time' },
+              },
+              additionalProperties: false,
+            },
+          },
+        },
+        additionalProperties: false,
+      },
+      SmeResponse: {
+        type: 'object',
+        required: ['data'],
+        properties: {
+          data: { $ref: '#/components/schemas/SmeRecord' },
+        },
+        additionalProperties: false,
+      },
+      CreateInvoiceRequest: {
+        type: 'object',
+        required: ['amount', 'seller', 'currency', 'dueDate'],
+        properties: {
+          amount: { type: 'number', exclusiveMinimum: 0 },
+          dueDate: { type: 'string', format: 'date' },
+          buyer: { type: 'string', maxLength: 255 },
+          customer: { type: 'string', maxLength: 255 },
+          seller: { type: 'string', maxLength: 255 },
+          currency: { type: 'string', minLength: 3, maxLength: 3 },
+          description: { type: 'string', maxLength: 1000 },
+          invoiceNumber: { type: 'string', maxLength: 100 },
+          smeId: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 100,
+            description: 'Required when REQUIRE_SME_VERIFICATION=true.',
+          },
+          sme: { type: 'string', maxLength: 200 },
+          smeAddress: { type: 'string', maxLength: 56 },
+        },
+        anyOf: [{ required: ['buyer'] }, { required: ['customer'] }],
+        additionalProperties: false,
+      },
+      CreateInvoiceResponse: {
+        type: 'object',
+        required: ['data', 'message'],
+        properties: {
+          data: {
+            type: 'object',
+            required: ['id', 'status'],
+            properties: {
+              id: { type: 'string' },
+              status: { type: 'string' },
+              smeId: { type: 'string' },
+              sme: { type: 'string' },
+              smeAddress: { type: 'string' },
+            },
+            additionalProperties: false,
+          },
+          message: { type: 'string' },
+        },
+        additionalProperties: false,
+      },
       /**
        * Reusable invoice projection used by the marketplace and invoice
        * list endpoints. Kept permissive so it tolerates additional columns

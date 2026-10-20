@@ -138,6 +138,8 @@ test_output.txt
 
 # Local data directory (API keys DB, etc.)
 data/
+!src/data/
+!src/data/smes.js
 
 # Load test reports
 tests/load/reports/
