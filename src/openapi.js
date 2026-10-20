@@ -124,6 +124,143 @@ function buildSpec(baseUrl) {
           responses: { 200: { description: 'Escrow state' } },
         },
       },
+      '/api/escrow/attestations': {
+        get: {
+          tags: ['Escrow'],
+          summary: 'On-chain attestation log (paginated)',
+          description:
+            'Returns the primary attestation hash and a page of the append-only attestation log. ' +
+            'Page size is capped at 20 (MAX_ATTESTATION_READ_PAGE). Use `nextCursor` to fetch subsequent pages.',
+          parameters: [
+            {
+              name: 'cursor',
+              in: 'query',
+              description: 'Zero-based start index for the log page (default: 0)',
+              schema: { type: 'integer', minimum: 0, default: 0 },
+            },
+            {
+              name: 'limit',
+              in: 'query',
+              description: 'Number of log entries to return (1–20, default: 20)',
+              schema: { type: 'integer', minimum: 1, maximum: 20, default: 20 },
+            },
+          ],
+          responses: {
+            200: {
+              description: 'Attestation state',
+              ...json({
+                type: 'object',
+                properties: {
+                  primary: {
+                    type: 'string',
+                    nullable: true,
+                    description: 'Lowercase hex SHA-256 of the primary attestation, or null if not set',
+                    example: 'a'.repeat(64),
+                  },
+                  log: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        index: { type: 'integer', description: 'Zero-based position in the append log' },
+                        digest: { type: 'string', description: 'Lowercase 64-char hex SHA-256' },
+                        revoked: { type: 'boolean' },
+                      },
+                      required: ['index', 'digest', 'revoked'],
+                    },
+                  },
+                  total: {
+                    type: 'integer',
+                    nullable: true,
+                    description: 'Total number of log entries, or null if unavailable',
+                  },
+                  nextCursor: {
+                    type: 'integer',
+                    nullable: true,
+                    description: 'Start index for the next page, or null if this is the last page',
+                  },
+                },
+                required: ['primary', 'log', 'total', 'nextCursor'],
+              }),
+            },
+            400: { description: 'Invalid cursor or limit', ...json(ErrorBody) },
+            502: { description: 'Soroban RPC read failed', ...json(ErrorBody) },
+          },
+        },
+      },
+      '/api/escrow/attestations/verify': {
+        post: {
+          tags: ['Escrow'],
+          summary: 'Verify a document digest against on-chain attestations',
+          description:
+            'Accepts either a JSON body `{ sha256: "<64 hex>" }` or a `multipart/form-data` upload ' +
+            '(file ≤ 5 MiB, hashed with SHA-256 while streaming — the file is never stored). ' +
+            'Returns whether the digest matches the primary hash or a non-revoked log entry.',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['sha256'],
+                  properties: {
+                    sha256: {
+                      type: 'string',
+                      description: '64-character hex SHA-256 digest to verify',
+                      example: 'a'.repeat(64),
+                    },
+                  },
+                },
+              },
+              'multipart/form-data': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    file: {
+                      type: 'string',
+                      format: 'binary',
+                      description: 'Document file (≤ 5 MiB). The server hashes it with SHA-256 and discards the bytes.',
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            200: {
+              description: 'Verification result',
+              ...json({
+                type: 'object',
+                properties: {
+                  sha256: { type: 'string', description: 'The digest that was checked (normalised to lowercase)' },
+                  match: {
+                    type: 'string',
+                    enum: ['primary', 'log', 'none'],
+                    description: '"primary" if it matches the primary hash, "log" if found in the append log, "none" otherwise',
+                  },
+                  index: {
+                    type: 'integer',
+                    nullable: true,
+                    description: 'Zero-based log index when match is "log"; omitted otherwise',
+                  },
+                  revoked: {
+                    type: 'boolean',
+                    description: 'true if the matched log entry has been revoked',
+                  },
+                  verified: {
+                    type: 'boolean',
+                    description: 'true when match !== "none" && !revoked',
+                  },
+                },
+                required: ['sha256', 'match', 'revoked', 'verified'],
+              }),
+            },
+            400: { description: 'Invalid or missing digest (INVALID_DIGEST / NO_FILE)', ...json(ErrorBody) },
+            413: { description: 'Uploaded file exceeds 5 MiB', ...json(ErrorBody) },
+            502: { description: 'Soroban RPC read failed', ...json(ErrorBody) },
+          },
+        },
+      },
     },
   };
 }

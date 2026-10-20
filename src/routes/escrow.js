@@ -68,5 +68,8 @@ router.get('/live', async (req, res) => {
   }
 });
 
+// Mount attestation sub-router at /attestations
+router.use('/attestations', require('./attestation'));
+
 module.exports = router;
 module.exports.DEPLOY_SNAPSHOT = DEPLOY_SNAPSHOT;
