@@ -23,6 +23,76 @@ const Invoice = {
 const json = (schema) => ({ content: { 'application/json': { schema } } });
 const ErrorBody = { type: 'object', properties: { error: { type: 'string' } } };
 
+/** Raw stroop amount as a decimal integer string (7 decimals). */
+const StroopString = { type: 'string', pattern: '^\\d+$', example: '1000000000' };
+
+/** Amount converted to whole units with a fixed 7 decimal places. */
+const DecimalString = { type: 'string', pattern: '^\\d+\\.\\d{7}$', example: '100.0000000' };
+
+/**
+ * Typed escrow state returned identically by the live (Soroban RPC) and
+ * snapshot read paths.
+ */
+const EscrowState = {
+  type: 'object',
+  required: [
+    'invoiceId',
+    'admin',
+    'smeAddress',
+    'amount',
+    'fundingTarget',
+    'fundedAmount',
+    'amountDecimal',
+    'fundingTargetDecimal',
+    'fundedAmountDecimal',
+    'yieldBps',
+    'maturity',
+    'maturityIso',
+    'status',
+    'statusCode',
+  ],
+  properties: {
+    invoiceId: { type: 'string', example: 'INV_0001' },
+    admin: { type: 'string', example: 'GA7TXEBMEPQCLHIYCWDN7RKAO5IMRD2UV7O7TZXMEW6VZUMEXNR4XBB5' },
+    smeAddress: { type: 'string', example: 'GA7TXEBMEPQCLHIYCWDN7RKAO5IMRD2UV7O7TZXMEW6VZUMEXNR4XBB5' },
+    amount: { ...StroopString, description: 'Raw amount in stroops (7 decimals)' },
+    fundingTarget: { ...StroopString, description: 'Raw funding target in stroops' },
+    fundedAmount: { ...StroopString, description: 'Raw funded amount in stroops' },
+    amountDecimal: { ...DecimalString, description: 'Amount as a fixed 7-decimal string' },
+    fundingTargetDecimal: { ...DecimalString, description: 'Funding target as a fixed 7-decimal string' },
+    fundedAmountDecimal: { ...DecimalString, description: 'Funded amount as a fixed 7-decimal string' },
+    yieldBps: { type: 'integer', minimum: 0, maximum: 10000, example: 800 },
+    maturity: { type: 'integer', minimum: 0, description: 'Maturity as unix seconds', example: 1800132005 },
+    maturityIso: { type: 'string', format: 'date-time', example: '2027-01-17T00:13:25.000Z' },
+    status: {
+      type: 'string',
+      enum: ['open', 'funded', 'settled', 'withdrawn', 'cancelled', 'unknown'],
+      description: 'Human-readable status; unknown contract codes map to "unknown"',
+    },
+    statusCode: { type: 'integer', minimum: 0, description: 'Raw contract status code (0 open, 1 funded, 2 settled, 3 withdrawn, 4 cancelled)' },
+  },
+};
+
+/** Response of GET /api/escrow/live. */
+const EscrowLiveResponse = {
+  type: 'object',
+  required: ['source', 'contractId', 'network', 'escrow'],
+  properties: {
+    source: { type: 'string', enum: ['soroban-rpc', 'snapshot'], description: 'Where the payload came from' },
+    contractId: { type: 'string' },
+    network: { type: 'string', example: 'testnet' },
+    escrow: { $ref: '#/components/schemas/EscrowState' },
+    latestLedger: { type: 'integer', description: 'Ledger the live read came from (present only when source is soroban-rpc)' },
+    snapshotCapturedAt: { type: 'string', format: 'date-time', description: 'When the fallback snapshot was captured (present only when source is snapshot)' },
+    warning: {
+      type: 'object',
+      required: ['code'],
+      description: 'Present only when the live read failed and the snapshot was served',
+      properties: { code: { type: 'string', enum: ['LIVE_READ_FAILED'] } },
+    },
+  },
+};
+
 /**
  * Builds the OpenAPI document for the given public base URL.
  *
@@ -41,6 +111,12 @@ function buildSpec(baseUrl) {
     },
     servers: [{ url: baseUrl }],
     tags: [{ name: 'System' }, { name: 'Invoices' }, { name: 'Investors' }, { name: 'Escrow' }],
+    components: {
+      schemas: {
+        EscrowState,
+        EscrowLiveResponse,
+      },
+    },
     paths: {
       '/health': {
         get: {
@@ -265,13 +341,55 @@ function buildSpec(baseUrl) {
         },
       },
       '/api/escrow': {
-        get: { tags: ['Escrow'], summary: 'Deployed escrow contract metadata', responses: { 200: { description: 'Contract info' } } },
+        get: {
+          tags: ['Escrow'],
+          summary: 'Deployed escrow contract metadata (decoded deploy snapshot)',
+          responses: {
+            200: {
+              description: 'Contract info with the deploy snapshot decoded as EscrowState',
+              ...json({
+                type: 'object',
+                required: ['contractId', 'network', 'snapshot'],
+                properties: {
+                  contractId: { type: 'string' },
+                  network: { type: 'string' },
+                  rpcUrl: { type: 'string' },
+                  explorer: { type: 'string' },
+                  snapshot: { $ref: '#/components/schemas/EscrowState' },
+                  snapshotCapturedAt: { type: 'string', format: 'date-time' },
+                },
+              }),
+            },
+          },
+        },
       },
       '/api/escrow/live': {
         get: {
           tags: ['Escrow'],
           summary: 'Live escrow state read from Soroban RPC (falls back to deploy snapshot)',
-          responses: { 200: { description: 'Escrow state' } },
+          description:
+            'Returns the same typed EscrowState from both paths: the live Soroban RPC read and the deploy ' +
+            'snapshot fallback. Set `strict=true` to fail instead of falling back to the snapshot.',
+          parameters: [
+            {
+              name: 'strict',
+              in: 'query',
+              required: false,
+              description: 'When true, respond 503 instead of falling back to the deploy snapshot',
+              schema: { type: 'boolean', default: false },
+            },
+          ],
+          responses: {
+            200: { description: 'Escrow state (live read, or snapshot fallback with a warning)', ...json({ $ref: '#/components/schemas/EscrowLiveResponse' }) },
+            503: {
+              description: 'Live read failed and strict mode was requested',
+              ...json({
+                type: 'object',
+                required: ['error', 'code'],
+                properties: { error: { type: 'string' }, code: { type: 'string', enum: ['ESCROW_LIVE_UNAVAILABLE'] } },
+              }),
+            },
+          },
         },
       },
       '/api/escrow/attestations': {
