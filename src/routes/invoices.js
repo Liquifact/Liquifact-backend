@@ -4,6 +4,7 @@ const express = require('express');
 const { StrKey } = require('@stellar/stellar-sdk');
 const store = require('../data/store');
 const contributions = require('../data/contributions');
+const { requireRole } = require('../middleware/auth');
 const config = require('../config');
 const { toMinor, fromMinor, couponMinor, daysBetween, annualisedBps } = require('../domain/returns');
 
@@ -123,15 +124,16 @@ router.get('/:id/quote', (req, res) => {
   });
 });
 
-router.post('/', (req, res) => {
+router.post('/', requireRole('sme', 'admin'), (req, res) => {
   const { value, errors } = validateInvoice(req.body);
   if (errors) {
     return res.status(400).json({ error: 'Validation failed', details: errors });
   }
-  return res.status(201).json({ data: store.create(value) });
+  // Record the opaque API key id that created the invoice for later audit.
+  return res.status(201).json({ data: store.create({ ...value, createdBy: req.principal.keyId }) });
 });
 
-router.post('/:id/fund', (req, res) => {
+router.post('/:id/fund', requireRole('investor', 'admin'), (req, res) => {
   const invoice = store.get(req.params.id);
   if (!invoice) {
     return res.status(404).json({ error: 'Invoice not found' });

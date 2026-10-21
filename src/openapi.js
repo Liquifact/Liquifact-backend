@@ -17,6 +17,11 @@ const Invoice = {
     status: { type: 'string', enum: ['open', 'funded', 'settled', 'cancelled'] },
     onChain: { type: 'boolean' },
     createdAt: { type: 'string', format: 'date-time' },
+    createdBy: {
+      type: 'string',
+      description: 'Opaque id of the API key that created the invoice (absent on demo seed data)',
+      example: 'ak_1a2b3c4d',
+    },
   },
 };
 
@@ -93,6 +98,35 @@ const EscrowLiveResponse = {
   },
 };
 
+/** Standard responses for API-key-protected mutating operations. */
+const Unauthenticated = {
+  description: 'Missing, malformed or unknown API key',
+  ...json({
+    type: 'object',
+    required: ['error', 'code'],
+    properties: { error: { type: 'string' }, code: { type: 'string', enum: ['UNAUTHENTICATED'] } },
+  }),
+};
+const Forbidden = {
+  description: 'The API key does not have the required role',
+  ...json({
+    type: 'object',
+    required: ['error', 'code'],
+    properties: { error: { type: 'string' }, code: { type: 'string', enum: ['FORBIDDEN'] } },
+  }),
+};
+const AuthNotConfigured = {
+  description: 'API key authentication is not configured on this deployment (production fails closed)',
+  ...json({
+    type: 'object',
+    required: ['error', 'code'],
+    properties: { error: { type: 'string' }, code: { type: 'string', enum: ['AUTH_NOT_CONFIGURED'] } },
+  }),
+};
+
+/** Security requirement applied to every mutating operation. */
+const apiKeySecurity = [{ ApiKeyAuth: [] }];
+
 /**
  * Builds the OpenAPI document for the given public base URL.
  *
@@ -112,6 +146,15 @@ function buildSpec(baseUrl) {
     servers: [{ url: baseUrl }],
     tags: [{ name: 'System' }, { name: 'Invoices' }, { name: 'Investors' }, { name: 'Escrow' }],
     components: {
+      securitySchemes: {
+        ApiKeyAuth: {
+          type: 'http',
+          scheme: 'bearer',
+          description:
+            'API key issued via `npm run apikey:new` and configured as `API_KEYS=id:role:sha256hex`. ' +
+            'Send it as `Authorization: Bearer <key>` or `X-API-Key: <key>`. Roles: sme, investor, admin.',
+        },
+      },
       schemas: {
         EscrowState,
         EscrowLiveResponse,
@@ -194,6 +237,8 @@ function buildSpec(baseUrl) {
         post: {
           tags: ['Invoices'],
           summary: 'Submit an invoice for financing',
+          description: 'Requires the `sme` or `admin` role. The creating key id is stored as `createdBy`.',
+          security: apiKeySecurity,
           requestBody: {
             required: true,
             ...json({
@@ -213,6 +258,9 @@ function buildSpec(baseUrl) {
           responses: {
             201: { description: 'Created', ...json({ type: 'object', properties: { data: Invoice } }) },
             400: { description: 'Validation failed', ...json(ErrorBody) },
+            401: Unauthenticated,
+            403: Forbidden,
+            503: AuthNotConfigured,
           },
         },
       },
@@ -263,6 +311,8 @@ function buildSpec(baseUrl) {
         post: {
           tags: ['Invoices'],
           summary: 'Record an investor contribution (demo, off-chain)',
+          description: 'Requires the `investor` or `admin` role.',
+          security: apiKeySecurity,
           parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
           requestBody: {
             required: true,
@@ -278,9 +328,12 @@ function buildSpec(baseUrl) {
           responses: {
             200: { description: 'Updated invoice', ...json({ type: 'object', properties: { data: Invoice } }) },
             400: { description: 'Invalid amount or missing/invalid investor', ...json(ErrorBody) },
+            401: Unauthenticated,
+            403: Forbidden,
             404: { description: 'Not found', ...json(ErrorBody) },
             409: { description: 'Invoice not open', ...json(ErrorBody) },
             422: { description: 'Self-funding not allowed', ...json(ErrorBody) },
+            503: AuthNotConfigured,
           },
         },
       },
@@ -493,9 +546,11 @@ function buildSpec(baseUrl) {
           tags: ['Escrow'],
           summary: 'Verify a document digest against on-chain attestations',
           description:
+            'Requires any API key role (`sme`, `investor` or `admin`). ' +
             'Accepts either a JSON body `{ sha256: "<64 hex>" }` or a `multipart/form-data` upload ' +
             '(file ≤ 5 MiB, hashed with SHA-256 while streaming — the file is never stored). ' +
             'Returns whether the digest matches the primary hash or a non-revoked log entry.',
+          security: apiKeySecurity,
           requestBody: {
             required: true,
             content: {
@@ -556,8 +611,11 @@ function buildSpec(baseUrl) {
               }),
             },
             400: { description: 'Invalid or missing digest (INVALID_DIGEST / NO_FILE)', ...json(ErrorBody) },
+            401: Unauthenticated,
+            403: Forbidden,
             413: { description: 'Uploaded file exceeds 5 MiB', ...json(ErrorBody) },
             502: { description: 'Soroban RPC read failed', ...json(ErrorBody) },
+            503: AuthNotConfigured,
           },
         },
       },

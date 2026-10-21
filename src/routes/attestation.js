@@ -16,6 +16,7 @@ const express = require('express');
 const crypto = require('crypto');
 const { Writable } = require('stream');
 const config = require('../config');
+const { requireRole } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -290,7 +291,7 @@ function hashUploadedFile(req) {
   });
 }
 
-router.post('/verify', async (req, res) => {
+router.post('/verify', requireRole('sme', 'investor', 'admin'), async (req, res) => {
   let sha256;
 
   const contentType = req.get('content-type') || '';

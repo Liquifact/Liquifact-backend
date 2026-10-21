@@ -28,6 +28,18 @@ app.use(
 app.use(cors({ origin: config.corsOrigins.includes('*') ? '*' : config.corsOrigins }));
 app.use(express.json({ limit: '100kb' }));
 
+if (config.apiKeys.length === 0 && config.nodeEnv !== 'test') {
+  if (config.nodeEnv === 'production') {
+    console.warn(
+      '[auth] API_KEYS is empty: mutating routes fail closed with 503 AUTH_NOT_CONFIGURED until keys are configured',
+    );
+  } else {
+    console.warn(
+      '[auth] API_KEYS is empty: mutating routes only accept the dev key from DEV_API_KEY (never valid in production)',
+    );
+  }
+}
+
 /**
  * @param {import('express').Request} req incoming request
  * @returns {string} public base URL of this deployment
