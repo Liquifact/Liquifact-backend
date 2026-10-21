@@ -47,6 +47,7 @@ const ENDPOINTS = [
   { method: 'POST', path: '/api/invoices/:id/fund', description: 'Record an investor contribution' },
   { method: 'GET', path: '/api/escrow', description: 'Deployed Soroban escrow contract metadata' },
   { method: 'GET', path: '/api/escrow/live', description: 'Live escrow state from Soroban RPC' },
+  { method: 'GET', path: '/api/escrow/investors/:address', description: 'On-chain investor escrow position' },
 ];
 
 app.get('/', (req, res) => {

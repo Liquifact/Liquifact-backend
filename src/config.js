@@ -14,6 +14,7 @@ module.exports = {
   networkPassphrase:
     process.env.STELLAR_NETWORK_PASSPHRASE || 'Test SDF Network ; September 2015',
   contractId: CONTRACT_ID,
+  simulationSourceAccount: process.env.SIMULATION_SOURCE_ACCOUNT || 'GA7TXEBMEPQCLHIYCWDN7RKAO5IMRD2UV7O7TZXMEW6VZUMEXNR4XBB5',
   explorerUrl: `https://stellar.expert/explorer/testnet/contract/${CONTRACT_ID}`,
   frontendUrl: process.env.FRONTEND_URL || 'https://liquifact-frontend.vercel.app',
   corsOrigins: (process.env.CORS_ALLOWED_ORIGINS || '*')
