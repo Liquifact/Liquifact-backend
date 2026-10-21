@@ -3,8 +3,12 @@
 const request = require('supertest');
 const app = require('../src/app');
 const store = require('../src/data/store');
+const idempotency = require('../src/middleware/idempotency');
 
-beforeEach(() => store.reset());
+beforeEach(() => {
+  store.reset();
+  idempotency.resetStore();
+});
 
 describe('system', () => {
   test('GET /health', async () => {

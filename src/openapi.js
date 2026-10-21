@@ -23,6 +23,17 @@ const Invoice = {
 const json = (schema) => ({ content: { 'application/json': { schema } } });
 const ErrorBody = { type: 'object', properties: { error: { type: 'string' } } };
 
+const IdempotencyHeaders = {
+  'Idempotency-Key': {
+    description: 'Idempotency key for safe retries (8-128 chars, alphanumeric, underscore, hyphen)',
+    schema: { type: 'string' },
+  },
+  'Idempotent-Replayed': {
+    description: 'Present with value "true" when the response is a replay of a cached request',
+    schema: { type: 'string' },
+  },
+};
+
 /**
  * Builds the OpenAPI document for the given public base URL.
  *
@@ -67,6 +78,15 @@ function buildSpec(baseUrl) {
         post: {
           tags: ['Invoices'],
           summary: 'Submit an invoice for financing',
+          parameters: [
+            {
+              name: 'Idempotency-Key',
+              in: 'header',
+              description: 'Idempotency key for safe retries (8-128 chars, alphanumeric, underscore, hyphen)',
+              required: false,
+              schema: { type: 'string' },
+            },
+          ],
           requestBody: {
             required: true,
             ...json({
@@ -84,8 +104,14 @@ function buildSpec(baseUrl) {
             }),
           },
           responses: {
-            201: { description: 'Created', ...json({ type: 'object', properties: { data: Invoice } }) },
+            201: {
+              description: 'Created',
+              headers: IdempotencyHeaders,
+              ...json({ type: 'object', properties: { data: Invoice } }),
+            },
             400: { description: 'Validation failed', ...json(ErrorBody) },
+            409: { description: 'Idempotency request in progress', headers: { 'Retry-After': { schema: { type: 'string' } } }, ...json(ErrorBody) },
+            422: { description: 'Idempotency key reused with different payload', ...json(ErrorBody) },
           },
         },
       },
@@ -104,13 +130,31 @@ function buildSpec(baseUrl) {
         post: {
           tags: ['Invoices'],
           summary: 'Record an investor contribution (demo, off-chain)',
-          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          parameters: [
+            { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+            {
+              name: 'Idempotency-Key',
+              in: 'header',
+              description: 'Idempotency key for safe retries (8-128 chars, alphanumeric, underscore, hyphen)',
+              required: false,
+              schema: { type: 'string' },
+            },
+          ],
           requestBody: { required: true, ...json({ type: 'object', properties: { amount: { type: 'number' } } }) },
           responses: {
-            200: { description: 'Updated invoice' },
-            400: { description: 'Invalid amount' },
-            404: { description: 'Not found' },
-            409: { description: 'Invoice not open' },
+            200: {
+              description: 'Updated invoice',
+              headers: IdempotencyHeaders,
+              ...json({ type: 'object', properties: { data: Invoice } }),
+            },
+            400: { description: 'Invalid amount', ...json(ErrorBody) },
+            404: { description: 'Not found', ...json(ErrorBody) },
+            409: {
+              description: 'Invoice not open or idempotency request in progress',
+              headers: { 'Retry-After': { schema: { type: 'string' } } },
+              ...json(ErrorBody),
+            },
+            422: { description: 'Idempotency key reused with different payload', ...json(ErrorBody) },
           },
         },
       },

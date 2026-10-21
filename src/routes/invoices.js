@@ -2,6 +2,7 @@
 
 const express = require('express');
 const store = require('../data/store');
+const idempotency = require('../middleware/idempotency');
 
 const router = express.Router();
 
@@ -64,7 +65,7 @@ router.get('/:id', (req, res) => {
   return res.json({ data: invoice });
 });
 
-router.post('/', (req, res) => {
+router.post('/', idempotency, (req, res) => {
   const { value, errors } = validateInvoice(req.body);
   if (errors) {
     return res.status(400).json({ error: 'Validation failed', details: errors });
@@ -72,7 +73,7 @@ router.post('/', (req, res) => {
   return res.status(201).json({ data: store.create(value) });
 });
 
-router.post('/:id/fund', (req, res) => {
+router.post('/:id/fund', idempotency, (req, res) => {
   const invoice = store.get(req.params.id);
   if (!invoice) {
     return res.status(404).json({ error: 'Invoice not found' });
