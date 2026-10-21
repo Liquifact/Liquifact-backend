@@ -2,9 +2,12 @@
 
 const request = require('supertest');
 const app = require('../src/app');
-const store = require('../src/data/store');
 
-beforeEach(() => store.reset());
+const repo = app.locals.repo;
+
+beforeEach(async () => {
+  await repo.reset();
+});
 
 describe('system', () => {
   test('GET /health', async () => {
@@ -58,6 +61,7 @@ describe('invoices', () => {
       .send({ sme: 'Test SME', debtor: 'Buyer', amount: 500, dueDate: '2027-01-01' });
     expect(ok.status).toBe(201);
     expect(ok.body.data.status).toBe('open');
+    expect(ok.body.data.id).toMatch(/^INV_[A-Z2-7]{12}$/);
   });
 
   test('fund moves invoice to funded when target reached', async () => {

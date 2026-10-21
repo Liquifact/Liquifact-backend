@@ -16,6 +16,8 @@ const PROTOCOL_FEE_BPS = Number.isInteger(Number(process.env.PROTOCOL_FEE_BPS)) 
 
 module.exports = {
   port: Number(process.env.PORT) || 3001,
+  /** Present when Postgres persistence is enabled. Never log this value. */
+  databaseUrl: process.env.DATABASE_URL || null,
   network: process.env.STELLAR_NETWORK || 'testnet',
   rpcUrl: process.env.SOROBAN_RPC_URL || 'https://soroban-testnet.stellar.org',
   networkPassphrase:

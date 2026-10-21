@@ -2,10 +2,14 @@
 
 const request = require('supertest');
 const app = require('../src/app');
-const store = require('../src/data/store');
 const contributions = require('../src/data/contributions');
+const { RepoError } = require('../src/data/errors');
 
-beforeEach(() => store.reset());
+const repo = app.locals.repo;
+
+beforeEach(async () => {
+  await repo.reset();
+});
 
 const INVESTOR_A = 'GA7TXEBMEPQCLHIYCWDN7RKAO5IMRD2UV7O7TZXMEW6VZUMEXNR4XBB5';
 const INVESTOR_B = 'GBTUJNOF2WAAUPKCJHBB76ID5HGN6KMTUG43F3Z344T7QRTP7B7TVPVC';
@@ -126,7 +130,7 @@ describe('Investor Contributions and Portfolio', () => {
     }
 
     // Assert invariant for every invoice in store
-    const allInvoices = store.list();
+    const allInvoices = await repo.list();
     for (const inv of allInvoices) {
       const sum = contributions.sumForInvoice(inv.id);
       expect(inv.fundedAmount).toBe(sum);
@@ -183,9 +187,9 @@ describe('Investor Contributions and Portfolio', () => {
     });
   });
 
-  test('store.fund enforces required investor parameter', () => {
-    const inv = store.get('INV_0001');
-    expect(() => store.fund(inv, 10)).toThrow('investor address is required to fund an invoice');
+  test('repo.fund enforces required investor parameter', async () => {
+    await expect(repo.fund('INV_0001', 10)).rejects.toThrow(RepoError);
+    await expect(repo.fund('INV_0001', 10)).rejects.toThrow('investor address is required to fund an invoice');
   });
 
   test('coupon math truncates using integer minor unit arithmetic where floor rounding matters', async () => {
@@ -247,9 +251,8 @@ describe('Investor Contributions and Portfolio', () => {
       .post('/api/invoices/INV_0002/fund')
       .send({ amount: 1000, investor: INVESTOR_B });
 
-    // Manually mark invoice as cancelled
-    const invoice = store.get('INV_0002');
-    invoice.status = 'cancelled';
+    // Mark invoice as cancelled via repository (returned objects are copies)
+    await repo.setStatus('INV_0002', 'cancelled');
 
     const port = await request(app).get(`/api/investors/${INVESTOR_B}/portfolio`);
     expect(port.status).toBe(200);
@@ -351,16 +354,15 @@ describe('Investor Contributions and Portfolio', () => {
     });
   });
 
-  test('store.reset restores contributions and invoice fundedAmount sums', async () => {
+  test('repo.reset restores contributions and invoice fundedAmount sums', async () => {
     await request(app)
       .post('/api/invoices/INV_0002/fund')
       .send({ amount: 1000, investor: INVESTOR_A });
-    expect(store.get('INV_0002').fundedAmount).toBe(19000);
+    expect((await repo.get('INV_0002')).fundedAmount).toBe(19000);
 
-    store.reset();
-    expect(store.get('INV_0002').fundedAmount).toBe(18000);
+    await repo.reset();
+    expect((await repo.get('INV_0002')).fundedAmount).toBe(18000);
     expect(contributions.listByInvoice('INV_0002')).toHaveLength(1);
     expect(contributions.listByInvoice('INV_0002')[0].amount).toBe(18000);
   });
 });
-
