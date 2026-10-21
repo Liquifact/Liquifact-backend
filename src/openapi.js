@@ -93,6 +93,87 @@ const EscrowLiveResponse = {
   },
 };
 
+/** Response of GET /health and GET /healthz. */
+const HealthResponse = {
+  type: 'object',
+  required: ['status', 'service', 'version', 'timestamp', 'uptimeSeconds'],
+  properties: {
+    status: { type: 'string', enum: ['ok'], description: 'Always "ok": the liveness probe never checks dependencies' },
+    service: { type: 'string', example: 'liquifact-api' },
+    version: { type: 'string', example: '1.0.0' },
+    timestamp: { type: 'string', format: 'date-time' },
+    uptimeSeconds: { type: 'integer', minimum: 0, description: 'Seconds since the process started' },
+  },
+};
+
+/** Short, non-sensitive failure codes reported by the readiness checks. */
+const ReadinessErrorCode = {
+  type: 'string',
+  enum: ['TIMEOUT', 'PASSPHRASE_MISMATCH', 'STALE_LEDGER', 'CONTRACT_NOT_FOUND', 'RPC_ERROR'],
+  description: 'Present only on the failing check; raw upstream messages are never returned',
+};
+
+/** Response of GET /ready. */
+const ReadinessResponse = {
+  type: 'object',
+  required: ['status', 'checks'],
+  properties: {
+    status: { type: 'string', enum: ['ready', 'not_ready'] },
+    checks: {
+      type: 'object',
+      required: ['rpc', 'network', 'ledger', 'contract'],
+      properties: {
+        rpc: {
+          type: 'object',
+          required: ['ok'],
+          description: 'The Soroban RPC answers and reports itself as healthy',
+          properties: {
+            ok: { type: 'boolean' },
+            latencyMs: { type: 'integer', minimum: 0, description: 'Round-trip time of the health call' },
+            error: ReadinessErrorCode,
+          },
+        },
+        network: {
+          type: 'object',
+          required: ['ok', 'expected', 'actual'],
+          description: 'The RPC serves the network the API is configured for',
+          properties: {
+            ok: { type: 'boolean' },
+            expected: { type: 'string', description: 'Configured network passphrase' },
+            actual: { type: 'string', nullable: true, description: 'Network passphrase reported by the RPC' },
+            error: ReadinessErrorCode,
+          },
+        },
+        ledger: {
+          type: 'object',
+          required: ['ok'],
+          description: 'The latest ledger is recent enough to be served by a healthy node',
+          properties: {
+            ok: { type: 'boolean' },
+            sequence: { type: 'integer', nullable: true, description: 'Sequence of the latest ledger' },
+            ageSeconds: {
+              type: 'integer',
+              nullable: true,
+              minimum: 0,
+              description: 'Age of the latest ledger; null when the RPC does not expose a ledger close time',
+            },
+            error: ReadinessErrorCode,
+          },
+        },
+        contract: {
+          type: 'object',
+          required: ['ok'],
+          description: 'The configured escrow contract is deployed on the RPC network',
+          properties: {
+            ok: { type: 'boolean' },
+            error: ReadinessErrorCode,
+          },
+        },
+      },
+    },
+  },
+};
+
 /**
  * Builds the OpenAPI document for the given public base URL.
  *
@@ -115,6 +196,8 @@ function buildSpec(baseUrl) {
       schemas: {
         EscrowState,
         EscrowLiveResponse,
+        HealthResponse,
+        ReadinessResponse,
       },
     },
     paths: {
@@ -122,7 +205,26 @@ function buildSpec(baseUrl) {
         get: {
           tags: ['System'],
           summary: 'Liveness probe',
-          responses: { 200: { description: 'Service is up', ...json({ type: 'object' }) } },
+          description: 'Dependency-free liveness probe. It never calls the Soroban RPC.',
+          responses: { 200: { description: 'Service is up', ...json({ $ref: '#/components/schemas/HealthResponse' }) } },
+        },
+      },
+      '/ready': {
+        get: {
+          tags: ['System'],
+          summary: 'Readiness probe (Soroban RPC, network, ledger freshness, contract)',
+          description:
+            'Runs four checks in parallel against the configured Soroban RPC: `rpc` (the RPC reports itself ' +
+            'healthy), `network` (the RPC serves the configured network passphrase), `ledger` (the latest ledger ' +
+            `is at most READY_MAX_LEDGER_AGE_SECONDS old, default 60) and \`contract\` (the configured escrow ` +
+            'contract is deployed). Every check is bounded by READY_CHECK_TIMEOUT_MS (default 2000) and the ' +
+            'result is reused for READY_CACHE_SECONDS (default 10) so probes cannot hammer the RPC. A failing ' +
+            'check reports a short error code (TIMEOUT, PASSPHRASE_MISMATCH, STALE_LEDGER, CONTRACT_NOT_FOUND, ' +
+            'RPC_ERROR); raw upstream messages are never returned.',
+          responses: {
+            200: { description: 'All checks passed', ...json({ $ref: '#/components/schemas/ReadinessResponse' }) },
+            503: { description: 'At least one check failed', ...json({ $ref: '#/components/schemas/ReadinessResponse' }) },
+          },
         },
       },
       '/api/stats': {

@@ -3,6 +3,7 @@
 const express = require('express');
 const config = require('../config');
 const { decodeEscrow } = require('../stellar/escrow-decoder');
+const { getRpcServer } = require('../stellar/rpc');
 
 const router = express.Router();
 
@@ -35,8 +36,8 @@ const DEPLOY_SNAPSHOT = {
  */
 async function readEscrowOnChain(timeoutMs = 6000) {
   const sdk = require('@stellar/stellar-sdk');
-  const { rpc, Contract, TransactionBuilder, Account, BASE_FEE, scValToNative } = sdk;
-  const server = new rpc.Server(config.rpcUrl);
+  const { Contract, TransactionBuilder, Account, BASE_FEE, scValToNative } = sdk;
+  const server = getRpcServer();
   // Simulation does not need a real or funded source account.
   const source = new Account('GA7TXEBMEPQCLHIYCWDN7RKAO5IMRD2UV7O7TZXMEW6VZUMEXNR4XBB5', '0');
   const tx = new TransactionBuilder(source, { fee: BASE_FEE, networkPassphrase: config.networkPassphrase })

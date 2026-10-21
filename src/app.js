@@ -7,6 +7,7 @@ const config = require('./config');
 const store = require('./data/store');
 const { buildSpec } = require('./openapi');
 const { computeStats } = require('./services/stats');
+const { getReadiness } = require('./services/readiness');
 
 const app = express();
 app.disable('x-powered-by');
@@ -39,6 +40,7 @@ function baseUrl(req) {
 const ENDPOINTS = [
   { method: 'GET', path: '/', description: 'This index' },
   { method: 'GET', path: '/health', description: 'Liveness probe' },
+  { method: 'GET', path: '/ready', description: 'Readiness probe (Soroban RPC, network, ledger, contract)' },
   { method: 'GET', path: '/docs', description: 'Interactive API docs (Swagger UI)' },
   { method: 'GET', path: '/openapi.json', description: 'OpenAPI 3 document' },
   { method: 'GET', path: '/api/stats', description: 'Marketplace totals' },
@@ -68,10 +70,26 @@ app.get('/', (req, res) => {
   });
 });
 
+// Process start time, used by the liveness probe to report uptime.
+const PROCESS_STARTED_AT = Date.now();
+
 const health = (req, res) =>
-  res.json({ status: 'ok', service: 'liquifact-api', version: config.version, timestamp: new Date().toISOString() });
+  res.json({
+    status: 'ok',
+    service: 'liquifact-api',
+    version: config.version,
+    timestamp: new Date().toISOString(),
+    uptimeSeconds: Math.max(0, Math.floor((Date.now() - PROCESS_STARTED_AT) / 1000)),
+  });
 app.get('/health', health);
 app.get('/healthz', health);
+
+// Readiness probe: checks the Soroban RPC, the configured network, the ledger
+// freshness and the escrow contract. It is dependency-aware, unlike /health.
+app.get('/ready', async (req, res) => {
+  const result = await getReadiness();
+  res.status(result.status === 'ready' ? 200 : 503).json(result);
+});
 
 app.get('/openapi.json', (req, res) => res.json(buildSpec(baseUrl(req))));
 

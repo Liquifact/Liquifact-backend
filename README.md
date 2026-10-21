@@ -24,6 +24,7 @@ snapshot as fallback.
 |--------|------|-------------|
 | GET | `/` | JSON index of all endpoints, contract and docs links |
 | GET | `/health` | Liveness probe (`/healthz` alias) |
+| GET | `/ready` | Readiness probe (Soroban RPC, network, ledger freshness, contract) |
 | GET | `/docs` | Swagger UI |
 | GET | `/openapi.json` | OpenAPI 3 document |
 | GET | `/api/stats` | Marketplace totals |
@@ -81,6 +82,31 @@ npm test
 
 Configuration is optional; see [`.env.example`](.env.example).
 
+### Readiness probe (#1543)
+
+`GET /health` is a cheap liveness probe: it never touches a dependency and
+always answers `200`. `GET /ready` is the dependency-aware probe. It runs four
+checks in parallel against the configured Soroban RPC and answers `200` with
+`{ "status": "ready", "checks": { ... } }`, or `503` with
+`{ "status": "not_ready", "checks": { ... } }` when a check fails:
+
+| Check | What it verifies | Failure code |
+|-------|------------------|--------------|
+| `rpc` | `getHealth()` reports `healthy` | `RPC_ERROR`, `TIMEOUT` |
+| `network` | `getNetwork()` passphrase equals `STELLAR_NETWORK_PASSPHRASE` | `PASSPHRASE_MISMATCH` |
+| `ledger` | the latest ledger is younger than `READY_MAX_LEDGER_AGE_SECONDS` | `STALE_LEDGER` |
+| `contract` | the configured escrow contract is deployed | `CONTRACT_NOT_FOUND` |
+
+Failing checks report a short code only; raw upstream messages are never
+returned. The result is cached for `READY_CACHE_SECONDS` so that probes cannot
+hammer the RPC, and every check is bounded by `READY_CHECK_TIMEOUT_MS`.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `READY_CHECK_TIMEOUT_MS` | `2000` | Per-check timeout |
+| `READY_MAX_LEDGER_AGE_SECONDS` | `60` | Maximum accepted age of the latest ledger |
+| `READY_CACHE_SECONDS` | `10` | How long a probe result is reused (`0` disables caching) |
+
 ## Deployment (Vercel)
 
 `api/index.js` exports the Express app and `vercel.json` rewrites every path
@@ -100,6 +126,8 @@ src/config.js        Env-driven config with safe defaults
 src/openapi.js       OpenAPI document
 src/data/store.js    In-memory invoice store (demo seed data)
 src/routes/          invoices and escrow routers
+src/services/        marketplace stats and readiness checks
+src/stellar/         escrow decoder and shared Soroban RPC client
 tests/               Jest + supertest API tests
 ```
 

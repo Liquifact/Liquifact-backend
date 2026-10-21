@@ -14,12 +14,32 @@ const PROTOCOL_FEE_BPS = Number.isInteger(Number(process.env.PROTOCOL_FEE_BPS)) 
   ? Number(process.env.PROTOCOL_FEE_BPS)
   : 0;
 
+/**
+ * Reads an integer environment variable.
+ *
+ * @param {string} name environment variable name
+ * @param {number} fallback value used when the variable is unset or invalid
+ * @param {number} [min] smallest accepted value
+ * @returns {number} the configured value
+ */
+function envInt(name, fallback, min = 0) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') {
+    return fallback;
+  }
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < min) {
+    return fallback;
+  }
+  return value;
+}
+
 module.exports = {
   port: Number(process.env.PORT) || 3001,
   network: process.env.STELLAR_NETWORK || 'testnet',
   rpcUrl: process.env.SOROBAN_RPC_URL || 'https://soroban-testnet.stellar.org',
   networkPassphrase:
-    process.env.STELLAR_NETWORK_PASSPHRASE || 'Test DEV Network ; September 2015',
+    process.env.STELLAR_NETWORK_PASSPHRASE || 'Test SDF Network ; September 2015',
   contractId: CONTRACT_ID,
   explorerUrl: `https://stellar.expert/explorer/testnet/contract/${CONTRACT_ID}`,
   frontendUrl: process.env.FRONTEND_URL || 'https://liquifact-frontend.vercel.app',
@@ -29,5 +49,10 @@ module.exports = {
     .filter(Boolean),
   txWaitMs: TX_WAIT_MS,
   protocolFeeBps: PROTOCOL_FEE_BPS,
+  // Readiness probe: per-check timeout, maximum accepted ledger age and how
+  // long a probe result may be reused before the RPC is called again.
+  readyCheckTimeoutMs: envInt('READY_CHECK_TIMEOUT_MS', 2000, 1),
+  readyMaxLedgerAgeSeconds: envInt('READY_MAX_LEDGER_AGE_SECONDS', 60, 1),
+  readyCacheSeconds: envInt('READY_CACHE_SECONDS', 10, 0),
   version: require('../package.json').version,
 };
