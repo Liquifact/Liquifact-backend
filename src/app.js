@@ -44,6 +44,7 @@ const ENDPOINTS = [
   { method: 'GET', path: '/api/stats', description: 'Marketplace totals' },
   { method: 'GET', path: '/api/invoices', description: 'List invoices (?status=open|funded|settled|cancelled)' },
   { method: 'GET', path: '/api/invoices/:id', description: 'Get one invoice' },
+  { method: 'GET', path: '/api/invoices/:id/quote', description: 'Quote an investment contribution and annualised returns' },
   { method: 'POST', path: '/api/invoices', description: 'Submit an invoice for financing' },
   { method: 'POST', path: '/api/invoices/:id/fund', description: 'Record an investor contribution' },
   { method: 'GET', path: '/api/invoices/:id/contributions', description: 'List contributions for an invoice' },

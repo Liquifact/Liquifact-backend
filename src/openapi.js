@@ -151,6 +151,38 @@ function buildSpec(baseUrl) {
           },
         },
       },
+      '/api/invoices/{id}/quote': {
+        get: {
+          tags: ['Invoices'],
+          summary: 'Quote an investment contribution and annualised returns',
+          description: 'Coupon uses floor(principal minor units × yieldBps / 10,000), matching escrow. The protocol fee is shown separately and is deducted from SME withdrawal on-chain, so it is not subtracted from investor payout. Effective annualisation uses floating-point arithmetic solely as a comparison metric.',
+          parameters: [
+            { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+            { name: 'amount', in: 'query', required: true, description: 'Positive decimal contribution, with at most 7 fractional digits', schema: { type: 'string', pattern: '^(?:0|[1-9]\\d*)(?:\\.\\d{1,7})?$' } },
+            { name: 'asOf', in: 'query', required: false, description: 'Valuation date in UTC; defaults to today UTC', schema: { type: 'string', format: 'date' } },
+          ],
+          responses: {
+            200: { description: 'Investment quote; monetary values are decimal strings', ...json({
+              type: 'object',
+              required: ['invoiceId', 'currency', 'principal', 'yieldBps', 'coupon', 'payout', 'protocolFeeBps', 'daysToMaturity', 'simpleAnnualisedBps', 'effectiveAnnualisedBps', 'maturity', 'asOf'],
+              properties: {
+                invoiceId: { type: 'string' }, currency: { type: 'string' },
+                principal: { type: 'string', pattern: '^\\d+(?:\\.\\d{1,7})?$' },
+                yieldBps: { type: 'integer', minimum: 0, maximum: 10000 },
+                coupon: { type: 'string', pattern: '^\\d+(?:\\.\\d{1,7})?$' },
+                payout: { type: 'string', pattern: '^\\d+(?:\\.\\d{1,7})?$' },
+                protocolFeeBps: { type: 'integer', minimum: 0 }, daysToMaturity: { type: 'integer', minimum: 1 },
+                simpleAnnualisedBps: { type: 'integer', minimum: 0 }, effectiveAnnualisedBps: { type: 'integer', minimum: 0 },
+                maturity: { type: 'string', format: 'date' }, asOf: { type: 'string', format: 'date' },
+              },
+            }) },
+            400: { description: 'Invalid amount or asOf', ...json({ type: 'object', required: ['error', 'code'], properties: { error: { type: 'string' }, code: { type: 'string', enum: ['INVALID_AMOUNT', 'INVALID_AS_OF'] } } }) },
+            404: { description: 'Unknown invoice', ...json({ type: 'object', required: ['error', 'code'], properties: { error: { type: 'string' }, code: { type: 'string', enum: ['INVOICE_NOT_FOUND'] } } }) },
+            409: { description: 'Invoice is not open or has matured', ...json({ type: 'object', required: ['error', 'code'], properties: { error: { type: 'string' }, code: { type: 'string', enum: ['INVOICE_NOT_OPEN', 'INVOICE_MATURED'] } } }) },
+            422: { description: 'Contribution exceeds remaining capacity', ...json({ type: 'object', required: ['error', 'code'], properties: { error: { type: 'string' }, code: { type: 'string', enum: ['EXCEEDS_CAPACITY'] } } }) },
+          },
+        },
+      },
       '/api/invoices/{id}/fund': {
         post: {
           tags: ['Invoices'],

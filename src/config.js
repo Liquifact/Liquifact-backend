@@ -10,6 +10,9 @@ const CONTRACT_ID =
 // Maximum time (ms) to poll for a transaction's final status when the client
 // requests `?wait=true`. Capped to stay within Vercel's function limits.
 const TX_WAIT_MS = Math.min(Number(process.env.TX_WAIT_MS) || 20000, 25000);
+const PROTOCOL_FEE_BPS = Number.isInteger(Number(process.env.PROTOCOL_FEE_BPS)) && Number(process.env.PROTOCOL_FEE_BPS) >= 0
+  ? Number(process.env.PROTOCOL_FEE_BPS)
+  : 0;
 
 module.exports = {
   port: Number(process.env.PORT) || 3001,
@@ -25,5 +28,6 @@ module.exports = {
     .map((s) => s.trim())
     .filter(Boolean),
   txWaitMs: TX_WAIT_MS,
+  protocolFeeBps: PROTOCOL_FEE_BPS,
   version: require('../package.json').version,
 };

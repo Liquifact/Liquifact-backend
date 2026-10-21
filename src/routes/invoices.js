@@ -4,6 +4,8 @@ const express = require('express');
 const { StrKey } = require('@stellar/stellar-sdk');
 const store = require('../data/store');
 const contributions = require('../data/contributions');
+const config = require('../config');
+const { toMinor, fromMinor, couponMinor, daysBetween, annualisedBps } = require('../domain/returns');
 
 const router = express.Router();
 
@@ -64,6 +66,61 @@ router.get('/:id', (req, res) => {
     return res.status(404).json({ error: 'Invoice not found' });
   }
   return res.json({ data: invoice });
+});
+
+router.get('/:id/quote', (req, res) => {
+  const invoice = store.get(req.params.id);
+  if (!invoice) {
+    return res.status(404).json({ error: 'INVOICE_NOT_FOUND', code: 'INVOICE_NOT_FOUND' });
+  }
+  if (invoice.status !== 'open') {
+    return res.status(409).json({ error: 'INVOICE_NOT_OPEN', code: 'INVOICE_NOT_OPEN' });
+  }
+  const { amount, asOf } = req.query;
+  if (typeof amount !== 'string' || !/^(?:0|[1-9]\d*)(?:\.\d{1,7})?$/.test(amount)) {
+    return res.status(400).json({ error: 'INVALID_AMOUNT', code: 'INVALID_AMOUNT' });
+  }
+  const parsedAsOf = typeof asOf === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(asOf)
+    ? new Date(`${asOf}T00:00:00.000Z`)
+    : null;
+  if (asOf !== undefined && (!parsedAsOf || Number.isNaN(parsedAsOf.getTime()) || parsedAsOf.toISOString().slice(0, 10) !== asOf)) {
+    return res.status(400).json({ error: 'INVALID_AS_OF', code: 'INVALID_AS_OF' });
+  }
+  let principalMinor;
+  let capacityMinor;
+  try {
+    principalMinor = toMinor(amount);
+    capacityMinor = toMinor(invoice.amount) - toMinor(invoice.fundedAmount);
+  } catch {
+    return res.status(400).json({ error: 'INVALID_AMOUNT', code: 'INVALID_AMOUNT' });
+  }
+  if (principalMinor <= 0n) {
+    return res.status(400).json({ error: 'INVALID_AMOUNT', code: 'INVALID_AMOUNT' });
+  }
+  if (principalMinor > capacityMinor) {
+    return res.status(422).json({ error: 'EXCEEDS_CAPACITY', code: 'EXCEEDS_CAPACITY' });
+  }
+  const quoteAsOf = asOf || new Date().toISOString().slice(0, 10);
+  const daysToMaturity = daysBetween(quoteAsOf, invoice.dueDate);
+  if (daysToMaturity <= 0) {
+    return res.status(409).json({ error: 'INVOICE_MATURED', code: 'INVOICE_MATURED' });
+  }
+  const coupon = couponMinor(principalMinor, invoice.yieldBps);
+  const { simpleAnnualisedBps, effectiveAnnualisedBps } = annualisedBps(invoice.yieldBps, daysToMaturity);
+  return res.json({
+    invoiceId: invoice.id,
+    currency: invoice.currency,
+    principal: fromMinor(principalMinor),
+    yieldBps: invoice.yieldBps,
+    coupon: fromMinor(coupon),
+    payout: fromMinor(principalMinor + coupon),
+    protocolFeeBps: config.protocolFeeBps,
+    daysToMaturity,
+    simpleAnnualisedBps,
+    effectiveAnnualisedBps,
+    maturity: invoice.dueDate,
+    asOf: quoteAsOf,
+  });
 });
 
 router.post('/', (req, res) => {
