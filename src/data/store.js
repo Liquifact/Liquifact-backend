@@ -6,6 +6,8 @@
  * intentional for the public demo (no database required).
  */
 
+const config = require('../config');
+
 const STATUSES = ['open', 'funded', 'settled', 'cancelled'];
 
 const seed = () => [
@@ -20,7 +22,7 @@ const seed = () => [
     yieldBps: 800,
     dueDate: '2027-01-17',
     status: 'open',
-    onChain: true,
+    escrowContractId: config.contractId,
     createdAt: '2026-10-19T00:00:00.000Z',
   },
   {
@@ -34,7 +36,7 @@ const seed = () => [
     yieldBps: 650,
     dueDate: '2026-12-30',
     status: 'open',
-    onChain: false,
+    escrowContractId: null,
     createdAt: '2026-10-02T09:30:00.000Z',
   },
   {
@@ -48,7 +50,7 @@ const seed = () => [
     yieldBps: 720,
     dueDate: '2026-11-28',
     status: 'funded',
-    onChain: false,
+    escrowContractId: null,
     createdAt: '2026-09-15T14:00:00.000Z',
   },
   {
@@ -62,12 +64,21 @@ const seed = () => [
     yieldBps: 900,
     dueDate: '2026-09-30',
     status: 'settled',
-    onChain: false,
+    escrowContractId: null,
     createdAt: '2026-07-01T08:00:00.000Z',
   },
 ];
 
-let invoices = seed();
+function withDerivedOnChain(invoice) {
+  Object.defineProperty(invoice, 'onChain', {
+    enumerable: true,
+    configurable: true,
+    get() { return this.escrowContractId !== null; },
+  });
+  return invoice;
+}
+
+let invoices = seed().map(withDerivedOnChain);
 
 /** @returns {object[]} all invoices */
 function list() {
@@ -92,10 +103,11 @@ function create(invoice) {
     id,
     fundedAmount: 0,
     status: 'open',
-    onChain: false,
+    escrowContractId: null,
     createdAt: new Date().toISOString(),
     ...invoice,
   };
+  withDerivedOnChain(record);
   invoices.push(record);
   return record;
 }
@@ -117,7 +129,14 @@ function fund(invoice, amount) {
 
 /** Restores the seed data (used by tests). */
 function reset() {
-  invoices = seed();
+  invoices = seed().map(withDerivedOnChain);
 }
 
-module.exports = { STATUSES, list, get, create, fund, reset };
+function linkEscrow(invoice, contractId) {
+  if (invoice.escrowContractId && invoice.escrowContractId !== contractId) { return 'ALREADY_LINKED'; }
+  if (invoices.some((other) => other !== invoice && other.escrowContractId === contractId)) { return 'CONTRACT_IN_USE'; }
+  invoice.escrowContractId = contractId;
+  return null;
+}
+
+module.exports = { STATUSES, list, get, create, fund, linkEscrow, reset };

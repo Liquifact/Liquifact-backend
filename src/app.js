@@ -45,6 +45,8 @@ const ENDPOINTS = [
   { method: 'GET', path: '/api/invoices/:id', description: 'Get one invoice' },
   { method: 'POST', path: '/api/invoices', description: 'Submit an invoice for financing' },
   { method: 'POST', path: '/api/invoices/:id/fund', description: 'Record an investor contribution' },
+  { method: 'POST', path: '/api/invoices/:id/escrow', description: 'Admin: link verified escrow' },
+  { method: 'GET', path: '/api/invoices/:id/escrow', description: 'Read invoice escrow' },
   { method: 'GET', path: '/api/escrow', description: 'Deployed Soroban escrow contract metadata' },
   { method: 'GET', path: '/api/escrow/live', description: 'Live escrow state from Soroban RPC' },
 ];
