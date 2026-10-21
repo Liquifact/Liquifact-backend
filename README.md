@@ -36,6 +36,34 @@ snapshot as fallback.
 | GET | `/api/escrow` | Deployed escrow contract metadata |
 | GET | `/api/escrow/live` | Live `get_escrow` read from Soroban RPC |
 
+## Authentication
+
+All `GET` routes are public. Every mutating route requires an API key, sent as
+`Authorization: Bearer <key>` or `X-API-Key: <key>`:
+
+| Method | Path | Required role |
+|--------|------|---------------|
+| POST | `/api/invoices` | `sme` or `admin` |
+| POST | `/api/invoices/:id/fund` | `investor` or `admin` |
+| POST | `/api/escrow/attestations/verify` | `sme`, `investor` or `admin` |
+
+Keys are configured through the `API_KEYS` environment variable as comma-separated
+`id:role:sha256hex` entries. Only SHA-256 hashes are stored. Generate a key with:
+
+```bash
+npm run apikey:new -- --role sme
+```
+
+The command prints the raw key once (store it securely; it is never retrievable
+again) plus the matching `API_KEYS` line for your deployment config.
+
+Failure modes: a missing, malformed or unknown key returns `401` with
+`WWW-Authenticate: Bearer` and `{ "code": "UNAUTHENTICATED" }`; a valid key with
+the wrong role returns `403 { "code": "FORBIDDEN" }`; an empty `API_KEYS` in
+production fails closed with `503 { "code": "AUTH_NOT_CONFIGURED" }`. Outside
+production, a single dev key from `DEV_API_KEY` (accepted as the `admin` role)
+works while `API_KEYS` is empty, with a startup warning.
+
 ## Known Limitations
 
 - **Wallet authentication:** Verification/cryptographic signatures for the `investor` address field on funding are tracked separately. Contributions currently trust the submitted Stellar address.

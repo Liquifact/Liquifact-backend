@@ -13,6 +13,7 @@
     "dev": "node --watch src/index.js",
     "lint": "eslint .",
     "build": "node scripts/check.js",
+    "apikey:new": "node scripts/new-api-key.js",
     "test": "jest --runInBand"
   },
   "dependencies": {

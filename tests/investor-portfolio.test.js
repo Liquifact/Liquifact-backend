@@ -1,9 +1,19 @@
 'use strict';
 
 const request = require('supertest');
+const crypto = require('crypto');
+
+// Mutating routes require an API key (issue #1534). Configure a single admin
+// key before the app (and its config) is loaded.
+const ADMIN_KEY = 'lf_test_admin_key';
+process.env.API_KEYS = `test-admin:admin:${crypto.createHash('sha256').update(ADMIN_KEY).digest('hex')}`;
+
 const app = require('../src/app');
 const store = require('../src/data/store');
 const contributions = require('../src/data/contributions');
+
+/** Authenticated POST helper (mutating routes require an API key). */
+const authedPost = (url) => request(app).post(url).set('authorization', `Bearer ${ADMIN_KEY}`);
 
 beforeEach(() => store.reset());
 
@@ -14,15 +24,13 @@ const INVESTOR_EMPTY = 'GBD3OBQM2K3GSBVKRPZOUW3DTZLWMOKIGW2XW6ZQ3PFFNIAT7NFBN6IV
 describe('Investor Contributions and Portfolio', () => {
   test('funds INV_0002 from two investors and asserts contributions, totals, and each portfolio', async () => {
     // Fund from investor A
-    const resA = await request(app)
-      .post('/api/invoices/INV_0002/fund')
+    const resA = await authedPost('/api/invoices/INV_0002/fund')
       .send({ amount: 2000, investor: INVESTOR_A });
     expect(resA.status).toBe(200);
     expect(resA.body.data.fundedAmount).toBe(20000); // 18000 seed + 2000
 
     // Fund from investor B
-    const resB = await request(app)
-      .post('/api/invoices/INV_0002/fund')
+    const resB = await authedPost('/api/invoices/INV_0002/fund')
       .send({ amount: 3000, investor: INVESTOR_B });
     expect(resB.status).toBe(200);
     expect(resB.body.data.fundedAmount).toBe(23000); // 20000 + 3000
@@ -101,8 +109,7 @@ describe('Investor Contributions and Portfolio', () => {
 
   test('invariant: fundedAmount === sum of contributions for every invoice after N random fund calls', async () => {
     // Create new open invoice to have plenty of headroom
-    const created = await request(app)
-      .post('/api/invoices')
+    const created = await authedPost('/api/invoices')
       .send({
         sme: 'Invariant SME',
         debtor: 'Buyer Inc',
@@ -119,8 +126,7 @@ describe('Investor Contributions and Portfolio', () => {
     for (let i = 0; i < N; i++) {
       const inv = investors[i % investors.length];
       const amount = Math.floor(Math.random() * 50) + 1; // 1 to 50
-      const res = await request(app)
-        .post(`/api/invoices/${testInvoiceId}/fund`)
+      const res = await authedPost(`/api/invoices/${testInvoiceId}/fund`)
         .send({ amount, investor: inv });
       expect(res.status).toBe(200);
     }
@@ -135,30 +141,26 @@ describe('Investor Contributions and Portfolio', () => {
 
   test('failure tests: missing investor, invalid address, self-funding, unknown invoice, empty portfolio', async () => {
     // 1. Missing investor
-    const missingRes = await request(app)
-      .post('/api/invoices/INV_0002/fund')
+    const missingRes = await authedPost('/api/invoices/INV_0002/fund')
       .send({ amount: 100 });
     expect(missingRes.status).toBe(400);
     expect(missingRes.body.error).toBe('INVESTOR_REQUIRED');
 
     // 2. Invalid investor address on fund
-    const invalidFundRes = await request(app)
-      .post('/api/invoices/INV_0002/fund')
+    const invalidFundRes = await authedPost('/api/invoices/INV_0002/fund')
       .send({ amount: 100, investor: 'not-a-valid-stellar-key' });
     expect(invalidFundRes.status).toBe(400);
     expect(invalidFundRes.body.error).toBe('INVALID_INVESTOR_ADDRESS');
 
     // 3. Self-funding rejected with 422
     // INV_0001 has smeAddress = INVESTOR_A
-    const selfRes = await request(app)
-      .post('/api/invoices/INV_0001/fund')
+    const selfRes = await authedPost('/api/invoices/INV_0001/fund')
       .send({ amount: 10, investor: INVESTOR_A });
     expect(selfRes.status).toBe(422);
     expect(selfRes.body.error).toBe('SELF_FUNDING_NOT_ALLOWED');
 
     // 4. Unknown invoice on fund
-    const unknownFundRes = await request(app)
-      .post('/api/invoices/INV_9999/fund')
+    const unknownFundRes = await authedPost('/api/invoices/INV_9999/fund')
       .send({ amount: 10, investor: INVESTOR_B });
     expect(unknownFundRes.status).toBe(404);
     expect(unknownFundRes.body.error).toBe('Invoice not found');
@@ -190,8 +192,7 @@ describe('Investor Contributions and Portfolio', () => {
 
   test('coupon math truncates using integer minor unit arithmetic where floor rounding matters', async () => {
     // Create an invoice with yieldBps: 650 (6.5%)
-    const created = await request(app)
-      .post('/api/invoices')
+    const created = await authedPost('/api/invoices')
       .send({
         sme: 'Fractional SME',
         debtor: 'Buyer B',
@@ -209,8 +210,7 @@ describe('Investor Contributions and Portfolio', () => {
     // Payout = 123.4567891 + 8.0246912 = 131.4814803
     // Note: Float math without minor unit floor produces 8.0246912915, so floor rounding strictly matters here!
     const principal = 123.4567891;
-    await request(app)
-      .post(`/api/invoices/${invoiceId}/fund`)
+    await authedPost(`/api/invoices/${invoiceId}/fund`)
       .send({ amount: principal, investor: INVESTOR_B });
 
     const port = await request(app).get(`/api/investors/${INVESTOR_B}/portfolio`);
@@ -224,11 +224,9 @@ describe('Investor Contributions and Portfolio', () => {
 
   test('aggregates multiple contributions by the same investor to one invoice', async () => {
     // Fund INV_0002 twice by INVESTOR_B
-    await request(app)
-      .post('/api/invoices/INV_0002/fund')
+    await authedPost('/api/invoices/INV_0002/fund')
       .send({ amount: 1000, investor: INVESTOR_B });
-    await request(app)
-      .post('/api/invoices/INV_0002/fund')
+    await authedPost('/api/invoices/INV_0002/fund')
       .send({ amount: 1500, investor: INVESTOR_B });
 
     const port = await request(app).get(`/api/investors/${INVESTOR_B}/portfolio`);
@@ -243,8 +241,7 @@ describe('Investor Contributions and Portfolio', () => {
 
   test('cancelled invoice shows expectedCoupon: "0" and returns principal as expectedPayout', async () => {
     // Fund an invoice
-    await request(app)
-      .post('/api/invoices/INV_0002/fund')
+    await authedPost('/api/invoices/INV_0002/fund')
       .send({ amount: 1000, investor: INVESTOR_B });
 
     // Manually mark invoice as cancelled
@@ -261,14 +258,11 @@ describe('Investor Contributions and Portfolio', () => {
 
   test('contributions endpoint pagination with limit and cursor', async () => {
     // INV_0002 initially has 1 seed contribution. Add 3 more contributions.
-    await request(app)
-      .post('/api/invoices/INV_0002/fund')
+    await authedPost('/api/invoices/INV_0002/fund')
       .send({ amount: 100, investor: INVESTOR_A });
-    await request(app)
-      .post('/api/invoices/INV_0002/fund')
+    await authedPost('/api/invoices/INV_0002/fund')
       .send({ amount: 200, investor: INVESTOR_B });
-    await request(app)
-      .post('/api/invoices/INV_0002/fund')
+    await authedPost('/api/invoices/INV_0002/fund')
       .send({ amount: 300, investor: INVESTOR_A });
 
     // Test invalid limit
@@ -322,13 +316,11 @@ describe('Investor Contributions and Portfolio', () => {
 
   test('portfolio correctly aggregates totalsByCurrency across multiple currencies', async () => {
     // Fund INV_0001 (currency: XLM, yieldBps: 800) with INVESTOR_B (not SME)
-    await request(app)
-      .post('/api/invoices/INV_0001/fund')
+    await authedPost('/api/invoices/INV_0001/fund')
       .send({ amount: 50, investor: INVESTOR_B });
 
     // Fund INV_0002 (currency: USDC, yieldBps: 650) with INVESTOR_B
-    await request(app)
-      .post('/api/invoices/INV_0002/fund')
+    await authedPost('/api/invoices/INV_0002/fund')
       .send({ amount: 1000, investor: INVESTOR_B });
 
     const port = await request(app).get(`/api/investors/${INVESTOR_B}/portfolio`);
@@ -352,8 +344,7 @@ describe('Investor Contributions and Portfolio', () => {
   });
 
   test('store.reset restores contributions and invoice fundedAmount sums', async () => {
-    await request(app)
-      .post('/api/invoices/INV_0002/fund')
+    await authedPost('/api/invoices/INV_0002/fund')
       .send({ amount: 1000, investor: INVESTOR_A });
     expect(store.get('INV_0002').fundedAmount).toBe(19000);
 
