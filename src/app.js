@@ -4,13 +4,15 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const config = require('./config');
-const store = require('./data/store');
+const { createRepository } = require('./data/repository');
+const { sendRepoError } = require('./data/errors');
 const { buildSpec } = require('./openapi');
 const { computeStats } = require('./services/stats');
 
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', true);
+app.locals.repo = createRepository();
 
 app.use(
   helmet({
@@ -90,16 +92,24 @@ app.get('/docs/init.js', (req, res) => {
   res.type('application/javascript').send("window.ui=SwaggerUIBundle({url:'/openapi.json',dom_id:'#swagger-ui'});");
 });
 
-app.get('/api/stats', (req, res) => {
-  const { currency } = req.query;
-  if (currency !== undefined && (typeof currency !== 'string' || !/^[a-zA-Z0-9]{1,12}$/.test(currency))) {
-    return res.status(400).json({
-      error: 'currency must be a 1-12 character alphanumeric asset code',
-      code: 'VALIDATION_FAILED',
-      details: { currency: 'Invalid asset code' },
-    });
+app.get('/api/stats', async (req, res, next) => {
+  try {
+    const { currency } = req.query;
+    if (currency !== undefined && (typeof currency !== 'string' || !/^[a-zA-Z0-9]{1,12}$/.test(currency))) {
+      return res.status(400).json({
+        error: 'currency must be a 1-12 character alphanumeric asset code',
+        code: 'VALIDATION_FAILED',
+        details: { currency: 'Invalid asset code' },
+      });
+    }
+    const invoices = await req.app.locals.repo.list();
+    return res.json(computeStats(invoices, currency));
+  } catch (err) {
+    if (sendRepoError(res, err)) {
+      return undefined;
+    }
+    return next(err);
   }
-  return res.json(computeStats(store.list(), currency));
 });
 
 app.use('/api/invoices', require('./routes/invoices'));
@@ -109,6 +119,9 @@ app.use('/api/escrow', require('./routes/escrow'));
 app.use((req, res) => res.status(404).json({ error: 'Not found', path: req.path, docs: '/docs' }));
 
 app.use((err, req, res, _next) => {
+  if (sendRepoError(res, err)) {
+    return;
+  }
   const status = err.status || err.statusCode || 500;
   res.status(status).json({ error: status === 500 ? 'Internal server error' : err.message });
 });

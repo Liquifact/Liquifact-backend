@@ -1,6 +1,6 @@
 'use strict';
 
-const { STATUSES } = require('../data/store');
+const { STATUSES } = require('../data/statuses');
 const { parseDecimal, rescale, decimalToString } = require('../utils/decimal');
 
 /** Pure aggregation of a snapshot; no mutation, FX conversion or persistence. */
