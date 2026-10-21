@@ -115,9 +115,31 @@ function fund(invoice, amount) {
   return invoice;
 }
 
+/**
+ * Marks a fully funded invoice as settled (debtor paid).
+ *
+ * @param {object} invoice target invoice
+ * @returns {object} updated invoice
+ */
+function settle(invoice) {
+  invoice.status = 'settled';
+  return invoice;
+}
+
+/**
+ * Cancels an open or funded invoice.
+ *
+ * @param {object} invoice target invoice
+ * @returns {object} updated invoice
+ */
+function cancel(invoice) {
+  invoice.status = 'cancelled';
+  return invoice;
+}
+
 /** Restores the seed data (used by tests). */
 function reset() {
   invoices = seed();
 }
 
-module.exports = { STATUSES, list, get, create, fund, reset };
+module.exports = { STATUSES, list, get, create, fund, settle, cancel, reset };

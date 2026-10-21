@@ -67,6 +67,63 @@ describe('invoices', () => {
     const again = await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 1 });
     expect(again.status).toBe(409);
   });
+
+  test('create rejects non-ISO dueDate', async () => {
+    const bad = await request(app)
+      .post('/api/invoices')
+      .send({ sme: 'Test SME', debtor: 'Buyer', amount: 500, dueDate: 'January 1, 2027' });
+    expect(bad.status).toBe(400);
+
+    const alsoBad = await request(app)
+      .post('/api/invoices')
+      .send({ sme: 'Test SME', debtor: 'Buyer', amount: 500, dueDate: '01/01/2027' });
+    expect(alsoBad.status).toBe(400);
+  });
+
+  test('create treats null yieldBps as default', async () => {
+    const ok = await request(app)
+      .post('/api/invoices')
+      .send({ sme: 'Test SME', debtor: 'Buyer', amount: 500, dueDate: '2027-01-01', yieldBps: null });
+    expect(ok.status).toBe(201);
+    expect(ok.body.data.yieldBps).toBe(800);
+  });
+
+  test('settle moves funded invoice to settled', async () => {
+    await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 25000 });
+    const res = await request(app).post('/api/invoices/INV_0002/settle');
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('settled');
+  });
+
+  test('settle rejects non-funded invoice', async () => {
+    const res = await request(app).post('/api/invoices/INV_0001/settle');
+    expect(res.status).toBe(409);
+  });
+
+  test('cancel moves open invoice to cancelled', async () => {
+    const res = await request(app).post('/api/invoices/INV_0001/cancel');
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('cancelled');
+  });
+
+  test('cancel moves funded invoice to cancelled', async () => {
+    await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 25000 });
+    const res = await request(app).post('/api/invoices/INV_0002/cancel');
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('cancelled');
+  });
+
+  test('cancel rejects settled invoice', async () => {
+    await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 25000 });
+    await request(app).post('/api/invoices/INV_0002/settle');
+    const res = await request(app).post('/api/invoices/INV_0002/cancel');
+    expect(res.status).toBe(409);
+  });
+
+  test('settle and cancel return 404 for missing invoice', async () => {
+    expect((await request(app).post('/api/invoices/missing/settle')).status).toBe(404);
+    expect((await request(app).post('/api/invoices/missing/cancel')).status).toBe(404);
+  });
 });
 
 describe('escrow', () => {
