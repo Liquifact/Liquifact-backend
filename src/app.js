@@ -7,6 +7,7 @@ const config = require('./config');
 const store = require('./data/store');
 const { buildSpec } = require('./openapi');
 const { logger, requestIdMiddleware, httpLogger } = require('./logger');
+const { computeStats } = require('./services/stats');
 
 const app = express();
 app.disable('x-powered-by');
@@ -47,10 +48,15 @@ const ENDPOINTS = [
   { method: 'GET', path: '/api/stats', description: 'Marketplace totals' },
   { method: 'GET', path: '/api/invoices', description: 'List invoices (?status=open|funded|settled|cancelled)' },
   { method: 'GET', path: '/api/invoices/:id', description: 'Get one invoice' },
+  { method: 'GET', path: '/api/invoices/:id/quote', description: 'Quote an investment contribution and annualised returns' },
   { method: 'POST', path: '/api/invoices', description: 'Submit an invoice for financing' },
   { method: 'POST', path: '/api/invoices/:id/fund', description: 'Record an investor contribution' },
+  { method: 'GET', path: '/api/invoices/:id/contributions', description: 'List contributions for an invoice' },
+  { method: 'GET', path: '/api/investors/:address/portfolio', description: 'Investor portfolio summary and expected returns' },
   { method: 'GET', path: '/api/escrow', description: 'Deployed Soroban escrow contract metadata' },
   { method: 'GET', path: '/api/escrow/live', description: 'Live escrow state from Soroban RPC' },
+  { method: 'GET', path: '/api/escrow/attestations', description: 'On-chain attestation log (paginated)' },
+  { method: 'POST', path: '/api/escrow/attestations/verify', description: 'Verify a document digest against on-chain attestations' },
 ];
 
 app.get('/', (req, res) => {
@@ -89,18 +95,19 @@ app.get('/docs/init.js', (req, res) => {
 });
 
 app.get('/api/stats', (req, res) => {
-  const all = store.list();
-  const sum = (arr, k) => arr.reduce((acc, i) => acc + i[k], 0);
-  res.json({
-    invoices: all.length,
-    open: all.filter((i) => i.status === 'open').length,
-    totalFaceValue: sum(all, 'amount'),
-    totalFunded: sum(all, 'fundedAmount'),
-    averageYieldBps: all.length ? Math.round(sum(all, 'yieldBps') / all.length) : 0,
-  });
+  const { currency } = req.query;
+  if (currency !== undefined && (typeof currency !== 'string' || !/^[a-zA-Z0-9]{1,12}$/.test(currency))) {
+    return res.status(400).json({
+      error: 'currency must be a 1-12 character alphanumeric asset code',
+      code: 'VALIDATION_FAILED',
+      details: { currency: 'Invalid asset code' },
+    });
+  }
+  return res.json(computeStats(store.list(), currency));
 });
 
 app.use('/api/invoices', require('./routes/invoices'));
+app.use('/api/investors', require('./routes/investors'));
 app.use('/api/escrow', require('./routes/escrow'));
 
 app.use((req, res) => res.status(404).json({ error: 'Not found', path: req.path, docs: '/docs' }));
