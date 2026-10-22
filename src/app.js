@@ -27,6 +27,7 @@ app.use(
 app.use(cors({ origin: config.corsOrigins.includes('*') ? '*' : config.corsOrigins }));
 app.use(express.json({ limit: '100kb' }));
 
+
 /**
  * @param {import('express').Request} req incoming request
  * @returns {string} public base URL of this deployment
