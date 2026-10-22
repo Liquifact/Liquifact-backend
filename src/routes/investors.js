@@ -4,7 +4,7 @@ const express = require('express');
 const { StrKey } = require('@stellar/stellar-sdk');
 const store = require('../data/store');
 const contributions = require('../data/contributions');
-const { toMinor, fromMinor } = contributions;
+const { formatAmount, mulBps } = require('../lib/money');
 
 const router = express.Router();
 
@@ -17,7 +17,7 @@ const router = express.Router();
  * @returns {bigint} coupon in minor units
  */
 function computeCouponMinor(principalMinor, yieldBps) {
-  return (principalMinor * BigInt(yieldBps || 0)) / 10000n;
+  return mulBps(principalMinor, yieldBps || 0);
 }
 
 router.get('/:address/portfolio', (req, res) => {
@@ -40,7 +40,7 @@ router.get('/:address/portfolio', (req, res) => {
   const byInvoice = new Map();
   for (const c of investorContributions) {
     const prev = byInvoice.get(c.invoiceId) || 0n;
-    byInvoice.set(c.invoiceId, prev + toMinor(c.amount));
+    byInvoice.set(c.invoiceId, prev + c.amountMinor);
   }
 
   const positions = [];
@@ -52,13 +52,13 @@ router.get('/:address/portfolio', (req, res) => {
       continue;
     }
 
-    const principal = fromMinor(principalMinor);
+    const principal = formatAmount(principalMinor);
     const isCancelled = invoice.status === 'cancelled';
     const couponMinor = isCancelled ? 0n : computeCouponMinor(principalMinor, invoice.yieldBps);
     const payoutMinor = principalMinor + couponMinor;
 
-    const expectedCoupon = isCancelled ? '0' : fromMinor(couponMinor);
-    const expectedPayout = fromMinor(payoutMinor);
+    const expectedCoupon = formatAmount(couponMinor);
+    const expectedPayout = formatAmount(payoutMinor);
 
     positions.push({
       invoiceId: invoice.id,
@@ -88,9 +88,9 @@ router.get('/:address/portfolio', (req, res) => {
   const formattedTotals = {};
   for (const [curr, t] of Object.entries(totalsByCurrency)) {
     formattedTotals[curr] = {
-      principal: fromMinor(t.principalMinor),
-      expectedCoupon: fromMinor(t.couponMinor),
-      expectedPayout: fromMinor(t.payoutMinor),
+      principal: formatAmount(t.principalMinor),
+      expectedCoupon: formatAmount(t.couponMinor),
+      expectedPayout: formatAmount(t.payoutMinor),
     };
   }
 

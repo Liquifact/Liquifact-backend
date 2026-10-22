@@ -18,19 +18,19 @@ describe('Investor Contributions and Portfolio', () => {
       .post('/api/invoices/INV_0002/fund')
       .send({ amount: 2000, investor: INVESTOR_A });
     expect(resA.status).toBe(200);
-    expect(resA.body.data.fundedAmount).toBe(20000); // 18000 seed + 2000
+    expect(resA.body.data.fundedAmount).toBe('20000'); // 18000 seed + 2000
 
     // Fund from investor B
     const resB = await request(app)
       .post('/api/invoices/INV_0002/fund')
       .send({ amount: 3000, investor: INVESTOR_B });
     expect(resB.status).toBe(200);
-    expect(resB.body.data.fundedAmount).toBe(23000); // 20000 + 3000
+    expect(resB.body.data.fundedAmount).toBe('23000'); // 20000 + 3000
 
     // Query contributions for INV_0002
     const contribRes = await request(app).get('/api/invoices/INV_0002/contributions');
     expect(contribRes.status).toBe(200);
-    expect(contribRes.body.totals.funded).toBe(23000);
+    expect(contribRes.body.totals.funded).toBe('23000');
     expect(contribRes.body.totals.investors).toBe(3); // seed demo investor + A + B
     expect(contribRes.body.data.length).toBe(3);
 
@@ -39,12 +39,12 @@ describe('Investor Contributions and Portfolio', () => {
       expect.arrayContaining([
         expect.objectContaining({
           investor: INVESTOR_A,
-          amount: 2000,
+          amount: '2000',
           createdAt: expect.any(String),
         }),
         expect.objectContaining({
           investor: INVESTOR_B,
-          amount: 3000,
+          amount: '3000',
           createdAt: expect.any(String),
         }),
       ]),
@@ -60,17 +60,17 @@ describe('Investor Contributions and Portfolio', () => {
       invoiceId: 'INV_0002',
       status: 'open',
       currency: 'USDC',
-      principal: 2000,
+      principal: '2000',
       yieldBps: 650,
       dueDate: '2026-12-30',
-      expectedCoupon: 130,
-      expectedPayout: 2130,
+      expectedCoupon: '130',
+      expectedPayout: '2130',
     });
     expect(portA.body.totalsByCurrency).toEqual({
       USDC: {
-        principal: 2000,
-        expectedCoupon: 130,
-        expectedPayout: 2130,
+        principal: '2000',
+        expectedCoupon: '130',
+        expectedPayout: '2130',
       },
     });
 
@@ -84,17 +84,17 @@ describe('Investor Contributions and Portfolio', () => {
       invoiceId: 'INV_0002',
       status: 'open',
       currency: 'USDC',
-      principal: 3000,
+      principal: '3000',
       yieldBps: 650,
       dueDate: '2026-12-30',
-      expectedCoupon: 195,
-      expectedPayout: 3195,
+      expectedCoupon: '195',
+      expectedPayout: '3195',
     });
     expect(portB.body.totalsByCurrency).toEqual({
       USDC: {
-        principal: 3000,
-        expectedCoupon: 195,
-        expectedPayout: 3195,
+        principal: '3000',
+        expectedCoupon: '195',
+        expectedPayout: '3195',
       },
     });
   });
@@ -129,7 +129,7 @@ describe('Investor Contributions and Portfolio', () => {
     const allInvoices = store.list();
     for (const inv of allInvoices) {
       const sum = contributions.sumForInvoice(inv.id);
-      expect(inv.fundedAmount).toBe(sum);
+      expect(inv.fundedAmountMinor).toBe(sum);
     }
   });
 
@@ -217,9 +217,9 @@ describe('Investor Contributions and Portfolio', () => {
     expect(port.status).toBe(200);
     const pos = port.body.positions.find((p) => p.invoiceId === invoiceId);
     expect(pos).toBeDefined();
-    expect(pos.principal).toBe(principal);
-    expect(pos.expectedCoupon).toBe(8.0246912);
-    expect(pos.expectedPayout).toBe(131.4814803);
+    expect(pos.principal).toBe('123.4567891');
+    expect(pos.expectedCoupon).toBe('8.0246912');
+    expect(pos.expectedPayout).toBe('131.4814803');
   });
 
   test('aggregates multiple contributions by the same investor to one invoice', async () => {
@@ -236,9 +236,9 @@ describe('Investor Contributions and Portfolio', () => {
     // Should have only 1 aggregated position for INV_0002
     const inv2Positions = port.body.positions.filter((p) => p.invoiceId === 'INV_0002');
     expect(inv2Positions).toHaveLength(1);
-    expect(inv2Positions[0].principal).toBe(2500); // 1000 + 1500
-    expect(inv2Positions[0].expectedCoupon).toBe(162.5); // 2500 * 650 / 10000
-    expect(inv2Positions[0].expectedPayout).toBe(2662.5);
+    expect(inv2Positions[0].principal).toBe('2500'); // 1000 + 1500
+    expect(inv2Positions[0].expectedCoupon).toBe('162.5'); // 2500 * 650 / 10000
+    expect(inv2Positions[0].expectedPayout).toBe('2662.5');
   });
 
   test('cancelled invoice shows expectedCoupon: "0" and returns principal as expectedPayout', async () => {
@@ -256,7 +256,7 @@ describe('Investor Contributions and Portfolio', () => {
     const pos = port.body.positions.find((p) => p.invoiceId === 'INV_0002');
     expect(pos.status).toBe('cancelled');
     expect(pos.expectedCoupon).toBe('0');
-    expect(pos.expectedPayout).toBe(1000);
+    expect(pos.expectedPayout).toBe('1000');
   });
 
   test('contributions endpoint pagination with limit and cursor', async () => {
@@ -314,9 +314,10 @@ describe('Investor Contributions and Portfolio', () => {
     expect(res.body).toEqual({
       data: [],
       totals: {
-        funded: 0,
+        funded: '0',
         investors: 0,
       },
+      decimals: 7,
     });
   });
 
@@ -339,14 +340,14 @@ describe('Investor Contributions and Portfolio', () => {
     // USDC: 1000 principal, 1000 * 650 / 10000 = 65 coupon, 1065 payout
     expect(port.body.totalsByCurrency).toEqual({
       XLM: {
-        principal: 50,
-        expectedCoupon: 4,
-        expectedPayout: 54,
+        principal: '50',
+        expectedCoupon: '4',
+        expectedPayout: '54',
       },
       USDC: {
-        principal: 1000,
-        expectedCoupon: 65,
-        expectedPayout: 1065,
+        principal: '1000',
+        expectedCoupon: '65',
+        expectedPayout: '1065',
       },
     });
   });
@@ -355,12 +356,12 @@ describe('Investor Contributions and Portfolio', () => {
     await request(app)
       .post('/api/invoices/INV_0002/fund')
       .send({ amount: 1000, investor: INVESTOR_A });
-    expect(store.get('INV_0002').fundedAmount).toBe(19000);
+    expect(store.get('INV_0002').fundedAmountMinor).toBe(190000000000n);
 
     store.reset();
-    expect(store.get('INV_0002').fundedAmount).toBe(18000);
+    expect(store.get('INV_0002').fundedAmountMinor).toBe(180000000000n);
     expect(contributions.listByInvoice('INV_0002')).toHaveLength(1);
-    expect(contributions.listByInvoice('INV_0002')[0].amount).toBe(18000);
+    expect(contributions.listByInvoice('INV_0002')[0].amountMinor).toBe(180000000000n);
   });
 });
 

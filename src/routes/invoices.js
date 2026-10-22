@@ -6,6 +6,7 @@ const store = require('../data/store');
 const contributions = require('../data/contributions');
 const config = require('../config');
 const { toMinor, fromMinor, couponMinor, daysBetween, annualisedBps } = require('../domain/returns');
+const { parseAmount, formatAmount } = require('../lib/money');
 
 const router = express.Router();
 
@@ -25,8 +26,11 @@ function validateInvoice(body) {
   };
   str('sme');
   str('debtor');
-  if (typeof b.amount !== 'number' || !(b.amount > 0) || b.amount > 1e12) {
-    errors.push('amount must be a positive number');
+  let amountMinor;
+  try {
+    amountMinor = parseAmount(b.amount);
+  } catch {
+    errors.push('amount must be a positive amount with at most 7 fractional digits');
   }
   const yieldBps = b.yieldBps === undefined ? 800 : b.yieldBps;
   if (!Number.isInteger(yieldBps) || yieldBps < 0 || yieldBps > 10000) {
@@ -43,11 +47,21 @@ function validateInvoice(body) {
       sme: b.sme.trim(),
       debtor: b.debtor.trim(),
       smeAddress: typeof b.smeAddress === 'string' ? b.smeAddress : null,
-      amount: b.amount,
+      amountMinor,
       currency: typeof b.currency === 'string' ? b.currency.toUpperCase().slice(0, 12) : 'USDC',
       yieldBps,
       dueDate: b.dueDate,
     },
+  };
+}
+
+function invoiceResponse(invoice) {
+  const { amountMinor, fundedAmountMinor, ...fields } = invoice;
+  return {
+    ...fields,
+    amount: formatAmount(amountMinor),
+    fundedAmount: formatAmount(fundedAmountMinor),
+    decimals: 7,
   };
 }
 
@@ -57,7 +71,7 @@ router.get('/', (req, res) => {
     return res.status(400).json({ error: `status must be one of ${store.STATUSES.join(', ')}` });
   }
   const data = status ? store.list().filter((i) => i.status === status) : store.list();
-  return res.json({ data, count: data.length });
+  return res.json({ data: data.map(invoiceResponse), count: data.length });
 });
 
 router.get('/:id', (req, res) => {
@@ -65,7 +79,7 @@ router.get('/:id', (req, res) => {
   if (!invoice) {
     return res.status(404).json({ error: 'Invoice not found' });
   }
-  return res.json({ data: invoice });
+  return res.json({ data: invoiceResponse(invoice) });
 });
 
 router.get('/:id/quote', (req, res) => {
@@ -90,7 +104,7 @@ router.get('/:id/quote', (req, res) => {
   let capacityMinor;
   try {
     principalMinor = toMinor(amount);
-    capacityMinor = toMinor(invoice.amount) - toMinor(invoice.fundedAmount);
+    capacityMinor = invoice.amountMinor - invoice.fundedAmountMinor;
   } catch {
     return res.status(400).json({ error: 'INVALID_AMOUNT', code: 'INVALID_AMOUNT' });
   }
@@ -126,9 +140,14 @@ router.get('/:id/quote', (req, res) => {
 router.post('/', (req, res) => {
   const { value, errors } = validateInvoice(req.body);
   if (errors) {
-    return res.status(400).json({ error: 'Validation failed', details: errors });
+    const invalidAmount = errors.some((error) => error.startsWith('amount '));
+    return res.status(400).json({
+      error: invalidAmount ? 'INVALID_AMOUNT' : 'Validation failed',
+      ...(invalidAmount ? { code: 'INVALID_AMOUNT' } : {}),
+      details: errors,
+    });
   }
-  return res.status(201).json({ data: store.create(value) });
+  return res.status(201).json({ data: invoiceResponse(store.create(value)) });
 });
 
 router.post('/:id/fund', (req, res) => {
@@ -146,13 +165,16 @@ router.post('/:id/fund', (req, res) => {
   if (invoice.smeAddress && investor === invoice.smeAddress) {
     return res.status(422).json({ error: 'SELF_FUNDING_NOT_ALLOWED' });
   }
-  if (typeof amount !== 'number' || !(amount > 0) || !Number.isFinite(amount)) {
-    return res.status(400).json({ error: 'amount must be a positive number' });
+  let amountMinor;
+  try {
+    amountMinor = parseAmount(amount);
+  } catch {
+    return res.status(400).json({ error: 'INVALID_AMOUNT', code: 'INVALID_AMOUNT' });
   }
   if (invoice.status !== 'open') {
     return res.status(409).json({ error: `Invoice is ${invoice.status}; only open invoices can be funded` });
   }
-  return res.json({ data: store.fund(invoice, amount, investor) });
+  return res.json({ data: invoiceResponse(store.fund(invoice, amountMinor, investor)) });
 });
 
 router.get('/:id/contributions', (req, res) => {
@@ -182,12 +204,12 @@ router.get('/:id/contributions', (req, res) => {
   const page = all.slice(startIndex, startIndex + limit);
   const data = page.map((c) => ({
     investor: c.investor,
-    amount: c.amount,
+    amount: formatAmount(c.amountMinor),
     createdAt: c.createdAt,
   }));
 
   const uniqueInvestors = new Set(all.map((c) => c.investor)).size;
-  const totalFunded = invoice.fundedAmount;
+  const totalFunded = formatAmount(invoice.fundedAmountMinor);
 
   const nextCursor = startIndex + limit < all.length && page.length > 0 ? page[page.length - 1].id : null;
 
@@ -197,6 +219,7 @@ router.get('/:id/contributions', (req, res) => {
       funded: totalFunded,
       investors: uniqueInvestors,
     },
+    decimals: 7,
   };
   if (nextCursor) {
     response.nextCursor = nextCursor;

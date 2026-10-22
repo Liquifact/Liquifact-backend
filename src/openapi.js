@@ -4,14 +4,16 @@ const config = require('./config');
 
 const Invoice = {
   type: 'object',
+  required: ['id', 'amount', 'fundedAmount', 'decimals'],
   properties: {
     id: { type: 'string', example: 'INV_0001' },
     sme: { type: 'string', example: 'Acme Components Ltd' },
     smeAddress: { type: 'string', nullable: true },
     debtor: { type: 'string', example: 'Globex Retail' },
-    amount: { type: 'number', example: 25000 },
+    amount: { type: 'string', pattern: '^\\d+(?:\\.\\d{1,7})?$', example: '25000' },
     currency: { type: 'string', example: 'USDC' },
-    fundedAmount: { type: 'number', example: 0 },
+    fundedAmount: { type: 'string', pattern: '^\\d+(?:\\.\\d{1,7})?$', example: '0' },
+    decimals: { type: 'integer', enum: [7], example: 7 },
     yieldBps: { type: 'integer', example: 800 },
     dueDate: { type: 'string', format: 'date' },
     status: { type: 'string', enum: ['open', 'funded', 'settled', 'cancelled'] },
@@ -159,16 +161,16 @@ function buildSpec(baseUrl) {
                     },
                   },
                   generatedAt: { type: 'string', format: 'date-time' },
-                  totalFaceValue: { type: 'number', deprecated: true, description: 'Compatibility alias of deprecated.totalFaceValue for one release only' },
-                  totalFunded: { type: 'number', deprecated: true, description: 'Compatibility alias of deprecated.totalFunded for one release only' },
+                  totalFaceValue: { type: 'string', deprecated: true, description: 'Compatibility decimal-string alias of deprecated.totalFaceValue for one release only' },
+                  totalFunded: { type: 'string', deprecated: true, description: 'Compatibility decimal-string alias of deprecated.totalFunded for one release only' },
                   averageYieldBps: { type: 'number', deprecated: true, description: 'Compatibility alias of deprecated.averageYieldBps for one release only' },
                   deprecated: {
                     type: 'object', deprecated: true,
                     description: 'Legacy mixed-currency calculations retained here for one release only. Not meaningful financial totals.',
                     required: ['totalFaceValue', 'totalFunded', 'averageYieldBps'],
                     properties: {
-                      totalFaceValue: { type: 'number', deprecated: true },
-                      totalFunded: { type: 'number', deprecated: true },
+                      totalFaceValue: { type: 'string', deprecated: true },
+                      totalFunded: { type: 'string', deprecated: true },
                       averageYieldBps: { type: 'number', deprecated: true },
                     },
                   },
@@ -202,7 +204,13 @@ function buildSpec(baseUrl) {
               properties: {
                 sme: { type: 'string' },
                 debtor: { type: 'string' },
-                amount: { type: 'number' },
+                amount: {
+                  oneOf: [
+                    { type: 'string', pattern: '^(?:0|[1-9]\\d*)(?:\\.\\d{1,7})?$' },
+                    { type: 'number', exclusiveMinimum: 0, maximum: 922337203685.4776 },
+                  ],
+                  description: 'Positive decimal amount with at most 7 fractional digits; numeric inputs must be finite and safe integers when integral.',
+                },
                 currency: { type: 'string', default: 'USDC' },
                 yieldBps: { type: 'integer', default: 800 },
                 dueDate: { type: 'string', format: 'date' },
@@ -212,7 +220,7 @@ function buildSpec(baseUrl) {
           },
           responses: {
             201: { description: 'Created', ...json({ type: 'object', properties: { data: Invoice } }) },
-            400: { description: 'Validation failed', ...json(ErrorBody) },
+            400: { description: 'Validation failed or INVALID_AMOUNT', ...json({ type: 'object', properties: { error: { type: 'string' }, code: { type: 'string', enum: ['INVALID_AMOUNT'] }, details: { type: 'array', items: { type: 'string' } } } }) },
           },
         },
       },
@@ -270,14 +278,21 @@ function buildSpec(baseUrl) {
               type: 'object',
               required: ['amount', 'investor'],
               properties: {
-                amount: { type: 'number', example: 1000 },
+                amount: {
+                  oneOf: [
+                    { type: 'string', pattern: '^(?:0|[1-9]\\d*)(?:\\.\\d{1,7})?$' },
+                    { type: 'number', exclusiveMinimum: 0, maximum: 922337203685.4776 },
+                  ],
+                  description: 'Positive decimal amount with at most 7 fractional digits; numeric inputs must be finite and safe integers when integral.',
+                  example: '1000',
+                },
                 investor: { type: 'string', example: 'GA7TXEBMEPQCLHIYCWDN7RKAO5IMRD2UV7O7TZXMEW6VZUMEXNR4XBB5' },
               },
             }),
           },
           responses: {
             200: { description: 'Updated invoice', ...json({ type: 'object', properties: { data: Invoice } }) },
-            400: { description: 'Invalid amount or missing/invalid investor', ...json(ErrorBody) },
+            400: { description: 'INVALID_AMOUNT or missing/invalid investor', ...json({ type: 'object', properties: { error: { type: 'string' }, code: { type: 'string', enum: ['INVALID_AMOUNT'] } } }) },
             404: { description: 'Not found', ...json(ErrorBody) },
             409: { description: 'Invoice not open', ...json(ErrorBody) },
             422: { description: 'Self-funding not allowed', ...json(ErrorBody) },
@@ -305,7 +320,7 @@ function buildSpec(baseUrl) {
                       type: 'object',
                       properties: {
                         investor: { type: 'string' },
-                        amount: { type: 'number' },
+                        amount: { type: 'string', pattern: '^\\d+(?:\\.\\d{1,7})?$' },
                         createdAt: { type: 'string', format: 'date-time' },
                       },
                     },
@@ -313,10 +328,11 @@ function buildSpec(baseUrl) {
                   totals: {
                     type: 'object',
                     properties: {
-                      funded: { type: 'number' },
+                      funded: { type: 'string', pattern: '^\\d+(?:\\.\\d{1,7})?$' },
                       investors: { type: 'integer' },
                     },
                   },
+                  decimals: { type: 'integer', enum: [7] },
                   nextCursor: { type: 'string' },
                 },
               }),
@@ -346,11 +362,11 @@ function buildSpec(baseUrl) {
                         invoiceId: { type: 'string' },
                         status: { type: 'string', enum: ['open', 'funded', 'settled', 'cancelled'] },
                         currency: { type: 'string' },
-                        principal: { type: 'number' },
+                        principal: { type: 'string', pattern: '^\\d+(?:\\.\\d{1,7})?$' },
                         yieldBps: { type: 'integer' },
                         dueDate: { type: 'string', format: 'date' },
-                        expectedCoupon: { oneOf: [{ type: 'number' }, { type: 'string' }] },
-                        expectedPayout: { type: 'number' },
+                        expectedCoupon: { type: 'string', pattern: '^\\d+(?:\\.\\d{1,7})?$' },
+                        expectedPayout: { type: 'string', pattern: '^\\d+(?:\\.\\d{1,7})?$' },
                       },
                     },
                   },
@@ -359,9 +375,9 @@ function buildSpec(baseUrl) {
                     additionalProperties: {
                       type: 'object',
                       properties: {
-                        principal: { type: 'number' },
-                        expectedCoupon: { type: 'number' },
-                        expectedPayout: { type: 'number' },
+                        principal: { type: 'string', pattern: '^\\d+(?:\\.\\d{1,7})?$' },
+                        expectedCoupon: { type: 'string', pattern: '^\\d+(?:\\.\\d{1,7})?$' },
+                        expectedPayout: { type: 'string', pattern: '^\\d+(?:\\.\\d{1,7})?$' },
                       },
                     },
                   },
