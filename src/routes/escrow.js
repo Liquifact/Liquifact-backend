@@ -3,6 +3,7 @@
 const express = require('express');
 const config = require('../config');
 const { decodeEscrow } = require('../stellar/escrow-decoder');
+const { conflict } = require('../errors');
 
 const router = express.Router();
 
@@ -89,9 +90,7 @@ router.get('/live', async (req, res) => {
   } catch (err) {
     console.warn(`escrow live read failed, serving snapshot fallback: ${err.message}`);
     if (strict) {
-      return res
-        .status(503)
-        .json({ error: 'Live escrow read unavailable', code: 'ESCROW_LIVE_UNAVAILABLE' });
+      throw conflict('ESCROW_LIVE_UNAVAILABLE');
     }
     return res.json({
       source: 'snapshot',

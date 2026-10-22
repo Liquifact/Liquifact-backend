@@ -139,14 +139,18 @@ describe('Investor Contributions and Portfolio', () => {
       .post('/api/invoices/INV_0002/fund')
       .send({ amount: 100 });
     expect(missingRes.status).toBe(400);
-    expect(missingRes.body.error).toBe('INVESTOR_REQUIRED');
+    expect(missingRes.type).toMatch(/application\/problem\+json/);
+    expect(missingRes.body.code).toBe('INVESTOR_REQUIRED');
+    expect(missingRes.body.error).toBe('Investor Required'); // legacy field equals title
 
     // 2. Invalid investor address on fund
     const invalidFundRes = await request(app)
       .post('/api/invoices/INV_0002/fund')
       .send({ amount: 100, investor: 'not-a-valid-stellar-key' });
     expect(invalidFundRes.status).toBe(400);
-    expect(invalidFundRes.body.error).toBe('INVALID_INVESTOR_ADDRESS');
+    expect(invalidFundRes.type).toMatch(/application\/problem\+json/);
+    expect(invalidFundRes.body.code).toBe('INVALID_INVESTOR_ADDRESS');
+    expect(invalidFundRes.body.error).toBe('Invalid Investor Address');
 
     // 3. Self-funding rejected with 422
     // INV_0001 has smeAddress = INVESTOR_A
@@ -154,24 +158,32 @@ describe('Investor Contributions and Portfolio', () => {
       .post('/api/invoices/INV_0001/fund')
       .send({ amount: 10, investor: INVESTOR_A });
     expect(selfRes.status).toBe(422);
-    expect(selfRes.body.error).toBe('SELF_FUNDING_NOT_ALLOWED');
+    expect(selfRes.type).toMatch(/application\/problem\+json/);
+    expect(selfRes.body.code).toBe('SELF_FUNDING_NOT_ALLOWED');
+    expect(selfRes.body.error).toBe('Self-Funding Not Allowed');
 
     // 4. Unknown invoice on fund
     const unknownFundRes = await request(app)
       .post('/api/invoices/INV_9999/fund')
       .send({ amount: 10, investor: INVESTOR_B });
     expect(unknownFundRes.status).toBe(404);
-    expect(unknownFundRes.body.error).toBe('Invoice not found');
+    expect(unknownFundRes.type).toMatch(/application\/problem\+json/);
+    expect(unknownFundRes.body.code).toBe('INVOICE_NOT_FOUND');
+    expect(unknownFundRes.body.error).toBe('Invoice Not Found');
 
     // 5. Unknown invoice on contributions query
     const unknownContribRes = await request(app).get('/api/invoices/INV_9999/contributions');
     expect(unknownContribRes.status).toBe(404);
-    expect(unknownContribRes.body.error).toBe('Invoice not found');
+    expect(unknownContribRes.type).toMatch(/application\/problem\+json/);
+    expect(unknownContribRes.body.code).toBe('INVOICE_NOT_FOUND');
+    expect(unknownContribRes.body.error).toBe('Invoice Not Found');
 
     // 6. Invalid address on portfolio query
     const invalidPortRes = await request(app).get('/api/investors/INVALID_ADDR/portfolio');
     expect(invalidPortRes.status).toBe(400);
-    expect(invalidPortRes.body.error).toBe('INVALID_INVESTOR_ADDRESS');
+    expect(invalidPortRes.type).toMatch(/application\/problem\+json/);
+    expect(invalidPortRes.body.code).toBe('INVALID_INVESTOR_ADDRESS');
+    expect(invalidPortRes.body.error).toBe('Invalid Investor Address');
 
     // 7. Portfolio for address with no positions returns 200 with empty positions and totals
     const emptyPortRes = await request(app).get(`/api/investors/${INVESTOR_EMPTY}/portfolio`);

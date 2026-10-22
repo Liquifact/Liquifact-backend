@@ -192,7 +192,7 @@ describe('OpenAPI — escrow schemas', () => {
     const live = spec.paths['/api/escrow/live'].get;
     expect(live.parameters.map((p) => p.name)).toContain('strict');
     expect(live.responses['200']).toBeDefined();
-    expect(live.responses['503'].content['application/json'].schema.properties.code.enum).toContain(
+    expect(live.responses['503'].content['application/problem+json'].schema.properties.code.enum).toContain(
       'ESCROW_LIVE_UNAVAILABLE',
     );
 

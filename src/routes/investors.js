@@ -5,6 +5,7 @@ const { StrKey } = require('@stellar/stellar-sdk');
 const store = require('../data/store');
 const contributions = require('../data/contributions');
 const { toMinor, fromMinor } = contributions;
+const { badRequest } = require('../errors');
 
 const router = express.Router();
 
@@ -24,7 +25,7 @@ router.get('/:address/portfolio', (req, res) => {
   const { address } = req.params;
 
   if (typeof address !== 'string' || !StrKey.isValidEd25519PublicKey(address)) {
-    return res.status(400).json({ error: 'INVALID_INVESTOR_ADDRESS' });
+    throw badRequest('INVALID_INVESTOR_ADDRESS');
   }
 
   const investorContributions = contributions.listByInvestor(address);

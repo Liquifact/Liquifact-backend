@@ -6,6 +6,7 @@ const store = require('../data/store');
 const contributions = require('../data/contributions');
 const config = require('../config');
 const { toMinor, fromMinor, couponMinor, daysBetween, annualisedBps } = require('../domain/returns');
+const { badRequest, notFound, conflict, unprocessable } = require('../errors');
 
 const router = express.Router();
 
@@ -54,7 +55,7 @@ function validateInvoice(body) {
 router.get('/', (req, res) => {
   const { status } = req.query;
   if (status && !store.STATUSES.includes(status)) {
-    return res.status(400).json({ error: `status must be one of ${store.STATUSES.join(', ')}` });
+    throw badRequest('INVALID_STATUS_FILTER');
   }
   const data = status ? store.list().filter((i) => i.status === status) : store.list();
   return res.json({ data, count: data.length });
@@ -63,7 +64,7 @@ router.get('/', (req, res) => {
 router.get('/:id', (req, res) => {
   const invoice = store.get(req.params.id);
   if (!invoice) {
-    return res.status(404).json({ error: 'Invoice not found' });
+    throw notFound('INVOICE_NOT_FOUND');
   }
   return res.json({ data: invoice });
 });
@@ -71,20 +72,20 @@ router.get('/:id', (req, res) => {
 router.get('/:id/quote', (req, res) => {
   const invoice = store.get(req.params.id);
   if (!invoice) {
-    return res.status(404).json({ error: 'INVOICE_NOT_FOUND', code: 'INVOICE_NOT_FOUND' });
+    throw notFound('INVOICE_NOT_FOUND');
   }
   if (invoice.status !== 'open') {
-    return res.status(409).json({ error: 'INVOICE_NOT_OPEN', code: 'INVOICE_NOT_OPEN' });
+    throw conflict('INVOICE_NOT_OPEN');
   }
   const { amount, asOf } = req.query;
   if (typeof amount !== 'string' || !/^(?:0|[1-9]\d*)(?:\.\d{1,7})?$/.test(amount)) {
-    return res.status(400).json({ error: 'INVALID_AMOUNT', code: 'INVALID_AMOUNT' });
+    throw badRequest('INVALID_AMOUNT');
   }
   const parsedAsOf = typeof asOf === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(asOf)
     ? new Date(`${asOf}T00:00:00.000Z`)
     : null;
   if (asOf !== undefined && (!parsedAsOf || Number.isNaN(parsedAsOf.getTime()) || parsedAsOf.toISOString().slice(0, 10) !== asOf)) {
-    return res.status(400).json({ error: 'INVALID_AS_OF', code: 'INVALID_AS_OF' });
+    throw badRequest('INVALID_AS_OF');
   }
   let principalMinor;
   let capacityMinor;
@@ -92,18 +93,18 @@ router.get('/:id/quote', (req, res) => {
     principalMinor = toMinor(amount);
     capacityMinor = toMinor(invoice.amount) - toMinor(invoice.fundedAmount);
   } catch {
-    return res.status(400).json({ error: 'INVALID_AMOUNT', code: 'INVALID_AMOUNT' });
+    throw badRequest('INVALID_AMOUNT');
   }
   if (principalMinor <= 0n) {
-    return res.status(400).json({ error: 'INVALID_AMOUNT', code: 'INVALID_AMOUNT' });
+    throw badRequest('INVALID_AMOUNT');
   }
   if (principalMinor > capacityMinor) {
-    return res.status(422).json({ error: 'EXCEEDS_CAPACITY', code: 'EXCEEDS_CAPACITY' });
+    throw unprocessable('EXCEEDS_CAPACITY');
   }
   const quoteAsOf = asOf || new Date().toISOString().slice(0, 10);
   const daysToMaturity = daysBetween(quoteAsOf, invoice.dueDate);
   if (daysToMaturity <= 0) {
-    return res.status(409).json({ error: 'INVOICE_MATURED', code: 'INVOICE_MATURED' });
+    throw conflict('INVOICE_MATURED');
   }
   const coupon = couponMinor(principalMinor, invoice.yieldBps);
   const { simpleAnnualisedBps, effectiveAnnualisedBps } = annualisedBps(invoice.yieldBps, daysToMaturity);
@@ -126,7 +127,11 @@ router.get('/:id/quote', (req, res) => {
 router.post('/', (req, res) => {
   const { value, errors } = validateInvoice(req.body);
   if (errors) {
-    return res.status(400).json({ error: 'Validation failed', details: errors });
+    const fieldErrors = errors.map((msg) => {
+      const field = msg.split(' ')[0];
+      return { field, message: msg };
+    });
+    throw badRequest('VALIDATION_FAILED', 'Validation failed', fieldErrors);
   }
   return res.status(201).json({ data: store.create(value) });
 });
@@ -134,23 +139,23 @@ router.post('/', (req, res) => {
 router.post('/:id/fund', (req, res) => {
   const invoice = store.get(req.params.id);
   if (!invoice) {
-    return res.status(404).json({ error: 'Invoice not found' });
+    throw notFound('INVOICE_NOT_FOUND');
   }
   const { amount, investor } = req.body || {};
   if (investor === undefined || investor === null || investor === '') {
-    return res.status(400).json({ error: 'INVESTOR_REQUIRED' });
+    throw badRequest('INVESTOR_REQUIRED');
   }
   if (typeof investor !== 'string' || !StrKey.isValidEd25519PublicKey(investor)) {
-    return res.status(400).json({ error: 'INVALID_INVESTOR_ADDRESS' });
+    throw badRequest('INVALID_INVESTOR_ADDRESS');
   }
   if (invoice.smeAddress && investor === invoice.smeAddress) {
-    return res.status(422).json({ error: 'SELF_FUNDING_NOT_ALLOWED' });
+    throw unprocessable('SELF_FUNDING_NOT_ALLOWED');
   }
   if (typeof amount !== 'number' || !(amount > 0) || !Number.isFinite(amount)) {
-    return res.status(400).json({ error: 'amount must be a positive number' });
+    throw badRequest('VALIDATION_FAILED', 'Validation failed', [{ field: 'amount', message: 'amount must be a positive number' }]);
   }
   if (invoice.status !== 'open') {
-    return res.status(409).json({ error: `Invoice is ${invoice.status}; only open invoices can be funded` });
+    throw conflict('INVOICE_NOT_OPEN');
   }
   return res.json({ data: store.fund(invoice, amount, investor) });
 });
@@ -158,14 +163,14 @@ router.post('/:id/fund', (req, res) => {
 router.get('/:id/contributions', (req, res) => {
   const invoice = store.get(req.params.id);
   if (!invoice) {
-    return res.status(404).json({ error: 'Invoice not found' });
+    throw notFound('INVOICE_NOT_FOUND');
   }
 
   let limit = 50;
   if (req.query.limit !== undefined) {
     limit = Number(req.query.limit);
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
-      return res.status(400).json({ error: 'limit must be an integer between 1 and 100' });
+      throw badRequest('INVALID_LIMIT');
     }
   }
 
@@ -174,7 +179,7 @@ router.get('/:id/contributions', (req, res) => {
   if (req.query.cursor) {
     const idx = all.findIndex((c) => c.id === req.query.cursor);
     if (idx === -1) {
-      return res.status(400).json({ error: 'Invalid cursor' });
+      throw badRequest('INVALID_CURSOR');
     }
     startIndex = idx + 1;
   }

@@ -7,6 +7,14 @@ const config = require('./config');
 const store = require('./data/store');
 const { buildSpec } = require('./openapi');
 const { computeStats } = require('./services/stats');
+const {
+  ApiError,
+  badRequest,
+  notFound,
+  internal,
+  getCatalogEntry,
+  ERROR_BASE_URI,
+} = require('./errors');
 
 const app = express();
 app.disable('x-powered-by');
@@ -53,6 +61,7 @@ const ENDPOINTS = [
   { method: 'GET', path: '/api/escrow/live', description: 'Live escrow state from Soroban RPC' },
   { method: 'GET', path: '/api/escrow/attestations', description: 'On-chain attestation log (paginated)' },
   { method: 'POST', path: '/api/escrow/attestations/verify', description: 'Verify a document digest against on-chain attestations' },
+  { method: 'GET', path: '/errors/:code', description: 'Error catalog entry by code' },
 ];
 
 app.get('/', (req, res) => {
@@ -93,24 +102,75 @@ app.get('/docs/init.js', (req, res) => {
 app.get('/api/stats', (req, res) => {
   const { currency } = req.query;
   if (currency !== undefined && (typeof currency !== 'string' || !/^[a-zA-Z0-9]{1,12}$/.test(currency))) {
-    return res.status(400).json({
-      error: 'currency must be a 1-12 character alphanumeric asset code',
-      code: 'VALIDATION_FAILED',
-      details: { currency: 'Invalid asset code' },
-    });
+    throw badRequest('VALIDATION_FAILED', 'Invalid currency parameter', [{ field: 'currency', message: 'Invalid asset code' }]);
   }
   return res.json(computeStats(store.list(), currency));
+});
+
+app.get('/errors/:code', (req, res) => {
+  const entry = getCatalogEntry(req.params.code);
+  if (!entry) {
+    throw notFound('ROUTE_NOT_FOUND', `Error code "${req.params.code}" not found in catalog`);
+  }
+  res.json({ code: req.params.code, ...entry, type: `${ERROR_BASE_URI}${req.params.code}` });
 });
 
 app.use('/api/invoices', require('./routes/invoices'));
 app.use('/api/investors', require('./routes/investors'));
 app.use('/api/escrow', require('./routes/escrow'));
 
-app.use((req, res) => res.status(404).json({ error: 'Not found', path: req.path, docs: '/docs' }));
+// 404 handler for unknown routes
+app.use((_req, _res, _next) => {
+  throw notFound('ROUTE_NOT_FOUND');
+});
 
+// Global error handler
 app.use((err, req, res, _next) => {
+  // Handle express.json() parsing errors
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    if (err.type === 'entity.parse.failed') {
+      return res.status(400).type('application/problem+json').json(
+        badRequest('MALFORMED_JSON', 'The request body contains invalid JSON').toProblem(req)
+      );
+    }
+    if (err.type === 'entity.too.large') {
+      return res.status(413).type('application/problem+json').json(
+        badRequest('PAYLOAD_TOO_LARGE', 'The request body exceeds the maximum allowed size').toProblem(req)
+      );
+    }
+  }
+
+  // Handle express.json() limit error (sent as a different error type)
+  if (err.type === 'entity.too.large') {
+    return res.status(413).type('application/problem+json').json(
+      badRequest('PAYLOAD_TOO_LARGE', 'The request body exceeds the maximum allowed size').toProblem(req)
+    );
+  }
+
+  // Handle unsupported media type
+  if (err.type === 'entity.unsupported') {
+    return res.status(415).type('application/problem+json').json(
+      badRequest('UNSUPPORTED_MEDIA_TYPE', 'The request Content-Type is not supported. Use application/json').toProblem(req)
+    );
+  }
+
+  // Handle ApiError instances
+  if (err instanceof ApiError) {
+    return res.status(err.status).type('application/problem+json').json(err.toProblem(req));
+  }
+
+  // Handle errors with status property (from routes that haven't been migrated yet)
   const status = err.status || err.statusCode || 500;
-  res.status(status).json({ error: status === 500 ? 'Internal server error' : err.message });
+  if (status !== 500) {
+    // For non-500 errors, use the error message but don't leak internals
+    const error = new ApiError(status, 'UNKNOWN_ERROR', 'Request Failed', { detail: err.message });
+    return res.status(status).type('application/problem+json').json(error.toProblem(req));
+  }
+
+  // 500 errors: log stack server-side only, return generic message
+  console.error('Unhandled error:', err);
+  const error = internal('An unexpected error occurred');
+  return res.status(500).type('application/problem+json').json(error.toProblem(req));
 });
 
 module.exports = app;
