@@ -61,10 +61,11 @@ describe('invoices', () => {
   });
 
   test('fund moves invoice to funded when target reached', async () => {
-    const res = await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 7000 });
+    const investor = 'GBTUJNOF2WAAUPKCJHBB76ID5HGN6KMTUG43F3Z344T7QRTP7B7TVPVC';
+    const res = await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 7000, investor });
     expect(res.status).toBe(200);
     expect(res.body.data.status).toBe('funded');
-    const again = await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 1 });
+    const again = await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 1, investor });
     expect(again.status).toBe(409);
   });
 });
