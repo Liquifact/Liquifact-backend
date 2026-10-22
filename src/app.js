@@ -33,7 +33,7 @@ app.use(express.json({ limit: '100kb' }));
  * @returns {string} public base URL of this deployment
  */
 function baseUrl(req) {
-  return process.env.PUBLIC_API_BASE_URL || `${req.protocol}://${req.get('host')}`;
+  return config.publicApiBaseUrl || `${req.protocol}://${req.get('host')}`;
 }
 
 const ENDPOINTS = [

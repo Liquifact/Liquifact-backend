@@ -1,8 +1,49 @@
 'use strict';
 
+const { StrKey } = require('@stellar/stellar-sdk');
+
+class ConfigError extends Error {
+  /**
+   * @param {string[]} errors
+   */
+  constructor(errors) {
+    const message = `Invalid configuration:\n  - ${errors.join('\n  - ')}`;
+    super(message);
+    this.name = 'ConfigError';
+    this.errors = errors;
+  }
+}
+
+const DEFAULT_CONTRACT_ID = 'CDQCKR2YU6IVQ4GYPBMXBPZ4FGFQB5H25AI7ZSETHS2CZ5ZRCWQDSO6P';
+const DEFAULT_FRONTEND_URL = 'https://liquifact-frontend.vercel.app';
+
+const PRESETS = {
+  testnet: {
+    networkPassphrase: 'Test SDF Network ; September 2015',
+    rpcUrl: 'https://soroban-testnet.stellar.org',
+    explorerBaseUrl: 'https://stellar.expert/explorer/testnet',
+  },
+  public: {
+    networkPassphrase: 'Public Global Stellar Network ; September 2015',
+    rpcUrl: null, // must be provided
+    explorerBaseUrl: 'https://stellar.expert/explorer/public',
+  },
+  mainnet: {
+    networkPassphrase: 'Public Global Stellar Network ; September 2015',
+    rpcUrl: null, // must be provided
+    explorerBaseUrl: 'https://stellar.expert/explorer/public',
+  },
+  futurenet: {
+    networkPassphrase: 'Test SDF Future Network ; October 2022',
+    rpcUrl: 'https://rpc-futurenet.stellar.org',
+    explorerBaseUrl: 'https://stellar.expert/explorer/futurenet',
+  },
+};
+
 /**
- * Runtime configuration. Every value has a safe default so the API runs with
- * zero setup (locally, in CI and on Vercel).
+ * Validates whether a string is a valid URL.
+ * @param {string} val
+ * @returns {URL|null}
  */
 const CONTRACT_ID =
   process.env.ESCROW_CONTRACT_ID || 'CDQCKR2YU6IVQ4GYPBMXBPZ4FGFQB5H25AI7ZSETHS2CZ5ZRCWQDSO6P';
