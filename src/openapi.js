@@ -1,27 +1,13 @@
 'use strict';
 
+const { OpenApiGeneratorV3 } = require('@asteasolutions/zod-to-openapi');
 const config = require('./config');
+const { registry } = require('./schemas');
 
-const Invoice = {
-  type: 'object',
-  properties: {
-    id: { type: 'string', example: 'INV_0001' },
-    sme: { type: 'string', example: 'Acme Components Ltd' },
-    smeAddress: { type: 'string', nullable: true },
-    debtor: { type: 'string', example: 'Globex Retail' },
-    amount: { type: 'number', example: 25000 },
-    currency: { type: 'string', example: 'USDC' },
-    fundedAmount: { type: 'number', example: 0 },
-    yieldBps: { type: 'integer', example: 800 },
-    dueDate: { type: 'string', format: 'date' },
-    status: { type: 'string', enum: ['open', 'funded', 'settled', 'cancelled'] },
-    onChain: { type: 'boolean' },
-    createdAt: { type: 'string', format: 'date-time' },
-  },
-};
-
-const json = (schema) => ({ content: { 'application/json': { schema } } });
-const ErrorBody = { type: 'object', properties: { error: { type: 'string' } } };
+// ---------------------------------------------------------------------------
+// Cache: one built spec per baseUrl
+// ---------------------------------------------------------------------------
+const _cache = new Map();
 
 /** Raw stroop amount as a decimal integer string (7 decimals). */
 const StroopString = { type: 'string', pattern: '^\\d+$', example: '1000000000' };
@@ -95,12 +81,28 @@ const EscrowLiveResponse = {
 
 /**
  * Builds the OpenAPI document for the given public base URL.
+ * The result is memoised so schemas are not regenerated on every request.
  *
  * @param {string} baseUrl server URL to advertise
  * @returns {object} OpenAPI 3.0 document
  */
 function buildSpec(baseUrl) {
-  return {
+  if (_cache.has(baseUrl)) {
+    return _cache.get(baseUrl);
+  }
+
+  // Generate components.schemas from the Zod registry
+  const generator = new OpenApiGeneratorV3(registry.definitions);
+  const components = generator.generateComponents();
+
+  // Convenience ref helper
+  const ref = (name) => ({ $ref: `#/components/schemas/${name}` });
+  const json = (schemaOrRef) => ({ content: { 'application/json': { schema: schemaOrRef } } });
+
+  const errorRef = json(ref('ErrorResponse'));
+  const validationErrorRef = json(ref('ErrorResponse'));
+
+  const spec = {
     openapi: '3.0.3',
     info: {
       title: 'LiquiFact API',
@@ -112,7 +114,9 @@ function buildSpec(baseUrl) {
     servers: [{ url: baseUrl }],
     tags: [{ name: 'System' }, { name: 'Invoices' }, { name: 'Investors' }, { name: 'Escrow' }],
     components: {
+      ...components.components,
       schemas: {
+        ...components.components?.schemas,
         EscrowState,
         EscrowLiveResponse,
       },
@@ -122,7 +126,12 @@ function buildSpec(baseUrl) {
         get: {
           tags: ['System'],
           summary: 'Liveness probe',
-          responses: { 200: { description: 'Service is up', ...json({ type: 'object' }) } },
+          responses: {
+            200: {
+              description: 'Service is up',
+              ...json({ type: 'object', properties: { status: { type: 'string' }, version: { type: 'string' } } }),
+            },
+          },
         },
       },
       '/api/stats': {
@@ -184,11 +193,25 @@ function buildSpec(baseUrl) {
           tags: ['Invoices'],
           summary: 'List invoices',
           parameters: [
-            { name: 'status', in: 'query', schema: { type: 'string', enum: ['open', 'funded', 'settled', 'cancelled'] } },
+            {
+              name: 'status',
+              in: 'query',
+              schema: { type: 'string', enum: ['open', 'funded', 'settled', 'cancelled'] },
+              description: 'Filter by invoice status',
+            },
           ],
           responses: {
-            200: { description: 'Invoices', ...json({ type: 'object', properties: { data: { type: 'array', items: Invoice }, count: { type: 'integer' } } }) },
-            400: { description: 'Invalid filter', ...json(ErrorBody) },
+            200: {
+              description: 'List of invoices',
+              ...json({
+                type: 'object',
+                properties: {
+                  data: { type: 'array', items: ref('Invoice') },
+                  count: { type: 'integer' },
+                },
+              }),
+            },
+            400: { description: 'Invalid status filter', ...errorRef },
           },
         },
         post: {
@@ -196,34 +219,38 @@ function buildSpec(baseUrl) {
           summary: 'Submit an invoice for financing',
           requestBody: {
             required: true,
-            ...json({
-              type: 'object',
-              required: ['sme', 'debtor', 'amount', 'dueDate'],
-              properties: {
-                sme: { type: 'string' },
-                debtor: { type: 'string' },
-                amount: { type: 'number' },
-                currency: { type: 'string', default: 'USDC' },
-                yieldBps: { type: 'integer', default: 800 },
-                dueDate: { type: 'string', format: 'date' },
-                smeAddress: { type: 'string' },
-              },
-            }),
+            ...json(ref('CreateInvoiceBody')),
           },
           responses: {
-            201: { description: 'Created', ...json({ type: 'object', properties: { data: Invoice } }) },
-            400: { description: 'Validation failed', ...json(ErrorBody) },
+            201: {
+              description: 'Invoice created',
+              ...json({ type: 'object', properties: { data: ref('Invoice') } }),
+            },
+            400: { description: 'Validation failed', ...validationErrorRef },
+            415: { description: 'Content-Type must be application/json', ...errorRef },
           },
         },
       },
       '/api/invoices/{id}': {
         get: {
           tags: ['Invoices'],
-          summary: 'Get an invoice',
-          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          summary: 'Get an invoice by id',
+          parameters: [
+            {
+              name: 'id',
+              in: 'path',
+              required: true,
+              schema: { type: 'string', pattern: '^[A-Za-z0-9_]{1,32}$' },
+              description: 'Invoice identifier (1–32 alphanumeric/underscore characters)',
+            },
+          ],
           responses: {
-            200: { description: 'Invoice', ...json({ type: 'object', properties: { data: Invoice } }) },
-            404: { description: 'Not found', ...json(ErrorBody) },
+            200: {
+              description: 'Invoice found',
+              ...json({ type: 'object', properties: { data: ref('Invoice') } }),
+            },
+            400: { description: 'Invalid id format', ...errorRef },
+            404: { description: 'Invoice not found', ...errorRef },
           },
         },
       },
@@ -263,112 +290,29 @@ function buildSpec(baseUrl) {
         post: {
           tags: ['Invoices'],
           summary: 'Record an investor contribution (demo, off-chain)',
-          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', pattern: '^[A-Za-z0-9_]{1,32}$' }, description: 'Invoice identifier' }],
           requestBody: {
             required: true,
             ...json({
               type: 'object',
               required: ['amount', 'investor'],
               properties: {
-                amount: { type: 'number', example: 1000 },
-                investor: { type: 'string', example: 'GA7TXEBMEPQCLHIYCWDN7RKAO5IMRD2UV7O7TZXMEW6VZUMEXNR4XBB5' },
+                amount: { type: 'number', minimum: 0, exclusiveMinimum: true, description: 'Contribution amount', example: 5000 },
+                investor: { type: 'string', description: 'Stellar public key of the investor', example: 'GA7TXEBMEPQCLHIYCWDN7RKAO5IMRD2UV7O7TZXMEW6VZUMEXNR4XBB5' },
               },
+              additionalProperties: false,
             }),
           },
           responses: {
-            200: { description: 'Updated invoice', ...json({ type: 'object', properties: { data: Invoice } }) },
-            400: { description: 'Invalid amount or missing/invalid investor', ...json(ErrorBody) },
-            404: { description: 'Not found', ...json(ErrorBody) },
-            409: { description: 'Invoice not open', ...json(ErrorBody) },
-            422: { description: 'Self-funding not allowed', ...json(ErrorBody) },
-          },
-        },
-      },
-      '/api/invoices/{id}/contributions': {
-        get: {
-          tags: ['Invoices'],
-          summary: 'List contributions for an invoice',
-          parameters: [
-            { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
-            { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 } },
-            { name: 'cursor', in: 'query', schema: { type: 'string' } },
-          ],
-          responses: {
             200: {
-              description: 'Contributions and totals',
-              ...json({
-                type: 'object',
-                properties: {
-                  data: {
-                    type: 'array',
-                    items: {
-                      type: 'object',
-                      properties: {
-                        investor: { type: 'string' },
-                        amount: { type: 'number' },
-                        createdAt: { type: 'string', format: 'date-time' },
-                      },
-                    },
-                  },
-                  totals: {
-                    type: 'object',
-                    properties: {
-                      funded: { type: 'number' },
-                      investors: { type: 'integer' },
-                    },
-                  },
-                  nextCursor: { type: 'string' },
-                },
-              }),
+              description: 'Invoice updated after funding',
+              ...json({ type: 'object', properties: { data: ref('Invoice') } }),
             },
-            400: { description: 'Invalid limit or cursor', ...json(ErrorBody) },
-            404: { description: 'Not found', ...json(ErrorBody) },
-          },
-        },
-      },
-      '/api/investors/{address}/portfolio': {
-        get: {
-          tags: ['Investors'],
-          summary: 'Investor portfolio summary and expected returns',
-          parameters: [{ name: 'address', in: 'path', required: true, schema: { type: 'string' } }],
-          responses: {
-            200: {
-              description: 'Investor portfolio',
-              ...json({
-                type: 'object',
-                properties: {
-                  investor: { type: 'string' },
-                  positions: {
-                    type: 'array',
-                    items: {
-                      type: 'object',
-                      properties: {
-                        invoiceId: { type: 'string' },
-                        status: { type: 'string', enum: ['open', 'funded', 'settled', 'cancelled'] },
-                        currency: { type: 'string' },
-                        principal: { type: 'number' },
-                        yieldBps: { type: 'integer' },
-                        dueDate: { type: 'string', format: 'date' },
-                        expectedCoupon: { oneOf: [{ type: 'number' }, { type: 'string' }] },
-                        expectedPayout: { type: 'number' },
-                      },
-                    },
-                  },
-                  totalsByCurrency: {
-                    type: 'object',
-                    additionalProperties: {
-                      type: 'object',
-                      properties: {
-                        principal: { type: 'number' },
-                        expectedCoupon: { type: 'number' },
-                        expectedPayout: { type: 'number' },
-                      },
-                    },
-                  },
-                },
-              }),
-            },
-            400: { description: 'Invalid investor address', ...json(ErrorBody) },
+            400: { description: 'Validation failed', ...validationErrorRef },
+            404: { description: 'Invoice not found', ...errorRef },
+            409: { description: 'Invoice is not open', ...errorRef },
+            415: { description: 'Content-Type must be application/json', ...errorRef },
+            422: { description: 'Self-funding not allowed', ...errorRef },
           },
         },
       },
@@ -421,6 +365,94 @@ function buildSpec(baseUrl) {
                 properties: { error: { type: 'string' }, code: { type: 'string', enum: ['ESCROW_LIVE_UNAVAILABLE'] } },
               }),
             },
+          },
+        },
+      },
+      '/api/invoices/{id}/contributions': {
+        get: {
+          tags: ['Invoices'],
+          summary: 'List contributions for an invoice',
+          parameters: [
+            { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+            { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 } },
+            { name: 'cursor', in: 'query', schema: { type: 'string' } },
+          ],
+          responses: {
+            200: {
+              description: 'Contributions and totals',
+              ...json({
+                type: 'object',
+                properties: {
+                  data: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        investor: { type: 'string' },
+                        amount: { type: 'number' },
+                        createdAt: { type: 'string', format: 'date-time' },
+                      },
+                    },
+                  },
+                  totals: {
+                    type: 'object',
+                    properties: {
+                      funded: { type: 'number' },
+                      investors: { type: 'integer' },
+                    },
+                  },
+                  nextCursor: { type: 'string' },
+                },
+              }),
+            },
+            400: { description: 'Invalid limit or cursor', ...errorRef },
+            404: { description: 'Not found', ...errorRef },
+          },
+        },
+      },
+      '/api/investors/{address}/portfolio': {
+        get: {
+          tags: ['Investors'],
+          summary: 'Investor portfolio summary and expected returns',
+          parameters: [{ name: 'address', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            200: {
+              description: 'Investor portfolio',
+              ...json({
+                type: 'object',
+                properties: {
+                  investor: { type: 'string' },
+                  positions: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        invoiceId: { type: 'string' },
+                        status: { type: 'string', enum: ['open', 'funded', 'settled', 'cancelled'] },
+                        currency: { type: 'string' },
+                        principal: { type: 'number' },
+                        yieldBps: { type: 'integer' },
+                        dueDate: { type: 'string', format: 'date' },
+                        expectedCoupon: { oneOf: [{ type: 'number' }, { type: 'string' }] },
+                        expectedPayout: { type: 'number' },
+                      },
+                    },
+                  },
+                  totalsByCurrency: {
+                    type: 'object',
+                    additionalProperties: {
+                      type: 'object',
+                      properties: {
+                        principal: { type: 'number' },
+                        expectedCoupon: { type: 'number' },
+                        expectedPayout: { type: 'number' },
+                      },
+                    },
+                  },
+                },
+              }),
+            },
+            400: { description: 'Invalid investor address', ...errorRef },
           },
         },
       },
@@ -483,8 +515,8 @@ function buildSpec(baseUrl) {
                 required: ['primary', 'log', 'total', 'nextCursor'],
               }),
             },
-            400: { description: 'Invalid cursor or limit', ...json(ErrorBody) },
-            502: { description: 'Soroban RPC read failed', ...json(ErrorBody) },
+            400: { description: 'Invalid cursor or limit', ...errorRef },
+            502: { description: 'Soroban RPC read failed', ...errorRef },
           },
         },
       },
@@ -555,14 +587,17 @@ function buildSpec(baseUrl) {
                 required: ['sha256', 'match', 'revoked', 'verified'],
               }),
             },
-            400: { description: 'Invalid or missing digest (INVALID_DIGEST / NO_FILE)', ...json(ErrorBody) },
-            413: { description: 'Uploaded file exceeds 5 MiB', ...json(ErrorBody) },
-            502: { description: 'Soroban RPC read failed', ...json(ErrorBody) },
+            400: { description: 'Invalid or missing digest (INVALID_DIGEST / NO_FILE)', ...errorRef },
+            413: { description: 'Uploaded file exceeds 5 MiB', ...errorRef },
+            502: { description: 'Soroban RPC read failed', ...errorRef },
           },
         },
       },
     },
   };
+
+  _cache.set(baseUrl, spec);
+  return spec;
 }
 
 module.exports = { buildSpec };
