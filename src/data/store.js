@@ -95,11 +95,13 @@ function compositeKey(parts) {
 }
 
 function exactKey(invoice) {
-  return compositeKey([normalizeIdentity(invoice.sme), invoice.invoiceNumber.trim()]);
+  const number = String(invoice.invoiceNumber ?? '').trim();
+  return compositeKey([normalizeIdentity(invoice.sme), number]);
 }
 
 function fuzzyKey(invoice) {
-  return compositeKey([normalizeIdentity(invoice.sme), normalizeIdentity(invoice.debtor), invoice.amount, invoice.dueDate]);
+   const number = String(invoice.invoiceNumber ?? '').trim();
+  return compositeKey([normalizeIdentity(invoice.sme), normalizeIdentity(invoice.debtor), number, invoice.amount, invoice.dueDate]);
 }
 
 function isValidInvoiceId(id) {
@@ -149,7 +151,7 @@ function addToIndex(index, key, id) {
 }
 
 function indexInvoice(invoice) {
-  invoicesById.set(invoice.id, invoice);
+  if (!invoice.invoiceNumber) return;
   addToIndex(exactIndex, exactKey(invoice), invoice.id);
   addToIndex(fuzzyIndex, fuzzyKey(invoice), invoice.id);
 }
