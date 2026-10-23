@@ -13,7 +13,14 @@ const Invoice = {
     currency: { type: 'string', example: 'USDC' },
     fundedAmount: { type: 'number', example: 0 },
     yieldBps: { type: 'integer', example: 800 },
-    dueDate: { type: 'string', format: 'date' },
+    dueDate: { type: 'string', format: 'date', description: 'ISO 8601 calendar date (YYYY-MM-DD). Must be a real date strictly in the future and within the contract horizon.' },
+    maturity: {
+      type: 'integer',
+      description:
+        'Unix timestamp in seconds for the on-chain maturity. Defined as 00:00:00 UTC of the day after dueDate. ' +
+        'For INV_0001 (dueDate 2027-01-17) this equals 1800172800, within ±1 day of the on-chain seed value 1800132005.',
+      example: 1800172800,
+    },
     status: { type: 'string', enum: ['open', 'funded', 'settled', 'cancelled'] },
     onChain: { type: 'boolean' },
     createdAt: { type: 'string', format: 'date-time' },
@@ -22,6 +29,13 @@ const Invoice = {
 
 const json = (schema) => ({ content: { 'application/json': { schema } } });
 const ErrorBody = { type: 'object', properties: { error: { type: 'string' } } };
+const ValidationErrorBody = {
+  type: 'object',
+  properties: {
+    error: { type: 'string', example: 'Validation failed' },
+    details: { type: 'array', items: { type: 'string' }, description: 'Per-field error messages' },
+  },
+};
 
 /** Raw stroop amount as a decimal integer string (7 decimals). */
 const StroopString = { type: 'string', pattern: '^\\d+$', example: '1000000000' };
@@ -184,16 +198,46 @@ function buildSpec(baseUrl) {
           tags: ['Invoices'],
           summary: 'List invoices',
           parameters: [
-            { name: 'status', in: 'query', schema: { type: 'string', enum: ['open', 'funded', 'settled', 'cancelled'] } },
+            {
+              name: 'status',
+              in: 'query',
+              schema: { type: 'string', enum: ['open', 'funded', 'settled', 'cancelled'] },
+            },
+            {
+              name: 'dueBefore',
+              in: 'query',
+              description: 'Return only invoices whose dueDate is strictly before this YYYY-MM-DD date.',
+              schema: { type: 'string', format: 'date' },
+            },
+            {
+              name: 'dueAfter',
+              in: 'query',
+              description: 'Return only invoices whose dueDate is strictly after this YYYY-MM-DD date.',
+              schema: { type: 'string', format: 'date' },
+            },
           ],
           responses: {
-            200: { description: 'Invoices', ...json({ type: 'object', properties: { data: { type: 'array', items: Invoice }, count: { type: 'integer' } } }) },
-            400: { description: 'Invalid filter', ...json(ErrorBody) },
+            200: {
+              description: 'Invoices',
+              ...json({
+                type: 'object',
+                properties: {
+                  data: { type: 'array', items: Invoice },
+                  count: { type: 'integer' },
+                },
+              }),
+            },
+            400: { description: 'Invalid filter (status, dueBefore, or dueAfter)', ...json(ErrorBody) },
           },
         },
         post: {
           tags: ['Invoices'],
           summary: 'Submit an invoice for financing',
+          description:
+            `dueDate must be a real ISO 8601 calendar date (YYYY-MM-DD), strictly more than ` +
+            `${config.minTenorDays} day(s) in the future and at most ${config.maxTenorDays} days out ` +
+            `(≈ 5 years, matching the escrow contract's maturity_max_horizon). ` +
+            `The response includes a computed \`maturity\` (Unix seconds) for on-chain use.`,
           requestBody: {
             required: true,
             ...json({
@@ -205,14 +249,20 @@ function buildSpec(baseUrl) {
                 amount: { type: 'number' },
                 currency: { type: 'string', default: 'USDC' },
                 yieldBps: { type: 'integer', default: 800 },
-                dueDate: { type: 'string', format: 'date' },
+                dueDate: {
+                  type: 'string',
+                  format: 'date',
+                  description:
+                    'Canonical YYYY-MM-DD. Must be a real calendar date, strictly in the future ' +
+                    '(> today + MIN_TENOR_DAYS), and within MAX_TENOR_DAYS (default 1825 ≈ 5 years).',
+                },
                 smeAddress: { type: 'string' },
               },
             }),
           },
           responses: {
             201: { description: 'Created', ...json({ type: 'object', properties: { data: Invoice } }) },
-            400: { description: 'Validation failed', ...json(ErrorBody) },
+            400: { description: 'Validation failed (per-field errors)', ...json(ValidationErrorBody) },
           },
         },
       },
