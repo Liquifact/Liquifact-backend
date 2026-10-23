@@ -7,24 +7,36 @@ const config = require('./config');
 const store = require('./data/store');
 const { buildSpec } = require('./openapi');
 const { computeStats } = require('./services/stats');
+const { mountDocs } = require('./docs');
 
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', true);
 
-app.use(
-  helmet({
-    contentSecurityPolicy: {
-      directives: {
-        defaultSrc: ["'self'"],
-        scriptSrc: ["'self'", 'https://unpkg.com'],
-        styleSrc: ["'self'", "'unsafe-inline'", 'https://unpkg.com'],
-        imgSrc: ["'self'", 'data:', 'https://unpkg.com'],
-        connectSrc: ["'self'"],
-      },
-    },
-  }),
-);
+const API_CSP = { useDefaults: false, directives: { defaultSrc: ["'none'"], frameAncestors: ["'none'"] } };
+const DOCS_CSP = {
+  useDefaults: false,
+  directives: {
+    defaultSrc: ["'none'"],
+    scriptSrc: ["'self'"],
+    styleSrc: ["'self'"],
+    imgSrc: ["'self'", 'data:'],
+    fontSrc: ["'self'"],
+    connectSrc: ["'self'"],
+    baseUri: ["'none'"],
+    formAction: ["'self'"],
+    frameAncestors: ["'none'"],
+  },
+};
+const helmetOpts = (csp) => ({ contentSecurityPolicy: csp, crossOriginResourcePolicy: { policy: 'same-site' } });
+const apiHelmet = helmet(helmetOpts(API_CSP));
+const docsHelmet = helmet(helmetOpts(DOCS_CSP));
+
+app.use((req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  res.set('Permissions-Policy', 'interest-cohort=()');
+  return (/^\/docs(\/|$)/.test(req.path) ? docsHelmet : apiHelmet)(req, res, next);
+});
 app.use(cors({ origin: config.corsOrigins.includes('*') ? '*' : config.corsOrigins }));
 app.use(express.json({ limit: '100kb' }));
 
@@ -75,20 +87,7 @@ app.get('/healthz', health);
 
 app.get('/openapi.json', (req, res) => res.json(buildSpec(baseUrl(req))));
 
-const SWAGGER = 'https://unpkg.com/swagger-ui-dist@5.17.14';
-app.get('/docs', (req, res) => {
-  res.type('html').send(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>LiquiFact API Docs</title><link rel="stylesheet" href="${SWAGGER}/swagger-ui.css">
-<style>body{margin:0;background:#fafafa}.lf-bar{background:#0b1020;color:#fff;padding:14px 20px;font:600 16px system-ui}
-.lf-bar a{color:#7dd3fc;margin-left:16px;font-weight:400;text-decoration:none}</style></head>
-<body><div class="lf-bar">LiquiFact API<a href="/">Index</a><a href="/openapi.json">openapi.json</a>
-<a href="${config.frontendUrl}">Website</a><a href="${config.explorerUrl}">Escrow contract</a></div>
-<div id="swagger-ui"></div><script src="${SWAGGER}/swagger-ui-bundle.js"></script><script src="/docs/init.js"></script></body></html>`);
-});
-app.get('/docs/init.js', (req, res) => {
-  res.type('application/javascript').send("window.ui=SwaggerUIBundle({url:'/openapi.json',dom_id:'#swagger-ui'});");
-});
+mountDocs(app, config);
 
 app.get('/api/stats', (req, res) => {
   const { currency } = req.query;
