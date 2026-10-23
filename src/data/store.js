@@ -2,14 +2,15 @@
 
 /**
  * In-memory data store seeded with demo invoices. Serverless instances are
- * stateless, so writes live for the lifetime of a warm instance only; this is
- * intentional for the public demo (no database required).
+ * stateless, so writes and lookup indexes live for a warm instance only.
+ * They improve local lookup efficiency but are not distributed coordination.
  */
 
 const assert = require('node:assert');
 const contributions = require('./contributions');
 
 const STATUSES = ['open', 'funded', 'settled', 'cancelled'];
+const INVOICE_ID_PATTERN = /^[A-Za-z0-9_]{1,32}$/;
 
 const seed = () => {
   const records = [
@@ -80,36 +81,136 @@ const seed = () => {
   return records;
 };
 
-let invoices = seed();
+/** Normalizes a displayed SME or debtor name for identity comparison. */
+function normalizeIdentity(value) {
+  return String(value).toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+}
 
-/** @returns {object[]} all invoices */
+/** JSON array encoding avoids ambiguous delimiter-based composite keys. */
+function compositeKey(parts) {
+  return JSON.stringify(parts);
+}
+
+function exactKey(invoice) {
+  const number = String(invoice.invoiceNumber ?? '').trim();
+  return compositeKey([normalizeIdentity(invoice.sme), number]);
+}
+
+function fuzzyKey(invoice) {
+  return compositeKey([normalizeIdentity(invoice.sme), normalizeIdentity(invoice.debtor), invoice.amount, invoice.dueDate]);
+}
+
+function hasInvoiceNumber(invoice) {
+  return typeof invoice.invoiceNumber === 'string' && invoice.invoiceNumber.trim().length > 0;
+}
+
+function isValidInvoiceId(id) {
+  return typeof id === 'string' && INVOICE_ID_PATTERN.test(id);
+}
+
+/** Creates the next unused INV_XXXX identifier without changing seed IDs. */
+function generateInvoiceId({ has = () => false } = {}) {
+  for (let sequence = 1; sequence <= Number.MAX_SAFE_INTEGER; sequence += 1) {
+    const id = `INV_${String(sequence).padStart(4, '0')}`;
+    if (!has(id)) {
+      return id;
+    }
+  }
+  throw new Error('Unable to generate a unique invoice ID');
+}
+
+class DuplicateInvoiceError extends Error {
+  constructor(code, existingId) {
+    super(code);
+    this.code = code;
+    this.existingId = existingId;
+  }
+}
+
+let invoices = [];
+let invoicesById = new Map();
+let exactIndex = new Map();
+let fuzzyIndex = new Map();
+
+function addToIndex(index, key, id) {
+  const ids = index.get(key) || new Set();
+  ids.add(id);
+  index.set(key, ids);
+}
+
+function indexInvoice(invoice) {
+  invoicesById.set(invoice.id, invoice);
+  if (!hasInvoiceNumber(invoice)) {
+    return;
+  }
+  addToIndex(exactIndex, exactKey(invoice), invoice.id);
+  addToIndex(fuzzyIndex, fuzzyKey(invoice), invoice.id);
+}
+
+function rebuildIndexes() {
+  invoicesById = new Map();
+  exactIndex = new Map();
+  fuzzyIndex = new Map();
+  for (const invoice of invoices) {
+    indexInvoice(invoice);
+  }
+}
+
+function findEligible(index, key) {
+  const ids = index.get(key);
+  if (!ids) {
+    return undefined;
+  }
+  for (const id of ids) {
+    const invoice = invoicesById.get(id);
+    // Statuses are mutable; retaining IDs and filtering here prevents stale blocks.
+    if (invoice && invoice.status !== 'cancelled') {
+      return invoice;
+    }
+  }
+  return undefined;
+}
+
 function list() {
   return invoices;
 }
 
-/**
- * @param {string} id invoice id
- * @returns {object|undefined} the invoice
- */
 function get(id) {
-  return invoices.find((i) => i.id === id);
+  return invoicesById.get(id);
 }
 
-/**
- * @param {object} invoice validated invoice fields
- * @returns {object} the stored invoice
- */
+function findExactDuplicate(invoice) {
+  if (!hasInvoiceNumber(invoice)) {
+    return undefined;
+  }
+  return findEligible(exactIndex, exactKey(invoice));
+}
+
+function findPossibleDuplicate(invoice) {
+  if (!hasInvoiceNumber(invoice)) {
+    return undefined;
+  }
+  return findEligible(fuzzyIndex, fuzzyKey(invoice));
+}
+
+/** Inserts validated fields after local integrity checks. */
 function create(invoice) {
-  const id = `INV_${String(invoices.length + 1).padStart(4, '0')}`;
-  const record = {
-    id,
-    fundedAmount: 0,
-    status: 'open',
-    onChain: false,
-    createdAt: new Date().toISOString(),
-    ...invoice,
-  };
+  const exact = findExactDuplicate(invoice);
+  if (exact) {
+    throw new DuplicateInvoiceError('DUPLICATE_INVOICE', exact.id);
+  }
+  const possible = findPossibleDuplicate(invoice);
+  if (possible && invoice.confirmNotDuplicate !== true) {
+    throw new DuplicateInvoiceError('POSSIBLE_DUPLICATE', possible.id);
+  }
+  const id = generateInvoiceId({ has: (candidate) => invoicesById.has(candidate) });
+  if (!isValidInvoiceId(id)) {
+    throw new Error('Generated invalid invoice ID');
+  }
+  const record = { id, fundedAmount: 0, status: 'open', onChain: false, createdAt: new Date().toISOString(), duplicateOverride: invoice.confirmNotDuplicate === true, ...invoice };
+  delete record.confirmNotDuplicate;
   invoices.push(record);
+  indexInvoice(record);
   return record;
 }
 
@@ -136,10 +237,13 @@ function fund(invoice, amount, investor) {
   return invoice;
 }
 
-/** Restores the seed data (used by tests). */
+/** Restores seed data and all derived lookup indexes (used by tests). */
 function reset() {
   contributions.reset();
   invoices = seed();
+  rebuildIndexes();
 }
 
-module.exports = { STATUSES, list, get, create, fund, reset };
+reset();
+
+module.exports = { STATUSES, normalizeIdentity, compositeKey, exactKey, fuzzyKey, isValidInvoiceId, generateInvoiceId, DuplicateInvoiceError, list, get, findExactDuplicate, findPossibleDuplicate, create, fund, reset };

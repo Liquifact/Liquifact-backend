@@ -5,7 +5,8 @@ const config = require('./config');
 const Invoice = {
   type: 'object',
   properties: {
-    id: { type: 'string', example: 'INV_0001' },
+    id: { type: 'string', pattern: '^[A-Za-z0-9_]{1,32}$', example: 'INV_0001' },
+    invoiceNumber: { type: 'string', minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9._/-]{1,64}$', example: 'ACME-2027-001' },
     sme: { type: 'string', example: 'Acme Components Ltd' },
     smeAddress: { type: 'string', nullable: true },
     debtor: { type: 'string', example: 'Globex Retail' },
@@ -17,11 +18,20 @@ const Invoice = {
     status: { type: 'string', enum: ['open', 'funded', 'settled', 'cancelled'] },
     onChain: { type: 'boolean' },
     createdAt: { type: 'string', format: 'date-time' },
+    duplicateOverride: { type: 'boolean', example: false },
   },
 };
 
 const json = (schema) => ({ content: { 'application/json': { schema } } });
-const ErrorBody = { type: 'object', properties: { error: { type: 'string' } } };
+const ErrorBody = { type: 'object', properties: { error: { type: 'string' }, details: { type: 'array', items: { type: 'string' } } } };
+const DuplicateError = {
+  type: 'object',
+  required: ['code', 'existingId'],
+  properties: {
+    code: { type: 'string', enum: ['DUPLICATE_INVOICE', 'POSSIBLE_DUPLICATE'] },
+    existingId: { type: 'string', pattern: '^[A-Za-z0-9_]{1,32}$' },
+  },
+};
 
 /** Raw stroop amount as a decimal integer string (7 decimals). */
 const StroopString = { type: 'string', pattern: '^\\d+$', example: '1000000000' };
@@ -202,6 +212,8 @@ function buildSpec(baseUrl) {
               properties: {
                 sme: { type: 'string' },
                 debtor: { type: 'string' },
+                invoiceNumber: { type: 'string', minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9._/-]{1,64}$' },
+                confirmNotDuplicate: { type: 'boolean', description: 'Explicitly permits a possible duplicate; never bypasses an exact invoice-number duplicate.' },
                 amount: { type: 'number' },
                 currency: { type: 'string', default: 'USDC' },
                 yieldBps: { type: 'integer', default: 800 },
@@ -213,6 +225,7 @@ function buildSpec(baseUrl) {
           responses: {
             201: { description: 'Created', ...json({ type: 'object', properties: { data: Invoice } }) },
             400: { description: 'Validation failed', ...json(ErrorBody) },
+            409: { description: 'Duplicate invoice or possible duplicate receivable', ...json(DuplicateError) },
           },
         },
       },
