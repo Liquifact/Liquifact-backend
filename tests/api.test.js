@@ -37,7 +37,7 @@ describe('system', () => {
     expect(spec.openapi).toBe('3.0.3');
     const post = spec.paths['/api/invoices'].post;
     const schema = post.requestBody.content['application/json'].schema;
-    expect(schema.required).toContain('invoiceNumber');
+    expect(schema.required).not.toContain('invoiceNumber');
     expect(schema.properties.invoiceNumber).toMatchObject({ minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9._/-]{1,64}$' });
     expect(schema.properties.confirmNotDuplicate.type).toBe('boolean');
     expect(post.responses).toHaveProperty('400');
@@ -62,9 +62,36 @@ describe('invoices', () => {
     const ok = await request(app).post('/api/invoices').send(invoice());
     expect(ok.status).toBe(201);
     expect(ok.body.data.status).toBe('open');
-    const funded = await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 7000 });
+    const investor = 'GBTUJNOF2WAAUPKCJHBB76ID5HGN6KMTUG43F3Z344T7QRTP7B7TVPVC';
+    const funded = await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 7000, investor });
     expect(funded.body.data.status).toBe('funded');
-    expect((await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 1 })).status).toBe(409);
+    expect((await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 1, investor })).status).toBe(409);
+  });
+
+  test('create validates required fields and permits multiple invoices without invoice numbers', async () => {
+    const bad = await request(app).post('/api/invoices').send({ sme: '' });
+    expect(bad.status).toBe(400);
+
+    const payload = { sme: 'Test SME', debtor: 'Buyer', amount: 500, dueDate: '2027-01-01' };
+    const first = await request(app).post('/api/invoices').send(payload);
+    const second = await request(app).post('/api/invoices').send(payload);
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    expect(first.body.data.id).toMatch(/^INV_\d{4}$/);
+    expect(second.body.data.id).toMatch(/^INV_\d{4}$/);
+    expect(second.body.data.id).not.toBe(first.body.data.id);
+  });
+
+  test('duplicate invoice checks retain their 409 response contract', async () => {
+    const first = await request(app).post('/api/invoices').send(invoice({ invoiceNumber: 'DUP-1' }));
+    const exact = await request(app).post('/api/invoices').send(invoice({ invoiceNumber: 'DUP-1' }));
+    expect(first.status).toBe(201);
+    expect(exact.status).toBe(409);
+    expect(exact.body).toEqual({ code: 'DUPLICATE_INVOICE', existingId: first.body.data.id });
+
+    const possible = await request(app).post('/api/invoices').send(invoice({ invoiceNumber: 'DUP-2' }));
+    expect(possible.status).toBe(409);
+    expect(possible.body).toEqual({ code: 'POSSIBLE_DUPLICATE', existingId: first.body.data.id });
   });
 
   test('fund moves invoice to funded when target reached', async () => {

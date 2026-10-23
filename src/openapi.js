@@ -208,7 +208,7 @@ function buildSpec(baseUrl) {
             required: true,
             ...json({
               type: 'object',
-              required: ['sme', 'debtor', 'invoiceNumber', 'amount', 'dueDate'],
+              required: ['sme', 'debtor', 'amount', 'dueDate'],
               properties: {
                 sme: { type: 'string' },
                 debtor: { type: 'string' },

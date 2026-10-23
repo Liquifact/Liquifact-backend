@@ -31,8 +31,9 @@ function validateInvoice(body) {
   if (typeof b.debtor === 'string' && b.debtor.trim() && !store.normalizeIdentity(b.debtor)) {
     errors.push('debtor must contain letters or numbers');
   }
-  const invoiceNumber = typeof b.invoiceNumber === 'string' ? b.invoiceNumber.trim() : '';
-  if (!invoiceNumber || invoiceNumber.length > 64 || !/^[A-Za-z0-9._/-]{1,64}$/.test(invoiceNumber)) {
+  const invoiceNumber = typeof b.invoiceNumber === 'string' ? b.invoiceNumber.trim() : undefined;
+  if (b.invoiceNumber !== undefined
+    && (!invoiceNumber || invoiceNumber.length > 64 || !/^[A-Za-z0-9._/-]{1,64}$/.test(invoiceNumber))) {
     errors.push('invoiceNumber must be 1-64 characters using letters, digits, ., _, /, or -');
   }
   if (typeof b.amount !== 'number' || !(b.amount > 0) || b.amount > 1e12) {
@@ -52,7 +53,7 @@ function validateInvoice(body) {
     value: {
       sme: b.sme.trim(),
       debtor: b.debtor.trim(),
-      invoiceNumber,
+      ...(invoiceNumber ? { invoiceNumber } : {}),
       smeAddress: typeof b.smeAddress === 'string' ? b.smeAddress : null,
       amount: b.amount,
       currency: typeof b.currency === 'string' ? b.currency.toUpperCase().slice(0, 12) : 'USDC',

@@ -1,7 +1,5 @@
 'use strict';
 
-const crypto = require('crypto');
-
 /**
  * In-memory data store seeded with demo invoices. Serverless instances are
  * stateless, so writes and lookup indexes live for a warm instance only.
@@ -12,7 +10,6 @@ const assert = require('node:assert');
 const contributions = require('./contributions');
 
 const STATUSES = ['open', 'funded', 'settled', 'cancelled'];
-const CROCKFORD_BASE32 = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 const INVOICE_ID_PATTERN = /^[A-Za-z0-9_]{1,32}$/;
 
 const seed = () => {
@@ -100,31 +97,22 @@ function exactKey(invoice) {
 }
 
 function fuzzyKey(invoice) {
-   const number = String(invoice.invoiceNumber ?? '').trim();
-  return compositeKey([normalizeIdentity(invoice.sme), normalizeIdentity(invoice.debtor), number, invoice.amount, invoice.dueDate]);
+  return compositeKey([normalizeIdentity(invoice.sme), normalizeIdentity(invoice.debtor), invoice.amount, invoice.dueDate]);
+}
+
+function hasInvoiceNumber(invoice) {
+  return typeof invoice.invoiceNumber === 'string' && invoice.invoiceNumber.trim().length > 0;
 }
 
 function isValidInvoiceId(id) {
   return typeof id === 'string' && INVOICE_ID_PATTERN.test(id);
 }
 
-/** Creates INV_ + 20 uniformly random Crockford Base32 characters (100 bits). */
-function generateInvoiceId({ has = () => false, randomBytes = crypto.randomBytes, maxAttempts = 10 } = {}) {
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const bytes = randomBytes(13); // 104 random bits; the first 100 encode 20 symbols.
-    let bits = 0;
-    let bitCount = 0;
-    let encoded = '';
-    for (const byte of bytes) {
-      bits = (bits << 8) | byte;
-      bitCount += 8;
-      while (bitCount >= 5 && encoded.length < 20) {
-        bitCount -= 5;
-        encoded += CROCKFORD_BASE32[(bits >> bitCount) & 31];
-      }
-    }
-    const id = `INV_${encoded}`;
-    if (isValidInvoiceId(id) && !has(id)) {
+/** Creates the next unused INV_XXXX identifier without changing seed IDs. */
+function generateInvoiceId({ has = () => false } = {}) {
+  for (let sequence = 1; sequence <= Number.MAX_SAFE_INTEGER; sequence += 1) {
+    const id = `INV_${String(sequence).padStart(4, '0')}`;
+    if (!has(id)) {
       return id;
     }
   }
@@ -151,7 +139,10 @@ function addToIndex(index, key, id) {
 }
 
 function indexInvoice(invoice) {
-  if (!invoice.invoiceNumber) return;
+  invoicesById.set(invoice.id, invoice);
+  if (!hasInvoiceNumber(invoice)) {
+    return;
+  }
   addToIndex(exactIndex, exactKey(invoice), invoice.id);
   addToIndex(fuzzyIndex, fuzzyKey(invoice), invoice.id);
 }
@@ -189,10 +180,16 @@ function get(id) {
 }
 
 function findExactDuplicate(invoice) {
+  if (!hasInvoiceNumber(invoice)) {
+    return undefined;
+  }
   return findEligible(exactIndex, exactKey(invoice));
 }
 
 function findPossibleDuplicate(invoice) {
+  if (!hasInvoiceNumber(invoice)) {
+    return undefined;
+  }
   return findEligible(fuzzyIndex, fuzzyKey(invoice));
 }
 
