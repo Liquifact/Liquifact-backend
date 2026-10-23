@@ -53,6 +53,10 @@ const ENDPOINTS = [
   { method: 'GET', path: '/api/escrow/live', description: 'Live escrow state from Soroban RPC' },
   { method: 'GET', path: '/api/escrow/attestations', description: 'On-chain attestation log (paginated)' },
   { method: 'POST', path: '/api/escrow/attestations/verify', description: 'Verify a document digest against on-chain attestations' },
+  { method: 'POST', path: '/api/webhooks', description: 'Register a webhook subscription (admin)' },
+  { method: 'GET', path: '/api/webhooks', description: 'List webhook subscriptions (admin)' },
+  { method: 'DELETE', path: '/api/webhooks/:id', description: 'Remove a webhook subscription (admin)' },
+  { method: 'GET', path: '/api/webhooks/:id/deliveries', description: 'Last 50 delivery records for a webhook (admin)' },
 ];
 
 app.get('/', (req, res) => {
@@ -105,6 +109,10 @@ app.get('/api/stats', (req, res) => {
 app.use('/api/invoices', require('./routes/invoices'));
 app.use('/api/investors', require('./routes/investors'));
 app.use('/api/escrow', require('./routes/escrow'));
+app.use('/api/webhooks', require('./routes/webhooks'));
+
+// Start webhook delivery listener (idempotent — safe to call multiple times)
+require('./webhooks/deliver').startListening();
 
 app.use((req, res) => res.status(404).json({ error: 'Not found', path: req.path, docs: '/docs' }));
 

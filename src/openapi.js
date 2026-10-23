@@ -93,6 +93,61 @@ const EscrowLiveResponse = {
   },
 };
 
+const WebhookSubscription = {
+  type: 'object',
+  properties: {
+    id: { type: 'string', example: 'wh_a1b2c3d4e5f6a7b8' },
+    url: { type: 'string', format: 'uri', example: 'https://example.com/hooks' },
+    events: {
+      type: 'array',
+      items: { type: 'string', enum: ['invoice.created', 'invoice.funding_received', 'invoice.funded'] },
+    },
+    createdAt: { type: 'string', format: 'date-time' },
+  },
+};
+
+const WebhookCreatedResponse = {
+  type: 'object',
+  properties: {
+    id: { type: 'string', example: 'wh_a1b2c3d4e5f6a7b8' },
+    secret: {
+      type: 'string',
+      description: 'base64url-encoded 32-byte signing secret. Shown once — store it securely.',
+      example: 'abc123...',
+    },
+    url: { type: 'string', format: 'uri' },
+    events: { type: 'array', items: { type: 'string' } },
+    createdAt: { type: 'string', format: 'date-time' },
+  },
+};
+
+const DeliveryAttempt = {
+  type: 'object',
+  properties: {
+    attempt: { type: 'integer', example: 1 },
+    status: { type: 'integer', nullable: true, example: 200 },
+    durationMs: { type: 'integer', example: 142 },
+    error: { type: 'string', nullable: true },
+  },
+};
+
+const DeliveryRecord = {
+  type: 'object',
+  properties: {
+    deliveryId: { type: 'string', example: 'dlv_a1b2c3d4e5f6' },
+    eventId: { type: 'string', example: 'evt_a1b2c3d4e5f6a7b8' },
+    eventType: { type: 'string', example: 'invoice.created' },
+    webhookId: { type: 'string' },
+    url: { type: 'string', format: 'uri' },
+    status: { type: 'string', enum: ['pending', 'delivered', 'failed'] },
+    attempts: { type: 'array', items: DeliveryAttempt },
+    createdAt: { type: 'string', format: 'date-time' },
+  },
+};
+
+const AdminSecurity = [{ BearerAuth: [] }];
+
+
 /**
  * Builds the OpenAPI document for the given public base URL.
  *
@@ -110,8 +165,15 @@ function buildSpec(baseUrl) {
         `contract holds funds until settlement. Escrow contract (testnet): ${config.contractId}`,
     },
     servers: [{ url: baseUrl }],
-    tags: [{ name: 'System' }, { name: 'Invoices' }, { name: 'Investors' }, { name: 'Escrow' }],
+    tags: [{ name: 'System' }, { name: 'Invoices' }, { name: 'Investors' }, { name: 'Escrow' }, { name: 'Webhooks' }],
     components: {
+      securitySchemes: {
+        BearerAuth: {
+          type: 'http',
+          scheme: 'bearer',
+          description: 'Admin API token (ADMIN_API_TOKEN env var). Required for all /api/webhooks routes.',
+        },
+      },
       schemas: {
         EscrowState,
         EscrowLiveResponse,
@@ -558,6 +620,93 @@ function buildSpec(baseUrl) {
             400: { description: 'Invalid or missing digest (INVALID_DIGEST / NO_FILE)', ...json(ErrorBody) },
             413: { description: 'Uploaded file exceeds 5 MiB', ...json(ErrorBody) },
             502: { description: 'Soroban RPC read failed', ...json(ErrorBody) },
+          },
+        },
+      },
+      '/api/webhooks': {
+        post: {
+          tags: ['Webhooks'],
+          summary: 'Register a webhook subscription',
+          description:
+            'Requires `Authorization: Bearer <ADMIN_API_TOKEN>`. Returns 503 if ADMIN_API_TOKEN is not configured.',
+          security: AdminSecurity,
+          requestBody: {
+            required: true,
+            ...json({
+              type: 'object',
+              required: ['url', 'events'],
+              properties: {
+                url: {
+                  type: 'string',
+                  format: 'uri',
+                  description:
+                    'HTTPS endpoint to receive events. HTTP allowed only for localhost in non-production.',
+                  example: 'https://example.com/hooks',
+                },
+                events: {
+                  type: 'array',
+                  items: {
+                    type: 'string',
+                    enum: ['invoice.created', 'invoice.funding_received', 'invoice.funded'],
+                  },
+                  example: ['invoice.created', 'invoice.funded'],
+                },
+              },
+            }),
+          },
+          responses: {
+            201: {
+              description:
+                'Subscription created. The `secret` field is shown exactly once — store it securely.',
+              ...json({ type: 'object', properties: { data: WebhookCreatedResponse } }),
+            },
+            400: { description: 'Validation failed (bad URL, invalid events, SSRF)', ...json(ErrorBody) },
+            401: { description: 'Missing or invalid admin token', ...json(ErrorBody) },
+            503: { description: 'ADMIN_API_TOKEN not configured', ...json(ErrorBody) },
+          },
+        },
+        get: {
+          tags: ['Webhooks'],
+          summary: 'List webhook subscriptions',
+          security: AdminSecurity,
+          responses: {
+            200: {
+              description: 'List of subscriptions (secrets not included)',
+              ...json({ type: 'object', properties: { data: { type: 'array', items: WebhookSubscription } } }),
+            },
+            401: { description: 'Missing or invalid admin token', ...json(ErrorBody) },
+            503: { description: 'ADMIN_API_TOKEN not configured', ...json(ErrorBody) },
+          },
+        },
+      },
+      '/api/webhooks/{id}': {
+        delete: {
+          tags: ['Webhooks'],
+          summary: 'Delete a webhook subscription',
+          security: AdminSecurity,
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            204: { description: 'Deleted' },
+            401: { description: 'Missing or invalid admin token', ...json(ErrorBody) },
+            404: { description: 'Webhook not found', ...json(ErrorBody) },
+            503: { description: 'ADMIN_API_TOKEN not configured', ...json(ErrorBody) },
+          },
+        },
+      },
+      '/api/webhooks/{id}/deliveries': {
+        get: {
+          tags: ['Webhooks'],
+          summary: 'Last 50 delivery records for a webhook',
+          security: AdminSecurity,
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            200: {
+              description: 'Delivery log (most recent first)',
+              ...json({ type: 'object', properties: { data: { type: 'array', items: DeliveryRecord } } }),
+            },
+            401: { description: 'Missing or invalid admin token', ...json(ErrorBody) },
+            404: { description: 'Webhook not found', ...json(ErrorBody) },
+            503: { description: 'ADMIN_API_TOKEN not configured', ...json(ErrorBody) },
           },
         },
       },
