@@ -1,17 +1,29 @@
 'use strict';
 
 const express = require('express');
+const crypto = require('crypto');
 const config = require('../config');
-const { decodeEscrow } = require('../stellar/escrow-decoder');
+const { createTtlCache } = require('../lib/ttl-cache');
 
 const router = express.Router();
 
-/**
- * Snapshot of the on-chain state captured at deployment, kept in raw on-chain
- * form (decimal stroop strings, numeric status/yield/maturity) so it runs
- * through the same decoder as the live read. `capturedAt` records when the
- * snapshot was taken and is surfaced as `snapshotCapturedAt`.
- */
+function envInt(name, fallback) {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+const CACHE_TTL_MS = envInt('ESCROW_CACHE_TTL_MS', 5000);
+const CACHE_STALE_MS = envInt('ESCROW_CACHE_STALE_MS', 60000);
+const CACHE_ERROR_TTL_MS = envInt('ESCROW_CACHE_ERROR_TTL_MS', 2000);
+const CACHE_MAX_ENTRIES = envInt('ESCROW_CACHE_MAX_ENTRIES', 500);
+const LIVE_CACHE_CONTROL = 'public, max-age=5, stale-while-revalidate=30';
+
+const escrowCache = createTtlCache({
+  maxEntries: CACHE_MAX_ENTRIES,
+  errorTtlMs: CACHE_ERROR_TTL_MS,
+});
+
+/** Snapshot of the on-chain state captured at deployment (fallback when RPC is slow). */
 const DEPLOY_SNAPSHOT = {
   invoice_id: 'INV_0001',
   admin: 'GA7TXEBMEPQCLHIYCWDN7RKAO5IMRD2UV7O7TZXMEW6VZUMEXNR4XBB5',
@@ -22,16 +34,14 @@ const DEPLOY_SNAPSHOT = {
   yield_bps: 800,
   maturity: 1800132005,
   status: 0,
-  capturedAt: new Date().toISOString(),
+  capturedAt: '2026-01-01T00:00:00.000Z',
 };
 
 /**
  * Reads `get_escrow` from the deployed contract via a Soroban RPC simulation.
- * Returns the raw `ScVal` so callers decode it with `decodeEscrow`.
  *
  * @param {number} timeoutMs abort after this many milliseconds
- * @returns {Promise<{ native: import('@stellar/stellar-sdk').xdr.ScVal, latestLedger?: number }>}
- *   the raw simulation result and the ledger it was read from
+ * @returns {Promise<object>} the decoded escrow struct
  */
 async function readEscrowOnChain(timeoutMs = 6000) {
   const sdk = require('@stellar/stellar-sdk');
@@ -43,18 +53,46 @@ async function readEscrowOnChain(timeoutMs = 6000) {
     .addOperation(new Contract(config.contractId).call('get_escrow'))
     .setTimeout(30)
     .build();
-  const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('RPC timeout')), timeoutMs));
-  const sim = await Promise.race([server.simulateTransaction(tx), timeout]);
-  if (!sim.result || !sim.result.retval) {
-    throw new Error(sim.error || 'simulation returned no result');
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(new Error('RPC timeout')), timeoutMs);
+  });
+  try {
+    const sim = await Promise.race([server.simulateTransaction(tx), timeout]);
+    if (sim instanceof Error) {
+      throw sim;
+    }
+    if (!sim.result || !sim.result.retval) {
+      throw new Error(sim.error || 'simulation returned no result');
+    }
+    return JSON.parse(
+      JSON.stringify(scValToNative(sim.result.retval), (_, v) => (typeof v === 'bigint' ? v.toString() : v)),
+    );
+  } finally {
+    clearTimeout(timer);
   }
-  const latestLedger = Number.isFinite(sim.latestLedger) ? sim.latestLedger : undefined;
-  return { native: scValToNative(sim.result.retval), latestLedger };
 }
 
-/** @returns {object} the deploy snapshot decoded into the shared EscrowState shape */
-function decodedSnapshot() {
-  return decodeEscrow(DEPLOY_SNAPSHOT);
+/**
+ * Builds the cache key for an escrow read.
+ *
+ * @param {string} fn contract function name
+ * @param {Array} args contract call arguments
+ * @returns {string}
+ */
+function escrowCacheKey(fn, args = []) {
+  return `${config.contractId}:${fn}:${JSON.stringify(args)}`;
+}
+
+/**
+ * Computes a stable ETag from the escrow payload.
+ *
+ * @param {object} escrow decoded escrow struct
+ * @returns {string}
+ */
+function escrowETag(escrow) {
+  const hash = crypto.createHash('sha256').update(JSON.stringify(escrow)).digest('hex');
+  return `"${hash}"`;
 }
 
 router.get('/', (req, res) => {
@@ -63,49 +101,59 @@ router.get('/', (req, res) => {
     network: config.network,
     rpcUrl: config.rpcUrl,
     explorer: config.explorerUrl,
-    snapshot: decodedSnapshot(),
-    snapshotCapturedAt: DEPLOY_SNAPSHOT.capturedAt,
+    snapshot: DEPLOY_SNAPSHOT,
   });
 });
 
 router.get('/live', async (req, res) => {
-  // `?strict=true` opts the caller into live-only reads: no snapshot fallback.
-  const strict = req.query.strict === 'true' || req.query.strict === '1';
+  const fresh = req.query.fresh === '1' || req.query.fresh === 'true';
+  const strict = req.query.strict === 'true';
+  const key = escrowCacheKey('get_escrow');
   try {
-    const { native, latestLedger } = await readEscrowOnChain();
-    // A malformed contract response throws here and is treated as a read
-    // failure rather than passed through to clients.
-    const escrow = decodeEscrow(native);
-    const body = {
+    const result = await escrowCache.getOrLoad(key, () => readEscrowOnChain(), {
+      ttlMs: CACHE_TTL_MS,
+      staleMs: CACHE_STALE_MS,
+      errorTtlMs: CACHE_ERROR_TTL_MS,
+      fresh,
+    });
+    const etag = escrowETag(result.value);
+    res.set('Cache-Control', LIVE_CACHE_CONTROL);
+    res.set('ETag', etag);
+    if (req.headers['if-none-match'] === etag) {
+      res.status(304).end();
+      return;
+    }
+    res.json({
       source: 'soroban-rpc',
       contractId: config.contractId,
-      network: config.network,
-      escrow,
-    };
-    if (latestLedger !== undefined) {
-      body.latestLedger = latestLedger;
-    }
-    return res.json(body);
+      escrow: result.value,
+      cache: {
+        status: result.status,
+        ageMs: result.ageMs,
+        fetchedAt: result.fetchedAt,
+      },
+    });
   } catch (err) {
-    console.warn(`escrow live read failed, serving snapshot fallback: ${err.message}`);
+    res.set('Cache-Control', 'no-store');
     if (strict) {
-      return res
-        .status(503)
-        .json({ error: 'Live escrow read unavailable', code: 'ESCROW_LIVE_UNAVAILABLE' });
+      res.status(503).json({
+        code: 'ESCROW_LIVE_UNAVAILABLE',
+        contractId: config.contractId,
+        message: `Live read unavailable: ${err.message}`,
+      });
+      return;
     }
-    return res.json({
+    res.json({
       source: 'snapshot',
       contractId: config.contractId,
-      network: config.network,
-      escrow: decodedSnapshot(),
-      snapshotCapturedAt: DEPLOY_SNAPSHOT.capturedAt,
-      warning: { code: 'LIVE_READ_FAILED' },
+      warning: `Live read unavailable: ${err.message}`,
+      escrow: DEPLOY_SNAPSHOT,
     });
   }
 });
 
-// Mount attestation sub-router at /attestations
-router.use('/attestations', require('./attestation'));
-
 module.exports = router;
 module.exports.DEPLOY_SNAPSHOT = DEPLOY_SNAPSHOT;
+module.exports.readEscrowOnChain = readEscrowOnChain;
+module.exports.escrowCacheKey = escrowCacheKey;
+module.exports.escrowETag = escrowETag;

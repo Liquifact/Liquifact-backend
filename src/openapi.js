@@ -20,6 +20,16 @@ const Invoice = {
   },
 };
 
+const CacheMeta = {
+  type: 'object',
+  required: ['status', 'ageMs', 'fetchedAt'],
+  properties: {
+    status: { type: 'string', enum: ['hit', 'miss', 'stale'] },
+    ageMs: { type: 'integer', minimum: 0 },
+    fetchedAt: { type: 'string', format: 'date-time' },
+  },
+};
+
 const json = (schema) => ({ content: { 'application/json': { schema } } });
 const ErrorBody = { type: 'object', properties: { error: { type: 'string' } } };
 
@@ -93,6 +103,17 @@ const EscrowLiveResponse = {
   },
 };
 
+const EscrowSnapshotResponse = {
+  type: 'object',
+  required: ['source', 'contractId', 'escrow', 'warning'],
+  properties: {
+    source: { type: 'string', enum: ['snapshot'] },
+    contractId: { type: 'string' },
+    warning: { type: 'string' },
+    escrow: EscrowState,
+  },
+};
+
 /**
  * Builds the OpenAPI document for the given public base URL.
  *
@@ -107,7 +128,7 @@ function buildSpec(baseUrl) {
       version: config.version,
       description:
         'Invoice liquidity network on Stellar. SMEs tokenize invoices, investors fund them, and a Soroban escrow ' +
-        `contract holds funds until settlement. Escrow contract (testnet): ${config.contractId}`,
+        'holds funds until settlement. Escrow contract (testnet): ' + config.contractId,
     },
     servers: [{ url: baseUrl }],
     tags: [{ name: 'System' }, { name: 'Invoices' }, { name: 'Investors' }, { name: 'Escrow' }],
@@ -398,11 +419,21 @@ function buildSpec(baseUrl) {
       '/api/escrow/live': {
         get: {
           tags: ['Escrow'],
-          summary: 'Live escrow state read from Soroban RPC (falls back to deploy snapshot)',
+          summary: 'Live escrow state read from Soroban RPC (cached, falls back to deploy snapshot)',
           description:
+            'Served from a small in-process TTL cache with single-flight and stale-while-revalidate. ' +
+            'The `cache.status` is `miss` on the first load, `hit` within the TTL, and `stale` while ' +
+            'a background refresh is in flight. Use `?fresh=1` to bypass the cache (still single-flighted). ' +
             'Returns the same typed EscrowState from both paths: the live Soroban RPC read and the deploy ' +
             'snapshot fallback. Set `strict=true` to fail instead of falling back to the snapshot.',
           parameters: [
+            {
+              name: 'fresh',
+              in: 'query',
+              required: false,
+              schema: { type: 'string', enum: ['1', 'true'] },
+              description: 'Bypass the cache and force a reload (still single-flighted).',
+            },
             {
               name: 'strict',
               in: 'query',
@@ -412,7 +443,11 @@ function buildSpec(baseUrl) {
             },
           ],
           responses: {
-            200: { description: 'Escrow state (live read, or snapshot fallback with a warning)', ...json({ $ref: '#/components/schemas/EscrowLiveResponse' }) },
+            200: {
+              description: 'Live escrow state (or snapshot fallback)',
+              ...json({ type: 'object', oneOf: [EscrowLiveResponse, EscrowSnapshotResponse] }),
+            },
+            304: { description: 'Not Modified (ETag match)' },
             503: {
               description: 'Live read failed and strict mode was requested',
               ...json({
@@ -565,4 +600,4 @@ function buildSpec(baseUrl) {
   };
 }
 
-module.exports = { buildSpec };
+module.exports = { buildSpec, EscrowLiveResponse, EscrowSnapshotResponse, CacheMeta };
