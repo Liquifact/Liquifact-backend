@@ -3,11 +3,27 @@
 const express = require('express');
 const { StrKey } = require('@stellar/stellar-sdk');
 const store = require('../data/store');
+const { auditContext } = require('../audit/middleware');
 const contributions = require('../data/contributions');
 const config = require('../config');
 const { toMinor, fromMinor, couponMinor, daysBetween, annualisedBps } = require('../domain/returns');
+const { parseInvoiceQuery, queryInvoices, InvoiceQueryError } = require('../services/invoice-query');
 
 const router = express.Router();
+router.use(auditContext());
+
+/**
+ * Adds the computed remainingCapacity field to an invoice representation.
+ *
+ * @param {object} invoice invoice record
+ * @returns {object} invoice with remainingCapacity
+ */
+function present(invoice) {
+  if (!invoice) {
+    return invoice;
+  }
+  return { ...invoice, remainingCapacity: store.remaining(invoice) };
+}
 
 /**
  * Validates a create-invoice payload.
@@ -39,11 +55,12 @@ function validateInvoice(body) {
   if (typeof b.amount !== 'number' || !(b.amount > 0) || b.amount > 1e12) {
     errors.push('amount must be a positive number');
   }
-  const yieldBps = b.yieldBps === undefined ? 800 : b.yieldBps;
+  const yieldBps = b.yieldBps == null ? 800 : b.yieldBps;
   if (!Number.isInteger(yieldBps) || yieldBps < 0 || yieldBps > 10000) {
     errors.push('yieldBps must be an integer between 0 and 10000');
   }
-  if (typeof b.dueDate !== 'string' || Number.isNaN(Date.parse(b.dueDate))) {
+  const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+  if (!ISO_DATE.test(b.dueDate) || Number.isNaN(Date.parse(b.dueDate))) {
     errors.push('dueDate must be an ISO date (YYYY-MM-DD)');
   }
   if (errors.length) {
@@ -65,12 +82,16 @@ function validateInvoice(body) {
 }
 
 router.get('/', (req, res) => {
-  const { status } = req.query;
-  if (status && !store.STATUSES.includes(status)) {
-    return res.status(400).json({ error: `status must be one of ${store.STATUSES.join(', ')}` });
+  try {
+    const query = parseInvoiceQuery(req.query);
+    const page = queryInvoices(store.list(), query);
+    return res.json({ ...page, data: page.data.map(present) });
+  } catch (error) {
+    if (!(error instanceof InvoiceQueryError)) {
+      throw error;
+    }
+    return res.status(400).json({ error: error.message, code: error.code, details: error.details });
   }
-  const data = status ? store.list().filter((i) => i.status === status) : store.list();
-  return res.json({ data, count: data.length });
 });
 
 router.get('/:id', (req, res) => {
@@ -78,7 +99,7 @@ router.get('/:id', (req, res) => {
   if (!invoice) {
     return res.status(404).json({ error: 'Invoice not found' });
   }
-  return res.json({ data: invoice });
+  return res.json({ data: present(invoice) });
 });
 
 router.get('/:id/quote', (req, res) => {
@@ -139,40 +160,109 @@ router.get('/:id/quote', (req, res) => {
 router.post('/', (req, res) => {
   const { value, errors } = validateInvoice(req.body);
   if (errors) {
+    req.audit({
+      action: 'invoice.create',
+      resourceType: 'invoice',
+      outcome: 'rejected',
+      statusCode: 400,
+      metadata: { errors },
+    });
     return res.status(400).json({ error: 'Validation failed', details: errors });
   }
+  let invoice;
   try {
-    return res.status(201).json({ data: store.create(value) });
+    invoice = store.create(value);
   } catch (error) {
-    if (error instanceof store.DuplicateInvoiceError) {
-      return res.status(409).json({ code: error.code, existingId: error.existingId });
+    if (!(error instanceof store.DuplicateInvoiceError)) {
+      throw error;
     }
-    throw error;
+    req.audit({
+      action: 'invoice.create',
+      resourceType: 'invoice',
+      outcome: 'rejected',
+      statusCode: 409,
+      metadata: { code: error.code, existingId: error.existingId },
+    });
+    return res.status(409).json({ code: error.code, existingId: error.existingId });
   }
+  req.audit({
+    action: 'invoice.create',
+    resourceType: 'invoice',
+    resourceId: invoice.id,
+    outcome: 'success',
+    statusCode: 201,
+    after: invoice,
+  });
+  return res.status(201).json({ data: present(invoice) });
 });
 
 router.post('/:id/fund', (req, res) => {
+  const record = (details) =>
+    req.audit({ action: 'invoice.fund', resourceType: 'invoice', resourceId: req.params.id, ...details });
+  const reject = (statusCode, error, details, extra = {}) => {
+    record({ outcome: 'rejected', statusCode, metadata: { error, ...details.metadata }, before: details.before });
+    return res.status(statusCode).json({ error, ...extra });
+  };
+
   const invoice = store.get(req.params.id);
   if (!invoice) {
-    return res.status(404).json({ error: 'Invoice not found' });
+    return reject(404, 'Invoice not found', {});
   }
-  const { amount, investor } = req.body || {};
+  const body = req.body || {};
+  const { amount, investor } = body;
+  const before = { fundedAmount: invoice.fundedAmount, status: invoice.status };
+  const requested = {
+    requestedAmount: typeof amount === 'number' && Number.isFinite(amount) ? amount : null,
+    requestedAmountType: typeof amount,
+  };
   if (investor === undefined || investor === null || investor === '') {
-    return res.status(400).json({ error: 'INVESTOR_REQUIRED' });
+    return reject(400, 'INVESTOR_REQUIRED', { before, metadata: requested });
   }
   if (typeof investor !== 'string' || !StrKey.isValidEd25519PublicKey(investor)) {
-    return res.status(400).json({ error: 'INVALID_INVESTOR_ADDRESS' });
+    return reject(400, 'INVALID_INVESTOR_ADDRESS', { before, metadata: requested });
   }
   if (invoice.smeAddress && investor === invoice.smeAddress) {
-    return res.status(422).json({ error: 'SELF_FUNDING_NOT_ALLOWED' });
+    return reject(422, 'SELF_FUNDING_NOT_ALLOWED', { before, metadata: requested });
   }
-  if (typeof amount !== 'number' || !(amount > 0) || !Number.isFinite(amount)) {
-    return res.status(400).json({ error: 'amount must be a positive number' });
+  if (typeof amount !== 'number' || !Number.isFinite(amount) || !(amount > 0)) {
+    return reject(400, 'amount must be a positive finite number', { before, metadata: requested }, { code: 'INVALID_AMOUNT' });
+  }
+  if (amount > invoice.amount) {
+    return reject(400, 'amount must not exceed the invoice face value', { before, metadata: requested }, {
+      code: 'INVALID_AMOUNT',
+    });
   }
   if (invoice.status !== 'open') {
-    return res.status(409).json({ error: `Invoice is ${invoice.status}; only open invoices can be funded` });
+    return reject(409, `Invoice is ${invoice.status}; only open invoices can be funded`, {
+      before,
+      metadata: requested,
+    });
   }
-  return res.json({ data: store.fund(invoice, amount, investor) });
+
+  // Contributions are accepted in full or rejected; allowPartial explicitly caps at remaining capacity.
+  const remainingCapacity = store.remaining(invoice);
+  let accepted = amount;
+  if (amount > remainingCapacity) {
+    if (body.allowPartial !== true) {
+      return reject(422, 'Contribution exceeds remaining capacity', {
+        before,
+        metadata: { ...requested, remainingCapacity },
+      }, { code: 'FUNDING_EXCEEDS_CAPACITY', remainingCapacity });
+    }
+    accepted = remainingCapacity;
+  }
+  const updated = store.fund(invoice, accepted, investor);
+  record({
+    outcome: 'success',
+    statusCode: 200,
+    before,
+    after: { fundedAmount: updated.fundedAmount, status: updated.status },
+    metadata: accepted === amount ? requested : { ...requested, accepted, rejected: amount - accepted },
+  });
+  if (accepted !== amount) {
+    return res.json({ data: present(updated), accepted, rejected: amount - accepted });
+  }
+  return res.json({ data: present(updated) });
 });
 
 router.get('/:id/contributions', (req, res) => {
@@ -223,6 +313,54 @@ router.get('/:id/contributions', (req, res) => {
   }
 
   return res.json(response);
+});
+
+/**
+ * Builds an audit-recording helper for a status transition route.
+ *
+ * @param {import('express').Request} req request carrying `req.audit`
+ * @param {import('express').Response} res response
+ * @param {string} action audit action name, e.g. "invoice.settle"
+ * @returns {{ reject: Function, success: Function }} helpers that record and respond
+ */
+function transitionAudit(req, res, action) {
+  const record = (details) => req.audit({ action, resourceType: 'invoice', resourceId: req.params.id, ...details });
+  return {
+    reject(statusCode, error, before = null) {
+      record({ outcome: 'rejected', statusCode, before, metadata: { error } });
+      return res.status(statusCode).json({ error });
+    },
+    success(before, updated) {
+      record({ outcome: 'success', statusCode: 200, before, after: { fundedAmount: updated.fundedAmount, status: updated.status } });
+      return res.json({ data: updated });
+    },
+  };
+}
+
+router.post('/:id/settle', (req, res) => {
+  const audit = transitionAudit(req, res, 'invoice.settle');
+  const invoice = store.get(req.params.id);
+  if (!invoice) {
+    return audit.reject(404, 'Invoice not found');
+  }
+  const before = { fundedAmount: invoice.fundedAmount, status: invoice.status };
+  if (invoice.status !== 'funded') {
+    return audit.reject(409, `Invoice is ${invoice.status}; only funded invoices can be settled`, before);
+  }
+  return audit.success(before, store.settle(invoice));
+});
+
+router.post('/:id/cancel', (req, res) => {
+  const audit = transitionAudit(req, res, 'invoice.cancel');
+  const invoice = store.get(req.params.id);
+  if (!invoice) {
+    return audit.reject(404, 'Invoice not found');
+  }
+  const before = { fundedAmount: invoice.fundedAmount, status: invoice.status };
+  if (invoice.status !== 'open' && invoice.status !== 'funded') {
+    return audit.reject(409, `Invoice is ${invoice.status}; only open or funded invoices can be cancelled`, before);
+  }
+  return audit.success(before, store.cancel(invoice));
 });
 
 module.exports = router;
