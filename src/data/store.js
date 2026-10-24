@@ -6,9 +6,13 @@
  * intentional for the public demo (no database required).
  */
 
+const assert = require('node:assert');
+const contributions = require('./contributions');
+
 const STATUSES = ['open', 'funded', 'settled', 'cancelled'];
 
-const seed = () => [
+const seed = () => {
+  const records = [
   {
     id: 'INV_0001',
     sme: 'Acme Components Ltd',
@@ -65,7 +69,16 @@ const seed = () => [
     onChain: false,
     createdAt: '2026-07-01T08:00:00.000Z',
   },
-];
+  ];
+  for (const inv of records) {
+    assert.strictEqual(
+      inv.fundedAmount,
+      contributions.sumForInvoice(inv.id),
+      `Invoice ${inv.id} fundedAmount must equal contributions sum`,
+    );
+  }
+  return records;
+};
 
 let invoices = seed();
 
@@ -105,19 +118,50 @@ function create(invoice) {
  *
  * @param {object} invoice target invoice
  * @param {number} amount contribution amount
+ * @param {string} investor investor Stellar address
  * @returns {object} updated invoice
  */
-function fund(invoice, amount) {
-  invoice.fundedAmount = Math.min(invoice.amount, invoice.fundedAmount + amount);
+function fund(invoice, amount, investor) {
+  assert(investor, 'investor address is required to fund an invoice');
+  contributions.record({ invoiceId: invoice.id, investor, amount });
+  invoice.fundedAmount = contributions.sumForInvoice(invoice.id);
   if (invoice.fundedAmount >= invoice.amount) {
     invoice.status = 'funded';
   }
+  assert.strictEqual(
+    invoice.fundedAmount,
+    contributions.sumForInvoice(invoice.id),
+    `Invoice ${invoice.id} fundedAmount must equal contributions sum`,
+  );
+  return invoice;
+}
+
+/**
+ * Marks a fully funded invoice as settled (debtor paid).
+ *
+ * @param {object} invoice target invoice
+ * @returns {object} updated invoice
+ */
+function settle(invoice) {
+  invoice.status = 'settled';
+  return invoice;
+}
+
+/**
+ * Cancels an open or funded invoice.
+ *
+ * @param {object} invoice target invoice
+ * @returns {object} updated invoice
+ */
+function cancel(invoice) {
+  invoice.status = 'cancelled';
   return invoice;
 }
 
 /** Restores the seed data (used by tests). */
 function reset() {
+  contributions.reset();
   invoices = seed();
 }
 
-module.exports = { STATUSES, list, get, create, fund, reset };
+module.exports = { STATUSES, list, get, create, fund, settle, cancel, reset };

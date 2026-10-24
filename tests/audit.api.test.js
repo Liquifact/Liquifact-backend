@@ -9,6 +9,7 @@ const { createAuditRouter } = require('../src/routes/audit');
 
 const TOKEN = 'test-admin-token';
 const admin = (req) => req.set('Authorization', `Bearer ${TOKEN}`);
+const INVESTOR = 'GBTUJNOF2WAAUPKCJHBB76ID5HGN6KMTUG43F3Z344T7QRTP7B7TVPVC';
 const NEW_INVOICE = { sme: 'Test SME', debtor: 'Buyer', amount: 500, dueDate: '2027-01-01' };
 const entries = () => auditLog.entries();
 
@@ -51,7 +52,7 @@ describe('recording mutations', () => {
   });
 
   test('invoice.fund records before/after fundedAmount and status', async () => {
-    const res = await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 1000 });
+    const res = await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 1000, investor: INVESTOR });
     expect(res.status).toBe(200);
     expect(res.body.data.fundedAmount).toBe(19000);
     const [e] = entries();
@@ -64,19 +65,47 @@ describe('recording mutations', () => {
     expect(e.metadata.requestedAmount).toBe(1000);
   });
 
-  test('a fund that completes the invoice records the status change, and the requested amount when capped', async () => {
-    const res = await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 50000 });
+  test('a fund that completes the invoice records the status change and the requested amount', async () => {
+    const res = await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 7000, investor: INVESTOR });
     expect(res.body.data.status).toBe('funded');
     const [e] = entries();
     expect(e.before).toEqual({ fundedAmount: 18000, status: 'open' });
     expect(e.after).toEqual({ fundedAmount: 25000, status: 'funded' });
-    expect(e.metadata.requestedAmount).toBe(50000);
+    expect(e.metadata.requestedAmount).toBe(7000);
+  });
+
+  test('a fund without a valid investor is recorded as rejected', async () => {
+    const res = await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 10 });
+    expect(res.status).toBe(400);
+    const [e] = entries();
+    expect(e.action).toBe('invoice.fund');
+    expect(e.outcome).toBe('rejected');
+    expect(e.metadata.error).toBe('INVESTOR_REQUIRED');
+    expect(e.before).toEqual({ fundedAmount: 18000, status: 'open' });
+  });
+
+  test('settle and cancel transitions are recorded with before/after status', async () => {
+    expect((await request(app).post('/api/invoices/INV_0003/settle')).status).toBe(200);
+    expect((await request(app).post('/api/invoices/INV_0001/settle')).status).toBe(409);
+    expect((await request(app).post('/api/invoices/INV_0001/cancel')).status).toBe(200);
+    expect((await request(app).post('/api/invoices/missing/cancel')).status).toBe(404);
+
+    const [settled, notFunded, cancelled, missing] = entries();
+    expect(settled).toEqual(expect.objectContaining({ action: 'invoice.settle', resourceId: 'INV_0003', outcome: 'success', statusCode: 200 }));
+    expect(settled.before).toEqual({ fundedAmount: 42000, status: 'funded' });
+    expect(settled.after).toEqual({ fundedAmount: 42000, status: 'settled' });
+    expect(notFunded).toEqual(expect.objectContaining({ action: 'invoice.settle', outcome: 'rejected', statusCode: 409 }));
+    expect(cancelled).toEqual(expect.objectContaining({ action: 'invoice.cancel', outcome: 'success' }));
+    expect(cancelled.after.status).toBe('cancelled');
+    expect(missing).toEqual(expect.objectContaining({ action: 'invoice.cancel', outcome: 'rejected', statusCode: 404 }));
+    expect(missing.before).toBeNull();
+    expect(auditLog.verify()).toEqual({ valid: true, entries: 4 });
   });
 
   test('rejected fund attempts (404, 400, 409) are recorded as rejected and change nothing', async () => {
-    expect((await request(app).post('/api/invoices/missing/fund').send({ amount: 5 })).status).toBe(404);
-    expect((await request(app).post('/api/invoices/INV_0001/fund').send({ amount: -5 })).status).toBe(400);
-    expect((await request(app).post('/api/invoices/INV_0003/fund').send({ amount: 1 })).status).toBe(409);
+    expect((await request(app).post('/api/invoices/missing/fund').send({ amount: 5, investor: INVESTOR })).status).toBe(404);
+    expect((await request(app).post('/api/invoices/INV_0001/fund').send({ amount: -5, investor: INVESTOR })).status).toBe(400);
+    expect((await request(app).post('/api/invoices/INV_0003/fund').send({ amount: 1, investor: INVESTOR })).status).toBe(409);
 
     const [notFound, invalid, notOpen] = entries();
     expect(entries().map((e) => e.outcome)).toEqual(['rejected', 'rejected', 'rejected']);
@@ -114,7 +143,7 @@ describe('recording mutations', () => {
     expect(Object.keys(created.body)).toEqual(['data']);
     const bad = await request(app).post('/api/invoices').send({});
     expect(Object.keys(bad.body).sort()).toEqual(['details', 'error']);
-    const funded = await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 1 });
+    const funded = await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 1, investor: INVESTOR });
     expect(Object.keys(funded.body)).toEqual(['data']);
   });
 
@@ -126,22 +155,22 @@ describe('recording mutations', () => {
   });
 
   test('a safe client request id is kept; an unsafe one is replaced', async () => {
-    await request(app).post('/api/invoices/INV_0002/fund').set('X-Request-Id', 'req-123').send({ amount: 1 });
-    await request(app).post('/api/invoices/INV_0002/fund').set('X-Request-Id', 'bad id!<script>').send({ amount: 1 });
+    await request(app).post('/api/invoices/INV_0002/fund').set('X-Request-Id', 'req-123').send({ amount: 1, investor: INVESTOR });
+    await request(app).post('/api/invoices/INV_0002/fund').set('X-Request-Id', 'bad id!<script>').send({ amount: 1, investor: INVESTOR });
     expect(entries()[0].requestId).toBe('req-123');
     expect(entries()[1].requestId).toMatch(/^[0-9a-f-]{36}$/);
   });
 
   test('the client IP is stored truncated', async () => {
-    await request(app).post('/api/invoices/INV_0002/fund').set('X-Forwarded-For', '203.0.113.77').send({ amount: 1 });
+    await request(app).post('/api/invoices/INV_0002/fund').set('X-Forwarded-For', '203.0.113.77').send({ amount: 1, investor: INVESTOR });
     expect(entries()[0].ip).toBe('203.0.113.0/24');
     expect(JSON.stringify(entries())).not.toContain('203.0.113.77');
   });
 
   test('the chain verifies after a mix of mutations', async () => {
     await request(app).post('/api/invoices').send(NEW_INVOICE);
-    await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 10 });
-    await request(app).post('/api/invoices/missing/fund').send({ amount: 10 });
+    await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 10, investor: INVESTOR });
+    await request(app).post('/api/invoices/missing/fund').send({ amount: 10, investor: INVESTOR });
     const res = await admin(request(app).get('/api/audit/verify'));
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ valid: true, entries: 3 });
@@ -157,9 +186,9 @@ describe('redaction', () => {
 
     await request(app).post('/api/invoices').set(headers).send({ ...NEW_INVOICE, ...extras });
     await request(app).post('/api/invoices').set(headers).send({ sme: '', ...extras });
-    await request(app).post('/api/invoices/INV_0002/fund').set(headers).send({ amount: 1, ...extras });
-    await request(app).post('/api/invoices/INV_0003/fund').set(headers).send({ amount: 1, ...extras });
-    await request(app).post('/api/invoices/missing/fund').set(headers).send({ amount: 1, ...extras });
+    await request(app).post('/api/invoices/INV_0002/fund').set(headers).send({ amount: 1, investor: INVESTOR, ...extras });
+    await request(app).post('/api/invoices/INV_0003/fund').set(headers).send({ amount: 1, investor: INVESTOR, ...extras });
+    await request(app).post('/api/invoices/missing/fund').set(headers).send({ amount: 1, investor: INVESTOR, ...extras });
     expect(entries()).toHaveLength(5);
 
     const stored = JSON.stringify(entries());
@@ -173,9 +202,9 @@ describe('redaction', () => {
 describe('GET /api/audit', () => {
   beforeEach(async () => {
     await request(app).post('/api/invoices').send(NEW_INVOICE); // seq 1 -> INV_0005
-    await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 1 }); // seq 2
-    await request(app).post('/api/invoices/INV_0001/fund').send({ amount: 1 }); // seq 3
-    await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 1 }); // seq 4
+    await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 1, investor: INVESTOR }); // seq 2
+    await request(app).post('/api/invoices/INV_0001/fund').send({ amount: 1, investor: INVESTOR }); // seq 3
+    await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 1, investor: INVESTOR }); // seq 4
   });
 
   test('lists entries oldest first', async () => {
@@ -293,7 +322,7 @@ describe('history cannot be rewritten through the API', () => {
   });
 
   test('there is no route to edit or delete entries', async () => {
-    await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 1 });
+    await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 1, investor: INVESTOR });
     const before = JSON.stringify(entries());
     for (const method of ['post', 'put', 'patch', 'delete']) {
       for (const path of ['/api/audit', '/api/audit/1']) {
