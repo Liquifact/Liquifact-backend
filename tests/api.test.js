@@ -3,9 +3,29 @@
 const request = require('supertest');
 const app = require('../src/app');
 const store = require('../src/data/store');
-const { logger } = require('../src/logger');
 
 beforeEach(() => store.reset());
+
+/**
+ * Capture every line written by the pino logger during fn().
+ * Uses the logger's own level-agnostic child stream via a spy on write,
+ * which works regardless of how pino was constructed.
+ * @param {() => Promise<void>} fn
+ * @returns {Promise<string[]>}
+ */
+async function captureLogLines(fn) {
+  const lines = [];
+  const spy = jest.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+    lines.push(String(chunk));
+    return true;
+  });
+  try {
+    await fn();
+  } finally {
+    spy.mockRestore();
+  }
+  return lines.join('').split('\n').filter(Boolean);
+}
 
 describe('system', () => {
   test('GET /health', async () => {
@@ -48,16 +68,18 @@ describe('system', () => {
   });
 
   test('emits an access log line with templated route and reqId', async () => {
-    const lines = [];
-    const stream = { write: (line) => lines.push(line) };
-    const original = logger[Symbol.for('pino.stream')];
-    logger[Symbol.for('pino.stream')] = stream;
-    try {
+    const lines = await captureLogLines(async () => {
       await request(app).get('/api/invoices/INV_0001').set('X-Request-Id', 'access-log-123');
-    } finally {
-      logger[Symbol.for('pino.stream')] = original;
-    }
-    const access = lines.map((l) => JSON.parse(l)).find((l) => l.reqId === 'access-log-123');
+    });
+    const access = lines
+      .map((l) => {
+        try {
+          return JSON.parse(l);
+        } catch {
+          return null;
+        }
+      })
+      .find((l) => l && l.reqId === 'access-log-123');
     expect(access).toBeDefined();
     expect(access.route).toBe('/api/invoices/:id');
     expect(access.method).toBe('GET');
@@ -65,18 +87,12 @@ describe('system', () => {
   });
 
   test('never logs the Authorization header value', async () => {
-    const lines = [];
-    const stream = { write: (line) => lines.push(line) };
-    const original = logger[Symbol.for('pino.stream')];
-    logger[Symbol.for('pino.stream')] = stream;
-    try {
+    const lines = await captureLogLines(async () => {
       await request(app)
         .get('/api/invoices')
         .set('X-Request-Id', 'auth-log-123')
         .set('Authorization', 'Bearer super-secret-token-value');
-    } finally {
-      logger[Symbol.for('pino.stream')] = original;
-    }
+    });
     expect(lines.join('')).not.toContain('super-secret-token-value');
   });
 });
@@ -124,22 +140,26 @@ describe('escrow', () => {
   });
 
   test('GET /api/escrow/live logs a warn when RPC fails and falls back', async () => {
-    const escrow = require('../src/services/escrow');
+    const escrow = require('../src/services/escrowLive');
+    const { readEscrowOnChain } = escrow;
     const spy = jest
       .spyOn(escrow, 'readEscrowOnChain')
       .mockRejectedValue(new Error('rpc down'));
-    const lines = [];
-    const stream = { write: (line) => lines.push(line) };
-    const original = logger[Symbol.for('pino.stream')];
-    logger[Symbol.for('pino.stream')] = stream;
-    try {
-      const res = await request(app).get('/api/escrow/live').set('X-Request-Id', 'rpc-warn-123');
-      expect(res.status).toBe(200);
-    } finally {
-      logger[Symbol.for('pino.stream')] = original;
-      spy.mockRestore();
-    }
-    const warn = lines.map((l) => JSON.parse(l)).find((l) => l.level === 40 && l.reqId === 'rpc-warn-123');
+    let res;
+    const lines = await captureLogLines(async () => {
+      res = await request(app).get('/api/escrow/live').set('X-Request-Id', 'rpc-warn-123');
+    });
+    spy.mockRestore();
+    expect(res.status).toBe(200);
+    const warn = lines
+      .map((l) => {
+        try {
+          return JSON.parse(l);
+        } catch {
+          return null;
+        }
+      })
+      .find((l) => l && l.level === 40 && l.reqId === 'rpc-warn-123');
     expect(warn).toBeDefined();
     expect(warn.err).toBe('rpc down');
   });
