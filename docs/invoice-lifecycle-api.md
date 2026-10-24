@@ -158,10 +158,95 @@ Returns the full, tenant-scoped audit trail for an invoice, most recent first.
 }
 ```
 
+## PATCH Field Validation
+
+`PATCH /v1/invoices/:id` enforces **strict field-level validation** via the
+`validatePatchFields` middleware (`src/middleware/patchInvoice.js`). Unknown or
+non-mutable fields are **rejected with 422** rather than silently stripped.
+
+### Mutable fields
+
+| Field | Type | Always editable? |
+|---|---|---|
+| `amount` | number | Only when status is not locked (`verified`, `funded`, `settled`, `cancelled`) |
+| `customer` | string | Only when status is not locked |
+| `notes` | string | Yes — editable at any status |
+
+### Rejection behaviour
+
+| Condition | HTTP Status | Response format |
+|---|---|---|
+| Body contains fields not in `{amount, customer, notes}` | `422` | RFC 7807 problem detail with `fieldErrors` map |
+| Body is empty (no fields at all) | `422` | RFC 7807 problem detail with `fieldErrors._root` |
+| Body contains `__proto__`, `constructor`, or `prototype` | `400` | `{ error: "Request body must be a JSON object." }` |
+| Body is not a plain object (string, number, array, null) | `400` | `{ error: "Request body must be a JSON object." }` |
+
+### Example: unknown field rejection
+
+**Request:**
+
+```bash
+curl -X PATCH http://localhost:3001/v1/invoices/inv-001 \
+  -H "Content-Type: application/json" \
+  -H "x-tenant-id: tenant-a" \
+  -d '{"amount": 500, "status": "funded", "yieldBps": 250}'
+```
+
+**Response:**
+
+```http
+HTTP/1.1 422 Unprocessable Entity
+Content-Type: application/json
+
+{
+  "type": "https://liquifact.com/probs/validation-error",
+  "title": "Validation Error",
+  "status": 422,
+  "detail": "Request body contains unrecognized or forbidden fields.",
+  "code": "VALIDATION_ERROR",
+  "fieldErrors": {
+    "status": "Field is not mutable",
+    "yieldBps": "Field is not mutable"
+  }
+}
+```
+
+### Example: empty payload rejection
+
+**Request:**
+
+```bash
+curl -X PATCH http://localhost:3001/v1/invoices/inv-001 \
+  -H "Content-Type: application/json" \
+  -H "x-tenant-id: tenant-a" \
+  -d '{}'
+```
+
+**Response:**
+
+```http
+HTTP/1.1 422 Unprocessable Entity
+Content-Type: application/json
+
+{
+  "type": "https://liquifact.com/probs/validation-error",
+  "title": "Validation Error",
+  "status": 422,
+  "detail": "No valid fields provided. Allowed fields: amount, customer, notes.",
+  "code": "VALIDATION_ERROR",
+  "fieldErrors": {
+    "_root": "No valid fields provided. Allowed fields: amount, customer, notes."
+  }
+}
+```
+
 ## Error Codes
 
 | Code | Description | HTTP Status |
 |------|-------------|-------------|
+| `VALIDATION_ERROR` | PATCH body contains unrecognized or non-mutable fields | 422 |
+| `VALIDATION_ERROR` | PATCH body is empty (no valid fields after filtering) | 422 |
+| `LOCKED_FIELD` | Attempted to modify a field locked by the invoice's current status | 422 |
 | `INVOICE_NOT_FOUND` | Invoice does not exist, is soft-deleted, or belongs to another tenant | 404 |
 | `MISSING_TARGET_STATE` | `targetState` not provided on `/transition` | 400 |
 | `MISSING_TRANSITION_REASON` | Reason required (terminal target, or `/reject`) but absent/blank | 400 |

@@ -228,3 +228,5 @@ Before deployment, confirm the following values are present and sane:
   definitions used by the admin config route.
 - [docs/configuration.md](./configuration.md) — broader environment-variable
   inventory.
+- [docs/changelog-config.md](./changelog-config.md) — notable, consumer-facing
+  API changes to the admin config surface over time.

@@ -50,7 +50,7 @@ Provides Zod-based validation of all environment variables. Called once during a
 | `NETWORK_PASSPHRASE` | `string` | `Test SDF Network ; September 2015` | — | Stellar network passphrase. |
 | `SOROBAN_BATCH_CONCURRENCY` | `number` | `5` | `1–50` | Max concurrent on-chain reads in batch operations. |
 | `SOROBAN_BATCH_TIMEOUT_MS` | `number` | `5000` | `100–30000` | Per-request timeout for on-chain reads (ms). |
-| `ESCROW_INDEXER_ENABLED` | `string` | `false` | `true \| false` | Feature flag for the background escrow indexer job. |
+| `ESCROW_INDEXER_ENABLED` | `string` | `false` | `true \| false` | Master feature flag for the indexer surface. Gates the background polling job, the admin indexer API routes (`/api/admin/indexer/events` + `/bulk`), and the in-process listing response cache. Safe default is disabled. |
 | `ESCROW_INDEXER_STALE_THRESHOLD_SECONDS` | `number` | `300` | min 1 | Seconds before indexer cursor is considered stale for `/ready`. |
 | `KYC_PROVIDER_URL` | `string` (URL) | — | optional | KYC provider base URL. Must be paired with `KYC_PROVIDER_API_KEY`. |
 | `KYC_PROVIDER_API_KEY` | `string` | — | optional, min 1 | KYC provider API key. Must be paired with `KYC_PROVIDER_URL`. |
@@ -226,24 +226,30 @@ CORS_MAX_AGE=3600
 
 Provides Stellar/Soroban network configuration and enforces strict network–RPC pairing at boot time. The `validateStellarConfig()` function is called from `src/index.js` before the HTTP server starts — a mismatch is a hard fail.
 
+The network passphrase is the **identity** of the chain and the RPC URL is the **transport**. Pairing them wrongly (a TESTNET passphrase with a MAINNET endpoint) does not fail loudly on-chain: the RPC answers normally and the problem only surfaces when a transaction is rejected, or when it is signed against the wrong network identity. This module therefore treats any network/RPC/passphrase disagreement as a hard, deterministic error rather than a warning.
+
 ### Exports
 
 | Export | Type | Description |
 |---|---|---|
-| `validateStellarConfig()` | `() => { network, rpcUrl, passphrase }` | Reads `STELLAR_NETWORK` and `SOROBAN_RPC_URL`, validates them as a matched pair, and returns the resolved config. Throws on any mismatch or missing value. |
-| `getStellarConfig()` | `() => { rpcUrl, networkPassphrase }` | Returns the current Soroban RPC URL and network passphrase from the validated `config/index` store. Requires `validate()` to have been called first. |
+| `validateStellarConfig(env?)` | `(env?: Object) => { network, rpcUrl, passphrase }` | Reads `STELLAR_NETWORK` and `SOROBAN_RPC_URL` from `env` (default `process.env`), validates them as a matched pair, and returns the resolved config. Throws on any mismatch or missing value. |
+| `getStellarConfig()` | `() => { rpcUrl, networkPassphrase }` | Returns the current Soroban RPC URL and network passphrase from the validated `config/index` store. Requires `validate()` to have been called first. Rejects a store pairing that is provably inconsistent (see [Invariants](#invariants-and-failure-recovery)). |
 | `getNetworkPassphrase(network)` | `(string) => string` | Returns the canonical passphrase for a known network name. Throws for unknown networks. |
 | `getExpectedRpc(network)` | `(string) => string` | Returns the canonical RPC URL for a known network name. Throws for unknown networks. |
-| `VALID_NETWORKS` | `string[]` | `['TESTNET', 'MAINNET', 'FUTURENET']` |
-| `NETWORK_RPC_MAP` | `Record<string, string>` | Maps network name → canonical RPC URL. |
-| `NETWORK_PASSPHRASE_MAP` | `Record<string, string>` | Maps network name → canonical network passphrase. |
+| `VALID_NETWORKS` | `readonly string[]` | `['TESTNET', 'MAINNET', 'FUTURENET']` (frozen). |
+| `NETWORK_RPC_MAP` | `Readonly<Record<string, string>>` | Maps network name → canonical RPC URL (frozen). |
+| `NETWORK_PASSPHRASE_MAP` | `Readonly<Record<string, string>>` | Maps network name → canonical network passphrase (frozen). |
+| `ERROR_CODES` | `Readonly<Record<string, string>>` | Stable failure codes emitted as `error.code` (frozen). Match on these in logs and alerting rather than on message text. |
+| `StellarConfigError` | `Error` subclass | Every failure thrown by this module. Carries `code`, a frozen redacted `details` object, optional `cause`, and `toJSON()` for structured logging. |
 
 ### Environment variables
 
 | Variable | Required | Description |
 |---|---|---|
-| `STELLAR_NETWORK` | Yes | One of `TESTNET`, `MAINNET`, `FUTURENET`. |
-| `SOROBAN_RPC_URL` | Yes | Must match the canonical URL for the chosen network. Custom URLs are rejected. |
+| `STELLAR_NETWORK` | Yes | One of `TESTNET`, `MAINNET`, `FUTURENET`. Trimmed and upper-cased before lookup, so `testnet` and `TESTNET ` resolve to the same network. |
+| `SOROBAN_RPC_URL` | Yes | Must resolve to the canonical URL for the chosen network. Custom URLs, `http://` and credentialed URLs are rejected. |
+
+Both variables are trimmed; unset, empty (`FOO=`) and whitespace-only values are treated identically as **missing**.
 
 ### Supported network combinations
 
@@ -252,6 +258,19 @@ Provides Stellar/Soroban network configuration and enforces strict network–RPC
 | `TESTNET` | `https://soroban-testnet.stellar.org` | `Test SDF Network ; September 2015` |
 | `MAINNET` | `https://soroban.stellar.org` | `Public Global Stellar Network ; September 2014` |
 | `FUTURENET` | `https://rpc-futurenet.stellar.org` | `Test SDF Future Network ; October 2022` |
+
+The URL is compared after canonicalisation, so a trailing slash (`…/soroban-testnet.stellar.org/`) and host casing are accepted. A path, query string, fragment, embedded credentials, or an `http://` scheme is **not** equivalent to a canonical endpoint and is rejected — that is what prevents a typo from silently downgrading RPC traffic to plaintext.
+
+### Invariants and failure recovery
+
+1. **Canonical matrix only.** `validateStellarConfig()` accepts a network only if it is in `VALID_NETWORKS`, and an RPC URL only if it is that network's canonical endpoint.
+2. **Store pairing is re-checked at request time.** `config/index` validates `SOROBAN_RPC_URL` and `NETWORK_PASSPHRASE` *independently* and never pairs them. `getStellarConfig()` re-checks the pairing before returning values to a signer, and throws `STELLAR_PASSPHRASE_RPC_MISMATCH` when a canonical passphrase is paired with **another network's** canonical endpoint. This is the check that prevents signing on the wrong network.
+3. **Only provable inconsistencies are rejected.** A non-canonical passphrase (a self-hosted network) or a non-canonical RPC URL (a private proxy, a local Soroban sandbox) is allowed, because no matrix entry describes it and rejecting it would break deployments that cannot be validated from configuration alone. `validateStellarConfig()` remains the strict gate for the public networks.
+4. **Side-effect free and re-runnable.** Neither validator mutates module state, `process.env`, or the validated config store, and neither memoises a result. A rejected call therefore leaves nothing half-initialised: correcting the environment and calling again deterministically succeeds. The same input always yields the same result or the same error, including under retries and concurrent calls.
+5. **Secret-safe diagnostics.** Every value placed in an error `message`, in `details`, or in a log line passes through redaction first: URL userinfo becomes `[redacted]@host`, control characters are stripped (so a value cannot forge a log line), and echoes are truncated at 200 characters. The passphrase is a public network identity, not a credential, so `getStellarConfig()` names the *network* a passphrase implies instead of echoing the passphrase.
+6. **Boot wiring.** `validateStellarConfig()` is designed to run before the HTTP server starts; see [README](../README.md#stellar-network-configuration) for the boot contract.
+
+**Compatibility.** The previously exported surface (`getStellarConfig`, `getNetworkPassphrase`, `getExpectedRpc`, `VALID_NETWORKS`, `NETWORK_RPC_MAP`, `NETWORK_PASSPHRASE_MAP`) is unchanged, and the return shapes are unchanged. `validateStellarConfig`, `getNetworkPassphrase`, `getExpectedRpc`, `ERROR_CODES` and `StellarConfigError` are additions. The only behavioural tightening is invariant 2: a `config/index` store holding a canonical passphrase next to a *different* network's canonical endpoint now fails fast instead of being returned to a signer. Deployments that intentionally point a canonical passphrase at a private endpoint are unaffected — that combination is still allowed.
 
 ### `validateStellarConfig()` return value
 
@@ -274,21 +293,33 @@ Provides Stellar/Soroban network configuration and enforces strict network–RPC
 
 ### Errors
 
-| Condition | Error message |
-|---|---|
-| `STELLAR_NETWORK` missing | `STELLAR_NETWORK is required` |
-| `SOROBAN_RPC_URL` missing | `SOROBAN_RPC_URL is required` |
-| `STELLAR_NETWORK` not in `VALID_NETWORKS` | `Invalid STELLAR_NETWORK: <value>` |
-| RPC URL does not match the expected URL for the network | `Mismatch: STELLAR_NETWORK=<N> requires SOROBAN_RPC_URL="<expected>", but got "<actual>". This combination would cause on-chain validation failures.` |
-| `getNetworkPassphrase` / `getExpectedRpc` called with unknown network | `Unknown network: <value>` |
-| `getStellarConfig()` called before `validate()` | `Config not validated. Call validate() first.` |
+Every failure is a `StellarConfigError` with a stable `error.code`. Messages are for humans; branch on the code.
+
+| Condition | `error.code` | Error message |
+|---|---|---|
+| `validateStellarConfig` called with a non-object env | `STELLAR_CONFIG_ENV_INVALID` | `Stellar configuration environment must be an object.` |
+| `STELLAR_NETWORK` missing, empty or whitespace | `STELLAR_NETWORK_MISSING` | `STELLAR_NETWORK is required` |
+| `SOROBAN_RPC_URL` missing, empty or whitespace | `SOROBAN_RPC_URL_MISSING` | `SOROBAN_RPC_URL is required` |
+| `STELLAR_NETWORK` not in `VALID_NETWORKS` | `STELLAR_NETWORK_UNKNOWN` | `Invalid STELLAR_NETWORK: <value>` |
+| RPC URL does not match the expected URL for the network | `STELLAR_NETWORK_RPC_MISMATCH` | `Mismatch: STELLAR_NETWORK=<N> requires SOROBAN_RPC_URL="<expected>", but got "<actual>". This combination would cause on-chain validation failures.` |
+| `getNetworkPassphrase` / `getExpectedRpc` called with unknown network | `STELLAR_NETWORK_UNKNOWN` | `Unknown network: <value>` |
+| `getStellarConfig()` called before `validate()` | `STELLAR_CONFIG_NOT_VALIDATED` | `Config not validated. Call validate() first.` |
+| Store pairs a canonical passphrase with another network's canonical endpoint | `STELLAR_PASSPHRASE_RPC_MISMATCH` | `Mismatch: NETWORK_PASSPHRASE identifies <A> but SOROBAN_RPC_URL is the <B> endpoint "<url>". This combination would cause on-chain validation failures.` |
+
+`error.details` carries the redacted diagnostic context for each case (e.g. `{ network, expectedRpcUrl, actualRpcUrl }`, or `{ passphraseNetwork, rpcNetwork, expectedRpcUrl, actualRpcUrl }`) and is safe to log via `error.toJSON()`.
 
 ### Example
 
 ```js
 // src/index.js (bootstrap)
 const { validateStellarConfig } = require('./config/stellar');
-validateStellarConfig(); // hard fail if misconfigured
+try {
+  validateStellarConfig(); // hard fail if misconfigured
+} catch (error) {
+  // StellarConfigError: branch on error.code, log error.toJSON()
+  console.error(error.code, error.message);
+  process.exit(1);
+}
 
 // In a Soroban service
 const { getStellarConfig } = require('./config/stellar');
@@ -303,24 +334,39 @@ SOROBAN_RPC_URL=https://soroban-testnet.stellar.org
 
 ---
 
-## 4. config/cache.js — Escrow Cache TTL
+## 4. config/cache.js — In-process cache bounds
 
 **Source:** [`src/config/cache.js`](../src/config/cache.js)
 
-Parses the in-memory escrow cache TTL from environment variables and exposes a typed config object. Used by the escrow read service to decide how long to hold a cached escrow state before re-querying.
+Parses the TTL and entry bound for every in-process cache from environment variables and exposes a typed, frozen config object. Consumed by the escrow read cache, the indexer listing cache, the invoice-state response cache, and the escrow address mapping cache.
+
+Every knob here is a **performance** knob: none of them protects a security, financial, or durability invariant. A bad value therefore never stops the service from booting, but it must also never produce an out-of-contract value — an `undefined` or `NaN` TTL/entry bound silently disables *both* expiry and eviction and turns a one-line config mistake into an unbounded-memory leak.
 
 ### Exports
 
 | Export | Type | Description |
 |---|---|---|
-| `cacheConfig` | `{ escrowTtl: number }` | Module-level singleton parsed at load time. `escrowTtl` is in **milliseconds**. |
-| `parseCacheConfig(env?)` | `(env?) => { escrowTtl: number }` | Parses the TTL from a given env map. Safe to call multiple times (used in tests). |
+| `cacheConfig` | `CacheConfig` (frozen) | Load-time snapshot parsed from `process.env`. |
+| `parseCacheConfig(env?, options?)` | `(env?, options?) => CacheConfig` (frozen) | Pure parse. `options.onFallback` is called once per rejected value. |
+| `describeCacheConfigFallbacks(env?)` | `(env?) => ReadonlyArray<CacheConfigFallback>` | Rejections for a given env map, with no logging and no module-state change. |
+| `getCacheConfig()` | `() => CacheConfig` | Configuration currently active (reflects the latest reload). |
+| `getCacheConfigFallbacks()` | `() => ReadonlyArray<CacheConfigFallback>` | Rejections recorded by the most recent activation. |
+| `reloadCacheConfig(env?)` | `(env?) => CacheConfig` | Re-reads the environment and atomically replaces the active configuration. |
+| `CACHE_CONFIG_LIMITS` | frozen object | Accepted `{ min, max }` per knob class, for runbooks and assertions. |
+| `CACHE_CONFIG_FALLBACK_REASON` | frozen object | Bounded reason enum — safe to use as a metrics label. |
+| `DEFAULT_*` | numbers | Per-knob defaults (`DEFAULT_ESCROW_MAX_ENTRIES` is retained for backward compatibility). |
+| `_resetCacheConfigForTests`, `_resetLoggerForTests` | functions | Test-only seams. |
 
 ### Environment variables
 
 | Variable | Default | Constraint | Description |
 |---|---|---|---|
-| `ESCROW_CACHE_TTL_SECONDS` | `30` | positive integer | In-memory escrow cache TTL in seconds. Converted to milliseconds on load. |
+| `ESCROW_CACHE_TTL_SECONDS` | `30` | integer `1..86400` | Escrow read cache TTL, seconds. Converted to milliseconds on load. |
+| `ESCROW_CACHE_MAX_ENTRIES` | `500` | integer `1..100000` | Escrow read cache entry bound. |
+| `INDEXER_CACHE_TTL_SECONDS` | `10` | integer `1..86400` | Indexer listing cache TTL, seconds. |
+| `INDEXER_CACHE_MAX_ENTRIES` | `200` | integer `1..100000` | Indexer listing cache entry bound. |
+| `INVOICE_STATE_CACHE_TTL_SECONDS` | `30` | integer `1..86400` | Invoice-state response cache TTL, seconds. |
+| `INVOICE_STATE_CACHE_MAX_ENTRIES` | `500` | integer `1..100000` | Invoice-state response cache entry bound. |
 
 > **Note:** The Redis-backed escrow cache has separate variables: `REDIS_ESCROW_CACHE_ENABLED`, `REDIS_ESCROW_CACHE_TTL_SECONDS` (clamped to `5–300`), and `REDIS_ESCROW_LEDGER_GAP_THRESHOLD`. Those are consumed directly by the Redis cache layer, not by this module.
 
@@ -328,14 +374,42 @@ Parses the in-memory escrow cache TTL from environment variables and exposes a t
 
 ```js
 {
-  escrowTtl: 30000  // number — TTL in milliseconds (ESCROW_CACHE_TTL_SECONDS × 1000)
+  escrowTtl: 30000,              // ms   — ESCROW_CACHE_TTL_SECONDS × 1000
+  escrowMaxEntries: 500,         // entries
+  indexerTtl: 10000,             // ms   — INDEXER_CACHE_TTL_SECONDS × 1000
+  indexerMaxEntries: 200,        // entries
+  invoiceStateTtl: 30000,        // ms   — INVOICE_STATE_CACHE_TTL_SECONDS × 1000
+  invoiceStateMaxEntries: 500,   // entries
 }
 ```
 
+The object is frozen before it is returned or published.
+
 ### Fallback behaviour
 
-- If `ESCROW_CACHE_TTL_SECONDS` is absent → `escrowTtl = 30000` (30 s)
-- If the value is not a finite positive integer (e.g. `"abc"`, `"-5"`, `"0"`) → `escrowTtl = 30000`
+One rule, applied to every knob: **the value is honoured only when it is a base-10 integer literal (optionally signed, surrounding whitespace ignored) inside `[min, max]`; every other case uses the documented default.** There is no clamping arithmetic and no second code path, so the outcome is fully determined by the input.
+
+| Input | Result | `reason` |
+|---|---|---|
+| absent, empty, or whitespace-only | default | *(none — a normal default, not a rejection)* |
+| not a string or number | default | `not_a_string` |
+| `"abc"`, `"1.5"`, `"1e3"`, `"60s"`, `"0x10"`, safe-integer overflow | default | `not_an_integer` |
+| numeric `NaN` or `±Infinity` | default | `not_finite` |
+| `"0"`, `"-1"` | default | `not_positive` |
+| in-range shape but above `max` | default | `out_of_range` |
+| `env` is not an object, or reading it throws | default for every knob | `unreadable_env` |
+
+### Observability
+
+A rejected value is logged once per distinct `variable:reason` pair as a single `warn` event named `cache_config.fallback`, carrying `variable`, `key`, `reason`, `envDefault`, `minAccepted`, `maxAccepted`, and `appliedValue`. The raw operator-supplied value is deliberately **not** logged. The same records are available programmatically via `getCacheConfigFallbacks()` and `describeCacheConfigFallbacks()`.
+
+`parseCacheConfig` never throws, and neither does module load: an unusable `env` source, a throwing property getter, a throwing `onFallback` observer, or a logger that fails to initialise all degrade to the documented default.
+
+### Guarantees
+
+- **Deterministic** — a pure function of `env`: no clock, no randomness, no I/O, no module state, fixed iteration order. Repeat calls are idempotent.
+- **Atomic** — the active configuration is only ever *replaced* with a complete frozen object, never mutated in place, so a concurrent or retried reload can never be observed half-applied.
+- **Never fatal** — cache configuration cannot prevent the process from starting.
 
 ### Example
 

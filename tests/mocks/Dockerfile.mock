@@ -1,6 +1,0 @@
-FROM node:20-slim
-WORKDIR /app
-RUN npm install express
-COPY soroban-mock.js .
-EXPOSE 8000
-CMD ["node", "soroban-mock.js"]

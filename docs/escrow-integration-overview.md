@@ -19,10 +19,10 @@
 |------|--------|----------------------|----------------------------|
 | Event ingest | [`src/jobs/escrowIndexer.js`](../src/jobs/escrowIndexer.js) | Horizon poll → `escrow_events` / `escrow_event_projection` | Same; optional Captive Core later |
 | Escrow read (service) | [`src/services/escrowRead.js`](../src/services/escrowRead.js) | **Projection-first** SQL read (`escrow_event_projection`) → neutral RPC stub for `get_escrow_state`; `get_legal_hold` stub | Real `LiquifactEscrow` contract reads |
-| Escrow read (minimal app) | [`src/app.js`](../src/app.js) | `GET /api/escrow/:invoiceId` via `resolveEscrowAddress` + placeholder Soroban op | Wire to `readEscrowState` + projection/cache |
+| Escrow read (minimal app) | [`src/app.js`](../src/app.js) | `GET /api/escrow/:invoiceId` via `escrowReadService.getEscrowRead()` → `resolveEscrowAddress` + **projection-first** `readEscrowState()` (no fabricated funded/settled stubs) | Migrate onto the cache-aware `getEscrowStateWithProjection()` entry point |
 | Funding | [`src/services/escrowSubmit.js`](../src/services/escrowSubmit.js) | Validates payload; **`submitted: false`**; optional simulation | Build/sign/submit `fund_escrow` (delegated or custodial) |
 | Reconciliation | [`src/jobs/reconcileEscrow.js`](../src/jobs/reconcileEscrow.js) | Mock invoices + mock on-chain amounts | Real DB + contract `funded_amount` |
-| On-chain contract | [`contracts/src/lib.rs`](../contracts/src/lib.rs) | `create_bounty` / `release_bounty` | `LiquifactEscrow` invoice escrow API |
+| On-chain contract | [`contracts/src/lib.rs`](../contracts/src/lib.rs) | `create_bounty` / `release_bounty` with typed `BountyError` rejection | `LiquifactEscrow` invoice escrow API |
 
 ---
 
@@ -88,7 +88,7 @@ avoid IEEE 754 drift in UI rendering.
 |---------|------|-------------|
 | HTTP entry | [`src/index.js`](../src/index.js), [`src/app.js`](../src/app.js) | `startServer`, `createApp`, `GET/POST /api/escrow` |
 | Invoice → address | [`src/config/escrowMap.js`](../src/config/escrowMap.js) | `resolveEscrowAddress`, `ESCROW_ADDR_BY_INVOICE` |
-| Stellar network | [`src/config/stellar.js`](../src/config/stellar.js), [`src/config/index.js`](../src/config/index.js) | `getStellarConfig`, Zod `validate()` |
+| Stellar network | [`src/config/stellar.js`](../src/config/stellar.js), [`src/config/index.js`](../src/config/index.js) | `validateStellarConfig`, `getStellarConfig`, Zod `validate()` |
 | Soroban wrapper | [`src/services/soroban.js`](../src/services/soroban.js) | `callSorobanContract` (retries) |
 | Read + legal hold | [`src/services/escrowRead.js`](../src/services/escrowRead.js) | `readEscrowState`, `fetchLegalHold` |
 | Batch read | [`src/services/escrowBatchRead.js`](../src/services/escrowBatchRead.js) | Uses `readEscrowState` with concurrency limits and per-invoice transient error retry |
@@ -98,7 +98,7 @@ avoid IEEE 754 drift in UI rendering.
 | Reconciliation job | [`src/jobs/reconcileEscrow.js`](../src/jobs/reconcileEscrow.js) | `performReconciliation`, `reconcileInvoice` |
 | Health | [`src/services/health.js`](../src/services/health.js) | `checkReconciliationHealth`, `performHealthChecks` |
 | DB schema | [`migrations/20260427123000_create_escrow_event_index_tables.sql`](../migrations/20260427123000_create_escrow_event_index_tables.sql) | `escrow_events`, `escrow_event_projection`, `escrow_indexer_state` |
-| On-chain (repo) | [`contracts/src/lib.rs`](../contracts/src/lib.rs) | `BountyContract::initialize`, `create_bounty`, `release_bounty`, `get_bounty` |
+| On-chain (repo) | [`contracts/src/lib.rs`](../contracts/src/lib.rs) | `BountyContract::initialize`, `create_bounty`, `create_bounty_with_key`, `release_bounty`, `get_bounty`, `find_bounty` |
 
 ### Target vs checked-in contract
 
@@ -110,12 +110,54 @@ avoid IEEE 754 drift in UI rendering.
 
 **Repository contract today** ([`contracts/src/lib.rs`](../contracts/src/lib.rs)) is **`BountyContract`**:
 
-- `initialize(fee_recipient)` — once per deployment  
-- `create_bounty(creator, hunter, token, amount, protocol_fee_bps)` — pulls tokens into contract  
-- `release_bounty(id)` — pays hunter and fee recipient  
-- `get_bounty(id)` — view helper  
+- `initialize(fee_recipient)` — once per deployment
+- `create_bounty(creator, hunter, token, amount, protocol_fee_bps)` — pulls tokens into contract
+- `create_bounty_with_key(..., key)` — same, idempotent on a caller-supplied 32-byte key
+- `release_bounty(id)` — pays hunter and fee recipient
+- `get_bounty(id)` / `find_bounty(id)` — view helper (panics) / non-trapping view
+- `fee_recipient()` / `bounty_count()` — configuration and id-counter views
 
 Use the bounty contract to understand Soroban patterns in-repo; use the LiquifactEscrow names when tracing the **intended** invoice product flow.
+
+#### Bounty contract validation boundaries
+
+Every entry point validates before it writes state or calls the token, and reports a
+typed `BountyError` (stable on-chain codes) instead of a bare panic/assert. The
+`bounty_created` / `bounty_released` event shapes and all existing parameters are
+unchanged, so indexers and callers keep working; the only signature change is that
+the mutating calls now return a typed error on rejection.
+
+| Code | Error | Boundary |
+|------|-------|----------|
+| 1 | `AlreadyInitialized` | `initialize` is one-shot |
+| 2 | `NotInitialized` | create/release require `initialize` first (fee recipient exists) |
+| 3 | `AmountOutOfRange` | `1 <= amount <= i128::MAX / 10_000` |
+| 4 | `FeeBpsOutOfRange` | `0 <= protocol_fee_bps < 10_000`, so the hunter is always paid `>= 1` |
+| 5–9 | `CreatorIsHunter`, `CreatorIsContract`, `HunterIsContract`, `TokenIsContract`, `FeeRecipientIsContract` | no payout or fee that would return to the escrow account |
+| 10 | `BountyNotFound` | unknown id |
+| 11 | `AlreadyReleased` | a bounty pays out at most once |
+| 12–13 | `IdSpaceExhausted`, `IdCollision` | id counter is advanced before the token call and never reset |
+| 14 | `IdempotencyKeyReuse` | `create_bounty_with_key` key replayed with different parameters |
+| 15 | `ArithmeticOverflow` | defensive: checked fee/payout maths |
+
+Notes for integrators:
+
+- **Amount cap.** `amount` is bounded by `i128::MAX / 10_000` so the release-time
+  `amount * protocol_fee_bps` product is always representable. Release builds enable
+  `overflow-checks`, so an unbounded amount used to be escrowed successfully and then
+  trapped on release — a permanently locked escrow.
+- **Initialisation first.** Creating a bounty before `initialize` is rejected instead
+  of escrowing funds that can never be released (release needs the fee recipient).
+- **Idempotent creation.** `create_bounty` still allows two identical bounties, which
+  is a legitimate request; use `create_bounty_with_key` when a retried submission must
+  not escrow twice. A retry with the same parameters returns the original id; a retry
+  with different parameters is refused with `IdempotencyKeyReuse`.
+- **Effects before interactions.** The id is reserved and `released` is persisted
+  before any token call, so a re-entrant token cannot make the counter skip an id or
+  pay a bounty twice (the Soroban host also refuses re-entry outright).
+- **Retry safety.** A failed token call rolls the whole invocation back, including
+  the reserved id, so the next attempt reuses that id and the escrow state stays
+  consistent.
 
 ---
 
@@ -174,7 +216,8 @@ adapter (if injected)  →  projection row  →  neutral RPC stub
 
 **Current minimal app** ([`src/app.js`](../src/app.js))
 
-- `GET /api/escrow/:invoiceId` trims `invoiceId`, calls `resolveEscrowAddress`, delegates to [`getEscrowStateWithProjection()`](../src/services/escrowRead.js) which orchestrates the cache → projection → RPC chain, and sets header **`X-Escrow-Address`**.
+- `GET /api/escrow/:invoiceId` trims `invoiceId`, then delegates to [`getEscrowRead()`](../src/services/escrowReadService.js) (`services/escrowReadService.js`), which resolves the address via `resolveEscrowAddress`, calls [`readEscrowState()`](../src/services/escrowRead.js) (**projection → neutral RPC stub**, no Redis layer on this endpoint), computes derived display fields, and sets header **`X-Escrow-Address`**.
+- [`getEscrowStateWithProjection()`](../src/services/escrowRead.js) additionally layers the **Redis cache** (`REDIS_ESCROW_CACHE_ENABLED=true`) and the process-local `escrowReadCache` in front of the same projection → RPC chain. It is exported for future/direct consumers (e.g. batch jobs, an admin cache-warm path) but is not currently called by any HTTP route — the legacy `/api/escrow/:invoiceId` handler predates it and has not been migrated onto the cache-aware entry point.
 - Full-feature routes/tests often mount [`escrowRead.js`](../src/services/escrowRead.js) directly (see `tests/escrow.read.test.js`, `tests/escrow.legalhold.test.js`).
 
 **`readEscrowState` return shape (target):** `invoiceId`, `status`, `fundedAmount`, `legal_hold`, `funding_token`, `source`, `latest_ledger_sequence`, `latest_event_type`, `latest_event_id`, `latest_observed_at`.
@@ -253,7 +296,7 @@ Documented in [README](../README.md) and asserted in [`src/config/stellar.test.j
 | `MAINNET` | `https://soroban.stellar.org` | `Public Global Stellar Network ; September 2014` |
 | `FUTURENET` | `https://rpc-futurenet.stellar.org` | `Test SDF Future Network ; October 2022` |
 
-**Boot-time note:** [`src/config/stellar.js`](../src/config/stellar.js) currently exports `getStellarConfig()` reading Zod-validated [`src/config/index.js`](../src/config/index.js). Tests import `validateStellarConfig` from `./stellar` (network/RPC mismatch errors). Wire-up in `src/index.js` may lag README — treat **`stellar.test.js` + README** as the contract for fail-fast pairing.
+**Boot-time note:** [`src/config/stellar.js`](../src/config/stellar.js) exports both accessors over the same canonical matrix: `validateStellarConfig()` (strict env gate) and `getStellarConfig()` (request-time accessor over the Zod-validated [`src/config/index.js`](../src/config/index.js) store). Because `config/index` validates `SOROBAN_RPC_URL` and `NETWORK_PASSPHRASE` independently and never pairs them, `getStellarConfig()` re-checks the pairing and throws `STELLAR_PASSPHRASE_RPC_MISMATCH` if a canonical passphrase sits next to another network's canonical endpoint — the guard against signing on the wrong network. Every failure is a `StellarConfigError` with a stable `code` and redacted `details`, so misconfiguration is diagnosable from logs without leaking credentials. Invariants, error codes and the compatibility note are documented in [`docs/config.md`](./config.md#3-configstellarjs--stellar-network-config). Wire-up of the boot gate in `src/index.js` may lag README — treat **`stellar.test.js` + README** as the contract for fail-fast pairing.
 
 ### Escrow-related variables
 
@@ -273,7 +316,7 @@ Documented in [README](../README.md) and asserted in [`src/config/stellar.test.j
 | `ESCROW_INDEXER_BATCH_SIZE` | `100` | `runEscrowIndexerCycle` |
 | `STELLAR_HORIZON_URL` | testnet Horizon | `fetchEscrowEventsFromHorizon` |
 | `REDIS_ESCROW_CACHE_ENABLED` | `false` | Optional read cache |
-| `SOROBAN_MAX_RETRIES` / `SOROBAN_BASE_DELAY` / `SOROBAN_MAX_DELAY` | 3 / 200 / 5000 | [`soroban.js`](../src/services/soroban.js) |
+| `SOROBAN_MAX_RETRIES` / `SOROBAN_BASE_DELAY` / `SOROBAN_MAX_DELAY` / `SOROBAN_MAX_ELAPSED_MS` | 3 / 200 / 5000 / 10000 | [`soroban.js`](../src/services/soroban.js), [Resilience Guide](soroban-resilience.md) |
 
 Never commit secrets; use `.env` locally and deployment secret stores.
 
@@ -324,7 +367,7 @@ Assume testnet configuration and a mapping entry in `ESCROW_ADDR_BY_INVOICE`.
 - **Escrow read** — projection-first lookup, never fabricated state. The legacy `funded_invoice` / `settled_invoice` stub fixtures have been removed because they misled investors and the reconciler into believing invoices had funded when the indexer had not yet recorded them. A missing projection now returns `status: 'not_found', fundedAmount: 0` (warn log on DB failure, fall through to RPC).
 - **No decimals for math** — Cached/projected decimals are never used to scale on-chain principal values. Reconciliation compares equal-unit amounts only. See [`TOKEN_METADATA.md`](./TOKEN_METADATA.md).
 - **Input validation** — strict patterns in `escrowSubmit` and `escrowRead`; oversized metadata rejected.
-- **Legal hold** — RPC failure defaults to **`legal_hold: false`** in `fetchLegalHold` (warn log); callers needing strict blocking should override via adapter.
+- **Legal hold** — fails **closed**, not open: `fetchLegalHoldStatus()` returns the tri-state `held` / `not_held` / `unknown` (issue #424), and every read path (`readEscrowState`, `readEscrowStateWithAttestations`, `getEscrowStateWithProjection`) maps `unknown` to `legal_hold: true` so an RPC failure can never silently unblock a held invoice (warn log with `legalHoldReason`/`legalHoldErrorCode` on the response). Only the deprecated `fetchLegalHold()` boolean wrapper collapses `unknown` to `false`; new callers should use `fetchLegalHoldStatus()` or read `legal_hold`/`legalHoldStatus` off the state object instead.
 - **Idempotency** — required for live submit; stub accepts key for forward compatibility.
 - **Rate limiting** — sensitive routes (e.g. `POST /api/escrow`) covered in middleware tests (`src/__tests__/rateLimit.test.js`).
 - **Allowlist** — `ESCROW_ADDR_BY_INVOICE` with `allowlistEnabled` prevents arbitrary invoice→address resolution.
@@ -346,6 +389,7 @@ Assume testnet configuration and a mapping entry in `ESCROW_ADDR_BY_INVOICE`.
 
 | Doc | Focus |
 |-----|--------|
+| [bounty-contract-compatibility.md](./bounty-contract-compatibility.md) | Existing bounty ABI, storage, lifecycle guards, and regression checks |
 | [escrow-indexing-strategy.md](./escrow-indexing-strategy.md) | Horizon poller vs Captive Core upgrade |
 | [escrow-deployment-model.md](./escrow-deployment-model.md) | Per-instance deployment, invariants, factory risks |
 | [ops-signing.md](./ops-signing.md) | Delegated vs custodial signing, KMS, funding API |

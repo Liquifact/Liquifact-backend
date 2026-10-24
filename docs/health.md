@@ -154,7 +154,7 @@ Database status is included in `checks` but is not part of the boolean gate in
 ## `GET /readyz`
 
 Critical-dependency readiness (`performReadinessChecks()`): database, Soroban,
-storage, and escrow reconciliation. Omits KYC and indexer staleness.
+storage, escrow reconciliation, and metrics. Omits KYC and indexer staleness.
 
 Also updates the Prometheus `readiness_gauge` (`1` ready, `0.5` degraded, `0`
 not ready).
@@ -184,7 +184,8 @@ Host: api.example.com
       "totalDrift": 0,
       "threshold": 1,
       "thresholdBreached": false
-    }
+    },
+    "metrics": { "status": "healthy", "latency": 2 }
   }
 }
 ```
@@ -202,6 +203,10 @@ Same outer shape as `/ready` (`ready`, `service`, `timestamp`, `checks` or
 - **Storage:** `healthy`, `in_memory`, or `disabled` → OK; otherwise not ready
 - **Reconciliation:** `mismatch_threshold_breached` → not ready; `not_run` and
   `error` are non-blocking (fresh deploys)
+- **Metrics:** always non-blocking — `disabled` or `unhealthy` never fails
+  readiness (observability, not a request-serving dependency). See
+  [`metrics-troubleshooting.md`](./metrics-troubleshooting.md#readiness-sub-check-get-ready-checksmetrics--status-codes)
+  for status/error-code details.
 
 ---
 
