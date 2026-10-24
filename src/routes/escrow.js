@@ -109,3 +109,4 @@ router.use('/attestations', require('./attestation'));
 
 module.exports = router;
 module.exports.DEPLOY_SNAPSHOT = DEPLOY_SNAPSHOT;
+module.exports.readEscrowOnChain = readEscrowOnChain;

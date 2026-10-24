@@ -1,6 +1,7 @@
 'use strict';
 
 const config = require('./config');
+const { SORTS } = require('./services/invoice-query');
 
 const Invoice = {
   type: 'object',
@@ -33,10 +34,15 @@ const FundingError = {
 
 const FundRequest = {
   type: 'object',
-  required: ['amount'],
+  required: ['amount', 'investor'],
   properties: {
     amount: { type: 'number', example: 7000, description: 'Positive finite amount not exceeding the invoice face value' },
-    allowPartial: { type: 'boolean', default: false, description: 'When true, the contribution is capped at remainingCapacity and the response reports accepted/rejected' },
+    investor: { type: 'string', example: 'GA7TXEBMEPQCLHIYCWDN7RKAO5IMRD2UV7O7TZXMEW6VZUMEXNR4XBB5' },
+    allowPartial: {
+      type: 'boolean',
+      default: false,
+      description: 'When true, the contribution is capped at remainingCapacity and the response reports accepted/rejected',
+    },
   },
 };
 
@@ -50,7 +56,17 @@ const FundResponse = {
 };
 
 const json = (schema) => ({ content: { 'application/json': { schema } } });
-const ErrorBody = { type: 'object', properties: { error: { type: 'string' } } };
+const ErrorBody = { type: 'object', properties: { error: { type: 'string' }, detail: { type: 'string' } } };
+
+const DocumentMeta = {
+  type: 'object',
+  properties: {
+    sha256Hex: { type: 'string', description: 'SHA-256 hex digest of the PDF bytes', example: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855' },
+    sizeBytes: { type: 'integer', description: 'File size in bytes', example: 12345 },
+    uploadedAt: { type: 'string', format: 'date-time', description: 'ISO 8601 upload timestamp' },
+    originalName: { type: 'string', description: 'Sanitised original filename (≤120 chars)', example: 'invoice-001.pdf' },
+  },
+};
 
 /** Raw stroop amount as a decimal integer string (7 decimals). */
 const StroopString = { type: 'string', pattern: '^\\d+$', example: '1000000000' };
@@ -122,6 +138,103 @@ const EscrowLiveResponse = {
   },
 };
 
+const Mismatch = {
+  type: 'object',
+  properties: {
+    field: { type: 'string', example: 'fundedAmount' },
+    offChain: { example: '1000000000' },
+    onChain: { example: '0' },
+    severity: { type: 'string', enum: ['critical', 'warning'] },
+  },
+  required: ['field', 'offChain', 'onChain', 'severity'],
+};
+
+const ReconciliationResult = {
+  type: 'object',
+  properties: {
+    invoiceId: { type: 'string', example: 'INV_0001' },
+    contractId: { type: 'string', example: 'CDQCKR2YU...' },
+    status: {
+      type: 'string',
+      enum: ['in_sync', 'drift', 'missing_on_chain', 'error'],
+    },
+    code: { type: 'string', example: 'RPC_ERROR', description: 'Only present when status is error' },
+    detail: { type: 'string', description: 'Human-readable error detail (status=error only)' },
+    mismatches: { type: 'array', items: Mismatch },
+  },
+  required: ['invoiceId', 'contractId', 'status', 'mismatches'],
+};
+
+const ReconciliationReport = {
+  type: 'object',
+  properties: {
+    checkedAt: { type: 'string', format: 'date-time' },
+    summary: {
+      type: 'object',
+      properties: {
+        inSync: { type: 'integer' },
+        drift: { type: 'integer' },
+        missing: { type: 'integer' },
+        error: { type: 'integer' },
+      },
+      required: ['inSync', 'drift', 'missing', 'error'],
+    },
+    results: { type: 'array', items: ReconciliationResult },
+  },
+  required: ['checkedAt', 'summary', 'results'],
+};
+
+const AuditEntry = {
+  type: 'object',
+  description:
+    'One append-only audit record. `hash` = sha256(prevHash + canonicalJSON(entry without hash)); the first entry ' +
+    'links to a prevHash of 64 zeros.',
+  required: ['seq', 'at', 'action', 'resourceType', 'outcome', 'statusCode', 'prevHash', 'hash'],
+  properties: {
+    seq: { type: 'integer', example: 3 },
+    at: { type: 'string', format: 'date-time' },
+    action: { type: 'string', example: 'invoice.fund' },
+    resourceType: { type: 'string', example: 'invoice' },
+    resourceId: { type: 'string', nullable: true, example: 'INV_0002' },
+    actor: { type: 'string', example: 'anonymous' },
+    ip: { type: 'string', nullable: true, description: 'Client IP truncated to /24 (IPv4) or /48 (IPv6)', example: '203.0.113.0/24' },
+    requestId: { type: 'string', nullable: true },
+    outcome: { type: 'string', enum: ['success', 'rejected'] },
+    statusCode: { type: 'integer', example: 200 },
+    before: { type: 'object', nullable: true, additionalProperties: true },
+    after: { type: 'object', nullable: true, additionalProperties: true },
+    metadata: { type: 'object', nullable: true, additionalProperties: true },
+    prevHash: { type: 'string', example: '0000000000000000000000000000000000000000000000000000000000000000' },
+    hash: { type: 'string' },
+  },
+};
+
+const AuditList = {
+  type: 'object',
+  required: ['data', 'count', 'nextAfter'],
+  properties: {
+    data: { type: 'array', items: { $ref: '#/components/schemas/AuditEntry' } },
+    count: { type: 'integer' },
+    nextAfter: { type: 'integer', nullable: true, description: 'Pass as `after` to get the next page; null on the last page' },
+  },
+};
+
+const AuditVerification = {
+  type: 'object',
+  required: ['valid'],
+  properties: {
+    valid: { type: 'boolean' },
+    entries: { type: 'integer', description: 'Number of entries checked (when valid)' },
+    brokenAt: { type: 'integer', description: 'seq of the first entry that fails verification (when not valid)' },
+  },
+};
+
+const adminSecurity = [{ adminBearer: [] }];
+const adminErrors = {
+  401: { description: 'Missing or invalid admin token', ...json(ErrorBody) },
+  503: { description: 'ADMIN_API_TOKEN is not configured on the server', ...json(ErrorBody) },
+};
+
 /**
  * Builds the OpenAPI document for the given public base URL.
  *
@@ -136,11 +249,25 @@ function buildSpec(baseUrl) {
       version: config.version,
       description:
         'Invoice liquidity network on Stellar. SMEs tokenize invoices, investors fund them, and a Soroban escrow ' +
-        `contract holds funds until settlement. Escrow contract (testnet): ${config.contractId}`,
+        `contract holds funds until settlement. Escrow contract (${config.network}): ${config.contractId}`,
     },
     servers: [{ url: baseUrl }],
-    tags: [{ name: 'System' }, { name: 'Invoices' }, { name: 'Investors' }, { name: 'Escrow' }],
+    tags: [
+      { name: 'System' },
+      { name: 'Invoices' },
+      { name: 'Investors' },
+      { name: 'Escrow' },
+      { name: 'Reconciliation' },
+      { name: 'Audit' },
+    ],
     components: {
+      securitySchemes: {
+        adminBearer: {
+          type: 'http',
+          scheme: 'bearer',
+          description: 'Shared admin secret: `Authorization: Bearer <ADMIN_API_TOKEN>`',
+        },
+      },
       schemas: {
         Invoice,
         FundingError,
@@ -148,6 +275,9 @@ function buildSpec(baseUrl) {
         FundResponse,
         EscrowState,
         EscrowLiveResponse,
+        AuditEntry,
+        AuditList,
+        AuditVerification,
       },
     },
     paths: {
@@ -217,16 +347,26 @@ function buildSpec(baseUrl) {
           tags: ['Invoices'],
           summary: 'List invoices',
           parameters: [
-            { name: 'status', in: 'query', schema: { type: 'string', enum: ['open', 'funded', 'settled', 'cancelled'] } },
+            { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 } },
+            { name: 'cursor', in: 'query', schema: { type: 'string', maxLength: 2048 }, description: 'Opaque base64url cursor from nextCursor; bound to sort. Reuse the same filters.' },
+            { name: 'status', in: 'query', schema: { type: 'string', pattern: '^(open|funded|settled|cancelled)(,(open|funded|settled|cancelled))*$' }, description: 'Comma-separated invoice statuses' },
+            { name: 'currency', in: 'query', schema: { type: 'string', pattern: '^[a-zA-Z0-9]{1,12}$' }, description: 'Case-sensitive asset code' },
+            { name: 'sme', in: 'query', schema: { type: 'string', minLength: 1, maxLength: 120 }, description: 'Case-insensitive name substring' },
+            ...['minAmount', 'maxAmount'].map((name) => ({ name, in: 'query', schema: { type: 'string', pattern: '^\\d+(\\.\\d+)?$', maxLength: 128 }, description: 'Inclusive exact decimal bound, without exponent notation' })),
+            ...['minYieldBps', 'maxYieldBps'].map((name) => ({ name, in: 'query', schema: { type: 'integer', minimum: 0, maximum: 10000 }, description: 'Inclusive yield bound in basis points' })),
+            ...['dueBefore', 'dueAfter'].map((name) => ({ name, in: 'query', schema: { type: 'string', format: 'date' }, description: 'Inclusive real calendar date, YYYY-MM-DD' })),
+            { name: 'onChain', in: 'query', schema: { type: 'boolean' } },
+            { name: 'sort', in: 'query', schema: { type: 'string', enum: SORTS, default: '-createdAt' }, description: 'Primary order; ties always use ascending id. Unknown and repeated query parameters are rejected.' },
           ],
           responses: {
-            200: { description: 'Invoices', ...json({ type: 'object', properties: { data: { type: 'array', items: Invoice }, count: { type: 'integer' } } }) },
-            400: { description: 'Invalid filter', ...json(ErrorBody) },
+            200: { description: 'Filtered invoice page', ...json({ type: 'object', required: ['data', 'count', 'total', 'nextCursor'], properties: { data: { type: 'array', maxItems: 100, items: Invoice }, count: { type: 'integer', minimum: 0, description: 'Page length (legacy meaning preserved)' }, total: { type: 'integer', minimum: 0, description: 'Filtered count before applying cursor and limit' }, nextCursor: { type: 'string', nullable: true, description: 'Null when no further records remain' } } }) },
+            400: { description: 'Invalid/unknown/repeated query parameter or malformed/sort-mismatched cursor', ...json({ type: 'object', required: ['error', 'code', 'details'], properties: { error: { type: 'string' }, code: { type: 'string', enum: ['VALIDATION_FAILED', 'INVALID_CURSOR'] }, details: { type: 'object', additionalProperties: { type: 'string' } } } }) },
           },
         },
         post: {
           tags: ['Invoices'],
           summary: 'Submit an invoice for financing',
+          description: 'Every attempt, accepted or rejected, is recorded in the audit log as `invoice.create`.',
           requestBody: {
             required: true,
             ...json({
@@ -297,16 +437,43 @@ function buildSpec(baseUrl) {
           tags: ['Invoices'],
           summary: 'Record an investor contribution (demo, off-chain)',
           description:
-            'A contribution is either accepted in full or rejected with a 422. ' +
-            'Set allowPartial to true to explicitly cap the contribution at the remaining capacity.',
+            'Every attempt, accepted or rejected (400, 404, 409, 422), is recorded in the audit log as `invoice.fund`, ' +
+            'with the invoice `fundedAmount` and `status` before and after. A contribution is either accepted in full ' +
+            'or rejected with a 422; set allowPartial to true to explicitly cap it at the remaining capacity.',
           parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
           requestBody: { required: true, ...json(FundRequest) },
           responses: {
             200: { description: 'Updated invoice', ...json(FundResponse) },
-            400: { description: 'Invalid amount', ...json(FundingError) },
+            400: { description: 'Invalid amount (non-finite, non-positive, above face value) or missing/invalid investor', ...json(FundingError) },
             404: { description: 'Not found', ...json(ErrorBody) },
             409: { description: 'Invoice not open', ...json(ErrorBody) },
-            422: { description: 'Contribution exceeds remaining capacity', ...json(FundingError) },
+            422: { description: 'Contribution exceeds remaining capacity, or self-funding not allowed', ...json(FundingError) },
+          },
+        },
+      },
+      '/api/invoices/{id}/settle': {
+        post: {
+          tags: ['Invoices'],
+          summary: 'Mark a fully funded invoice as settled',
+          description: 'Every attempt, accepted or rejected, is recorded in the audit log as `invoice.settle`.',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            200: { description: 'Invoice settled', ...json({ type: 'object', properties: { data: Invoice } }) },
+            404: { description: 'Not found', ...json(ErrorBody) },
+            409: { description: 'Invoice not funded', ...json(ErrorBody) },
+          },
+        },
+      },
+      '/api/invoices/{id}/cancel': {
+        post: {
+          tags: ['Invoices'],
+          summary: 'Cancel an open or funded invoice',
+          description: 'Every attempt, accepted or rejected, is recorded in the audit log as `invoice.cancel`.',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            200: { description: 'Invoice cancelled', ...json({ type: 'object', properties: { data: Invoice } }) },
+            404: { description: 'Not found', ...json(ErrorBody) },
+            409: { description: 'Invoice not cancellable', ...json(ErrorBody) },
           },
         },
       },
@@ -395,6 +562,136 @@ function buildSpec(baseUrl) {
               }),
             },
             400: { description: 'Invalid investor address', ...json(ErrorBody) },
+          },
+        },
+      },
+      '/api/invoices/{id}/document': {
+        post: {
+          tags: ['Invoices'],
+          summary: 'Upload a PDF document for an invoice',
+          description:
+            'Accepts a single `multipart/form-data` upload with field name `file`. ' +
+            'Validates PDF magic bytes (`%PDF-` header and `%%EOF` trailer) and rejects unsafe ' +
+            'PDFs containing `/JavaScript` or `/Launch` actions. Computes a SHA-256 digest. ' +
+            'Only allowed while the invoice is `open` and has no document yet.',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' }, description: 'Invoice ID' }],
+          requestBody: {
+            required: true,
+            content: {
+              'multipart/form-data': {
+                schema: {
+                  type: 'object',
+                  required: ['file'],
+                  properties: {
+                    file: { type: 'string', format: 'binary', description: 'The PDF file (max 5 MiB)' },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            201: {
+              description: 'Document accepted; returns metadata including SHA-256 digest',
+              ...json({
+                type: 'object',
+                properties: {
+                  data: DocumentMeta,
+                },
+              }),
+            },
+            400: { description: 'Missing or extra file field', ...json(ErrorBody) },
+            404: { description: 'Invoice not found', ...json(ErrorBody) },
+            409: { description: 'Invoice not open or document already exists', ...json(ErrorBody) },
+            413: { description: 'File exceeds the 5 MiB limit', ...json(ErrorBody) },
+            415: { description: 'File is not a valid PDF (magic-byte check failed)', ...json(ErrorBody) },
+            422: { description: 'PDF contains unsafe actions (/JavaScript or /Launch)', ...json(ErrorBody) },
+          },
+        },
+        get: {
+          tags: ['Invoices'],
+          summary: 'Download the invoice PDF document',
+          description: 'Streams the stored PDF with correct security headers.',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' }, description: 'Invoice ID' }],
+          responses: {
+            200: {
+              description: 'PDF binary stream',
+              headers: {
+                'Content-Disposition': { schema: { type: 'string' }, description: 'attachment; filename="<sanitised name>"' },
+                'X-Content-Type-Options': { schema: { type: 'string' }, description: 'nosniff' },
+                ETag: { schema: { type: 'string' }, description: '"<sha256Hex>"' },
+              },
+              content: { 'application/pdf': { schema: { type: 'string', format: 'binary' } } },
+            },
+            404: { description: 'Invoice or document not found', ...json(ErrorBody) },
+          },
+        },
+      },
+      '/api/invoices/{id}/document/meta': {
+        get: {
+          tags: ['Invoices'],
+          summary: 'Invoice document metadata + attestation hash',
+          description:
+            'Returns document metadata and `attestationHash` — the same SHA-256 hex ' +
+            'digest suitable for passing to `bind_primary_attestation_hash(digest: BytesN<32>)` on the Soroban escrow contract.',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' }, description: 'Invoice ID' }],
+          responses: {
+            200: {
+              description: 'Document metadata with on-chain attestation hash',
+              ...json({
+                type: 'object',
+                properties: {
+                  data: {
+                    allOf: [
+                      DocumentMeta,
+                      {
+                        type: 'object',
+                        properties: {
+                          attestationHash: {
+                            type: 'string',
+                            description: 'SHA-256 hex digest, same as sha256Hex; pass to bind_primary_attestation_hash',
+                            example: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+                          },
+                        },
+                      },
+                    ],
+                  },
+                },
+              }),
+            },
+            404: { description: 'Invoice or document not found', ...json(ErrorBody) },
+          },
+        },
+      },
+      '/api/audit': {
+        get: {
+          tags: ['Audit'],
+          summary: 'List audit log entries (admin)',
+          description: 'Oldest first. Page with `after` set to the previous response\'s `nextAfter`.',
+          security: adminSecurity,
+          parameters: [
+            { name: 'resourceId', in: 'query', schema: { type: 'string' }, description: 'Only entries for this resource' },
+            { name: 'action', in: 'query', schema: { type: 'string' }, description: 'Only this action, e.g. invoice.fund' },
+            { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 } },
+            { name: 'after', in: 'query', schema: { type: 'integer', minimum: 0 }, description: 'Only entries with seq greater than this' },
+          ],
+          responses: {
+            200: { description: 'A page of entries', ...json({ $ref: '#/components/schemas/AuditList' }) },
+            400: { description: 'Invalid query parameter', ...json(ErrorBody) },
+            ...adminErrors,
+          },
+        },
+      },
+      '/api/audit/verify': {
+        get: {
+          tags: ['Audit'],
+          summary: 'Verify the audit hash chain (admin)',
+          description:
+            'Recomputes every retained entry\'s hash and checks the links between them, starting from the oldest ' +
+            'retained entry\'s prevHash.',
+          security: adminSecurity,
+          responses: {
+            200: { description: 'Chain verification result', ...json({ $ref: '#/components/schemas/AuditVerification' }) },
+            ...adminErrors,
           },
         },
       },
@@ -584,6 +881,43 @@ function buildSpec(baseUrl) {
             400: { description: 'Invalid or missing digest (INVALID_DIGEST / NO_FILE)', ...json(ErrorBody) },
             413: { description: 'Uploaded file exceeds 5 MiB', ...json(ErrorBody) },
             502: { description: 'Soroban RPC read failed', ...json(ErrorBody) },
+          },
+        },
+      },
+      '/api/reconciliation': {
+        get: {
+          tags: ['Reconciliation'],
+          summary: 'Reconcile all on-chain invoices against escrow state',
+          description:
+            'For every invoice with onChain: true, reads get_escrow from the Soroban RPC and reports ' +
+            'field-level mismatches. RPC reads are deduplicated per contract and bounded to 4 concurrent calls. ' +
+            'Always returns 200; individual RPC failures are reported per-invoice with status "error".',
+          responses: {
+            200: {
+              description: 'Reconciliation report',
+              ...json(ReconciliationReport),
+            },
+          },
+        },
+      },
+      '/api/reconciliation/{invoiceId}': {
+        get: {
+          tags: ['Reconciliation'],
+          summary: 'Reconcile one invoice against escrow state',
+          parameters: [{ name: 'invoiceId', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            200: {
+              description: 'Reconciliation result for the invoice',
+              ...json(ReconciliationResult),
+            },
+            404: { description: 'Invoice not found', ...json(ErrorBody) },
+            409: {
+              description: 'Invoice is not tracked on-chain (onChain: false)',
+              ...json({
+                type: 'object',
+                properties: { error: { type: 'string', example: 'NOT_ON_CHAIN' }, detail: { type: 'string' } },
+              }),
+            },
           },
         },
       },
