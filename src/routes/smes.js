@@ -34,7 +34,9 @@ function publicSme(record, includePii) {
   if (includePii) {
     return record;
   }
-  const { contactEmail: _contactEmail, registrationNumber: _registrationNumber, ...publicRecord } = record;
+  const publicRecord = { ...record };
+  delete publicRecord.contactEmail;
+  delete publicRecord.registrationNumber;
   return publicRecord;
 }
 

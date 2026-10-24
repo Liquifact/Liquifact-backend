@@ -241,7 +241,8 @@ describe('SME onboarding and invoice verification (#1557)', () => {
     test('a verified smeId alone is enough (sme comes from the record)', async () => {
       const created = (await createRecord()).body.data;
       await review(created.id, 'verify');
-      const { sme: _sme, ...withoutSme } = validInvoice;
+      const withoutSme = { ...validInvoice };
+      delete withoutSme.sme;
       const response = await request(app).post('/api/invoices').send({ ...withoutSme, smeId: created.id });
       expect(response.status).toBe(201);
       expect(response.body.data.sme).toBe(validSme.legalName);
