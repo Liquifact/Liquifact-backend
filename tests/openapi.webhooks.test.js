@@ -41,10 +41,11 @@ describe('OpenAPI spec includes webhook routes', () => {
     expect(tagNames).toContain('Webhooks');
   });
 
-  test('BearerAuth security scheme is defined', () => {
+  test('admin bearer security scheme is defined and used by webhook routes', () => {
     expect(spec.components).toBeDefined();
     expect(spec.components.securitySchemes).toBeDefined();
-    expect(spec.components.securitySchemes.BearerAuth).toBeDefined();
+    expect(spec.components.securitySchemes.adminBearer).toBeDefined();
+    expect(spec.paths['/api/webhooks'].post.security).toEqual([{ adminBearer: [] }]);
   });
 
   test('POST /api/webhooks documents 201, 400, 401, 503', () => {

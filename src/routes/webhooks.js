@@ -4,7 +4,7 @@
  * Admin routes for webhook management.
  *
  * All routes require Authorization: Bearer <ADMIN_API_TOKEN>.
- * The middleware uses a constant-time comparison to prevent timing attacks.
+ * Uses the shared admin-token middleware (constant-time digest comparison).
  *
  * Routes:
  *   POST   /api/webhooks                  Register a new subscription
@@ -16,48 +16,9 @@
 const express = require('express');
 const { validateWebhookUrl } = require('../webhooks/ssrf');
 const webhookStore = require('../webhooks/store');
+const { requireAdminToken } = require('../middleware/require-admin-token');
 
 const router = express.Router();
-
-// ---------------------------------------------------------------------------
-// Auth middleware
-// ---------------------------------------------------------------------------
-
-/**
- * Constant-time token check. Returns 503 if ADMIN_API_TOKEN is not configured,
- * 401 if the token is wrong or missing.
- *
- * @type {import('express').RequestHandler}
- */
-function requireAdminToken(req, res, next) {
-  const token = process.env.ADMIN_API_TOKEN;
-  if (!token) {
-    return res.status(503).json({ error: 'Admin API not configured (ADMIN_API_TOKEN unset)' });
-  }
-
-  const authHeader = req.headers.authorization || '';
-  const supplied = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
-
-  // Constant-time compare using crypto.timingSafeEqual
-  const crypto = require('crypto');
-  const expected = Buffer.from(token, 'utf8');
-  const actual = Buffer.from(supplied, 'utf8');
-
-  // timingSafeEqual requires equal-length buffers
-  let match = false;
-  if (expected.length === actual.length) {
-    match = crypto.timingSafeEqual(expected, actual);
-  } else {
-    // Still perform a dummy comparison to avoid early exit timing leak
-    crypto.timingSafeEqual(expected, expected);
-  }
-
-  if (!match) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
-  return next();
-}
 
 router.use(requireAdminToken);
 

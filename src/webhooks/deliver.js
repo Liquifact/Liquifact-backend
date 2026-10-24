@@ -154,7 +154,8 @@ async function deliverToWebhook(wh, eventType, invoice) {
  * @returns {Promise<void>}
  */
 function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  // unref: pending retries must not keep the process (or a test run) alive.
+  return new Promise((resolve) => setTimeout(resolve, ms).unref());
 }
 
 /**
@@ -178,7 +179,12 @@ function dispatch(eventType, invoice) {
  * Starts listening to the event emitter and dispatching to subscribers.
  * Should be called once at application startup.
  */
+let listening = false;
 function startListening() {
+  if (listening) {
+    return;
+  }
+  listening = true;
   emitter.on('invoice.created', (invoice) => dispatch('invoice.created', invoice));
   emitter.on('invoice.funding_received', (invoice) => dispatch('invoice.funding_received', invoice));
   emitter.on('invoice.funded', (invoice) => dispatch('invoice.funded', invoice));
