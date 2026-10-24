@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 const express = require('express');
 const cors = require('cors');
@@ -53,6 +53,8 @@ const ENDPOINTS = [
   { method: 'GET', path: '/api/escrow/live', description: 'Live escrow state from Soroban RPC' },
   { method: 'GET', path: '/api/escrow/attestations', description: 'On-chain attestation log (paginated)' },
   { method: 'POST', path: '/api/escrow/attestations/verify', description: 'Verify a document digest against on-chain attestations' },
+  { method: 'GET', path: '/api/escrow/events', description: 'Query decoded escrow contract events (paginated)' },
+  { method: 'POST', path: '/api/internal/indexer/trigger', description: 'Manually trigger escrow event indexer (internal)' },
 ];
 
 app.get('/', (req, res) => {
@@ -106,6 +108,10 @@ app.use('/api/invoices', require('./routes/invoices'));
 app.use('/api/investors', require('./routes/investors'));
 app.use('/api/escrow', require('./routes/escrow'));
 
+// Escrow event indexer routes (feat/escrow-event-indexer)
+app.use('/api/escrow/events', require('./routes/escrowEvents'));
+app.use('/api/internal/indexer', require('./routes/indexerTrigger'));
+
 app.use((req, res) => res.status(404).json({ error: 'Not found', path: req.path, docs: '/docs' }));
 
 app.use((err, req, res, _next) => {
@@ -114,3 +120,4 @@ app.use((err, req, res, _next) => {
 });
 
 module.exports = app;
+module.exports.createApp = function createApp() { return app; };
