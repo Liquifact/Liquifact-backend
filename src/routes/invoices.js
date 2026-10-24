@@ -10,6 +10,19 @@ const { toMinor, fromMinor, couponMinor, daysBetween, annualisedBps } = require(
 const router = express.Router();
 
 /**
+ * Adds the computed remainingCapacity field to an invoice representation.
+ *
+ * @param {object} invoice invoice record
+ * @returns {object} invoice with remainingCapacity
+ */
+function present(invoice) {
+  if (!invoice) {
+    return invoice;
+  }
+  return { ...invoice, remainingCapacity: store.remaining(invoice) };
+}
+
+/**
  * Validates a create-invoice payload.
  *
  * @param {object} body request body
@@ -57,7 +70,7 @@ router.get('/', (req, res) => {
     return res.status(400).json({ error: `status must be one of ${store.STATUSES.join(', ')}` });
   }
   const data = status ? store.list().filter((i) => i.status === status) : store.list();
-  return res.json({ data, count: data.length });
+  return res.json({ data: data.map(present), count: data.length });
 });
 
 router.get('/:id', (req, res) => {
@@ -65,7 +78,7 @@ router.get('/:id', (req, res) => {
   if (!invoice) {
     return res.status(404).json({ error: 'Invoice not found' });
   }
-  return res.json({ data: invoice });
+  return res.json({ data: present(invoice) });
 });
 
 router.get('/:id/quote', (req, res) => {
@@ -128,15 +141,22 @@ router.post('/', (req, res) => {
   if (errors) {
     return res.status(400).json({ error: 'Validation failed', details: errors });
   }
-  return res.status(201).json({ data: store.create(value) });
+  return res.status(201).json({ data: present(store.create(value)) });
 });
 
+// Fund handler checks are ordered deterministically:
+//   404  -> invoice not found
+//   400 -> invalid amount (non-finite, non-positive, above face value)
+//   409 -> invoice not open
+//   422 -> contribution exceeds remaining capacity and allowPartial is false
 router.post('/:id/fund', (req, res) => {
   const invoice = store.get(req.params.id);
   if (!invoice) {
     return res.status(404).json({ error: 'Invoice not found' });
   }
-  const { amount, investor } = req.body || {};
+
+  const body = req.body || {};
+  const { amount, investor } = body;
   if (investor === undefined || investor === null || investor === '') {
     return res.status(400).json({ error: 'INVESTOR_REQUIRED' });
   }
@@ -146,13 +166,34 @@ router.post('/:id/fund', (req, res) => {
   if (invoice.smeAddress && investor === invoice.smeAddress) {
     return res.status(422).json({ error: 'SELF_FUNDING_NOT_ALLOWED' });
   }
-  if (typeof amount !== 'number' || !(amount > 0) || !Number.isFinite(amount)) {
-    return res.status(400).json({ error: 'amount must be a positive number' });
+  if (typeof amount !== 'number' || !Number.isFinite(amount) || !(amount > 0)) {
+    return res.status(400).json({ error: 'amount must be a positive finite number', code: 'INVALID_AMOUNT' });
+  }
+  if (amount > invoice.amount) {
+    return res.status(400).json({ error: 'amount must not exceed the invoice face value', code: 'INVALID_AMOUNT' });
   }
   if (invoice.status !== 'open') {
     return res.status(409).json({ error: `Invoice is ${invoice.status}; only open invoices can be funded` });
   }
-  return res.json({ data: store.fund(invoice, amount, investor) });
+
+  const remainingCapacity = store.remaining(invoice);
+  if (amount > remainingCapacity) {
+    const allowPartial = body.allowPartial === true;
+    if (!allowPartial) {
+      return res.status(422).json({
+        error: 'Contribution exceeds remaining capacity',
+        code: 'FUNDING_EXCEEDS_CAPACITY',
+        remainingCapacity,
+      });
+    }
+    const accepted = remainingCapacity;
+    const rejected = amount - accepted;
+    const updated = store.fund(invoice, accepted, investor);
+    return res.json({ data: present(updated), accepted, rejected });
+  }
+
+  const updated = store.fund(invoice, amount, investor);
+  return res.json({ data: present(updated) });
 });
 
 router.get('/:id/contributions', (req, res) => {

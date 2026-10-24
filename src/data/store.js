@@ -114,6 +114,16 @@ function create(invoice) {
 }
 
 /**
+ * Remaining funding capacity for an invoice.
+ *
+ * @param {object} invoice target invoice
+ * @returns {number} amount that can still be contributed
+ */
+function remaining(invoice) {
+  return invoice.amount - invoice.fundedAmount;
+}
+
+/**
  * Records an investor contribution against an open invoice.
  *
  * @param {object} invoice target invoice
@@ -122,6 +132,9 @@ function create(invoice) {
  * @returns {object} updated invoice
  */
 function fund(invoice, amount, investor) {
+  if (!(amount <= remaining(invoice))) {
+    throw new Error('fund() called with amount exceeding remaining capacity');
+  }
   assert(investor, 'investor address is required to fund an invoice');
   contributions.record({ invoiceId: invoice.id, investor, amount });
   invoice.fundedAmount = contributions.sumForInvoice(invoice.id);
@@ -142,4 +155,4 @@ function reset() {
   invoices = seed();
 }
 
-module.exports = { STATUSES, list, get, create, fund, reset };
+module.exports = { STATUSES, list, get, create, fund, remaining, reset };

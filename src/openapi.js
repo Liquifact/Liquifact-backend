@@ -12,11 +12,40 @@ const Invoice = {
     amount: { type: 'number', example: 25000 },
     currency: { type: 'string', example: 'USDC' },
     fundedAmount: { type: 'number', example: 0 },
+    remainingCapacity: { type: 'number', example: 25000, description: 'amount - fundedAmount (computed)' },
     yieldBps: { type: 'integer', example: 800 },
     dueDate: { type: 'string', format: 'date' },
     status: { type: 'string', enum: ['open', 'funded', 'settled', 'cancelled'] },
     onChain: { type: 'boolean' },
     createdAt: { type: 'string', format: 'date-time' },
+  },
+};
+
+const FundingError = {
+  type: 'object',
+  required: ['error'],
+  properties: {
+    error: { type: 'string' },
+    code: { type: 'string', enum: ['FUNDING_EXCEEDS_CAPACITY', 'INVALID_AMOUNT'] },
+    remainingCapacity: { type: 'number', description: 'Remaining capacity at the time of rejection' },
+  },
+};
+
+const FundRequest = {
+  type: 'object',
+  required: ['amount'],
+  properties: {
+    amount: { type: 'number', example: 7000, description: 'Positive finite amount not exceeding the invoice face value' },
+    allowPartial: { type: 'boolean', default: false, description: 'When true, the contribution is capped at remainingCapacity and the response reports accepted/rejected' },
+  },
+};
+
+const FundResponse = {
+  type: 'object',
+  properties: {
+    data: Invoice,
+    accepted: { type: 'number', description: 'Present only when allowPartial is true and the amount was capped' },
+    rejected: { type: 'number', description: 'Present only when allowPartial is true and the amount was capped' },
   },
 };
 
@@ -113,6 +142,10 @@ function buildSpec(baseUrl) {
     tags: [{ name: 'System' }, { name: 'Invoices' }, { name: 'Investors' }, { name: 'Escrow' }],
     components: {
       schemas: {
+        Invoice,
+        FundingError,
+        FundRequest,
+        FundResponse,
         EscrowState,
         EscrowLiveResponse,
       },
@@ -263,24 +296,17 @@ function buildSpec(baseUrl) {
         post: {
           tags: ['Invoices'],
           summary: 'Record an investor contribution (demo, off-chain)',
+          description:
+            'A contribution is either accepted in full or rejected with a 422. ' +
+            'Set allowPartial to true to explicitly cap the contribution at the remaining capacity.',
           parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
-          requestBody: {
-            required: true,
-            ...json({
-              type: 'object',
-              required: ['amount', 'investor'],
-              properties: {
-                amount: { type: 'number', example: 1000 },
-                investor: { type: 'string', example: 'GA7TXEBMEPQCLHIYCWDN7RKAO5IMRD2UV7O7TZXMEW6VZUMEXNR4XBB5' },
-              },
-            }),
-          },
+          requestBody: { required: true, ...json(FundRequest) },
           responses: {
-            200: { description: 'Updated invoice', ...json({ type: 'object', properties: { data: Invoice } }) },
-            400: { description: 'Invalid amount or missing/invalid investor', ...json(ErrorBody) },
+            200: { description: 'Updated invoice', ...json(FundResponse) },
+            400: { description: 'Invalid amount', ...json(FundingError) },
             404: { description: 'Not found', ...json(ErrorBody) },
             409: { description: 'Invoice not open', ...json(ErrorBody) },
-            422: { description: 'Self-funding not allowed', ...json(ErrorBody) },
+            422: { description: 'Contribution exceeds remaining capacity', ...json(FundingError) },
           },
         },
       },
