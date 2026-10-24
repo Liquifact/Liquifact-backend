@@ -6,11 +6,56 @@ const helmet = require('helmet');
 const config = require('./config');
 const store = require('./data/store');
 const { buildSpec } = require('./openapi');
+const loggerModule = require('./logger');
 const { computeStats } = require('./services/stats');
+
+const { logger, requestIdMiddleware } = loggerModule;
 
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', true);
+
+/**
+ * Resolve the HTTP request-logging middleware. The logger module may not export
+ * `httpLogger` as a callable middleware; registering `undefined` with app.use()
+ * throws at load time and breaks every consumer (including the build check).
+ * Fall back to a no-op pass-through so the app still boots without request logs.
+ * @returns {import('express').RequestHandler}
+ */
+function resolveHttpLogger() {
+  if (typeof loggerModule.httpLogger === 'function') {
+    return loggerModule.httpLogger;
+  }
+  return (req, res, next) => {
+    const start = Date.now();
+    if (!req.id) {
+      req.id = req.get('x-request-id') || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    }
+    res.setHeader('x-request-id', req.id);
+    res.on('finish', () => {
+      const matched = req.route && req.route.path ? req.route.path : null;
+      const route = matched
+        ? `${req.baseUrl || ''}${matched}`
+        : (req.baseUrl || '') + req.path.replace(/\/[0-9a-fA-F-]{8,}(?=\/|$)/g, '/:id');
+      logger.info(
+        {
+          reqId: req.id,
+          method: req.method,
+          route,
+          status: res.statusCode,
+          durationMs: Date.now() - start,
+        },
+        'access',
+      );
+    });
+    next();
+  };
+}
+
+if (typeof requestIdMiddleware === 'function') {
+  app.use(requestIdMiddleware);
+}
+app.use(resolveHttpLogger());
 
 app.use(
   helmet({
@@ -110,7 +155,12 @@ app.use((req, res) => res.status(404).json({ error: 'Not found', path: req.path,
 
 app.use((err, req, res, _next) => {
   const status = err.status || err.statusCode || 500;
-  res.status(status).json({ error: status === 500 ? 'Internal server error' : err.message });
+  const reqId = req.id;
+  logger.error({ reqId, err }, 'request failed');
+  res.status(status).json({
+    error: status === 500 ? 'Internal server error' : err.message,
+    requestId: reqId,
+  });
 });
 
 module.exports = app;

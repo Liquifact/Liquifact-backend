@@ -13,19 +13,22 @@
     "dev": "node --watch src/index.js",
     "lint": "eslint .",
     "build": "node scripts/check.js",
-    "test": "jest --runInBand"
+    "test": "jest --runInBand --forceExit"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^14.6.1",
     "cors": "^2.8.5",
     "express": "^5.1.0",
-    "helmet": "^8.1.0"
+    "helmet": "^8.1.0",
+    "pino": "^9.11.0",
+    "pino-http": "^10.3.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
     "eslint": "^9.39.1",
     "globals": "^16.5.0",
     "jest": "^30.2.0",
+    "pino-pretty": "^13.0.0",
     "supertest": "^7.1.4"
   }
 }

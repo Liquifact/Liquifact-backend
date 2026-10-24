@@ -2,6 +2,7 @@
 
 const express = require('express');
 const config = require('../config');
+const logger = require('../logger');
 const { decodeEscrow } = require('../stellar/escrow-decoder');
 
 const router = express.Router();
@@ -69,6 +70,7 @@ router.get('/', (req, res) => {
 });
 
 router.get('/live', async (req, res) => {
+  const startedAt = Date.now();
   // `?strict=true` opts the caller into live-only reads: no snapshot fallback.
   const strict = req.query.strict === 'true' || req.query.strict === '1';
   try {
@@ -87,7 +89,14 @@ router.get('/live', async (req, res) => {
     }
     return res.json(body);
   } catch (err) {
-    console.warn(`escrow live read failed, serving snapshot fallback: ${err.message}`);
+    const durationMs = Date.now() - startedAt;
+    logger.warn({
+      reqId: req.id,
+      rpcUrl: config.rpcUrl,
+      contractId: config.contractId,
+      err: err.message,
+      durationMs,
+    }, 'escrow live read failed; falling back to snapshot');
     if (strict) {
       return res
         .status(503)

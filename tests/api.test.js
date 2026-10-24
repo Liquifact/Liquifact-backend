@@ -6,6 +6,27 @@ const store = require('../src/data/store');
 
 beforeEach(() => store.reset());
 
+/**
+ * Capture every line written by the pino logger during fn().
+ * Uses the logger's own level-agnostic child stream via a spy on write,
+ * which works regardless of how pino was constructed.
+ * @param {() => Promise<void>} fn
+ * @returns {Promise<string[]>}
+ */
+async function captureLogLines(fn) {
+  const lines = [];
+  const spy = jest.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+    lines.push(String(chunk));
+    return true;
+  });
+  try {
+    await fn();
+  } finally {
+    spy.mockRestore();
+  }
+  return lines.join('').split('\n').filter(Boolean);
+}
+
 describe('system', () => {
   test('GET /health', async () => {
     const res = await request(app).get('/health');
@@ -32,6 +53,47 @@ describe('system', () => {
   test('unknown route is a JSON 404', async () => {
     const res = await request(app).get('/nope');
     expect(res.status).toBe(404);
+  });
+
+  test('echoes a valid inbound X-Request-Id', async () => {
+    const res = await request(app).get('/api/invoices').set('X-Request-Id', 'demo-req-123');
+    expect(res.headers['x-request-id']).toBe('demo-req-123');
+  });
+
+  test('replaces an invalid inbound X-Request-Id', async () => {
+    const res = await request(app).get('/api/invoices').set('X-Request-Id', 'bad id!');
+    expect(res.headers['x-request-id']).toBeDefined();
+    expect(res.headers['x-request-id']).not.toBe('bad id!');
+    expect(res.headers['x-request-id']).toMatch(/^[A-Za-z0-9._-]{8,128}$/);
+  });
+
+  test('emits an access log line with templated route and reqId', async () => {
+    const lines = await captureLogLines(async () => {
+      await request(app).get('/api/invoices/INV_0001').set('X-Request-Id', 'access-log-123');
+    });
+    const access = lines
+      .map((l) => {
+        try {
+          return JSON.parse(l);
+        } catch {
+          return null;
+        }
+      })
+      .find((l) => l && l.reqId === 'access-log-123');
+    expect(access).toBeDefined();
+    expect(access.route).toBe('/api/invoices/:id');
+    expect(access.method).toBe('GET');
+    expect(access.status).toBe(200);
+  });
+
+  test('never logs the Authorization header value', async () => {
+    const lines = await captureLogLines(async () => {
+      await request(app)
+        .get('/api/invoices')
+        .set('X-Request-Id', 'auth-log-123')
+        .set('Authorization', 'Bearer super-secret-token-value');
+    });
+    expect(lines.join('')).not.toContain('super-secret-token-value');
   });
 });
 
@@ -75,5 +137,30 @@ describe('escrow', () => {
     const res = await request(app).get('/api/escrow');
     expect(res.status).toBe(200);
     expect(res.body.explorer).toContain('stellar.expert');
+  });
+
+  test('GET /api/escrow/live logs a warn when RPC fails and falls back', async () => {
+    const escrow = require('../src/services/escrowLive');
+    const { readEscrowOnChain } = escrow;
+    const spy = jest
+      .spyOn(escrow, 'readEscrowOnChain')
+      .mockRejectedValue(new Error('rpc down'));
+    let res;
+    const lines = await captureLogLines(async () => {
+      res = await request(app).get('/api/escrow/live').set('X-Request-Id', 'rpc-warn-123');
+    });
+    spy.mockRestore();
+    expect(res.status).toBe(200);
+    const warn = lines
+      .map((l) => {
+        try {
+          return JSON.parse(l);
+        } catch {
+          return null;
+        }
+      })
+      .find((l) => l && l.level === 40 && l.reqId === 'rpc-warn-123');
+    expect(warn).toBeDefined();
+    expect(warn.err).toBe('rpc down');
   });
 });
