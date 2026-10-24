@@ -26,7 +26,7 @@ let read;
 beforeEach(() => {
   store.reset();
   process.env.ADMIN_API_TOKEN = token;
-  read = jest.spyOn(escrowReader, 'readEscrowOnChain').mockResolvedValue(terms());
+  read = jest.spyOn(escrowReader, 'readEscrowOnChain').mockResolvedValue({ native: terms() });
 });
 afterEach(() => {
   read.mockRestore();
@@ -52,7 +52,7 @@ describe('verified invoice escrow linking (#1553)', () => {
     ['yield_bps', { yield_bps: 700 }],
     ['status', { status: 4 }],
   ])('rejects %s mismatch', async (field, change) => {
-    read.mockResolvedValue(terms(change));
+    read.mockResolvedValue({ native: terms(change) });
     const res = await request(app).post(base).set(auth).send({ contractId: CONTRACT_A });
     expect(res.status).toBe(422);
     expect(res.body.code).toBe('ESCROW_TERMS_MISMATCH');
@@ -61,7 +61,7 @@ describe('verified invoice escrow linking (#1553)', () => {
   });
 
   test('unreadable or non-escrow contracts are not linked', async () => {
-    read.mockRejectedValueOnce(new Error('Contract does not exist')).mockResolvedValueOnce(null);
+    read.mockRejectedValueOnce(new Error('Contract does not exist')).mockResolvedValueOnce({ native: null });
     for (const contractId of [CONTRACT_A, CONTRACT_B]) {
       const res = await request(app).post(base).set(auth).send({ contractId });
       expect(res.status).toBe(422);
@@ -121,7 +121,7 @@ describe('verified invoice escrow linking (#1553)', () => {
     });
     expect(created.status).toBe(201);
     expect(created.body.data).toMatchObject({ escrowContractId: null, onChain: false });
-    read.mockResolvedValue({ invoice_id: created.body.data.id, amount: '1000000000', yield_bps: 800, status: 0 });
+    read.mockResolvedValue({ native: { invoice_id: created.body.data.id, amount: '1000000000', yield_bps: 800, status: 0 } });
     const linked = await request(app).post('/api/invoices/' + created.body.data.id + '/escrow').set(auth).send({ contractId: CONTRACT_C });
     expect(linked.status).toBe(200);
     expect(linked.body.data).toMatchObject({ escrowContractId: CONTRACT_C, onChain: true });
@@ -132,7 +132,7 @@ describe('verified invoice escrow linking (#1553)', () => {
     expect(exactStroops(100.0000001)).toBe('1000000001');
     expect(exactStroops(0.00000001)).toBeNull();
     const invoice = store.create({ sme: 'A', debtor: 'B', amount: 100.0000001, yieldBps: 800, smeAddress: null });
-    read.mockResolvedValue({ invoice_id: invoice.id, amount: '1000000000', yield_bps: 800, status: 0 });
+    read.mockResolvedValue({ native: { invoice_id: invoice.id, amount: '1000000000', yield_bps: 800, status: 0 } });
     const res = await request(app).post('/api/invoices/' + invoice.id + '/escrow').set(auth).send({ contractId: CONTRACT_C });
     expect(res.status).toBe(422);
     expect(res.body.mismatches).toEqual(expect.arrayContaining([expect.objectContaining({ field: 'amount' })]));
@@ -142,7 +142,7 @@ describe('verified invoice escrow linking (#1553)', () => {
     const res = await request(app).get('/openapi.json');
     const paths = res.body.paths['/api/invoices/{id}/escrow'];
     expect(paths.post.requestBody.content['application/json'].schema.properties.contractId).toBeDefined();
-    expect(paths.post.security).toEqual([{ AdminBearer: [] }]);
+    expect(paths.post.security).toEqual([{ adminBearer: [] }]);
     for (const status of ['200', '400', '401', '404', '409', '422', '503']) {
       expect(paths.post.responses[status]).toBeDefined();
     }
