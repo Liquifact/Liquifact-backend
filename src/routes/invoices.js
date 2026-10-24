@@ -6,6 +6,7 @@ const store = require('../data/store');
 const contributions = require('../data/contributions');
 const config = require('../config');
 const { toMinor, fromMinor, couponMinor, daysBetween, annualisedBps } = require('../domain/returns');
+const { parseInvoiceQuery, queryInvoices, InvoiceQueryError } = require('../services/invoice-query');
 
 const router = express.Router();
 
@@ -28,11 +29,12 @@ function validateInvoice(body) {
   if (typeof b.amount !== 'number' || !(b.amount > 0) || b.amount > 1e12) {
     errors.push('amount must be a positive number');
   }
-  const yieldBps = b.yieldBps === undefined ? 800 : b.yieldBps;
+  const yieldBps = b.yieldBps == null ? 800 : b.yieldBps;
   if (!Number.isInteger(yieldBps) || yieldBps < 0 || yieldBps > 10000) {
     errors.push('yieldBps must be an integer between 0 and 10000');
   }
-  if (typeof b.dueDate !== 'string' || Number.isNaN(Date.parse(b.dueDate))) {
+  const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+  if (!ISO_DATE.test(b.dueDate) || Number.isNaN(Date.parse(b.dueDate))) {
     errors.push('dueDate must be an ISO date (YYYY-MM-DD)');
   }
   if (errors.length) {
@@ -52,12 +54,15 @@ function validateInvoice(body) {
 }
 
 router.get('/', (req, res) => {
-  const { status } = req.query;
-  if (status && !store.STATUSES.includes(status)) {
-    return res.status(400).json({ error: `status must be one of ${store.STATUSES.join(', ')}` });
+  try {
+    const query = parseInvoiceQuery(req.query);
+    return res.json(queryInvoices(store.list(), query));
+  } catch (error) {
+    if (!(error instanceof InvoiceQueryError)) {
+      throw error;
+    }
+    return res.status(400).json({ error: error.message, code: error.code, details: error.details });
   }
-  const data = status ? store.list().filter((i) => i.status === status) : store.list();
-  return res.json({ data, count: data.length });
 });
 
 router.get('/:id', (req, res) => {
@@ -203,6 +208,28 @@ router.get('/:id/contributions', (req, res) => {
   }
 
   return res.json(response);
+});
+
+router.post('/:id/settle', (req, res) => {
+  const invoice = store.get(req.params.id);
+  if (!invoice) {
+    return res.status(404).json({ error: 'Invoice not found' });
+  }
+  if (invoice.status !== 'funded') {
+    return res.status(409).json({ error: `Invoice is ${invoice.status}; only funded invoices can be settled` });
+  }
+  return res.json({ data: store.settle(invoice) });
+});
+
+router.post('/:id/cancel', (req, res) => {
+  const invoice = store.get(req.params.id);
+  if (!invoice) {
+    return res.status(404).json({ error: 'Invoice not found' });
+  }
+  if (invoice.status !== 'open' && invoice.status !== 'funded') {
+    return res.status(409).json({ error: `Invoice is ${invoice.status}; only open or funded invoices can be cancelled` });
+  }
+  return res.json({ data: store.cancel(invoice) });
 });
 
 module.exports = router;

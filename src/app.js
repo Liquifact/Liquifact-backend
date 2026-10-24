@@ -28,6 +28,7 @@ app.use(
 app.use(cors({ origin: config.corsOrigins.includes('*') ? '*' : config.corsOrigins }));
 app.use(express.json({ limit: '100kb' }));
 
+
 /**
  * @param {import('express').Request} req incoming request
  * @returns {string} public base URL of this deployment
@@ -49,10 +50,15 @@ const ENDPOINTS = [
   { method: 'POST', path: '/api/invoices/:id/fund', description: 'Record an investor contribution' },
   { method: 'GET', path: '/api/invoices/:id/contributions', description: 'List contributions for an invoice' },
   { method: 'GET', path: '/api/investors/:address/portfolio', description: 'Investor portfolio summary and expected returns' },
+  { method: 'POST', path: '/api/invoices/:id/document', description: 'Upload invoice PDF document' },
+  { method: 'GET', path: '/api/invoices/:id/document', description: 'Download invoice PDF document' },
+  { method: 'GET', path: '/api/invoices/:id/document/meta', description: 'Invoice document metadata + attestation hash' },
   { method: 'GET', path: '/api/escrow', description: 'Deployed Soroban escrow contract metadata' },
   { method: 'GET', path: '/api/escrow/live', description: 'Live escrow state from Soroban RPC' },
   { method: 'GET', path: '/api/escrow/attestations', description: 'On-chain attestation log (paginated)' },
   { method: 'POST', path: '/api/escrow/attestations/verify', description: 'Verify a document digest against on-chain attestations' },
+  { method: 'GET', path: '/api/reconciliation', description: 'Reconcile all on-chain invoices against escrow state' },
+  { method: 'GET', path: '/api/reconciliation/:id', description: 'Reconcile one invoice against escrow state' },
 ];
 
 app.get('/', (req, res) => {
@@ -104,7 +110,9 @@ app.get('/api/stats', (req, res) => {
 
 app.use('/api/invoices', require('./routes/invoices'));
 app.use('/api/investors', require('./routes/investors'));
+app.use('/api/invoices/:id/document', require('./routes/invoiceDocument'));
 app.use('/api/escrow', require('./routes/escrow'));
+app.use('/api/reconciliation', require('./routes/reconciliation'));
 
 app.use((req, res) => res.status(404).json({ error: 'Not found', path: req.path, docs: '/docs' }));
 
