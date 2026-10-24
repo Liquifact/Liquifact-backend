@@ -19,7 +19,8 @@
     "@stellar/stellar-sdk": "^14.6.1",
     "cors": "^2.8.5",
     "express": "^5.1.0",
-    "helmet": "^8.1.0"
+    "helmet": "^8.1.0",
+    "multer": "^1.4.5-lts.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
