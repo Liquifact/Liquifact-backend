@@ -16,6 +16,8 @@ const express = require('express');
 const crypto = require('crypto');
 const { Writable } = require('stream');
 const config = require('../config');
+const { badRequest, conflict, ApiError } = require('../errors');
+const { requireRole } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -180,10 +182,10 @@ router.get('/', async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit ?? String(MAX_PAGE), 10), MAX_PAGE);
 
   if (!Number.isFinite(cursor) || cursor < 0) {
-    return res.status(400).json({ error: 'cursor must be a non-negative integer', code: 'INVALID_CURSOR' });
+    throw badRequest('INVALID_CURSOR');
   }
   if (!Number.isFinite(limit) || limit < 1) {
-    return res.status(400).json({ error: 'limit must be between 1 and 20', code: 'INVALID_LIMIT' });
+    throw badRequest('INVALID_LIMIT');
   }
 
   try {
@@ -201,8 +203,8 @@ router.get('/', async (req, res) => {
       total: null, // total log length not directly queryable without get_escrow_summary
       nextCursor,
     });
-  } catch (err) {
-    return res.status(502).json({ error: `Escrow read failed: ${err.message}`, code: 'ESCROW_READ_FAILED' });
+  } catch (_err) {
+    throw new ApiError(502, 'ESCROW_READ_FAILED', 'Escrow Read Failed', { detail: 'Soroban RPC read failed' });
   }
 });
 
@@ -290,7 +292,7 @@ function hashUploadedFile(req) {
   });
 }
 
-router.post('/verify', async (req, res) => {
+router.post('/verify', requireRole('sme', 'investor', 'admin'), async (req, res) => {
   let sha256;
 
   const contentType = req.get('content-type') || '';
@@ -300,20 +302,23 @@ router.post('/verify', async (req, res) => {
     try {
       sha256 = await hashUploadedFile(req);
     } catch (err) {
-      const status = err.status || 400;
-      return res.status(status).json({ error: err.message, code: err.code || 'UPLOAD_ERROR' });
+      const code = err.code || 'UPLOAD_ERROR';
+      if (code === 'FILE_TOO_LARGE') {
+        throw conflict('FILE_TOO_LARGE');
+      }
+      if (code === 'NO_FILE') {
+        throw badRequest('NO_FILE');
+      }
+      throw badRequest(code, err.message);
     }
   } else {
     // JSON body: { sha256: '<64 hex>' }
     const body = req.body || {};
     if (!body.sha256) {
-      return res.status(400).json({ error: 'sha256 field is required', code: 'INVALID_DIGEST' });
+      throw badRequest('INVALID_DIGEST', 'sha256 field is required');
     }
     if (!isValidHex(body.sha256)) {
-      return res.status(400).json({
-        error: 'sha256 must be a 64-character hex string',
-        code: 'INVALID_DIGEST',
-      });
+      throw badRequest('INVALID_DIGEST', 'sha256 must be a 64-character hex string');
     }
     sha256 = body.sha256.toLowerCase();
   }
@@ -323,8 +328,8 @@ router.post('/verify', async (req, res) => {
   let log;
   try {
     [primaryHash, log] = await Promise.all([fetchPrimaryHash(), fetchFullLog()]);
-  } catch (err) {
-    return res.status(502).json({ error: `Escrow read failed: ${err.message}`, code: 'ESCROW_READ_FAILED' });
+  } catch (_err) {
+    throw new ApiError(502, 'ESCROW_READ_FAILED', 'Escrow Read Failed', { detail: 'Soroban RPC read failed' });
   }
 
   const needle = sha256.toLowerCase();

@@ -1,7 +1,15 @@
 'use strict';
 
 const { STATUSES } = require('../data/store');
-const { parseDecimal, rescale, decimalToString } = require('../utils/decimal');
+const { parseDecimal, rescale } = require('../utils/decimal');
+const { formatAmount } = require('../lib/money');
+
+function invoiceMinor(invoice, minorKey, decimalKey) {
+  if (typeof invoice[minorKey] === 'bigint') {
+    return invoice[minorKey];
+  }
+  return rescale(parseDecimal(invoice[decimalKey]), 7);
+}
 
 /** Pure aggregation of a snapshot; no mutation, FX conversion or persistence. */
 function computeStats(invoices, currency, now = new Date()) {
@@ -17,42 +25,40 @@ function computeStats(invoices, currency, now = new Date()) {
   }
 
   const byCurrency = Object.fromEntries([...groups].map(([asset, rows]) => {
-    const active = rows.filter((invoice) => invoice.status !== 'cancelled').map((invoice) => ({
-      invoice,
-      amount: parseDecimal(invoice.amount),
-      funded: parseDecimal(invoice.fundedAmount),
-    }));
-    const scale = active.reduce((max, row) => Math.max(max, row.amount.scale, row.funded.scale), 0);
+    const active = rows.filter((invoice) => invoice.status !== 'cancelled');
     let faceValue = 0n;
     let funded = 0n;
     let outstanding = 0n;
     let weightedYield = 0n;
     for (const row of active) {
-      const amount = rescale(row.amount, scale);
-      const principal = rescale(row.funded, scale);
+      const amount = invoiceMinor(row, 'amountMinor', 'amount');
+      const principal = invoiceMinor(row, 'fundedAmountMinor', 'fundedAmount');
       faceValue += amount;
       funded += principal;
-      if (row.invoice.status === 'funded') {
+      if (row.status === 'funded') {
         outstanding += principal;
       }
-      weightedYield += amount * BigInt(row.invoice.yieldBps);
+      weightedYield += amount * BigInt(row.yieldBps);
     }
     return [asset, {
       invoices: rows.length,
-      faceValue: decimalToString(faceValue, scale),
-      funded: decimalToString(funded, scale),
-      outstanding: decimalToString(outstanding, scale),
+      faceValue: formatAmount(faceValue),
+      funded: formatAmount(funded),
+      outstanding: formatAmount(outstanding),
       weightedYieldBps: faceValue ? Number((2n * weightedYield + faceValue) / (2n * faceValue)) : 0,
     }];
   }));
 
   // Compatibility-only legacy calculations: they intentionally retain the old
   // mixed-asset semantics. Consumers must migrate to byCurrency this release.
-  const sum = (key) => selected.reduce((total, row) => total + Number(row[key]), 0);
+  const totalFaceValue = selected.reduce((total, row) => total + invoiceMinor(row, 'amountMinor', 'amount'), 0n);
+  const totalFunded = selected.reduce((total, row) => total + invoiceMinor(row, 'fundedAmountMinor', 'fundedAmount'), 0n);
   const deprecated = {
-    totalFaceValue: sum('amount'),
-    totalFunded: sum('fundedAmount'),
-    averageYieldBps: selected.length ? Math.round(sum('yieldBps') / selected.length) : 0,
+    totalFaceValue: formatAmount(totalFaceValue),
+    totalFunded: formatAmount(totalFunded),
+    averageYieldBps: selected.length
+      ? Math.round(selected.reduce((total, row) => total + row.yieldBps, 0) / selected.length)
+      : 0,
   };
   return {
     invoices: selected.length,

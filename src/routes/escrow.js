@@ -3,6 +3,10 @@
 const express = require('express');
 const config = require('../config');
 const { decodeEscrow } = require('../stellar/escrow-decoder');
+const { conflict } = require('../errors');
+const { getRpcServer } = require('../stellar/rpc');
+const contractReader = require('../stellar/contract-reader');
+const { Address, StrKey } = require('@stellar/stellar-sdk');
 
 const router = express.Router();
 
@@ -50,10 +54,10 @@ async function simulateContractCall(method, args = [], timeoutMs = 6000) {
     return Array.isArray(results) ? results[0] : results;
   }
   const sdk = require('@stellar/stellar-sdk');
-  const { rpc, Contract, TransactionBuilder, Account, BASE_FEE, scValToNative } = sdk;
-  const server = new rpc.Server(config.rpcUrl);
+  const { Contract, TransactionBuilder, Account, BASE_FEE, scValToNative } = sdk;
+  const server = getRpcServer();
   // Simulation does not need a real or funded source account.
-  const source = new Account('GA7TXEBMEPQCLHIYCWDN7RKAO5IMRD2UV7O7TZXMEW6VZUMEXNR4XBB5', '0');
+  const source = new Account(config.simulationSourceAccount, '0');
   const tx = new TransactionBuilder(source, { fee: BASE_FEE, networkPassphrase: config.networkPassphrase })
     .addOperation(new Contract(config.contractId).call(method, ...args))
     .setTimeout(30)
@@ -300,9 +304,103 @@ router.get('/live', async (req, res) => {
   }
 });
 
+const CACHE_TTL_MS = 5000;
+const CACHE_LIMIT = 1000;
+const positionCache = new Map();
+
+/**
+ * @param {string|number|bigint} value raw stroop amount
+ * @returns {string} amount with 7 decimals applied and trailing zeros trimmed
+ */
+function decimalStroops(value) {
+  const amount = BigInt(value);
+  const negative = amount < 0n;
+  const absolute = negative ? -amount : amount;
+  const whole = absolute / 10000000n;
+  const fractional = (absolute % 10000000n).toString().padStart(7, '0').replace(/0+$/, '');
+  return (negative ? '-' : '') + whole + (fractional ? '.' + fractional : '');
+}
+
+/**
+ * @param {string|number} seconds unix seconds (0 means "no restriction")
+ * @returns {string|null} ISO timestamp, or null for 0
+ */
+function unixIso(seconds) {
+  const n = Number(seconds);
+  if (!Number.isSafeInteger(n) || n < 0 || n * 1000 > 8640000000000000) {
+    throw new Error('Invalid claim timestamp');
+  }
+  return n === 0 ? null : new Date(n * 1000).toISOString();
+}
+
+const POSITION_METHODS = [
+  'get_contribution',
+  'get_claimable_payout',
+  'is_investor_claimed',
+  'get_investor_yield_bps',
+  'get_investor_claim_not_before',
+  'is_allowlist_active',
+  'is_investor_allowlisted',
+];
+
+router.get('/investors/:address', async (req, res) => {
+  const investor = req.params.address;
+  if (!StrKey.isValidEd25519PublicKey(investor) && !StrKey.isValidContract(investor)) {
+    return res.status(400).json({ code: 'INVALID_ADDRESS' });
+  }
+  const now = Date.now();
+  const cached = positionCache.get(investor);
+  if (cached && cached.expiresAt > now) {
+    return res.json(cached.value);
+  }
+  positionCache.delete(investor);
+  const addressScVal = new Address(investor).toScVal();
+  try {
+    const reads = POSITION_METHODS.map(async (method) => {
+      try {
+        return await contractReader.simulateRead(method,
+          method === 'is_allowlist_active' ? [] : [addressScVal], { timeoutMs: 5000 });
+      } catch {
+        throw new Error(method);
+      }
+    });
+    reads.push(contractReader.latestLedger().catch(() => {
+      throw new Error('latestLedger');
+    }));
+    const [contribution, claimablePayout, claimed, effectiveYieldBps,
+      claimNotBefore, active, allowlisted, latestLedger] = await Promise.all(reads);
+    const snapshot = {
+      investor,
+      contractId: config.contractId,
+      contribution: String(contribution),
+      contributionDecimal: decimalStroops(contribution),
+      claimablePayout: String(claimablePayout),
+      claimablePayoutDecimal: decimalStroops(claimablePayout),
+      claimed: Boolean(claimed),
+      effectiveYieldBps: Number(effectiveYieldBps),
+      claimNotBefore: Number(claimNotBefore),
+      claimNotBeforeIso: unixIso(claimNotBefore),
+      allowlist: { active: Boolean(active), allowlisted: Boolean(allowlisted), eligible: !active || Boolean(allowlisted) },
+      latestLedger,
+    };
+    // Preserve the verified snapshot for five seconds, bounding memory usage.
+    positionCache.delete(investor);
+    positionCache.set(investor, { value: snapshot, expiresAt: Date.now() + CACHE_TTL_MS });
+    while (positionCache.size > CACHE_LIMIT) {
+      positionCache.delete(positionCache.keys().next().value);
+    }
+    return res.json(snapshot);
+  } catch (err) {
+    const known = [...POSITION_METHODS, 'latestLedger'].includes(err.message);
+    return res.status(502).json({ code: 'ESCROW_READ_FAILED', method: known ? err.message : 'decode' });
+  }
+});
+
 // Mount attestation sub-router at /attestations
 router.use('/attestations', require('./attestation'));
 
 module.exports = router;
+module.exports.clearPositionCache = () => positionCache.clear();
 module.exports.DEPLOY_SNAPSHOT = DEPLOY_SNAPSHOT;
 module.exports.__setSorobanStub = __setSorobanStub;
+module.exports.readEscrowOnChain = readEscrowOnChain;
