@@ -20,6 +20,44 @@ snapshot as fallback.
 
 ## Endpoints
 
+### Listing invoices (#1554)
+
+`GET /api/invoices` now returns `{ data, count, total, nextCursor }`. `count`
+still means page length; `total` counts all filtered invoices before the cursor.
+The default page has at most 20 records, with `limit=1..100`. Pass the returned
+opaque `nextCursor` as `cursor` with the same sort and filters to continue;
+`nextCursor: null` ends traversal. This is live pagination, not a frozen snapshot:
+updates to the underlying invoices between requests can change membership.
+
+Available filters (all scalar, at most once per request):
+
+- `status=open,funded` (any comma-separated subset of open/funded/settled/cancelled).
+- `currency=USDC` (exact case-sensitive 1–12 alphanumeric asset code).
+- `sme=acme` (case-insensitive substring, 1–120 characters).
+- `minAmount`/`maxAmount` (inclusive non-negative decimal strings, at most 128
+  characters; no exponent notation). Comparisons use scaled integers, not floats.
+- `minYieldBps`/`maxYieldBps` (inclusive integers from 0 to 10000).
+- `dueAfter`/`dueBefore` (inclusive real `YYYY-MM-DD` calendar dates).
+- `onChain=true|false`.
+
+`sort` accepts `createdAt`, `dueDate`, `yieldBps`, `amount`, or any of these
+prefixed with `-` for descending order. Default: `-createdAt`. Ties always use
+ascending `id`, independent of direction. Cursors carry the sort, last sort
+value and id; they are read positions, not authentication credentials. Malformed
+or sort-mismatched cursors return 400 `INVALID_CURSOR`. Unknown/repeated params,
+invalid bounds and impossible dates return 400 `VALIDATION_FAILED` with errors
+keyed by parameter in `details`. Inverted ranges are rejected.
+
+Examples:
+
+```text
+/api/invoices?status=open,funded&currency=USDC&sort=-yieldBps&limit=2
+/api/invoices?dueBefore=2027-03-01&minAmount=100.25&onChain=false
+```
+
+`?status=open` remains supported. Sorting/filtering do not mutate the store;
+this remains an in-memory demo, with no database-level pagination or FX.
+
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/` | JSON index of all endpoints, contract and docs links |

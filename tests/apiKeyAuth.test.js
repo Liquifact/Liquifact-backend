@@ -126,6 +126,23 @@ describe('POST /api/escrow/attestations/verify — roles', () => {
   });
 });
 
+describe('other mutating routes — roles', () => {
+  beforeEach(() => {
+    require('../src/data/store').reset();
+  });
+
+  test('settle is admin-only; cancel accepts sme; SME registration needs a key', async () => {
+    const funded = 'INV_0003';
+    expect((await request(app).post(`/api/invoices/${funded}/settle`).set(bearer(SME_KEY))).status).toBe(403);
+    expect((await request(app).post(`/api/invoices/${funded}/settle`)).status).toBe(401);
+    expect((await request(app).post(`/api/invoices/${funded}/settle`).set(bearer(ADMIN_KEY))).status).toBe(200);
+    expect((await request(app).post('/api/invoices/INV_0001/cancel').set(bearer(INVESTOR_KEY))).status).toBe(403);
+    expect((await request(app).post('/api/invoices/INV_0001/cancel').set(bearer(SME_KEY))).status).toBe(200);
+    expect((await request(app).post('/api/smes').send({})).status).toBe(401);
+    expect((await request(app).post('/api/smes').set(bearer(INVESTOR_KEY)).send({})).status).toBe(403);
+  });
+});
+
 describe('constant-time key comparison', () => {
   test('hashes keys before comparison and matches correctly', () => {
     expect(sha256Hex(SME_KEY)).toBe(sha256(SME_KEY));
@@ -192,6 +209,8 @@ describe('unconfigured API keys', () => {
     let isolatedApp;
     try {
       process.env.NODE_ENV = 'production';
+      // Production also rejects CORS '*' unless explicitly allowed (config validation).
+      process.env.ALLOW_ANY_ORIGIN = 'true';
       delete process.env.API_KEYS;
       process.env.DEV_API_KEY = 'lf_dev_key';
       jest.isolateModules(() => {
@@ -199,6 +218,11 @@ describe('unconfigured API keys', () => {
       });
     } finally {
       process.env.NODE_ENV = previousEnv.NODE_ENV;
+      if (previousEnv.ALLOW_ANY_ORIGIN === undefined) {
+        delete process.env.ALLOW_ANY_ORIGIN;
+      } else {
+        process.env.ALLOW_ANY_ORIGIN = previousEnv.ALLOW_ANY_ORIGIN;
+      }
       if (previousEnv.API_KEYS === undefined) {
         delete process.env.API_KEYS;
       } else {
@@ -232,6 +256,11 @@ describe('unconfigured API keys', () => {
       });
     } finally {
       process.env.NODE_ENV = previousEnv.NODE_ENV;
+      if (previousEnv.ALLOW_ANY_ORIGIN === undefined) {
+        delete process.env.ALLOW_ANY_ORIGIN;
+      } else {
+        process.env.ALLOW_ANY_ORIGIN = previousEnv.ALLOW_ANY_ORIGIN;
+      }
       if (previousEnv.API_KEYS === undefined) {
         delete process.env.API_KEYS;
       } else {
@@ -340,8 +369,8 @@ describe('OpenAPI — security', () => {
   test('GET operations stay unsecured and Invoice documents createdBy', async () => {
     const spec = (await request(app).get('/openapi.json')).body;
     expect(spec.paths['/api/invoices'].get.security).toBeUndefined();
-    const invoiceSchema = spec.paths['/api/invoices'].post.responses['201']
-      .content['application/json'].schema.properties.data;
-    expect(invoiceSchema.properties.createdBy).toBeDefined();
+    const data = spec.paths['/api/invoices'].post.responses['201'].content['application/json'].schema.properties.data;
+    expect(data.$ref).toBe('#/components/schemas/Invoice');
+    expect(spec.components.schemas.Invoice.properties.createdBy).toBeDefined();
   });
 });

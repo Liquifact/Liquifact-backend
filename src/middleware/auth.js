@@ -146,6 +146,8 @@ function requireRole(...roles) {
       });
     }
     req.principal = principal;
+    // The audit log records the authenticated key id as the actor.
+    req.actor = principal.keyId;
     return next();
   };
   // Marker consumed by the route-table guard test in tests/apiKeyAuth.test.js.

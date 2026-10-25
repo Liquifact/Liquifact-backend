@@ -40,12 +40,13 @@ if (config.apiKeys.length === 0 && config.nodeEnv !== 'test') {
   }
 }
 
+
 /**
  * @param {import('express').Request} req incoming request
  * @returns {string} public base URL of this deployment
  */
 function baseUrl(req) {
-  return process.env.PUBLIC_API_BASE_URL || `${req.protocol}://${req.get('host')}`;
+  return config.publicApiBaseUrl || `${req.protocol}://${req.get('host')}`;
 }
 
 const ENDPOINTS = [
@@ -59,12 +60,31 @@ const ENDPOINTS = [
   { method: 'GET', path: '/api/invoices/:id/quote', description: 'Quote an investment contribution and annualised returns' },
   { method: 'POST', path: '/api/invoices', description: 'Submit an invoice for financing' },
   { method: 'POST', path: '/api/invoices/:id/fund', description: 'Record an investor contribution' },
+  { method: 'POST', path: '/api/invoices/:id/escrow', description: 'Admin: link a verified escrow contract' },
+  { method: 'GET', path: '/api/invoices/:id/escrow', description: 'Read the invoice\'s linked on-chain escrow' },
+  { method: 'GET', path: '/api/audit', description: 'Audit log entries (admin; ?resourceId=&action=&limit=&after=)' },
+  { method: 'GET', path: '/api/audit/verify', description: 'Verify the audit hash chain (admin)' },
   { method: 'GET', path: '/api/invoices/:id/contributions', description: 'List contributions for an invoice' },
   { method: 'GET', path: '/api/investors/:address/portfolio', description: 'Investor portfolio summary and expected returns' },
+  { method: 'POST', path: '/api/invoices/:id/document', description: 'Upload invoice PDF document' },
+  { method: 'GET', path: '/api/invoices/:id/document', description: 'Download invoice PDF document' },
+  { method: 'GET', path: '/api/invoices/:id/document/meta', description: 'Invoice document metadata + attestation hash' },
   { method: 'GET', path: '/api/escrow', description: 'Deployed Soroban escrow contract metadata' },
   { method: 'GET', path: '/api/escrow/live', description: 'Live escrow state from Soroban RPC' },
+  { method: 'GET', path: '/api/escrow/investors/:address', description: 'On-chain investor escrow position' },
   { method: 'GET', path: '/api/escrow/attestations', description: 'On-chain attestation log (paginated)' },
   { method: 'POST', path: '/api/escrow/attestations/verify', description: 'Verify a document digest against on-chain attestations' },
+  { method: 'GET', path: '/api/escrow/events', description: 'Query decoded escrow contract events (paginated)' },
+  { method: 'POST', path: '/api/internal/indexer/run', description: 'Manually trigger escrow event indexer (internal, Bearer CRON_SECRET)' },
+  { method: 'GET', path: '/api/reconciliation', description: 'Reconcile all on-chain invoices against escrow state' },
+  { method: 'GET', path: '/api/reconciliation/:id', description: 'Reconcile one invoice against escrow state' },
+  { method: 'POST', path: '/api/smes', description: 'Register an SME for KYB review' },
+  { method: 'GET', path: '/api/smes/:id', description: 'Get an SME (PII for admins only)' },
+  { method: 'POST', path: '/api/smes/:id/review', description: 'Review an SME: verify | reject | suspend (admin)' },
+  { method: 'POST', path: '/api/webhooks', description: 'Register a webhook subscription (admin)' },
+  { method: 'GET', path: '/api/webhooks', description: 'List webhook subscriptions (admin)' },
+  { method: 'DELETE', path: '/api/webhooks/:id', description: 'Remove a webhook subscription (admin)' },
+  { method: 'GET', path: '/api/webhooks/:id/deliveries', description: 'Last 50 delivery records for a webhook (admin)' },
 ];
 
 app.get('/', (req, res) => {
@@ -115,8 +135,20 @@ app.get('/api/stats', (req, res) => {
 });
 
 app.use('/api/invoices', require('./routes/invoices'));
+app.use('/api/audit', require('./routes/audit'));
 app.use('/api/investors', require('./routes/investors'));
+app.use('/api/invoices/:id/document', require('./routes/invoiceDocument'));
 app.use('/api/escrow', require('./routes/escrow'));
+app.use('/api/reconciliation', require('./routes/reconciliation'));
+app.use('/api/webhooks', require('./routes/webhooks'));
+app.use('/api/smes', require('./routes/smes'));
+
+// Start webhook delivery listener (idempotent — safe to call multiple times)
+require('./webhooks/deliver').startListening();
+
+// Escrow event indexer routes (feat/escrow-event-indexer)
+app.use('/api/escrow/events', require('./routes/escrowEvents'));
+app.use('/api/internal/indexer', require('./routes/indexerTrigger'));
 
 app.use((req, res) => res.status(404).json({ error: 'Not found', path: req.path, docs: '/docs' }));
 
@@ -126,3 +158,4 @@ app.use((err, req, res, _next) => {
 });
 
 module.exports = app;
+module.exports.createApp = function createApp() { return app; };
