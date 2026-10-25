@@ -20,7 +20,7 @@ test('reports seeded amounts separately by currency instead of mixing assets', a
 
 test('exposes deprecated totals and retains their old aliases for one migration release', async () => {
   const { body } = await request(app).get('/api/stats');
-  expect(body.deprecated).toEqual({ totalFaceValue: 79600, totalFunded: 72500, averageYieldBps: 768 });
+  expect(body.deprecated).toEqual({ totalFaceValue: '79600', totalFunded: '72500', averageYieldBps: 768 });
   for (const key of ['totalFaceValue', 'totalFunded', 'averageYieldBps']) {
     expect(body[key]).toBe(body.deprecated[key]);
   }
@@ -76,7 +76,7 @@ test('filters the entire response by currency and returns empty results for a va
   expect(Object.keys(body.byCurrency)).toEqual(['XLM']);
   expect(body.invoices).toBe(1);
   expect(body.open).toBe(1);
-  expect(body.deprecated.totalFaceValue).toBe(100);
+  expect(body.deprecated.totalFaceValue).toBe('100');
   const unknown = await request(app).get('/api/stats?currency=ZZZ');
   expect(unknown.status).toBe(200);
   expect(unknown.body.byCurrency).toEqual({});
@@ -88,8 +88,11 @@ test('filters the entire response by currency and returns empty results for a va
 test.each(['currency=', 'currency=BAD%21', 'currency=TOOLONGASSET123', 'currency=XLM&currency=USDC'])('rejects invalid currency query %s', async (query) => {
   const res = await request(app).get('/api/stats?' + query);
   expect(res.status).toBe(400);
+  expect(res.type).toMatch(/application\/problem\+json/);
   expect(res.body.code).toBe('VALIDATION_FAILED');
-  expect(res.body.details.currency).toEqual(expect.any(String));
+  expect(res.body.errors).toBeDefined();
+  expect(Array.isArray(res.body.errors)).toBe(true);
+  expect(res.body.errors.some(e => e.field === 'currency')).toBe(true);
 });
 
 test('documents all statistics fields and the currency error response in OpenAPI', async () => {
@@ -100,5 +103,7 @@ test('documents all statistics fields and the currency error response in OpenAPI
   expect(shape.required).toEqual(expect.arrayContaining(['invoices', 'open', 'byStatus', 'byCurrency', 'generatedAt', 'deprecated']));
   expect(Object.keys(shape.properties.byCurrency.additionalProperties.properties)).toEqual(['invoices', 'faceValue', 'funded', 'outstanding', 'weightedYieldBps']);
   expect(shape.properties.deprecated.deprecated).toBe(true);
-  expect(spec.responses[400].content['application/json'].schema.properties.code.enum).toEqual(['VALIDATION_FAILED']);
+  expect(shape.properties.deprecated.properties.totalFaceValue.type).toBe('string');
+  expect(shape.properties.deprecated.properties.totalFunded.type).toBe('string');
+  expect(spec.responses[400].content['application/problem+json'].schema.properties.code.enum).toEqual(['VALIDATION_FAILED']);
 });

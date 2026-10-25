@@ -13,20 +13,28 @@
     "dev": "node --watch src/index.js",
     "lint": "eslint .",
     "build": "node scripts/check.js",
+    "apikey:new": "node scripts/new-api-key.js",
     "test": "jest --runInBand"
   },
   "dependencies": {
+    "@asteasolutions/zod-to-openapi": "7.3.4",
     "@stellar/stellar-sdk": "^14.6.1",
     "cors": "^2.8.5",
     "express": "^5.1.0",
     "helmet": "^8.1.0",
-    "swagger-ui-dist": "5.34.0"
+    "multer": "^1.4.5-lts.1",
+    "swagger-ui-dist": "5.34.0",
+    "zod": "3.25.76"
   },
   "devDependencies": {
+    "@apidevtools/swagger-parser": "10.1.1",
     "@eslint/js": "^9.39.1",
     "eslint": "^9.39.1",
     "globals": "^16.5.0",
     "jest": "^30.2.0",
     "supertest": "^7.1.4"
+  },
+  "scarfSettings": {
+    "enabled": false
   }
 }
