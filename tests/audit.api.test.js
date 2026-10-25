@@ -1,6 +1,6 @@
 'use strict';
 
-const { authHeader } = require('./helpers/auth');
+const { authHeader, KEYS } = require('./helpers/auth');
 const request = require('supertest');
 const express = require('express');
 const app = require('../src/app');
@@ -180,10 +180,11 @@ describe('recording mutations', () => {
 });
 
 describe('redaction', () => {
-  const SECRETS = ['super-secret-bearer', 'key-12345', 'hunter2', 'SABCDEF', 'p4ss-w0rd', 'tok-789'];
+  const SECRETS = [KEYS.admin, 'key-12345', 'hunter2', 'SABCDEF', 'p4ss-w0rd', 'tok-789'];
 
   test('Authorization, API keys and secret/seed/password/token fields never reach any stored entry', async () => {
-    const headers = { Authorization: 'Bearer super-secret-bearer', 'X-API-Key': 'key-12345' };
+    // The (valid) API key travels in Authorization; neither it nor X-API-Key may be stored.
+    const headers = { 'X-API-Key': 'key-12345' };
     const extras = { secret: 'hunter2', seed: 'SABCDEF', password: 'p4ss-w0rd', token: 'tok-789' };
 
     await request(app).post('/api/invoices').set(authHeader()).set(headers).send({ ...NEW_INVOICE, ...extras });
