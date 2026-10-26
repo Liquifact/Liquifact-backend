@@ -21,10 +21,49 @@ fallback.
 
 ## Endpoints
 
+### Listing invoices (#1554)
+
+`GET /api/invoices` now returns `{ data, count, total, nextCursor }`. `count`
+still means page length; `total` counts all filtered invoices before the cursor.
+The default page has at most 20 records, with `limit=1..100`. Pass the returned
+opaque `nextCursor` as `cursor` with the same sort and filters to continue;
+`nextCursor: null` ends traversal. This is live pagination, not a frozen snapshot:
+updates to the underlying invoices between requests can change membership.
+
+Available filters (all scalar, at most once per request):
+
+- `status=open,funded` (any comma-separated subset of open/funded/settled/cancelled).
+- `currency=USDC` (exact case-sensitive 1–12 alphanumeric asset code).
+- `sme=acme` (case-insensitive substring, 1–120 characters).
+- `minAmount`/`maxAmount` (inclusive non-negative decimal strings, at most 128
+  characters; no exponent notation). Comparisons use scaled integers, not floats.
+- `minYieldBps`/`maxYieldBps` (inclusive integers from 0 to 10000).
+- `dueAfter`/`dueBefore` (inclusive real `YYYY-MM-DD` calendar dates).
+- `onChain=true|false`.
+
+`sort` accepts `createdAt`, `dueDate`, `yieldBps`, `amount`, or any of these
+prefixed with `-` for descending order. Default: `-createdAt`. Ties always use
+ascending `id`, independent of direction. Cursors carry the sort, last sort
+value and id; they are read positions, not authentication credentials. Malformed
+or sort-mismatched cursors return 400 `INVALID_CURSOR`. Unknown/repeated params,
+invalid bounds and impossible dates return 400 `VALIDATION_FAILED` with errors
+keyed by parameter in `details`. Inverted ranges are rejected.
+
+Examples:
+
+```text
+/api/invoices?status=open,funded&currency=USDC&sort=-yieldBps&limit=2
+/api/invoices?dueBefore=2027-03-01&minAmount=100.25&onChain=false
+```
+
+`?status=open` remains supported. Sorting/filtering do not mutate the store;
+this remains an in-memory demo, with no database-level pagination or FX.
+
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/` | JSON index of all endpoints, contract and docs links |
 | GET | `/health` | Liveness probe (`/healthz` alias) |
+| GET | `/ready` | Readiness probe (Soroban RPC, network, ledger freshness, contract) |
 | GET | `/docs` | Swagger UI |
 | GET | `/openapi.json` | OpenAPI 3 document |
 | GET | `/api/stats` | Marketplace totals |
@@ -36,6 +75,34 @@ fallback.
 | GET | `/api/investors/:address/portfolio` | Investor portfolio summary and expected returns |
 | GET | `/api/escrow` | Deployed escrow contract metadata |
 | GET | `/api/escrow/live` | Live `get_escrow` read from Soroban RPC |
+
+## Authentication
+
+All `GET` routes are public. Every mutating route requires an API key, sent as
+`Authorization: Bearer <key>` or `X-API-Key: <key>`:
+
+| Method | Path | Required role |
+|--------|------|---------------|
+| POST | `/api/invoices` | `sme` or `admin` |
+| POST | `/api/invoices/:id/fund` | `investor` or `admin` |
+| POST | `/api/escrow/attestations/verify` | `sme`, `investor` or `admin` |
+
+Keys are configured through the `API_KEYS` environment variable as comma-separated
+`id:role:sha256hex` entries. Only SHA-256 hashes are stored. Generate a key with:
+
+```bash
+npm run apikey:new -- --role sme
+```
+
+The command prints the raw key once (store it securely; it is never retrievable
+again) plus the matching `API_KEYS` line for your deployment config.
+
+Failure modes: a missing, malformed or unknown key returns `401` with
+`WWW-Authenticate: Bearer` and `{ "code": "UNAUTHENTICATED" }`; a valid key with
+the wrong role returns `403 { "code": "FORBIDDEN" }`; an empty `API_KEYS` in
+production fails closed with `503 { "code": "AUTH_NOT_CONFIGURED" }`. Outside
+production, a single dev key from `DEV_API_KEY` (accepted as the `admin` role)
+works while `API_KEYS` is empty, with a startup warning.
 
 ## Known Limitations
 
@@ -95,6 +162,31 @@ Set `PGSSLMODE=require` when the server requires SSL. Never log `DATABASE_URL`.
 
 Configuration is optional; see [`.env.example`](.env.example).
 
+### Readiness probe (#1543)
+
+`GET /health` is a cheap liveness probe: it never touches a dependency and
+always answers `200`. `GET /ready` is the dependency-aware probe. It runs four
+checks in parallel against the configured Soroban RPC and answers `200` with
+`{ "status": "ready", "checks": { ... } }`, or `503` with
+`{ "status": "not_ready", "checks": { ... } }` when a check fails:
+
+| Check | What it verifies | Failure code |
+|-------|------------------|--------------|
+| `rpc` | `getHealth()` reports `healthy` | `RPC_ERROR`, `TIMEOUT` |
+| `network` | `getNetwork()` passphrase equals `STELLAR_NETWORK_PASSPHRASE` | `PASSPHRASE_MISMATCH` |
+| `ledger` | the latest ledger is younger than `READY_MAX_LEDGER_AGE_SECONDS` | `STALE_LEDGER` |
+| `contract` | the configured escrow contract is deployed | `CONTRACT_NOT_FOUND` |
+
+Failing checks report a short code only; raw upstream messages are never
+returned. The result is cached for `READY_CACHE_SECONDS` so that probes cannot
+hammer the RPC, and every check is bounded by `READY_CHECK_TIMEOUT_MS`.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `READY_CHECK_TIMEOUT_MS` | `2000` | Per-check timeout |
+| `READY_MAX_LEDGER_AGE_SECONDS` | `60` | Maximum accepted age of the latest ledger |
+| `READY_CACHE_SECONDS` | `10` | How long a probe result is reused (`0` disables caching) |
+
 ## Deployment (Vercel)
 
 `api/index.js` exports the Express app and `vercel.json` rewrites every path
@@ -116,6 +208,8 @@ src/data/            Invoice repositories (memory + Postgres/knex)
 migrations/          Knex migrations (invoices table)
 seeds/               Demo invoice seed
 src/routes/          invoices and escrow routers
+src/services/        marketplace stats and readiness checks
+src/stellar/         escrow decoder and shared Soroban RPC client
 tests/               Jest + supertest API tests
 ```
 

@@ -10,7 +10,17 @@
  */
 
 const request = require('supertest');
+const crypto = require('crypto');
 const { xdr, scValToNative } = require('@stellar/stellar-sdk');
+
+// Mutating routes require an API key (issue #1534). Configure a single admin
+// key before the app (and its config) is loaded (the app require is below, once
+// the SDK mock is in place).
+const ADMIN_KEY = 'lf_test_admin_key';
+process.env.API_KEYS = `test-admin:admin:${crypto.createHash('sha256').update(ADMIN_KEY).digest('hex')}`;
+
+/** Authenticated POST helper (mutating routes require an API key). */
+const authedPost = (url) => request(app).post(url).set('authorization', `Bearer ${ADMIN_KEY}`);
 
 // ---------------------------------------------------------------------------
 // Mock @stellar/stellar-sdk rpc.Server
@@ -163,8 +173,7 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 async function verifyDigest(sha256) {
-  return request(app)
-    .post('/api/escrow/attestations/verify')
+  return authedPost('/api/escrow/attestations/verify')
     .set('content-type', 'application/json')
     .send({ sha256 });
 }
@@ -297,8 +306,7 @@ describe('POST /api/escrow/attestations/verify (JSON)', () => {
 
 describe('POST /api/escrow/attestations/verify — validation', () => {
   test('400 when sha256 field is missing', async () => {
-    const res = await request(app)
-      .post('/api/escrow/attestations/verify')
+    const res = await authedPost('/api/escrow/attestations/verify')
       .set('content-type', 'application/json')
       .send({});
     expect(res.status).toBe(400);
@@ -344,8 +352,7 @@ describe('POST /api/escrow/attestations/verify (multipart file upload)', () => {
 
   test('file upload: primary match when hash equals primary digest', async () => {
     setMockResponder(KNOWN_SHA256, []);
-    const res = await request(app)
-      .post('/api/escrow/attestations/verify')
+    const res = await authedPost('/api/escrow/attestations/verify')
       .attach('file', Buffer.from(KNOWN_CONTENT), 'invoice.pdf');
     expect(res.status).toBe(200);
     expect(res.body.sha256).toBe(KNOWN_SHA256);
@@ -355,8 +362,7 @@ describe('POST /api/escrow/attestations/verify (multipart file upload)', () => {
 
   test('file upload: log match', async () => {
     setMockResponder(null, [{ digest: KNOWN_SHA256, revoked: false }]);
-    const res = await request(app)
-      .post('/api/escrow/attestations/verify')
+    const res = await authedPost('/api/escrow/attestations/verify')
       .attach('file', Buffer.from(KNOWN_CONTENT), 'invoice.pdf');
     expect(res.status).toBe(200);
     expect(res.body.match).toBe('log');
@@ -366,8 +372,7 @@ describe('POST /api/escrow/attestations/verify (multipart file upload)', () => {
 
   test('file upload: no match', async () => {
     setMockResponder(PRIMARY_DIGEST, THREE_ENTRY_LOG);
-    const res = await request(app)
-      .post('/api/escrow/attestations/verify')
+    const res = await authedPost('/api/escrow/attestations/verify')
       .attach('file', Buffer.from('completely different content'), 'other.pdf');
     expect(res.status).toBe(200);
     expect(res.body.match).toBe('none');
@@ -376,8 +381,7 @@ describe('POST /api/escrow/attestations/verify (multipart file upload)', () => {
   test('413 when file exceeds 5 MiB', async () => {
     // 5 MiB + 1 byte
     const oversized = Buffer.alloc(5 * 1024 * 1024 + 1, 0x41);
-    const res = await request(app)
-      .post('/api/escrow/attestations/verify')
+    const res = await authedPost('/api/escrow/attestations/verify')
       .attach('file', oversized, 'big.pdf');
     expect(res.status).toBe(413);
     expect(res.body.code).toBe('FILE_TOO_LARGE');

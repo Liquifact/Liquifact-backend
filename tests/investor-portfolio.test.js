@@ -1,15 +1,21 @@
 'use strict';
 
 const request = require('supertest');
+const crypto = require('crypto');
+
+// Mutating routes require an API key (issue #1534). Configure a single admin
+// key before the app (and its config) is loaded.
+const ADMIN_KEY = 'lf_test_admin_key';
+process.env.API_KEYS = `test-admin:admin:${crypto.createHash('sha256').update(ADMIN_KEY).digest('hex')}`;
+
 const app = require('../src/app');
 const contributions = require('../src/data/contributions');
 const { RepoError } = require('../src/data/errors');
 
-const repo = app.locals.repo;
+/** Authenticated POST helper (mutating routes require an API key). */
+const authedPost = (url) => request(app).post(url).set('authorization', `Bearer ${ADMIN_KEY}`);
 
-beforeEach(async () => {
-  await repo.reset();
-});
+beforeEach(() => store.reset());
 
 const INVESTOR_A = 'GA7TXEBMEPQCLHIYCWDN7RKAO5IMRD2UV7O7TZXMEW6VZUMEXNR4XBB5';
 const INVESTOR_B = 'GBTUJNOF2WAAUPKCJHBB76ID5HGN6KMTUG43F3Z344T7QRTP7B7TVPVC';
@@ -18,23 +24,21 @@ const INVESTOR_EMPTY = 'GBD3OBQM2K3GSBVKRPZOUW3DTZLWMOKIGW2XW6ZQ3PFFNIAT7NFBN6IV
 describe('Investor Contributions and Portfolio', () => {
   test('funds INV_0002 from two investors and asserts contributions, totals, and each portfolio', async () => {
     // Fund from investor A
-    const resA = await request(app)
-      .post('/api/invoices/INV_0002/fund')
+    const resA = await authedPost('/api/invoices/INV_0002/fund')
       .send({ amount: 2000, investor: INVESTOR_A });
     expect(resA.status).toBe(200);
-    expect(resA.body.data.fundedAmount).toBe(20000); // 18000 seed + 2000
+    expect(resA.body.data.fundedAmount).toBe('20000'); // 18000 seed + 2000
 
     // Fund from investor B
-    const resB = await request(app)
-      .post('/api/invoices/INV_0002/fund')
+    const resB = await authedPost('/api/invoices/INV_0002/fund')
       .send({ amount: 3000, investor: INVESTOR_B });
     expect(resB.status).toBe(200);
-    expect(resB.body.data.fundedAmount).toBe(23000); // 20000 + 3000
+    expect(resB.body.data.fundedAmount).toBe('23000'); // 20000 + 3000
 
     // Query contributions for INV_0002
     const contribRes = await request(app).get('/api/invoices/INV_0002/contributions');
     expect(contribRes.status).toBe(200);
-    expect(contribRes.body.totals.funded).toBe(23000);
+    expect(contribRes.body.totals.funded).toBe('23000');
     expect(contribRes.body.totals.investors).toBe(3); // seed demo investor + A + B
     expect(contribRes.body.data.length).toBe(3);
 
@@ -43,12 +47,12 @@ describe('Investor Contributions and Portfolio', () => {
       expect.arrayContaining([
         expect.objectContaining({
           investor: INVESTOR_A,
-          amount: 2000,
+          amount: '2000',
           createdAt: expect.any(String),
         }),
         expect.objectContaining({
           investor: INVESTOR_B,
-          amount: 3000,
+          amount: '3000',
           createdAt: expect.any(String),
         }),
       ]),
@@ -64,17 +68,17 @@ describe('Investor Contributions and Portfolio', () => {
       invoiceId: 'INV_0002',
       status: 'open',
       currency: 'USDC',
-      principal: 2000,
+      principal: '2000',
       yieldBps: 650,
       dueDate: '2026-12-30',
-      expectedCoupon: 130,
-      expectedPayout: 2130,
+      expectedCoupon: '130',
+      expectedPayout: '2130',
     });
     expect(portA.body.totalsByCurrency).toEqual({
       USDC: {
-        principal: 2000,
-        expectedCoupon: 130,
-        expectedPayout: 2130,
+        principal: '2000',
+        expectedCoupon: '130',
+        expectedPayout: '2130',
       },
     });
 
@@ -88,25 +92,24 @@ describe('Investor Contributions and Portfolio', () => {
       invoiceId: 'INV_0002',
       status: 'open',
       currency: 'USDC',
-      principal: 3000,
+      principal: '3000',
       yieldBps: 650,
       dueDate: '2026-12-30',
-      expectedCoupon: 195,
-      expectedPayout: 3195,
+      expectedCoupon: '195',
+      expectedPayout: '3195',
     });
     expect(portB.body.totalsByCurrency).toEqual({
       USDC: {
-        principal: 3000,
-        expectedCoupon: 195,
-        expectedPayout: 3195,
+        principal: '3000',
+        expectedCoupon: '195',
+        expectedPayout: '3195',
       },
     });
   });
 
   test('invariant: fundedAmount === sum of contributions for every invoice after N random fund calls', async () => {
     // Create new open invoice to have plenty of headroom
-    const created = await request(app)
-      .post('/api/invoices')
+    const created = await authedPost('/api/invoices')
       .send({
         sme: 'Invariant SME',
         debtor: 'Buyer Inc',
@@ -123,8 +126,7 @@ describe('Investor Contributions and Portfolio', () => {
     for (let i = 0; i < N; i++) {
       const inv = investors[i % investors.length];
       const amount = Math.floor(Math.random() * 50) + 1; // 1 to 50
-      const res = await request(app)
-        .post(`/api/invoices/${testInvoiceId}/fund`)
+      const res = await authedPost(`/api/invoices/${testInvoiceId}/fund`)
         .send({ amount, investor: inv });
       expect(res.status).toBe(200);
     }
@@ -133,49 +135,57 @@ describe('Investor Contributions and Portfolio', () => {
     const allInvoices = await repo.list();
     for (const inv of allInvoices) {
       const sum = contributions.sumForInvoice(inv.id);
-      expect(inv.fundedAmount).toBe(sum);
+      expect(inv.fundedAmountMinor).toBe(sum);
     }
   });
 
   test('failure tests: missing investor, invalid address, self-funding, unknown invoice, empty portfolio', async () => {
     // 1. Missing investor
-    const missingRes = await request(app)
-      .post('/api/invoices/INV_0002/fund')
+    const missingRes = await authedPost('/api/invoices/INV_0002/fund')
       .send({ amount: 100 });
     expect(missingRes.status).toBe(400);
-    expect(missingRes.body.error).toBe('INVESTOR_REQUIRED');
+    expect(missingRes.type).toMatch(/application\/problem\+json/);
+    expect(missingRes.body.code).toBe('INVESTOR_REQUIRED');
+    expect(missingRes.body.error).toBe('Investor Required'); // legacy field equals title
 
     // 2. Invalid investor address on fund
-    const invalidFundRes = await request(app)
-      .post('/api/invoices/INV_0002/fund')
+    const invalidFundRes = await authedPost('/api/invoices/INV_0002/fund')
       .send({ amount: 100, investor: 'not-a-valid-stellar-key' });
     expect(invalidFundRes.status).toBe(400);
-    expect(invalidFundRes.body.error).toBe('INVALID_INVESTOR_ADDRESS');
+    expect(invalidFundRes.type).toMatch(/application\/problem\+json/);
+    expect(invalidFundRes.body.code).toBe('INVALID_INVESTOR_ADDRESS');
+    expect(invalidFundRes.body.error).toBe('Invalid Investor Address');
 
     // 3. Self-funding rejected with 422
     // INV_0001 has smeAddress = INVESTOR_A
-    const selfRes = await request(app)
-      .post('/api/invoices/INV_0001/fund')
+    const selfRes = await authedPost('/api/invoices/INV_0001/fund')
       .send({ amount: 10, investor: INVESTOR_A });
     expect(selfRes.status).toBe(422);
-    expect(selfRes.body.error).toBe('SELF_FUNDING_NOT_ALLOWED');
+    expect(selfRes.type).toMatch(/application\/problem\+json/);
+    expect(selfRes.body.code).toBe('SELF_FUNDING_NOT_ALLOWED');
+    expect(selfRes.body.error).toBe('Self-Funding Not Allowed');
 
     // 4. Unknown invoice on fund
-    const unknownFundRes = await request(app)
-      .post('/api/invoices/INV_9999/fund')
+    const unknownFundRes = await authedPost('/api/invoices/INV_9999/fund')
       .send({ amount: 10, investor: INVESTOR_B });
     expect(unknownFundRes.status).toBe(404);
-    expect(unknownFundRes.body.error).toBe('Invoice not found');
+    expect(unknownFundRes.type).toMatch(/application\/problem\+json/);
+    expect(unknownFundRes.body.code).toBe('INVOICE_NOT_FOUND');
+    expect(unknownFundRes.body.error).toBe('Invoice Not Found');
 
     // 5. Unknown invoice on contributions query
     const unknownContribRes = await request(app).get('/api/invoices/INV_9999/contributions');
     expect(unknownContribRes.status).toBe(404);
-    expect(unknownContribRes.body.error).toBe('Invoice not found');
+    expect(unknownContribRes.type).toMatch(/application\/problem\+json/);
+    expect(unknownContribRes.body.code).toBe('INVOICE_NOT_FOUND');
+    expect(unknownContribRes.body.error).toBe('Invoice Not Found');
 
     // 6. Invalid address on portfolio query
     const invalidPortRes = await request(app).get('/api/investors/INVALID_ADDR/portfolio');
     expect(invalidPortRes.status).toBe(400);
-    expect(invalidPortRes.body.error).toBe('INVALID_INVESTOR_ADDRESS');
+    expect(invalidPortRes.type).toMatch(/application\/problem\+json/);
+    expect(invalidPortRes.body.code).toBe('INVALID_INVESTOR_ADDRESS');
+    expect(invalidPortRes.body.error).toBe('Invalid Investor Address');
 
     // 7. Portfolio for address with no positions returns 200 with empty positions and totals
     const emptyPortRes = await request(app).get(`/api/investors/${INVESTOR_EMPTY}/portfolio`);
@@ -194,8 +204,7 @@ describe('Investor Contributions and Portfolio', () => {
 
   test('coupon math truncates using integer minor unit arithmetic where floor rounding matters', async () => {
     // Create an invoice with yieldBps: 650 (6.5%)
-    const created = await request(app)
-      .post('/api/invoices')
+    const created = await authedPost('/api/invoices')
       .send({
         sme: 'Fractional SME',
         debtor: 'Buyer B',
@@ -213,26 +222,23 @@ describe('Investor Contributions and Portfolio', () => {
     // Payout = 123.4567891 + 8.0246912 = 131.4814803
     // Note: Float math without minor unit floor produces 8.0246912915, so floor rounding strictly matters here!
     const principal = 123.4567891;
-    await request(app)
-      .post(`/api/invoices/${invoiceId}/fund`)
+    await authedPost(`/api/invoices/${invoiceId}/fund`)
       .send({ amount: principal, investor: INVESTOR_B });
 
     const port = await request(app).get(`/api/investors/${INVESTOR_B}/portfolio`);
     expect(port.status).toBe(200);
     const pos = port.body.positions.find((p) => p.invoiceId === invoiceId);
     expect(pos).toBeDefined();
-    expect(pos.principal).toBe(principal);
-    expect(pos.expectedCoupon).toBe(8.0246912);
-    expect(pos.expectedPayout).toBe(131.4814803);
+    expect(pos.principal).toBe('123.4567891');
+    expect(pos.expectedCoupon).toBe('8.0246912');
+    expect(pos.expectedPayout).toBe('131.4814803');
   });
 
   test('aggregates multiple contributions by the same investor to one invoice', async () => {
     // Fund INV_0002 twice by INVESTOR_B
-    await request(app)
-      .post('/api/invoices/INV_0002/fund')
+    await authedPost('/api/invoices/INV_0002/fund')
       .send({ amount: 1000, investor: INVESTOR_B });
-    await request(app)
-      .post('/api/invoices/INV_0002/fund')
+    await authedPost('/api/invoices/INV_0002/fund')
       .send({ amount: 1500, investor: INVESTOR_B });
 
     const port = await request(app).get(`/api/investors/${INVESTOR_B}/portfolio`);
@@ -240,15 +246,14 @@ describe('Investor Contributions and Portfolio', () => {
     // Should have only 1 aggregated position for INV_0002
     const inv2Positions = port.body.positions.filter((p) => p.invoiceId === 'INV_0002');
     expect(inv2Positions).toHaveLength(1);
-    expect(inv2Positions[0].principal).toBe(2500); // 1000 + 1500
-    expect(inv2Positions[0].expectedCoupon).toBe(162.5); // 2500 * 650 / 10000
-    expect(inv2Positions[0].expectedPayout).toBe(2662.5);
+    expect(inv2Positions[0].principal).toBe('2500'); // 1000 + 1500
+    expect(inv2Positions[0].expectedCoupon).toBe('162.5'); // 2500 * 650 / 10000
+    expect(inv2Positions[0].expectedPayout).toBe('2662.5');
   });
 
   test('cancelled invoice shows expectedCoupon: "0" and returns principal as expectedPayout', async () => {
     // Fund an invoice
-    await request(app)
-      .post('/api/invoices/INV_0002/fund')
+    await authedPost('/api/invoices/INV_0002/fund')
       .send({ amount: 1000, investor: INVESTOR_B });
 
     // Mark invoice as cancelled via repository (returned objects are copies)
@@ -259,19 +264,16 @@ describe('Investor Contributions and Portfolio', () => {
     const pos = port.body.positions.find((p) => p.invoiceId === 'INV_0002');
     expect(pos.status).toBe('cancelled');
     expect(pos.expectedCoupon).toBe('0');
-    expect(pos.expectedPayout).toBe(1000);
+    expect(pos.expectedPayout).toBe('1000');
   });
 
   test('contributions endpoint pagination with limit and cursor', async () => {
     // INV_0002 initially has 1 seed contribution. Add 3 more contributions.
-    await request(app)
-      .post('/api/invoices/INV_0002/fund')
+    await authedPost('/api/invoices/INV_0002/fund')
       .send({ amount: 100, investor: INVESTOR_A });
-    await request(app)
-      .post('/api/invoices/INV_0002/fund')
+    await authedPost('/api/invoices/INV_0002/fund')
       .send({ amount: 200, investor: INVESTOR_B });
-    await request(app)
-      .post('/api/invoices/INV_0002/fund')
+    await authedPost('/api/invoices/INV_0002/fund')
       .send({ amount: 300, investor: INVESTOR_A });
 
     // Test invalid limit
@@ -317,21 +319,20 @@ describe('Investor Contributions and Portfolio', () => {
     expect(res.body).toEqual({
       data: [],
       totals: {
-        funded: 0,
+        funded: '0',
         investors: 0,
       },
+      decimals: 7,
     });
   });
 
   test('portfolio correctly aggregates totalsByCurrency across multiple currencies', async () => {
     // Fund INV_0001 (currency: XLM, yieldBps: 800) with INVESTOR_B (not SME)
-    await request(app)
-      .post('/api/invoices/INV_0001/fund')
+    await authedPost('/api/invoices/INV_0001/fund')
       .send({ amount: 50, investor: INVESTOR_B });
 
     // Fund INV_0002 (currency: USDC, yieldBps: 650) with INVESTOR_B
-    await request(app)
-      .post('/api/invoices/INV_0002/fund')
+    await authedPost('/api/invoices/INV_0002/fund')
       .send({ amount: 1000, investor: INVESTOR_B });
 
     const port = await request(app).get(`/api/investors/${INVESTOR_B}/portfolio`);
@@ -342,27 +343,26 @@ describe('Investor Contributions and Portfolio', () => {
     // USDC: 1000 principal, 1000 * 650 / 10000 = 65 coupon, 1065 payout
     expect(port.body.totalsByCurrency).toEqual({
       XLM: {
-        principal: 50,
-        expectedCoupon: 4,
-        expectedPayout: 54,
+        principal: '50',
+        expectedCoupon: '4',
+        expectedPayout: '54',
       },
       USDC: {
-        principal: 1000,
-        expectedCoupon: 65,
-        expectedPayout: 1065,
+        principal: '1000',
+        expectedCoupon: '65',
+        expectedPayout: '1065',
       },
     });
   });
 
-  test('repo.reset restores contributions and invoice fundedAmount sums', async () => {
-    await request(app)
-      .post('/api/invoices/INV_0002/fund')
+  test('store.reset restores contributions and invoice fundedAmount sums', async () => {
+    await authedPost('/api/invoices/INV_0002/fund')
       .send({ amount: 1000, investor: INVESTOR_A });
-    expect((await repo.get('INV_0002')).fundedAmount).toBe(19000);
+    expect(store.get('INV_0002').fundedAmountMinor).toBe(190000000000n);
 
-    await repo.reset();
-    expect((await repo.get('INV_0002')).fundedAmount).toBe(18000);
+    store.reset();
+    expect(store.get('INV_0002').fundedAmountMinor).toBe(180000000000n);
     expect(contributions.listByInvoice('INV_0002')).toHaveLength(1);
-    expect(contributions.listByInvoice('INV_0002')[0].amount).toBe(18000);
+    expect(contributions.listByInvoice('INV_0002')[0].amountMinor).toBe(180000000000n);
   });
 });
