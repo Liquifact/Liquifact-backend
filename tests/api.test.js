@@ -22,6 +22,33 @@ beforeEach(() => {
   idempotency.resetStore();
 });
 
+const logger = require('../src/logger');
+
+/**
+ * Capture every JSON line the pino logger writes during fn(), by injecting a
+ * destination stream and temporarily lowering the level (logs are silent
+ * under Jest by default).
+ * @param {() => Promise<void>} fn
+ * @returns {Promise<object[]>}
+ */
+async function captureLogs(fn) {
+  const chunks = [];
+  const previousLevel = logger.level;
+  logger.setDestination({ write: (chunk) => chunks.push(String(chunk)) });
+  logger.level = 'debug';
+  try {
+    await fn();
+  } finally {
+    logger.level = previousLevel;
+    logger.setDestination(null);
+  }
+  return chunks
+    .join('')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
 describe('system', () => {
   test('GET /health', async () => {
     const res = await request(app).get('/health');
@@ -109,6 +136,77 @@ describe('system', () => {
     const res = await request(app).get('/errors/UNKNOWN_CODE');
     expect(res.status).toBe(404);
     expect(res.body.code).toBe('ROUTE_NOT_FOUND');
+  });
+
+  test('echoes a valid inbound X-Request-Id', async () => {
+    const res = await request(app).get('/api/invoices').set('X-Request-Id', 'demo-req-123');
+    expect(res.headers['x-request-id']).toBe('demo-req-123');
+  });
+
+  test('replaces an invalid inbound X-Request-Id', async () => {
+    const res = await request(app).get('/api/invoices').set('X-Request-Id', 'bad id!');
+    expect(res.headers['x-request-id']).toBeDefined();
+    expect(res.headers['x-request-id']).not.toBe('bad id!');
+    expect(res.headers['x-request-id']).toMatch(/^[A-Za-z0-9._-]{8,128}$/);
+  });
+
+  test('emits an access log line with templated route and reqId', async () => {
+    const logs = await captureLogs(async () => {
+      await request(app).get('/api/invoices/INV_0001').set('X-Request-Id', 'access-log-123');
+    });
+    const access = logs.find((l) => l.reqId === 'access-log-123' && l.msg === 'request completed');
+    expect(access).toBeDefined();
+    expect(access.level).toBe(30);
+    expect(access.route).toBe('/api/invoices/:id');
+    expect(access.method).toBe('GET');
+    expect(access.status).toBe(200);
+    expect(typeof access.durationMs).toBe('number');
+  });
+
+  test('logs /health at debug level', async () => {
+    const logs = await captureLogs(async () => {
+      await request(app).get('/health').set('X-Request-Id', 'health-log-123');
+    });
+    const access = logs.find((l) => l.reqId === 'health-log-123');
+    expect(access).toBeDefined();
+    expect(access.level).toBe(20);
+  });
+
+  test('never logs the Authorization header value', async () => {
+    const logs = await captureLogs(async () => {
+      await request(app)
+        .get('/api/invoices')
+        .set('X-Request-Id', 'auth-log-123')
+        .set('Authorization', 'Bearer super-secret-token-value');
+    });
+    expect(logs.some((l) => l.reqId === 'auth-log-123')).toBe(true);
+    expect(JSON.stringify(logs)).not.toContain('super-secret-token-value');
+  });
+
+  test('redacts secret fields', async () => {
+    const logs = await captureLogs(async () => {
+      logger.info({ body: { password: 'hunter2-pw' }, req: { headers: { authorization: 'Bearer abc' } } }, 'x');
+    });
+    expect(JSON.stringify(logs)).not.toContain('hunter2-pw');
+    expect(JSON.stringify(logs)).not.toContain('Bearer abc');
+    expect(logs[0].body.password).toBe('[REDACTED]');
+  });
+
+  test('a forced 500 logs an error line with stack and matching reqId', async () => {
+    const spy = jest.spyOn(store, 'list').mockImplementation(() => {
+      throw new Error('forced failure');
+    });
+    let res;
+    const logs = await captureLogs(async () => {
+      res = await request(app).get('/api/stats').set('X-Request-Id', 'forced-500-123');
+    });
+    spy.mockRestore();
+    expect(res.status).toBe(500);
+    expect(res.body.requestId).toBe('forced-500-123');
+    const errLine = logs.find((l) => l.level === 50 && l.reqId === 'forced-500-123');
+    expect(errLine).toBeDefined();
+    expect(errLine.err.message).toBe('forced failure');
+    expect(errLine.err.stack).toContain('forced failure');
   });
 });
 
@@ -410,6 +508,26 @@ describe('escrow', () => {
     const res = await request(app).get('/api/escrow');
     expect(res.status).toBe(200);
     expect(res.body.explorer).toContain('stellar.expert');
+  });
+
+  test('GET /api/escrow/live logs a warn when RPC fails and falls back', async () => {
+    const { rpc } = require('@stellar/stellar-sdk');
+    const spy = jest
+      .spyOn(rpc.Server.prototype, 'simulateTransaction')
+      .mockRejectedValue(new Error('rpc down'));
+    let res;
+    const logs = await captureLogs(async () => {
+      res = await request(app).get('/api/escrow/live').set('X-Request-Id', 'rpc-warn-123');
+    });
+    spy.mockRestore();
+    expect(res.status).toBe(200);
+    expect(res.body.source).toBe('snapshot');
+    const warn = logs.find((l) => l.level === 40 && l.reqId === 'rpc-warn-123');
+    expect(warn).toBeDefined();
+    expect(typeof warn.err).toBe('string');
+    expect(warn.rpcUrl).toBeDefined();
+    expect(warn.contractId).toBeDefined();
+    expect(typeof warn.durationMs).toBe('number');
   });
 });
 
