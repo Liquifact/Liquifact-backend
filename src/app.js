@@ -6,6 +6,7 @@ const helmet = require('helmet');
 const config = require('./config');
 const store = require('./data/store');
 const { buildSpec } = require('./openapi');
+const { logger, requestIdMiddleware, httpLogger } = require('./logger');
 const { computeStats } = require('./services/stats');
 const { mountDocs } = require('./docs');
 const {
@@ -22,6 +23,10 @@ const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', true);
 app.set('json replacer', (_key, value) => (typeof value === 'bigint' ? value.toString() : value));
+
+// Correlation id first so every response, including errors, carries it.
+app.use(requestIdMiddleware);
+app.use(httpLogger);
 
 const API_CSP = { useDefaults: false, directives: { defaultSrc: ["'none'"], frameAncestors: ["'none'"] } };
 const DOCS_CSP = {
@@ -225,14 +230,18 @@ app.use((err, req, res, _next) => {
   const status = err.status || err.statusCode || 500;
   if (status !== 500) {
     // For non-500 errors, use the error message but don't leak internals
+    logger.warn({ reqId: req.id, status, err: err.message }, 'request rejected');
     const error = new ApiError(status, 'UNKNOWN_ERROR', 'Request Failed', { detail: err.message });
     return res.status(status).type('application/problem+json').json(error.toProblem(req));
   }
 
   // 500 errors: log stack server-side only, return generic message
-  console.error('Unhandled error:', err);
+  logger.error({ reqId: req.id, err }, 'request failed');
   const error = internal('An unexpected error occurred');
-  return res.status(500).type('application/problem+json').json(error.toProblem(req));
+  return res
+    .status(500)
+    .type('application/problem+json')
+    .json({ ...error.toProblem(req), requestId: req.id });
 });
 
 module.exports = app;
