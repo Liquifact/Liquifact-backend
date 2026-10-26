@@ -5,6 +5,7 @@ const { StrKey } = require('@stellar/stellar-sdk');
 const store = require('../data/store');
 const { auditContext } = require('../audit/middleware');
 const contributions = require('../data/contributions');
+const { sendRepoError } = require('../data/errors');
 const config = require('../config');
 const { toMinor, fromMinor, couponMinor, daysBetween, annualisedBps } = require('../domain/returns');
 const { ApiError, badRequest, notFound, conflict, unprocessable, sendProblem } = require('../errors');
@@ -136,22 +137,6 @@ router.get('/:id/quote', idParam(), (req, res) => {
   if (daysToMaturity <= 0) {
     throw conflict('INVOICE_MATURED');
   }
-  const coupon = couponMinor(principalMinor, invoice.yieldBps);
-  const { simpleAnnualisedBps, effectiveAnnualisedBps } = annualisedBps(invoice.yieldBps, daysToMaturity);
-  return res.json({
-    invoiceId: invoice.id,
-    currency: invoice.currency,
-    principal: fromMinor(principalMinor),
-    yieldBps: invoice.yieldBps,
-    coupon: fromMinor(coupon),
-    payout: fromMinor(principalMinor + coupon),
-    protocolFeeBps: config.protocolFeeBps,
-    daysToMaturity,
-    simpleAnnualisedBps,
-    effectiveAnnualisedBps,
-    maturity: invoice.dueDate,
-    asOf: quoteAsOf,
-  });
 });
 
 /**
@@ -339,7 +324,6 @@ router.get('/:id/contributions', idParam(), (req, res) => {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
       throw badRequest('INVALID_LIMIT');
     }
-  }
 
   const all = contributions.listByInvoice(invoice.id);
   let startIndex = 0;
@@ -358,10 +342,38 @@ router.get('/:id/contributions', idParam(), (req, res) => {
     createdAt: c.createdAt,
   }));
 
-  const uniqueInvestors = new Set(all.map((c) => c.investor)).size;
-  const totalFunded = invoice.fundedAmount;
+    const all = contributions.listByInvoice(invoice.id);
+    let startIndex = 0;
+    if (req.query.cursor) {
+      const idx = all.findIndex((c) => c.id === req.query.cursor);
+      if (idx === -1) {
+        return res.status(400).json({ error: 'Invalid cursor' });
+      }
+      startIndex = idx + 1;
+    }
 
-  const nextCursor = startIndex + limit < all.length && page.length > 0 ? page[page.length - 1].id : null;
+    const page = all.slice(startIndex, startIndex + limit);
+    const data = page.map((c) => ({
+      investor: c.investor,
+      amount: c.amount,
+      createdAt: c.createdAt,
+    }));
+
+    const uniqueInvestors = new Set(all.map((c) => c.investor)).size;
+    const totalFunded = invoice.fundedAmount;
+
+    const nextCursor = startIndex + limit < all.length && page.length > 0 ? page[page.length - 1].id : null;
+
+    const response = {
+      data,
+      totals: {
+        funded: totalFunded,
+        investors: uniqueInvestors,
+      },
+    };
+    if (nextCursor) {
+      response.nextCursor = nextCursor;
+    }
 
   const response = {
     data,
@@ -374,8 +386,6 @@ router.get('/:id/contributions', idParam(), (req, res) => {
   if (nextCursor) {
     response.nextCursor = nextCursor;
   }
-
-  return res.json(response);
 });
 
 /**

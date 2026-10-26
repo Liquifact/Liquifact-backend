@@ -2,7 +2,6 @@
 
 const express = require('express');
 const { StrKey } = require('@stellar/stellar-sdk');
-const store = require('../data/store');
 const contributions = require('../data/contributions');
 const { formatAmount, mulBps } = require('../lib/money');
 const { badRequest } = require('../errors');
@@ -21,8 +20,9 @@ function computeCouponMinor(principalMinor, yieldBps) {
   return mulBps(principalMinor, yieldBps || 0);
 }
 
-router.get('/:address/portfolio', (req, res) => {
-  const { address } = req.params;
+router.get('/:address/portfolio', async (req, res, next) => {
+  try {
+    const { address } = req.params;
 
   if (typeof address !== 'string' || !StrKey.isValidEd25519PublicKey(address)) {
     throw badRequest('INVALID_INVESTOR_ADDRESS');
@@ -44,13 +44,20 @@ router.get('/:address/portfolio', (req, res) => {
     byInvoice.set(c.invoiceId, prev + c.amountMinor);
   }
 
-  const positions = [];
-  const totalsByCurrency = {};
+    const investorContributions = contributions.listByInvestor(address);
+    if (investorContributions.length === 0) {
+      return res.json({
+        investor: address,
+        positions: [],
+        totalsByCurrency: {},
+      });
+    }
 
-  for (const [invoiceId, principalMinor] of byInvoice.entries()) {
-    const invoice = store.get(invoiceId);
-    if (!invoice) {
-      continue;
+    // Aggregate multiple contributions by the same investor to one invoice
+    const byInvoice = new Map();
+    for (const c of investorContributions) {
+      const prev = byInvoice.get(c.invoiceId) || 0n;
+      byInvoice.set(c.invoiceId, prev + toMinor(c.amount));
     }
 
     const principal = formatAmount(principalMinor);
@@ -72,12 +79,12 @@ router.get('/:address/portfolio', (req, res) => {
       expectedPayout,
     });
 
-    const curr = invoice.currency;
-    if (!totalsByCurrency[curr]) {
-      totalsByCurrency[curr] = {
-        principalMinor: 0n,
-        couponMinor: 0n,
-        payoutMinor: 0n,
+    const formattedTotals = {};
+    for (const [curr, t] of Object.entries(totalsByCurrency)) {
+      formattedTotals[curr] = {
+        principal: fromMinor(t.principalMinor),
+        expectedCoupon: fromMinor(t.couponMinor),
+        expectedPayout: fromMinor(t.payoutMinor),
       };
     }
 
@@ -94,12 +101,6 @@ router.get('/:address/portfolio', (req, res) => {
       expectedPayout: formatAmount(t.payoutMinor),
     };
   }
-
-  return res.json({
-    investor: address,
-    positions,
-    totalsByCurrency: formattedTotals,
-  });
 });
 
 module.exports = router;

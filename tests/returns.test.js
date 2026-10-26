@@ -2,10 +2,10 @@
 
 const request = require('supertest');
 const app = require('../src/app');
-const store = require('../src/data/store');
+const repo = app.locals.repo;
 const { couponMinor, toMinor, fromMinor, annualisedBps } = require('../src/domain/returns');
 
-beforeEach(() => store.reset());
+beforeEach(async () => { await repo.reset(); });
 
 describe('investment return math', () => {
   test.each([

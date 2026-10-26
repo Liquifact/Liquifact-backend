@@ -2,10 +2,10 @@
 
 const request = require('supertest');
 const app = require('../src/app');
-const store = require('../src/data/store');
+const repo = app.locals.repo;
 const { computeStats } = require('../src/services/stats');
 
-beforeEach(() => store.reset());
+beforeEach(async () => { await repo.reset(); });
 
 test('reports seeded amounts separately by currency instead of mixing assets', async () => {
   const res = await request(app).get('/api/stats');

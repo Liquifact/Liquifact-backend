@@ -9,8 +9,8 @@ const ADMIN_KEY = 'lf_test_admin_key';
 process.env.API_KEYS = `test-admin:admin:${crypto.createHash('sha256').update(ADMIN_KEY).digest('hex')}`;
 
 const app = require('../src/app');
-const store = require('../src/data/store');
 const contributions = require('../src/data/contributions');
+const { RepoError } = require('../src/data/errors');
 
 /** Authenticated POST helper (mutating routes require an API key). */
 const authedPost = (url) => request(app).post(url).set('authorization', `Bearer ${ADMIN_KEY}`);
@@ -132,7 +132,7 @@ describe('Investor Contributions and Portfolio', () => {
     }
 
     // Assert invariant for every invoice in store
-    const allInvoices = store.list();
+    const allInvoices = await repo.list();
     for (const inv of allInvoices) {
       const sum = contributions.sumForInvoice(inv.id);
       expect(inv.fundedAmountMinor).toBe(sum);
@@ -197,9 +197,9 @@ describe('Investor Contributions and Portfolio', () => {
     });
   });
 
-  test('store.fund enforces required investor parameter', () => {
-    const inv = store.get('INV_0001');
-    expect(() => store.fund(inv, 10)).toThrow('investor address is required to fund an invoice');
+  test('repo.fund enforces required investor parameter', async () => {
+    await expect(repo.fund('INV_0001', 10)).rejects.toThrow(RepoError);
+    await expect(repo.fund('INV_0001', 10)).rejects.toThrow('investor address is required to fund an invoice');
   });
 
   test('coupon math truncates using integer minor unit arithmetic where floor rounding matters', async () => {
@@ -256,9 +256,8 @@ describe('Investor Contributions and Portfolio', () => {
     await authedPost('/api/invoices/INV_0002/fund')
       .send({ amount: 1000, investor: INVESTOR_B });
 
-    // Manually mark invoice as cancelled
-    const invoice = store.get('INV_0002');
-    invoice.status = 'cancelled';
+    // Mark invoice as cancelled via repository (returned objects are copies)
+    await repo.setStatus('INV_0002', 'cancelled');
 
     const port = await request(app).get(`/api/investors/${INVESTOR_B}/portfolio`);
     expect(port.status).toBe(200);
@@ -367,4 +366,3 @@ describe('Investor Contributions and Portfolio', () => {
     expect(contributions.listByInvoice('INV_0002')[0].amountMinor).toBe(180000000000n);
   });
 });
-

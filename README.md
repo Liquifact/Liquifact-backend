@@ -13,10 +13,11 @@ investors fund them, and a Soroban escrow contract holds funds until the debtor
 settles. This repository is the HTTP API: a small Express app that runs as a
 regular Node server locally and as a Vercel serverless function in production.
 
-No database is required. Invoices live in an in-memory store seeded with demo
-data (writes persist only for the lifetime of a warm instance). Escrow state is
-read live from the deployed Soroban contract via RPC, with a deploy-time
-snapshot as fallback.
+By default no database is required: invoices live in an in-memory repository
+seeded with demo data (writes persist only for the lifetime of a warm instance).
+Set `DATABASE_URL` to use Postgres via knex instead. Escrow state is read live
+from the deployed Soroban contract via RPC, with a deploy-time snapshot as
+fallback.
 
 ## Endpoints
 
@@ -146,6 +147,19 @@ npm run lint
 npm test
 ```
 
+### Optional Postgres
+
+```bash
+docker run -d --name lfpg -e POSTGRES_PASSWORD=pg -p 5432:5432 postgres:16
+export DATABASE_URL=postgres://postgres:pg@localhost:5432/postgres
+npm run db:migrate && npm run db:seed
+npm run dev
+# Run the full suite against Postgres:
+TEST_DATABASE_URL=$DATABASE_URL npm test
+```
+
+Set `PGSSLMODE=require` when the server requires SSL. Never log `DATABASE_URL`.
+
 Configuration is optional; see [`.env.example`](.env.example).
 
 ### Readiness probe (#1543)
@@ -190,12 +204,15 @@ src/app.js           Express app: routes, docs, error handling
 src/index.js         Local server entry
 src/config.js        Env-driven config with safe defaults
 src/openapi.js       OpenAPI document
-src/data/store.js    In-memory invoice store (demo seed data)
+src/data/            Invoice repositories (memory + Postgres/knex)
+migrations/          Knex migrations (invoices table)
+seeds/               Demo invoice seed
 src/routes/          invoices and escrow routers
 src/services/        marketplace stats and readiness checks
 src/stellar/         escrow decoder and shared Soroban RPC client
 tests/               Jest + supertest API tests
 ```
+
 
 The canonical Soroban escrow contract lives in
 [Liquifact-contracts](https://github.com/Liquifact/Liquifact-contracts).

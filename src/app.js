@@ -4,7 +4,8 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const config = require('./config');
-const store = require('./data/store');
+const { createRepository } = require('./data/repository');
+const { sendRepoError } = require('./data/errors');
 const { buildSpec } = require('./openapi');
 const { computeStats } = require('./services/stats');
 const { mountDocs } = require('./docs');
@@ -154,7 +155,6 @@ app.get('/api/stats', (req, res) => {
   if (currency !== undefined && (typeof currency !== 'string' || !/^[a-zA-Z0-9]{1,12}$/.test(currency))) {
     throw badRequest('VALIDATION_FAILED', 'Invalid currency parameter', [{ field: 'currency', message: 'Invalid asset code' }]);
   }
-  return res.json(computeStats(store.list(), currency));
 });
 
 app.get('/errors/:code', (req, res) => {
