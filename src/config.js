@@ -305,6 +305,12 @@ function loadConfig(env = process.env) {
   const rawFee = Number(env.PROTOCOL_FEE_BPS);
   const protocolFeeBps = Number.isInteger(rawFee) && rawFee >= 0 ? rawFee : 0;
 
+  // Invoice tenor window (calendar days from today UTC). Matches the deployed
+  // escrow contract: dueDate cannot be in the past and must stay inside the
+  // maturity_max_horizon of 157 680 000 s (~1825 days).
+  const minTenorDays = positiveInt(env.MIN_TENOR_DAYS, 1);
+  const maxTenorDays = positiveInt(env.MAX_TENOR_DAYS, 1825);
+
   // API keys for mutating routes (see middleware/auth.js)
   const apiKeys = parseApiKeys(env.API_KEYS, errors);
 
@@ -332,6 +338,8 @@ function loadConfig(env = process.env) {
     corsOrigins,
     txWaitMs,
     protocolFeeBps,
+    minTenorDays,
+    maxTenorDays,
     auditMaxEntries: positiveInt(env.AUDIT_MAX_ENTRIES, 10000),
     // Readiness probe: per-check timeout, maximum accepted ledger age and how
     // long a probe result may be reused before the RPC is called again.
