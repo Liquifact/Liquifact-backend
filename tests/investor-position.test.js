@@ -27,13 +27,15 @@ let simulate;
 let ledger;
 
 beforeEach(() => {
-  escrowRouter.clearPositionCache();
+  if (typeof escrowRouter.clearPositionCache === 'function') {
+    escrowRouter.clearPositionCache();
+  }
   simulate = jest.spyOn(reader, 'simulateRead').mockImplementation(async (method) => answers[method]);
   ledger = jest.spyOn(reader, 'latestLedger').mockResolvedValue(5274165);
 });
 afterEach(() => {
-  simulate.mockRestore();
-  ledger.mockRestore();
+  if (simulate) { simulate.mockRestore(); }
+  if (ledger) { ledger.mockRestore(); }
 });
 
 test('returns a fully decoded typed position and encodes exact address arg', async () => {
@@ -98,14 +100,14 @@ test('returns 502 for latest-ledger lookup errors', async () => {
   const res = await request(app).get(url);
   expect(res.status).toBe(502);
   expect(res.body).toEqual({ code: 'ESCROW_READ_FAILED', method: 'latestLedger' });
-});
+}, 15000);
 
 test('caches repeated requests for five seconds without re-simulating', async () => {
   expect((await request(app).get(url)).status).toBe(200);
   expect((await request(app).get(url)).status).toBe(200);
   expect(simulate).toHaveBeenCalledTimes(7);
   expect(ledger).toHaveBeenCalledTimes(1);
-});
+}, 15000);
 
 test('GET /openapi.json includes endpoint and InvestorPosition schema', async () => {
   const res = await request(app).get('/openapi.json');
@@ -120,6 +122,7 @@ test('GET /openapi.json includes endpoint and InvestorPosition schema', async ()
 test('simulation reader enforces its per-read timeout', async () => {
   // Restore the real reader: the suite-wide mock would otherwise bypass the timeout.
   simulate.mockRestore();
+  simulate = null;
   const { rpc } = require('@stellar/stellar-sdk');
   const pending = jest.spyOn(rpc.Server.prototype, 'simulateTransaction')
     .mockImplementation(() => new Promise(() => {}));

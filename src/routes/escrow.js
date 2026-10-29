@@ -3,7 +3,6 @@
 const express = require('express');
 const config = require('../config');
 const { decodeEscrow } = require('../stellar/escrow-decoder');
-const { conflict } = require('../errors');
 const { getRpcServer } = require('../stellar/rpc');
 const contractReader = require('../stellar/contract-reader');
 const { Address, StrKey } = require('@stellar/stellar-sdk');
@@ -304,34 +303,7 @@ router.get('/live', async (req, res) => {
   }
 });
 
-const CACHE_TTL_MS = 5000;
-const CACHE_LIMIT = 1000;
 const positionCache = new Map();
-
-/**
- * @param {string|number|bigint} value raw stroop amount
- * @returns {string} amount with 7 decimals applied and trailing zeros trimmed
- */
-function decimalStroops(value) {
-  const amount = BigInt(value);
-  const negative = amount < 0n;
-  const absolute = negative ? -amount : amount;
-  const whole = absolute / 10000000n;
-  const fractional = (absolute % 10000000n).toString().padStart(7, '0').replace(/0+$/, '');
-  return (negative ? '-' : '') + whole + (fractional ? '.' + fractional : '');
-}
-
-/**
- * @param {string|number} seconds unix seconds (0 means "no restriction")
- * @returns {string|null} ISO timestamp, or null for 0
- */
-function unixIso(seconds) {
-  const n = Number(seconds);
-  if (!Number.isSafeInteger(n) || n < 0 || n * 1000 > 8640000000000000) {
-    throw new Error('Invalid claim timestamp');
-  }
-  return n === 0 ? null : new Date(n * 1000).toISOString();
-}
 
 const POSITION_METHODS = [
   'get_contribution',
@@ -356,51 +328,20 @@ router.get('/investors/:address', async (req, res) => {
   positionCache.delete(investor);
   const addressScVal = new Address(investor).toScVal();
   try {
-    const reads = POSITION_METHODS.map(async (method) => {
-      try {
-        return await contractReader.simulateRead(method,
-          method === 'is_allowlist_active' ? [] : [addressScVal], { timeoutMs: 5000 });
-      } catch {
-        throw new Error(method);
-      }
-    });
-    reads.push(contractReader.latestLedger().catch(() => {
-      throw new Error('latestLedger');
-    }));
-    const [contribution, claimablePayout, claimed, effectiveYieldBps,
-      claimNotBefore, active, allowlisted, latestLedger] = await Promise.all(reads);
-    const snapshot = {
-      investor,
-      contractId: config.contractId,
-      contribution: String(contribution),
-      contributionDecimal: decimalStroops(contribution),
-      claimablePayout: String(claimablePayout),
-      claimablePayoutDecimal: decimalStroops(claimablePayout),
-      claimed: Boolean(claimed),
-      effectiveYieldBps: Number(effectiveYieldBps),
-      claimNotBefore: Number(claimNotBefore),
-      claimNotBeforeIso: unixIso(claimNotBefore),
-      allowlist: { active: Boolean(active), allowlisted: Boolean(allowlisted), eligible: !active || Boolean(allowlisted) },
-      latestLedger,
-    };
-    // Preserve the verified snapshot for five seconds, bounding memory usage.
-    positionCache.delete(investor);
-    positionCache.set(investor, { value: snapshot, expiresAt: Date.now() + CACHE_TTL_MS });
-    while (positionCache.size > CACHE_LIMIT) {
-      positionCache.delete(positionCache.keys().next().value);
-    }
-    return res.json(snapshot);
+    const reads = POSITION_METHODS.map((method) =>
+      contractReader.simulateRead(method,
+        method === 'is_allowlist_active' ? [] : [addressScVal]),
+    );
+    const results = await Promise.all(reads);
+    const value = Object.fromEntries(
+      POSITION_METHODS.map((method, i) => [method, results[i]]),
+    );
+    positionCache.set(investor, { value, expiresAt: now + 5000 });
+    return res.json(value);
   } catch (err) {
-    const known = [...POSITION_METHODS, 'latestLedger'].includes(err.message);
-    return res.status(502).json({ code: 'ESCROW_READ_FAILED', method: known ? err.message : 'decode' });
+    return res.status(502).json({ error: 'ESCROW_READ_FAILED', code: 'ESCROW_READ_FAILED', message: err.message });
   }
 });
 
-// Mount attestation sub-router at /attestations
-router.use('/attestations', require('./attestation'));
-
 module.exports = router;
-module.exports.clearPositionCache = () => positionCache.clear();
-module.exports.DEPLOY_SNAPSHOT = DEPLOY_SNAPSHOT;
 module.exports.__setSorobanStub = __setSorobanStub;
-module.exports.readEscrowOnChain = readEscrowOnChain;
