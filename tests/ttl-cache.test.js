@@ -89,13 +89,15 @@ describe('TtlCache', () => {
   test('LRU eviction bounds the cache', async () => {
     const cache = new TtlCache();
     const loader = (k) => Promise.resolve({ k: k });
+    const opts = { maxEntries: 3, ttlMs: 10000, staleMs: 10000 };
     for (let i = 0; i < 5; i++) {
-      await cache.getOrLoad(`key-${i}`, () => loader(`key-${i}`), { maxEntries: 3, ttlMs: 10000, staleMs: 10000 });
+      await cache.getOrLoad(`key-${i}`, () => loader(`key-${i}`), opts);
     }
-    expect(cache.size()).toBe(5);
+    expect(cache.size()).toBeLessThanOrEqual(3);
+    expect(cache.size()).toBe(3);
     // Touch key-3 to make it MRU, then add another and check key-2 is evicted.
-    await cache.getOrLoad('key-3', () => loader('key-3'), { maxEntries: 3, ttlMs: 10000, staleMs: 10000 });
-    await cache.getOrLoad('key-4', () => loader('key-4'), { maxEntries: 3, ttlMs: 10000, staleMs: 10000 });
+    await cache.getOrLoad('key-3', () => loader('key-3'), opts);
+    await cache.getOrLoad('key-4', () => loader('key-4'), opts);
     expect(cache.size()).toBe(3);
     expect(cache.entries.has('key-2')).toBe(false);
     expect(cache.entries.has('key-3')).toBe(true);
