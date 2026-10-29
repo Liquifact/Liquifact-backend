@@ -4,7 +4,6 @@ const express = require('express');
 const crypto = require('crypto');
 const config = require('../config');
 const { createTtlCache } = require('../lib/ttl-cache');
-const { decodeEscrow } = require('../stellar/escrow-decoder');
 const { conflict } = require('../errors');
 const { getRpcServer } = require('../stellar/rpc');
 const contractReader = require('../stellar/contract-reader');
