@@ -28,6 +28,8 @@ const EVENT_TYPE_MAP = {
   fund_tgt: 'funding_target_reached',
 };
 
+const EVENT_TYPES = Object.freeze([...Object.values(EVENT_TYPE_MAP), 'unknown']);
+
 /**
  * Extract a string value from an ScVal-like object.
  * Handles both raw JS strings and stellar-sdk ScVal wrappers.
@@ -271,6 +273,7 @@ function decodeEvent(rawEvent) {
 module.exports = {
   decodeEvent,
   EVENT_TYPE_MAP,
+  EVENT_TYPES,
   scValToString,
   scValToAmountString,
   scvMapToObject,
