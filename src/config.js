@@ -162,16 +162,6 @@ function envInt(raw, fallback, min = 0) {
 }
 
 /**
- * @param {string|undefined} raw environment value
- * @param {number} fallback value used when raw is missing or not a positive integer
- * @returns {number} parsed positive integer
- */
-function positiveInt(raw, fallback) {
-  const n = Number(raw);
-  return Number.isInteger(n) && n > 0 ? n : fallback;
-}
-
-/**
  * Loads, normalizes and validates configuration from an environment object.
  *
  * @param {Record<string, string|undefined>} [env=process.env]
@@ -308,6 +298,37 @@ function loadConfig(env = process.env) {
   // API keys for mutating routes (see middleware/auth.js)
   const apiKeys = parseApiKeys(env.API_KEYS, errors);
 
+  // Audit log configuration
+  let auditMaxEntries = 10000;
+  if (env.AUDIT_MAX_ENTRIES !== undefined && env.AUDIT_MAX_ENTRIES !== '') {
+    const parsedMax = Number(env.AUDIT_MAX_ENTRIES);
+    if (!Number.isInteger(parsedMax) || parsedMax < 1) {
+      errors.push(`AUDIT_MAX_ENTRIES must be a positive integer (got "${env.AUDIT_MAX_ENTRIES}")`);
+    } else {
+      auditMaxEntries = parsedMax;
+    }
+  }
+
+  let auditLogFile = null;
+  if (env.AUDIT_LOG_FILE !== undefined && env.AUDIT_LOG_FILE !== '') {
+    const trimmedPath = String(env.AUDIT_LOG_FILE).trim();
+    if (!trimmedPath || trimmedPath.includes('\0')) {
+      errors.push('AUDIT_LOG_FILE must be a valid non-empty file path');
+    } else {
+      auditLogFile = trimmedPath;
+    }
+  }
+
+  let auditRotateBytes = 0;
+  if (env.AUDIT_ROTATE_BYTES !== undefined && env.AUDIT_ROTATE_BYTES !== '') {
+    const parsedRotate = Number(env.AUDIT_ROTATE_BYTES);
+    if (!Number.isInteger(parsedRotate) || parsedRotate < 1) {
+      errors.push(`AUDIT_ROTATE_BYTES must be a positive integer (got "${env.AUDIT_ROTATE_BYTES}")`);
+    } else {
+      auditRotateBytes = parsedRotate;
+    }
+  }
+
   if (errors.length > 0) {
     throw new ConfigError(errors);
   }
@@ -332,7 +353,9 @@ function loadConfig(env = process.env) {
     corsOrigins,
     txWaitMs,
     protocolFeeBps,
-    auditMaxEntries: positiveInt(env.AUDIT_MAX_ENTRIES, 10000),
+    auditMaxEntries,
+    auditLogFile,
+    auditRotateBytes,
     // Readiness probe: per-check timeout, maximum accepted ledger age and how
     // long a probe result may be reused before the RPC is called again.
     readyCheckTimeoutMs: envInt(env.READY_CHECK_TIMEOUT_MS, 2000, 1),
