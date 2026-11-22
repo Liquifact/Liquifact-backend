@@ -73,6 +73,19 @@ router.get('/', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/webhooks/:id - Show webhook details (admin only, no secrets/URL)
+// ---------------------------------------------------------------------------
+
+router.get('/:id', requireAdminToken, (req, res) => {
+  const wh = webhookStore.getWebhook(req.params.id);
+  if (!wh) {
+    return res.status(404).json({ error: 'Webhook not found' });
+  }
+  // Return only public fields: id, url, events, createdAt
+  return res.json({ data: { id: wh.id, url: wh.url, events: wh.events, createdAt: wh.createdAt } });
+});
+
+// ---------------------------------------------------------------------------
 // DELETE /api/webhooks/:id
 // ---------------------------------------------------------------------------
 
