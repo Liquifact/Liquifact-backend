@@ -16,6 +16,7 @@
 
 const { Router } = require('express');
 const { runOnce } = require('../indexer/escrow-indexer');
+const { sendProblem } = require('../errors');
 const logger = require('../logger');
 
 const router = Router();
@@ -79,6 +80,12 @@ function safeEqual(a, b) {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/IndexerRunResult'
+ *       400:
+ *         description: Invalid maxPages (must be an integer between 1 and 20; VALIDATION_FAILED).
+ *         content:
+ *           application/problem+json:
+ *             schema:
+ *               $ref: '#/components/schemas/Problem'
  *       401:
  *         description: Missing or invalid Authorization header.
  *         content:
@@ -136,10 +143,28 @@ function requireCronSecret(req, res, next) {
 requireCronSecret.requiredRoles = ['cron'];
 
 router.post('/run', requireCronSecret, async (req, res) => {
-  const maxPages = Math.min(
-    Math.max(1, parseInt(req.body?.maxPages ?? '5', 10) || 5),
-    20,
-  );
+  const rawMaxPages = req.body?.maxPages;
+  let maxPages = 5;
+
+  if (rawMaxPages !== undefined) {
+    if (
+      typeof rawMaxPages !== 'number' ||
+      !Number.isInteger(rawMaxPages) ||
+      rawMaxPages < 1 ||
+      rawMaxPages > 20
+    ) {
+      return sendProblem(req, res, 'VALIDATION_FAILED', {
+        detail: 'maxPages must be an integer between 1 and 20.',
+        errors: [
+          {
+            field: 'maxPages',
+            message: 'maxPages must be an integer between 1 and 20',
+          },
+        ],
+      });
+    }
+    maxPages = rawMaxPages;
+  }
 
   try {
     const result = await runOnce({ maxPages });

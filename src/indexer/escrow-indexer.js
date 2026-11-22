@@ -29,9 +29,9 @@
  * @module indexer/escrow-indexer
  */
 
-const { rpc } = require('@stellar/stellar-sdk');
 const { decodeEvent } = require('./decode');
 const { defaultStore } = require('./EventStore');
+const { getRpcServer } = require('../stellar/rpc');
 const dataStore = require('../data/store');
 const logger = require('../logger');
 const config = require('../config');
@@ -43,14 +43,12 @@ const MAX_CONTRACT_IDS_PER_FILTER = 5;
 const PAGE_LIMIT = 100;
 
 /**
- * Build a Soroban RPC Server instance from config.
- * Lazily created so unit tests can inject their own server.
+ * Return the shared Soroban RPC Server instance.
  *
- * @returns {rpc.Server}
+ * @returns {import('@stellar/stellar-sdk').rpc.Server}
  */
 function buildRpcServer() {
-  const url = config.rpcUrl;
-  return new rpc.Server(url, { allowHttp: url.startsWith('http://') });
+  return getRpcServer();
 }
 
 /**
@@ -140,6 +138,8 @@ function cursorKeyForChunk(chunk, totalContracts) {
  */
 async function indexChunk({ server, store, log, contractIds, cursorKey, maxPages }) {
   let ingested = 0;
+  let skipped = 0;
+  let decodeFailures = 0;
   let latestLedger = 0;
   let currentCursor = store.getCursor(cursorKey);
 

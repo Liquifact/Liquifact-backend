@@ -162,16 +162,6 @@ function envInt(raw, fallback, min = 0) {
 }
 
 /**
- * @param {string|undefined} raw environment value
- * @param {number} fallback value used when raw is missing or not a positive integer
- * @returns {number} parsed positive integer
- */
-function positiveInt(raw, fallback) {
-  const n = Number(raw);
-  return Number.isInteger(n) && n > 0 ? n : fallback;
-}
-
-/**
  * Loads, normalizes and validates configuration from an environment object.
  *
  * @param {Record<string, string|undefined>} [env=process.env]
@@ -305,8 +295,30 @@ function loadConfig(env = process.env) {
   const rawFee = Number(env.PROTOCOL_FEE_BPS);
   const protocolFeeBps = Number.isInteger(rawFee) && rawFee >= 0 ? rawFee : 0;
 
+  // Graceful shutdown timeout (ms, positive integer, default 10000).
+  let shutdownTimeoutMs = 10000;
+  if (env.SHUTDOWN_TIMEOUT_MS !== undefined && env.SHUTDOWN_TIMEOUT_MS !== '') {
+    const parsedShutdownTimeout = Number(env.SHUTDOWN_TIMEOUT_MS);
+    if (!Number.isInteger(parsedShutdownTimeout) || parsedShutdownTimeout < 1) {
+      errors.push(`SHUTDOWN_TIMEOUT_MS must be a positive integer (got "${env.SHUTDOWN_TIMEOUT_MS}")`);
+    } else {
+      shutdownTimeoutMs = parsedShutdownTimeout;
+    }
+  }
+
   // API keys for mutating routes (see middleware/auth.js)
   const apiKeys = parseApiKeys(env.API_KEYS, errors);
+
+  // Maximum number of webhook subscriptions (positive integer, default 100).
+  let webhooksMax = 100;
+  if (env.WEBHOOKS_MAX !== undefined && env.WEBHOOKS_MAX !== '') {
+    const parsedMax = Number(env.WEBHOOKS_MAX);
+    if (!Number.isInteger(parsedMax) || parsedMax < 1) {
+      errors.push(`WEBHOOKS_MAX must be a positive integer (got "${env.WEBHOOKS_MAX}")`);
+    } else {
+      webhooksMax = parsedMax;
+    }
+  }
 
   if (errors.length > 0) {
     throw new ConfigError(errors);
@@ -332,7 +344,9 @@ function loadConfig(env = process.env) {
     corsOrigins,
     txWaitMs,
     protocolFeeBps,
+    shutdownTimeoutMs,
     auditMaxEntries: positiveInt(env.AUDIT_MAX_ENTRIES, 10000),
+    webhooksMax,
     // Readiness probe: per-check timeout, maximum accepted ledger age and how
     // long a probe result may be reused before the RPC is called again.
     readyCheckTimeoutMs: envInt(env.READY_CHECK_TIMEOUT_MS, 2000, 1),

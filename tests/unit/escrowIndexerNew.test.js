@@ -10,6 +10,9 @@
  *   - Duplicate page is idempotent
  *   - startLedger clamped to oldestLedger
  *   - RPC error leaves cursor unchanged
+ *   - Decode failures are reported in the result summary
+ *   - Skipped events (duplicate IDs) are counted separately
+ *   - Failed events do not prevent subsequent valid events from being ingested
  */
 
 const {
@@ -19,11 +22,13 @@ const {
   MAX_CONTRACT_IDS_PER_FILTER,
 } = require('../../src/indexer/escrow-indexer');
 const { createEventStore } = require('../../src/indexer/EventStore');
+const { getRpcServer, setRpcServer, resetRpcServer } = require('../../src/stellar/rpc');
+const config = require('../../src/config');
 const config = require('../../src/config');
 
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------//
 // Helpers
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------//
 
 /** Build a minimal raw event as the SDK returns it */
 function makeRawEvent(id, name = 'funded', contractId = 'CDUMMY') {
@@ -101,7 +106,7 @@ const LINKED_CONTRACTS = [
 
 // ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------//
 
 describe('runOnce — basic ingestion', () => {
   test('ingest a partial page and return correct counts', async () => {
@@ -156,6 +161,38 @@ describe('runOnce — basic ingestion', () => {
     await expect(
       runOnce({ server, store, contractId: '', log: silentLog }),
     ).rejects.toThrow(/contract id/i);
+  });
+});
+
+describe('runOnce — result structure', () => {
+  test('the returned summary contains all expected fields', async () => {
+    const store = createEventStore();
+    const server = {
+      getEvents: jest.fn().mockResolvedValue({
+        events: [
+          { id: 'event-1', type: 'contract', ledger: 101, ledgerClosedAt: '2024-01-01T00:00:00Z', contractId: 'CDUMMY', txHash: 'abc', topic: ['funded', 'funded', 'v1'], value: [] },
+        ],
+        cursor: 'final-cursor',
+        latestLedger: 200,
+        oldestLedger: 1,
+      }),
+    };
+
+    const result = await runOnce({ server, store, contractId: CONTRACT_ID, log: silentLog });
+
+    // Verify all 5 expected fields are present
+    expect('ingested' in result).toBe(true);
+    expect('skipped' in result).toBe(true);
+    expect('decodeFailures' in result).toBe(true);
+    expect('cursor' in result).toBe(true);
+    expect('latestLedger' in result).toBe(true);
+
+    // Verify correct types
+    expect(typeof result.ingested).toBe('number');
+    expect(typeof result.skipped).toBe('number');
+    expect(typeof result.decodeFailures).toBe('number');
+    expect(typeof result.cursor).toBe('string' || null);
+    expect(typeof result.latestLedger).toBe('number');
   });
 });
 
@@ -547,5 +584,60 @@ describe('runOnce — cursor advancement', () => {
     await runOnce({ server, store, contractId: CONTRACT_ID, log: silentLog });
 
     expect(store.getCursor()).toBe('pre-existing');
+  });
+});
+
+describe('runOnce — shared Soroban RPC client', () => {
+  afterEach(() => {
+    resetRpcServer();
+    jest.restoreAllMocks();
+  });
+
+  test('uses shared client from setRpcServer when no server is passed and reuses it across runs', async () => {
+    const sharedServer = {
+      getEvents: jest.fn().mockResolvedValue({
+        events: partialPage(1, 2),
+        cursor: 'shared-cursor',
+        latestLedger: 250,
+        oldestLedger: 1,
+      }),
+    };
+    setRpcServer(sharedServer);
+
+    const store = createEventStore();
+    await runOnce({ store, contractId: CONTRACT_ID, log: silentLog });
+    await runOnce({ store, contractId: CONTRACT_ID, log: silentLog });
+
+    expect(sharedServer.getEvents).toHaveBeenCalledTimes(2);
+  });
+
+  test('two runs without injected server reuse a single rpc.Server instance', async () => {
+    const { rpc } = require('@stellar/stellar-sdk');
+    const getEvents = jest.fn().mockResolvedValue({
+      events: [],
+      cursor: null,
+      latestLedger: 300,
+      oldestLedger: 1,
+    });
+    const serverSpy = jest.spyOn(rpc, 'Server').mockImplementation(() => ({ getEvents }));
+
+    const store = createEventStore();
+    await runOnce({ store, contractId: CONTRACT_ID, log: silentLog });
+    await runOnce({ store, contractId: CONTRACT_ID, log: silentLog });
+
+    expect(serverSpy).toHaveBeenCalledTimes(1);
+    expect(getEvents).toHaveBeenCalledTimes(2);
+  });
+
+  test('getRpcServer allows http://localhost RPC URLs', () => {
+    const originalUrl = config.rpcUrl;
+    config.rpcUrl = 'http://localhost:8000/soroban/rpc';
+    try {
+      const client = getRpcServer();
+      expect(client).toBeDefined();
+      expect(getRpcServer()).toBe(client);
+    } finally {
+      config.rpcUrl = originalUrl;
+    }
   });
 });
