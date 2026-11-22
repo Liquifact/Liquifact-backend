@@ -7,15 +7,17 @@
  * Uses the shared admin-token middleware (constant-time digest comparison).
  *
  * Routes:
- *   POST   /api/webhooks                  Register a new subscription
- *   GET    /api/webhooks                  List all subscriptions
- *   DELETE /api/webhooks/:id              Remove a subscription
- *   GET    /api/webhooks/:id/deliveries   Last 50 delivery records
+ *   POST   /api/webhooks                                 Register a new subscription
+ *   GET    /api/webhooks                                 List all subscriptions
+ *   DELETE /api/webhooks/:id                             Remove a subscription
+ *   GET    /api/webhooks/:id/deliveries                  Last 50 delivery records
+ *   POST   /api/webhooks/:id/deliveries/:deliveryId/replay  Replay a delivery
  */
 
 const express = require('express');
 const { validateWebhookUrl } = require('../webhooks/ssrf');
 const webhookStore = require('../webhooks/store');
+const { replayDelivery } = require('../webhooks/deliver');
 const { requireAdminToken } = require('../middleware/require-admin-token');
 
 const router = express.Router();
@@ -93,8 +95,37 @@ router.get('/:id/deliveries', (req, res) => {
   if (!wh) {
     return res.status(404).json({ error: 'Webhook not found' });
   }
-  const log = webhookStore.getDeliveries(req.params.id) || [];
+  const log = (webhookStore.getDeliveries(req.params.id) || []).map(
+    ({ rawBody: _rawBody, ...pub }) => pub
+  );
   return res.json({ data: log });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/webhooks/:id/deliveries/:deliveryId/replay
+// ---------------------------------------------------------------------------
+
+router.post('/:id/deliveries/:deliveryId/replay', requireAdminToken, (req, res) => {
+  const wh = webhookStore.getWebhookInternal(req.params.id);
+  if (!wh) {
+    return res.status(404).json({ error: 'Webhook not found' });
+  }
+
+  const original = webhookStore.getDelivery(req.params.id, req.params.deliveryId);
+  if (!original) {
+    return res.status(404).json({ error: 'Delivery not found' });
+  }
+
+  if (original.status === 'pending') {
+    return res.status(409).json({ error: 'Delivery is still pending' });
+  }
+
+  if (typeof original.rawBody !== 'string' || !original.rawBody) {
+    return res.status(409).json({ error: 'Delivery payload is not available for replay' });
+  }
+
+  const replayed = replayDelivery(wh, original);
+  return res.status(202).json({ data: replayed });
 });
 
 module.exports = router;

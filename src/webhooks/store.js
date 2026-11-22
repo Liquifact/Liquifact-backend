@@ -19,6 +19,7 @@ const crypto = require('crypto');
 
 const VALID_EVENTS = ['invoice.created', 'invoice.funding_received', 'invoice.funded'];
 const MAX_DELIVERIES_PER_WEBHOOK = 50;
+const MAX_RAW_BODY_BYTES = 64 * 1024;
 
 /**
  * Internal shape:
@@ -138,6 +139,18 @@ function getDeliveries(webhookId) {
   return deliveries.get(webhookId);
 }
 
+/**
+ * Returns a single delivery record for a webhook by deliveryId.
+ * @param {string} webhookId
+ * @param {string} deliveryId
+ * @returns {object|undefined}
+ */
+function getDelivery(webhookId, deliveryId) {
+  const log = deliveries.get(webhookId);
+  if (!log) { return undefined; }
+  return log.find((d) => d.deliveryId === deliveryId);
+}
+
 /** Strips fields that must not be in API responses. */
 function publicView({ secret: _s, pinnedUrl: _p, host: _h, ...pub }) {
   return pub;
@@ -151,6 +164,7 @@ function reset() {
 
 module.exports = {
   VALID_EVENTS,
+  MAX_RAW_BODY_BYTES,
   createWebhook,
   listWebhooks,
   getWebhook,
@@ -159,5 +173,6 @@ module.exports = {
   getWebhooksForEvent,
   appendDelivery,
   getDeliveries,
+  getDelivery,
   reset,
 };
