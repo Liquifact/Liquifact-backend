@@ -308,6 +308,17 @@ function loadConfig(env = process.env) {
   // API keys for mutating routes (see middleware/auth.js)
   const apiKeys = parseApiKeys(env.API_KEYS, errors);
 
+  // Maximum number of webhook subscriptions (positive integer, default 100).
+  let webhooksMax = 100;
+  if (env.WEBHOOKS_MAX !== undefined && env.WEBHOOKS_MAX !== '') {
+    const parsedMax = Number(env.WEBHOOKS_MAX);
+    if (!Number.isInteger(parsedMax) || parsedMax < 1) {
+      errors.push(`WEBHOOKS_MAX must be a positive integer (got "${env.WEBHOOKS_MAX}")`);
+    } else {
+      webhooksMax = parsedMax;
+    }
+  }
+
   if (errors.length > 0) {
     throw new ConfigError(errors);
   }
@@ -333,6 +344,7 @@ function loadConfig(env = process.env) {
     txWaitMs,
     protocolFeeBps,
     auditMaxEntries: positiveInt(env.AUDIT_MAX_ENTRIES, 10000),
+    webhooksMax,
     // Readiness probe: per-check timeout, maximum accepted ledger age and how
     // long a probe result may be reused before the RPC is called again.
     readyCheckTimeoutMs: envInt(env.READY_CHECK_TIMEOUT_MS, 2000, 1),
