@@ -74,12 +74,12 @@ const ERROR_CATALOG = {
   INVALID_CURSOR: {
     title: 'Invalid Cursor',
     status: 400,
-    description: 'The cursor parameter must be a non-negative integer.',
+    description: 'The cursor parameter must be a valid opaque pagination cursor (1–100 items per page).',
   },
   INVALID_LIMIT: {
     title: 'Invalid Limit',
     status: 400,
-    description: 'The limit parameter must be an integer between 1 and 20.',
+    description: 'The limit parameter must be an integer between 1 and 100.',
   },
   INVALID_DIGEST: {
     title: 'Invalid Digest',
