@@ -2,6 +2,7 @@
 
 const config = require('./config');
 const { SORTS } = require('./services/invoice-query');
+const { EVENT_TYPES } = require('./indexer/decode');
 
 const { OpenApiGeneratorV3 } = require('@asteasolutions/zod-to-openapi');
 const { registry } = require('./schemas');
@@ -652,6 +653,17 @@ function createSpec(baseUrl) {
         Escrow,
         LinkError,
         InvestorPosition,
+        DecodedEscrowEvent: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            type: { type: 'string' },
+            investor: { type: 'string' },
+            ledger: { type: 'integer' },
+            createdAt: { type: 'string', format: 'date-time' },
+            decoded: { type: 'object' },
+          },
+        },
         EscrowState,
         EscrowLiveResponse,
         HealthResponse,
@@ -1193,6 +1205,44 @@ function createSpec(baseUrl) {
           },
         },
       },
+      '/api/escrow/events': {
+        get: {
+          tags: ['Escrow'],
+          summary: 'List decoded escrow contract events',
+          description: 'Supports filtering by event type, investor Stellar public key, and minimum ledger, with cursor-based pagination.',
+          parameters: [
+            {
+              name: 'type',
+              in: 'query',
+              schema: { type: 'string', enum: EVENT_TYPES },
+              description: 'Filter by decoded event type.',
+            },
+            {
+              name: 'investor',
+              in: 'query',
+              schema: { type: 'string' },
+              description: 'Filter by investor Stellar G-address.',
+            },
+            { name: 'fromLedger', in: 'query', schema: { type: 'integer', minimum: 0 } },
+            { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 } },
+            { name: 'after', in: 'query', schema: { type: 'string' } },
+          ],
+          responses: {
+            200: {
+              description: 'Paginated list of decoded escrow events.',
+              ...json({
+                type: 'object',
+                required: ['data', 'nextCursor'],
+                properties: {
+                  data: { type: 'array', items: { type: 'object' } },
+                  nextCursor: { type: 'string', nullable: true },
+                },
+              }),
+            },
+            400: { description: 'Invalid query parameter.', ...problemJson({ $ref: '#/components/schemas/Problem' }) },
+          },
+        },
+      },
       '/api/escrow/investors/{address}': {
         get: {
           tags: ['Escrow'],
@@ -1216,6 +1266,57 @@ function createSpec(baseUrl) {
                 type: 'object',
                 required: ['code', 'method'],
                 properties: { code: { type: 'string', enum: ['ESCROW_READ_FAILED'] }, method: { type: 'string' } },
+              }),
+            },
+          },
+        },
+      },
+
+      '/api/escrow/events': {
+        get: {
+          tags: ['Escrow'],
+          summary: 'List decoded escrow contract events',
+          description: 'Returns decoded Soroban escrow contract events stored by the indexer. Supports filtering by type, investor address, and fromLedger. Uses cursor-based pagination via limit and after parameters.',
+          parameters: [
+            { name: 'type', in: 'query', schema: { type: 'string', description: 'Filter events by decoded event type.' } },
+            { name: 'investor', in: 'query', schema: { type: 'string', description: 'Filter events by investor Stellar address (G...).' } },
+            { name: 'fromLedger', in: 'query', schema: { type: 'integer', minimum: 0, description: 'Include only events at or after this ledger sequence.' } },
+            { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200, default: 50, description: 'Maximum number of events to return (1-200).' } },
+            { name: 'after', in: 'query', schema: { type: 'string', description: 'Return events after this event id (cursor-based pagination).' } },
+          ],
+          responses: {
+            200: {
+              description: 'Paginated list of decoded escrow events',
+              ...json({
+                type: 'object',
+                required: ['data', 'nextCursor'],
+                properties: {
+                  data: {
+                    type: 'array',
+                    items: { $ref: '#/components/schemas/DecodedEscrowEvent' },
+                    description: 'List of decoded escrow events.'
+                  },
+                  nextCursor: {
+                    type: 'string',
+                    nullable: true,
+                    description: 'Cursor for the next page; null when no further records remain.'
+                  },
+                },
+              }),
+            },
+            400: {
+              description: 'Invalid or evicted cursor',
+              ...problemJson({
+                type: 'object',
+                required: ['type', 'title', 'status', 'code', 'instance'],
+                properties: {
+                  type: { type: 'string', format: 'uri' },
+                  title: { type: 'string' },
+                  status: { type: 'integer' },
+                  code: { type: 'string', enum: ['INVALID_CURSOR'] },
+                  detail: { type: 'string' },
+                  instance: { type: 'string', format: 'uri' },
+                },
               }),
             },
           },
@@ -1540,6 +1641,41 @@ function createSpec(baseUrl) {
               ...json({ type: 'object', properties: { data: { type: 'array', items: DeliveryRecord } } }),
             },
             404: { description: 'Webhook not found', ...json(ErrorBody) },
+            ...adminErrors,
+          },
+        },
+      },
+      '/api/webhooks/{id}/deliveries/{deliveryId}/replay': {
+        post: {
+          tags: ['Webhooks'],
+          summary: 'Replay a webhook delivery',
+          description:
+            'Re-signs the stored raw event body with a fresh timestamp, preserves the original eventId for deduplication, and appends a new delivery record.',
+          security: adminSecurity,
+          parameters: [
+            { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+            { name: 'deliveryId', in: 'path', required: true, schema: { type: 'string' } },
+          ],
+          responses: {
+            202: {
+              description: 'Replay accepted and queued for asynchronous delivery',
+              ...json({
+                type: 'object',
+                properties: {
+                  data: {
+                    type: 'object',
+                    properties: {
+                      deliveryId: { type: 'string', example: 'dlv_a1b2c3d4e5f6' },
+                      eventId: { type: 'string', example: 'evt_1a2b3c4d5e6f7a8b' },
+                      replayedFrom: { type: 'string', example: 'dlv_001122334455' },
+                      status: { type: 'string', enum: ['pending'] },
+                    },
+                  },
+                },
+              }),
+            },
+            404: { description: 'Webhook or delivery not found', ...json(ErrorBody) },
+            409: { description: 'Delivery is still pending or payload is unavailable', ...json(ErrorBody) },
             ...adminErrors,
           },
         },

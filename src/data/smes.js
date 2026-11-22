@@ -3,6 +3,19 @@
 const crypto = require('crypto');
 
 const records = new Map();
+const registrationIndex = new Map();
+const stellarAddressIndex = new Map();
+
+/**
+ * Builds the normalized lookup key for country and registration number.
+ *
+ * @param {string} country ISO country code.
+ * @param {string} registrationNumber SME registration number.
+ * @returns {string} Normalized composite key.
+ */
+function registrationKey(country, registrationNumber) {
+  return `${country}|${registrationNumber.toLowerCase()}`;
+}
 
 /**
  * Returns a detached copy of an SME record.
@@ -25,12 +38,8 @@ function copySme(record) {
  * @throws {Error} When a country/registration number or Stellar address exists.
  */
 function createSme(input) {
-  const duplicate = [...records.values()].some((record) =>
-    (record.country === input.country &&
-      record.registrationNumber.toLowerCase() === input.registrationNumber.toLowerCase()) ||
-    record.stellarAddress === input.stellarAddress
-  );
-  if (duplicate) {
+  const regKey = registrationKey(input.country, input.registrationNumber);
+  if (registrationIndex.has(regKey) || stellarAddressIndex.has(input.stellarAddress)) {
     const error = new Error('An SME with these registration details or Stellar address already exists.');
     error.code = 'SME_DUPLICATE';
     throw error;
@@ -48,6 +57,8 @@ function createSme(input) {
     reviewHistory: [],
   };
   records.set(record.id, record);
+  registrationIndex.set(regKey, record.id);
+  stellarAddressIndex.set(record.stellarAddress, record.id);
   return copySme(record);
 }
 
@@ -87,6 +98,8 @@ function updateSmeReview(id, status, reviewEntry) {
  */
 function resetSmes() {
   records.clear();
+  registrationIndex.clear();
+  stellarAddressIndex.clear();
 }
 
 module.exports = { createSme, getSme, updateSmeReview, resetSmes };
