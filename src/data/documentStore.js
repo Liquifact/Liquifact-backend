@@ -1,8 +1,6 @@
-'use strict';
+'use strict'
 
-/**
- * @fileoverview In-memory DocumentStore for invoice PDF uploads.
- *
+/**@fileoverview In-memory DocumentStore for invoice PDF uploads.
  * Stores raw PDF bytes alongside metadata. Bounded at MAX_DOCS (default 50)
  * entries with LRU eviction: when the cap is reached and a new document
  * arrives, the least-recently-used entry is removed first.
@@ -12,27 +10,19 @@
 
 const DEFAULT_MAX_DOCS = 50;
 
-/**
- * Create a new DocumentStore instance.
- *
- * @param {object} [opts]
+/** Create a new DocumentStore instance.
  * @param {number} [opts.maxDocs=50] - Maximum number of documents to retain.
  * @returns {DocumentStore}
  */
+
 function createDocumentStore({ maxDocs = DEFAULT_MAX_DOCS } = {}) {
-  /**
-   * Map from invoiceId → { meta, buffer }.
+  /** Map from invoiceId → { meta, buffer }.
    * Map insertion-order tracks LRU: most-recently used moves to the end.
-   *
    * @type {Map<string, { meta: object, buffer: Buffer }>}
    */
   const store = new Map();
 
-  /**
-   * Promote an entry to most-recently-used position.
-   *
-   * @param {string} invoiceId
-   */
+  /** Promote an entry to most-recently-used position. */
   function _touch(invoiceId) {
     const entry = store.get(invoiceId);
     if (entry) {
@@ -41,9 +31,7 @@ function createDocumentStore({ maxDocs = DEFAULT_MAX_DOCS } = {}) {
     }
   }
 
-  /**
-   * Evict the least-recently-used entry when over capacity.
-   */
+  /** Evict the least-recently-used entry when over capacity. */
   function _evictIfNeeded() {
     if (store.size >= maxDocs) {
       const lruKey = store.keys().next().value;
@@ -51,30 +39,25 @@ function createDocumentStore({ maxDocs = DEFAULT_MAX_DOCS } = {}) {
     }
   }
 
-  /**
-   * Store a document. If the store is full, the LRU entry is evicted first.
+  /** Store a document. If the store is full, the LRU entry is evicted first.
    * Calling save() for an existing invoiceId replaces it (idempotent).
-   *
    * @param {string} invoiceId
    * @param {{ sha256Hex: string, sizeBytes: number, uploadedAt: string, originalName: string }} meta
    * @param {Buffer} buffer - Raw PDF bytes.
-   * @returns {void}
+   * @returns {boolean} true if an LRU entry was evicted to make room.
    */
   function save(invoiceId, meta, buffer) {
+    const wasNew = !store.has(invoiceId);
     if (store.has(invoiceId)) {
       store.delete(invoiceId);
     } else {
       _evictIfNeeded();
     }
     store.set(invoiceId, { meta, buffer });
+    return wasNew && store.size >= maxDocs;
   }
 
-  /**
-   * Retrieve document metadata without the bytes.
-   *
-   * @param {string} invoiceId
-   * @returns {{ sha256Hex: string, sizeBytes: number, uploadedAt: string, originalName: string } | null}
-   */
+  /** Retrieve document metadata without the bytes. */
   function getMeta(invoiceId) {
     const entry = store.get(invoiceId);
     if (!entry) { return null; }
@@ -82,12 +65,7 @@ function createDocumentStore({ maxDocs = DEFAULT_MAX_DOCS } = {}) {
     return entry.meta;
   }
 
-  /**
-   * Retrieve the raw PDF buffer.
-   *
-   * @param {string} invoiceId
-   * @returns {Buffer | null}
-   */
+  /** Retrieve the raw PDF buffer. */
   function getBuffer(invoiceId) {
     const entry = store.get(invoiceId);
     if (!entry) { return null; }
@@ -95,40 +73,22 @@ function createDocumentStore({ maxDocs = DEFAULT_MAX_DOCS } = {}) {
     return entry.buffer;
   }
 
-  /**
-   * Check whether a document exists for the invoice.
-   *
-   * @param {string} invoiceId
-   * @returns {boolean}
-   */
+  /** Check whether a document exists for the invoice. */
   function has(invoiceId) {
     return store.has(invoiceId);
   }
 
-  /**
-   * Remove a document (useful in tests).
-   *
-   * @param {string} invoiceId
-   * @returns {void}
-   */
+  /** Remove a document (useful in tests). */
   function remove(invoiceId) {
     store.delete(invoiceId);
   }
 
-  /**
-   * Clear all documents (used by tests).
-   *
-   * @returns {void}
-   */
+  /** Clear all documents (used by tests). */
   function clear() {
     store.clear();
   }
 
-  /**
-   * Number of stored documents.
-   *
-   * @returns {number}
-   */
+  /** Number of stored documents. */
   function size() {
     return store.size;
   }

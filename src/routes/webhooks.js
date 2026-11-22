@@ -14,6 +14,7 @@
  */
 
 const express = require('express');
+const config = require('../config');
 const { validateWebhookUrl } = require('../webhooks/ssrf');
 const webhookStore = require('../webhooks/store');
 const { requireAdminToken } = require('../middleware/require-admin-token');
@@ -38,11 +39,23 @@ router.post('/', requireAdminToken, async (req, res) => {
     return res.status(400).json({ error: 'events must be a non-empty array' });
   }
 
-  const invalid = events.filter((e) => !webhookStore.VALID_EVENTS.includes(e));
+  const uniqueEvents = [...new Set(events)];
+  const invalid = uniqueEvents.filter((e) => !webhookStore.VALID_EVENTS.includes(e));
   if (invalid.length > 0) {
     return res
       .status(400)
       .json({ error: `unknown event types: ${invalid.join(', ')}. Valid: ${webhookStore.VALID_EVENTS.join(', ')}` });
+  }
+
+  let maxWebhooks = config.webhooksMax;
+  if (process.env.WEBHOOKS_MAX !== undefined && process.env.WEBHOOKS_MAX !== '') {
+    maxWebhooks = config.loadConfig({ WEBHOOKS_MAX: process.env.WEBHOOKS_MAX }).webhooksMax;
+  }
+  if (webhookStore.countWebhooks() >= maxWebhooks) {
+    return res.status(409).json({
+      error: `webhook subscription limit (${maxWebhooks}) reached`,
+      code: 'WEBHOOKS_MAX_REACHED',
+    });
   }
 
   // SSRF guard + URL validation
@@ -53,11 +66,19 @@ router.post('/', requireAdminToken, async (req, res) => {
     return res.status(400).json({ error: `invalid webhook URL: ${err.message}` });
   }
 
+  // Re-check cap after async URL validation to guard against concurrent registrations
+  if (webhookStore.countWebhooks() >= maxWebhooks) {
+    return res.status(409).json({
+      error: `webhook subscription limit (${maxWebhooks}) reached`,
+      code: 'WEBHOOKS_MAX_REACHED',
+    });
+  }
+
   const result = webhookStore.createWebhook({
     url: urlMeta.url,
     pinnedUrl: urlMeta.pinnedUrl,
     host: urlMeta.host,
-    events,
+    events: uniqueEvents,
   });
 
   // result.secret is the only place the plaintext secret is ever returned
@@ -70,6 +91,19 @@ router.post('/', requireAdminToken, async (req, res) => {
 
 router.get('/', (req, res) => {
   return res.json({ data: webhookStore.listWebhooks() });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/webhooks/:id - Show webhook details (admin only, no secrets/URL)
+// ---------------------------------------------------------------------------
+
+router.get('/:id', requireAdminToken, (req, res) => {
+  const wh = webhookStore.getWebhook(req.params.id);
+  if (!wh) {
+    return res.status(404).json({ error: 'Webhook not found' });
+  }
+  // Return only public fields: id, url, events, createdAt
+  return res.json({ data: { id: wh.id, url: wh.url, events: wh.events, createdAt: wh.createdAt } });
 });
 
 // ---------------------------------------------------------------------------
