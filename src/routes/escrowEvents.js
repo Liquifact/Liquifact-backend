@@ -10,7 +10,10 @@
  */
 
 const { Router } = require('express');
+const { StrKey } = require('@stellar/stellar-sdk');
 const { defaultStore } = require('../indexer/EventStore');
+const { EVENT_TYPES } = require('../indexer/decode');
+const { badRequest } = require('../errors');
 
 const router = Router();
 
@@ -30,18 +33,7 @@ const router = Router();
  *         name: type
  *         schema:
  *           type: string
- *           enum:
- *             - funded
- *             - settled
- *             - investor_payout_claimed
- *             - refunded
- *             - funding_cancelled
- *             - legal_hold
- *             - sme_withdrawal
- *             - maturity
- *             - funding_target_reached
- *             - unknown
- *         description: Filter events by decoded event type.
+ *         description: Filter events by decoded event type; allowed values are listed in the OpenAPI document.
  *       - in: query
  *         name: investor
  *         schema:
@@ -82,6 +74,14 @@ const router = Router();
  */
 router.get('/', (req, res) => {
   const { type, investor, after } = req.query;
+
+  if (type !== undefined && (typeof type !== 'string' || !EVENT_TYPES.includes(type))) {
+    throw badRequest('VALIDATION_FAILED', `\`type\` must be one of: ${EVENT_TYPES.join(', ')}.`);
+  }
+
+  if (investor !== undefined && (typeof investor !== 'string' || !StrKey.isValidEd25519PublicKey(investor))) {
+    throw badRequest('INVALID_INVESTOR_ADDRESS');
+  }
 
   // Validate limit
   const rawLimit = req.query.limit;
