@@ -52,7 +52,7 @@ function createWebhook({ url, pinnedUrl, host, events }) {
     url,
     pinnedUrl,
     host,
-    events: [...events],
+    events: [...new Set(events)],
     secret, // retained in-memory for signing; never exposed via GET
     createdAt: new Date().toISOString(),
   };
@@ -62,6 +62,14 @@ function createWebhook({ url, pinnedUrl, host, events }) {
 
   // Return the secret here — this is the only time it is visible
   return { id, secret, url, events: record.events, createdAt: record.createdAt };
+}
+
+/**
+ * Returns the number of registered webhook subscriptions.
+ * @returns {number}
+ */
+function countWebhooks() {
+  return webhooks.size;
 }
 
 /**
@@ -152,6 +160,7 @@ function reset() {
 module.exports = {
   VALID_EVENTS,
   createWebhook,
+  countWebhooks,
   listWebhooks,
   getWebhook,
   getWebhookInternal,
