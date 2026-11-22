@@ -89,11 +89,32 @@ router.delete('/:id', requireAdminToken, (req, res) => {
 // ---------------------------------------------------------------------------
 
 router.get('/:id/deliveries', (req, res) => {
+  const { status, limit: rawLimit } = req.query;
+  const validStatuses = ['pending', 'delivered', 'failed'];
+  if (status !== undefined && (typeof status !== 'string' || !validStatuses.includes(status))) {
+    return res.status(400).json({ error: 'status must be one of: pending, delivered, failed' });
+  }
+
+  let limit = 50;
+  if (rawLimit !== undefined) {
+    if (typeof rawLimit !== 'string' || !/^\d+$/.test(rawLimit)) {
+      return res.status(400).json({ error: 'limit must be an integer from 1 to 50' });
+    }
+    limit = Number(rawLimit);
+    if (limit < 1 || limit > 50) {
+      return res.status(400).json({ error: 'limit must be an integer from 1 to 50' });
+    }
+  }
+
   const wh = webhookStore.getWebhook(req.params.id);
   if (!wh) {
     return res.status(404).json({ error: 'Webhook not found' });
   }
-  const log = webhookStore.getDeliveries(req.params.id) || [];
+  let log = webhookStore.getDeliveries(req.params.id) || [];
+  if (status !== undefined) {
+    log = log.filter((delivery) => delivery.status === status);
+  }
+  log = log.slice(0, limit);
   return res.json({ data: log });
 });
 

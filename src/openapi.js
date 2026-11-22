@@ -1531,15 +1531,20 @@ function createSpec(baseUrl) {
       '/api/webhooks/{id}/deliveries': {
         get: {
           tags: ['Webhooks'],
-          summary: 'Last 50 delivery records for a webhook',
+          summary: 'Delivery records for a webhook, optionally filtered by status and limited to 1–50 records',
           security: adminSecurity,
-          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          parameters: [
+            { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+            { name: 'status', in: 'query', required: false, schema: { type: 'string', enum: ['pending', 'delivered', 'failed'] } },
+            { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 50, default: 50 } },
+          ],
           responses: {
             200: {
               description: 'Delivery log (most recent first)',
               ...json({ type: 'object', properties: { data: { type: 'array', items: DeliveryRecord } } }),
             },
             404: { description: 'Webhook not found', ...json(ErrorBody) },
+            400: { description: 'Invalid status or limit', ...json(ErrorBody) },
             ...adminErrors,
           },
         },
