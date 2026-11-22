@@ -461,7 +461,10 @@ const WebhookSubscription = {
     url: { type: 'string', format: 'uri', example: 'https://example.com/hooks' },
     events: {
       type: 'array',
-      items: { type: 'string', enum: ['invoice.created', 'invoice.funding_received', 'invoice.funded'] },
+      items: {
+        type: 'string',
+        enum: ['invoice.created', 'invoice.funding_received', 'invoice.funded', 'invoice.reconciliation_drift'],
+      },
     },
     createdAt: { type: 'string', format: 'date-time' },
   },
@@ -621,6 +624,7 @@ function createSpec(baseUrl) {
       { name: 'Investors' },
       { name: 'Escrow' },
       { name: 'Reconciliation' },
+      { name: 'Internal' },
       { name: 'Audit' },
       { name: 'Webhooks' },
       { name: 'SMEs' },
@@ -638,6 +642,11 @@ function createSpec(baseUrl) {
           type: 'http',
           scheme: 'bearer',
           description: 'Shared admin secret: `Authorization: Bearer <ADMIN_API_TOKEN>`',
+        },
+        cronBearer: {
+          type: 'http',
+          scheme: 'bearer',
+          description: 'Scheduler secret: `Authorization: Bearer <CRON_SECRET>`',
         },
       },
       schemas: {
@@ -1421,6 +1430,62 @@ function createSpec(baseUrl) {
           },
         },
       },
+      '/api/reconciliation/latest': {
+        get: {
+          tags: ['Reconciliation'],
+          summary: 'Get the latest scheduled reconciliation report',
+          description:
+            'Returns the report cached by POST /api/internal/reconciliation/run together with its age. ' +
+            'Admin token required; 404 when no scheduled run has completed yet.',
+          security: adminSecurity,
+          responses: {
+            200: {
+              description: 'Cached reconciliation report and age',
+              ...json({
+                type: 'object',
+                required: ['report', 'ageMs', 'ageSeconds'],
+                properties: {
+                  report: ReconciliationReport,
+                  checkedAt: { type: 'string', format: 'date-time' },
+                  ageMs: { type: 'integer', nullable: true, description: 'Milliseconds since report.checkedAt' },
+                  ageSeconds: { type: 'integer', nullable: true, description: 'ageMs floored to seconds' },
+                },
+              }),
+            },
+            401: { description: 'Missing or invalid admin token', ...json(ErrorBody) },
+            404: { description: 'No reconciliation report available', ...json(ErrorBody) },
+            503: { description: 'ADMIN_API_TOKEN is not configured on the server', ...json(ErrorBody) },
+          },
+        },
+      },
+      '/api/internal/reconciliation/run': {
+        post: {
+          tags: ['Internal', 'Reconciliation'],
+          summary: 'Run scheduled reconciliation and emit drift alerts',
+          description:
+            'Runs reconcileAll(), caches the report for GET /api/reconciliation/latest, and emits one ' +
+            'invoice.reconciliation_drift webhook event per invoice transitioning from in_sync to drift/error. ' +
+            'Protected by Bearer CRON_SECRET; returns 404 when CRON_SECRET is unset.',
+          security: [{ cronBearer: [] }],
+          responses: {
+            200: {
+              description: 'Reconciliation report with alert counts',
+              ...json({
+                type: 'object',
+                required: [...ReconciliationReport.required, 'alerts', 'alertedInvoiceIds'],
+                properties: {
+                  ...ReconciliationReport.properties,
+                  alerts: { type: 'integer', description: 'Number of drift webhook events emitted' },
+                  alertedInvoiceIds: { type: 'array', items: { type: 'string' } },
+                },
+              }),
+            },
+            401: { description: 'Missing or invalid CRON_SECRET bearer token', ...problemJson({ $ref: '#/components/schemas/Problem' }) },
+            404: { description: 'Endpoint not available (CRON_SECRET not configured)', ...json(ErrorBody) },
+            500: { description: 'Reconciliation run failed', ...problemJson({ $ref: '#/components/schemas/Problem' }) },
+          },
+        },
+      },
       '/api/smes': {
         post: {
           tags: ['SMEs'],
@@ -1487,7 +1552,10 @@ function createSpec(baseUrl) {
                 },
                 events: {
                   type: 'array',
-                  items: { type: 'string', enum: ['invoice.created', 'invoice.funding_received', 'invoice.funded'] },
+                  items: {
+        type: 'string',
+        enum: ['invoice.created', 'invoice.funding_received', 'invoice.funded', 'invoice.reconciliation_drift'],
+      },
                   example: ['invoice.created', 'invoice.funded'],
                 },
               },
