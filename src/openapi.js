@@ -1544,6 +1544,41 @@ function createSpec(baseUrl) {
           },
         },
       },
+      '/api/webhooks/{id}/deliveries/{deliveryId}/replay': {
+        post: {
+          tags: ['Webhooks'],
+          summary: 'Replay a webhook delivery',
+          description:
+            'Re-signs the stored raw event body with a fresh timestamp, preserves the original eventId for deduplication, and appends a new delivery record.',
+          security: adminSecurity,
+          parameters: [
+            { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+            { name: 'deliveryId', in: 'path', required: true, schema: { type: 'string' } },
+          ],
+          responses: {
+            202: {
+              description: 'Replay accepted and queued for asynchronous delivery',
+              ...json({
+                type: 'object',
+                properties: {
+                  data: {
+                    type: 'object',
+                    properties: {
+                      deliveryId: { type: 'string', example: 'dlv_a1b2c3d4e5f6' },
+                      eventId: { type: 'string', example: 'evt_1a2b3c4d5e6f7a8b' },
+                      replayedFrom: { type: 'string', example: 'dlv_001122334455' },
+                      status: { type: 'string', enum: ['pending'] },
+                    },
+                  },
+                },
+              }),
+            },
+            404: { description: 'Webhook or delivery not found', ...json(ErrorBody) },
+            409: { description: 'Delivery is still pending or payload is unavailable', ...json(ErrorBody) },
+            ...adminErrors,
+          },
+        },
+      },
     },
   });
 }
