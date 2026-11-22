@@ -3,8 +3,8 @@
 /**
  * @fileoverview GET /api/escrow/events — query decoded escrow contract events.
  *
- * Supports filtering by type, investor address, and fromLedger; cursor-based
- * pagination via `limit` and `after` parameters.
+ * Supports filtering by type, investor address, originating contract id, and
+ * fromLedger; cursor-based pagination via `limit` and `after` parameters.
  *
  * @module routes/escrowEvents
  */
@@ -24,8 +24,8 @@ const router = Router();
  *     summary: List decoded escrow contract events
  *     description: >
  *       Returns decoded Soroban escrow contract events stored by the indexer.
- *       Supports filtering by type, investor address, and fromLedger.
- *       Uses cursor-based pagination.
+ *       Supports filtering by type, investor address, contractId, and
+ *       fromLedger. Uses cursor-based pagination.
  *     tags:
  *       - Escrow
  *     parameters:
@@ -39,6 +39,11 @@ const router = Router();
  *         schema:
  *           type: string
  *         description: Filter events by investor Stellar address (G...).
+ *       - in: query
+ *         name: contractId
+ *         schema:
+ *           type: string
+ *         description: Filter events by originating escrow contract id (C...).
  *       - in: query
  *         name: fromLedger
  *         schema:
@@ -74,6 +79,10 @@ const router = Router();
  */
 router.get('/', (req, res) => {
   const { type, investor, after } = req.query;
+  const contractId =
+    typeof req.query.contractId === 'string' && req.query.contractId.trim()
+      ? req.query.contractId.trim()
+      : undefined;
 
   if (type !== undefined && (typeof type !== 'string' || !EVENT_TYPES.includes(type))) {
     throw badRequest('VALIDATION_FAILED', `\`type\` must be one of: ${EVENT_TYPES.join(', ')}.`);
@@ -114,7 +123,14 @@ router.get('/', (req, res) => {
     fromLedger = parsed;
   }
 
-  const result = defaultStore.query({ type, investor, fromLedger, limit, after });
+  const result = defaultStore.query({
+    type,
+    investor,
+    contractId,
+    fromLedger,
+    limit,
+    after,
+  });
 
   if (result.error) {
     return res.status(400).json({

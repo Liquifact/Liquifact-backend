@@ -194,6 +194,8 @@ function coerceVal(v) {
  * ```
  *
  * @param {object} rawEvent - Raw event from Soroban RPC getEvents.
+ * @param {string} [fallbackContractId] - Originating contract id, used when the
+ *   raw event omits `contractId` (e.g. single-contract chunk requests).
  * @returns {{
  *   id: string,
  *   type: string,
@@ -206,7 +208,7 @@ function coerceVal(v) {
  *   schemaWarning?: true,
  * }}
  */
-function decodeEvent(rawEvent) {
+function decodeEvent(rawEvent, fallbackContractId) {
   const topics = Array.isArray(rawEvent.topic)
     ? rawEvent.topic
     : Array.isArray(rawEvent.topics)
@@ -253,7 +255,7 @@ function decodeEvent(rawEvent) {
     ledger: Number(rawEvent.ledger ?? 0),
     ledgerClosedAt: String(rawEvent.ledgerClosedAt ?? ''),
     txHash: String(rawEvent.txHash ?? ''),
-    contractId: String(rawEvent.contractId ?? ''),
+    contractId: String(rawEvent.contractId ?? fallbackContractId ?? ''),
     invoiceId,
     data,
   };

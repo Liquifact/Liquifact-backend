@@ -2,7 +2,7 @@
 
 > **Scope:** `Liquifact/Liquifact-backend`
 > **Last updated:** 2026-07-25
-> **Cross-reference:** `src/routes/adminIndexer.js` · `src/services/indexerService.js` · `src/utils/cursorPagination.js` · `src/middleware/stacks.js` · `src/app.js`
+> **Cross-reference:** `src/routes/adminIndexer.js` · `src/services/indexerService.js` · `src/utils/cursorPagination.js` · `src/middleware/stacks.js` · `src/app.js` · `src/indexer/escrow-indexer.js` · `src/indexer/EventStore.js` · `src/routes/escrowEvents.js`
 
 ---
 
@@ -309,3 +309,85 @@ and mapped by the centralized `errorHandler`/`mapError` to:
 - API keys are compared using a constant-time, SHA-256-hashed comparison
   (`timingSafeStringEqual`) to prevent timing-based enumeration; failed API
   key attempts are logged with `outcome` context but never log the key value.
+
+---
+
+## Multi-contract indexing (pull-based Soroban indexer)
+
+The pull-based indexer in `src/indexer/escrow-indexer.js` indexes **every linked
+escrow contract**, not only the configured one. Events are decoded by
+`src/indexer/decode.js`, stored in the in-memory `EventStore`, and exposed by
+`GET /api/escrow/events` (`src/routes/escrowEvents.js`).
+
+### Which contracts are indexed
+
+`collectContractIds()` builds the contract set from two sources:
+
+1. The configured default contract: `SOROBAN_CONTRACT_ID`, falling back to
+   `config.contractId` (that is `ESCROW_CONTRACT_ID`, or the built-in default).
+2. Every distinct non-null `escrowContractId` linked to an invoice returned by
+   `store.list()` in `src/data/store.js`.
+
+The ids are de-duplicated and sorted, so repeated runs produce the same
+contract set and chunk layout for an unchanged set of linked contracts. An
+explicit `contractId` option to `runOnce()` is an operator override: it is used
+on its own and is not merged with the data store.
+
+### Chunking for Soroban RPC
+
+Soroban RPC accepts at most **five** `contractIds` per event filter. The sorted
+contract list is therefore split into contiguous chunks of at most five
+(`chunkContractIds()`, `MAX_CONTRACT_IDS_PER_FILTER = 5`). Each chunk becomes one
+`getEvents` request shape:
+
+```js
+{ filters: [{ type: 'contract', contractIds: [...up to 5 ids] }], limit: 100 }
+```
+
+With seven contracts the indexer makes two chunk requests per page — one with
+five ids, one with two. `maxPages` is applied **per chunk**, so the total number
+of RPC pages in a run is at most `maxPages × number of chunks`.
+
+### Cursor handling and watermark strategy
+
+Each chunk owns an independent cursor stored in the EventStore (`getCursor(key)`
+/ `setCursor(cursor, key)`), keyed by `chunk:<sorted contract ids>`:
+
+- A chunk resumes from its own cursor on the next run. Chunks that did not
+  change keep progressing without re-reading history.
+- Adding a linked contract changes the sorted chunk layout. The affected chunks
+  have no stored cursor and start again from `INDEXER_START_LEDGER` (clamped up
+  to the RPC's `oldestLedger`). Re-read events cannot create duplicates because
+  `EventStore.append()` is idempotent by event id, and no events are skipped
+  because the re-scan starts at the beginning of the retained window.
+- A failed `getEvents` call leaves that chunk's cursor unchanged; chunks already
+  processed in the same run keep their advanced cursors, and the next run resumes
+  from each chunk's last confirmed position.
+- Only the **last successfully fetched page's** cursor is stored per chunk, and
+  it is stored after the page's events are appended, so a crash between append
+  and cursor write at worst replays one page (deduplicated by event id).
+
+When exactly one contract is indexed, the chunk logic collapses to a single
+chunk that uses the EventStore's default cursor, preserving the original
+single-contract behaviour and stored cursor.
+
+### Event tagging
+
+`decodeEvent(rawEvent, fallbackContractId)` always returns a `contractId` field:
+
+- the raw event's `contractId` when present, otherwise
+- the requesting contract for single-contract chunk requests (fallback).
+
+Multi-contract responses are required to carry their own `contractId`, and each
+stored event therefore records which escrow contract it originated from.
+
+### Filtering by contract
+
+`EventStore.query()` accepts `contractId` and matches it against the stored
+event's originating contract. `GET /api/escrow/events` exposes this as the
+optional `?contractId=` query parameter, which composes with the existing
+`type`, `investor`, `fromLedger`, `limit`, and `after` parameters:
+
+```
+GET /api/escrow/events?contractId=CDQCKR2YU6IVQ4GYPBMXBPZ4FGFQB5H25AI7ZSETHS2CZ5ZRCWQDSO6P&type=funded&limit=50
+```
