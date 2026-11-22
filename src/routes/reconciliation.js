@@ -20,9 +20,8 @@ const MAX_CONCURRENCY = 4;
  */
 async function fetchEscrow(contractId) {
   try {
-    void contractId; // reserved for future multi-contract support
-    const data = await escrowRoute.readEscrowOnChain();
-    return { data };
+    const result = await escrowRoute.readEscrowOnChain(contractId);
+    return { data: result ? result.native : result };
   } catch (err) {
     return { error: err.message || String(err) };
   }
