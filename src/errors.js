@@ -136,6 +136,11 @@ const ERROR_CATALOG = {
     status: 410,
     description: 'The document was evicted from the store to make room for a new entry.',
   },
+  INDEXER_BUSY: {
+    title: 'Indexer Busy',
+    status: 409,
+    description: 'An indexer run is already in progress; retry the request later.',
+  },
 }
 
 const ERROR_BASE_URI = 'https://liquifact-backend.vercel.app/errors/'

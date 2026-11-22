@@ -345,7 +345,7 @@ function loadConfig(env = process.env) {
     txWaitMs,
     protocolFeeBps,
     shutdownTimeoutMs,
-    auditMaxEntries: positiveInt(env.AUDIT_MAX_ENTRIES, 10000),
+    auditMaxEntries: envInt(env.AUDIT_MAX_ENTRIES, 10000, 1),
     webhooksMax,
     // Readiness probe: per-check timeout, maximum accepted ledger age and how
     // long a probe result may be reused before the RPC is called again.

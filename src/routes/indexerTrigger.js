@@ -101,6 +101,16 @@ function safeEqual(a, b) {
  *               properties:
  *                 error:
  *                   type: string
+ *       409:
+ *         description: An indexer run is already in progress (INDEXER_BUSY). Retry after Retry-After.
+ *         headers:
+ *           Retry-After:
+ *             schema:
+ *               type: string
+ *         content:
+ *           application/problem+json:
+ *             schema:
+ *               $ref: '#/components/schemas/Problem'
  *       500:
  *         description: Indexer run failed.
  *         content:
@@ -170,6 +180,12 @@ router.post('/run', requireCronSecret, async (req, res) => {
     const result = await runOnce({ maxPages });
     return res.json(result);
   } catch (err) {
+    if (err?.code === 'INDEXER_BUSY') {
+      res.set('Retry-After', '1');
+      return sendProblem(req, res, 'INDEXER_BUSY', {
+        detail: 'An indexer run is already in progress.',
+      });
+    }
     logger.error({ err }, 'Indexer trigger run failed');
     return res.status(500).json({
       type: 'https://liquifact.io/problems/indexer-error',
