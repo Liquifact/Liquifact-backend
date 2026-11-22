@@ -305,6 +305,17 @@ function loadConfig(env = process.env) {
   const rawFee = Number(env.PROTOCOL_FEE_BPS);
   const protocolFeeBps = Number.isInteger(rawFee) && rawFee >= 0 ? rawFee : 0;
 
+  // Graceful shutdown timeout (ms, positive integer, default 10000).
+  let shutdownTimeoutMs = 10000;
+  if (env.SHUTDOWN_TIMEOUT_MS !== undefined && env.SHUTDOWN_TIMEOUT_MS !== '') {
+    const parsedShutdownTimeout = Number(env.SHUTDOWN_TIMEOUT_MS);
+    if (!Number.isInteger(parsedShutdownTimeout) || parsedShutdownTimeout < 1) {
+      errors.push(`SHUTDOWN_TIMEOUT_MS must be a positive integer (got "${env.SHUTDOWN_TIMEOUT_MS}")`);
+    } else {
+      shutdownTimeoutMs = parsedShutdownTimeout;
+    }
+  }
+
   // API keys for mutating routes (see middleware/auth.js)
   const apiKeys = parseApiKeys(env.API_KEYS, errors);
 
@@ -332,6 +343,7 @@ function loadConfig(env = process.env) {
     corsOrigins,
     txWaitMs,
     protocolFeeBps,
+    shutdownTimeoutMs,
     auditMaxEntries: positiveInt(env.AUDIT_MAX_ENTRIES, 10000),
     // Readiness probe: per-check timeout, maximum accepted ledger age and how
     // long a probe result may be reused before the RPC is called again.
