@@ -16,21 +16,19 @@
  * @module indexer/escrow-indexer
  */
 
-const { rpc } = require('@stellar/stellar-sdk');
 const { decodeEvent } = require('./decode');
 const { defaultStore } = require('./EventStore');
+const { getRpcServer } = require('../stellar/rpc');
 const logger = require('../logger');
 const config = require('../config');
 
 /**
- * Build a Soroban RPC Server instance from config.
- * Lazily created so unit tests can inject their own server.
+ * Return the shared Soroban RPC Server instance.
  *
- * @returns {rpc.Server}
+ * @returns {import('@stellar/stellar-sdk').rpc.Server}
  */
 function buildRpcServer() {
-  const url = config.rpcUrl;
-  return new rpc.Server(url, { allowHttp: url.startsWith('http://') });
+  return getRpcServer();
 }
 
 /**
@@ -55,7 +53,7 @@ async function runOnce({
   contractId,
   log,
 } = {}) {
-  const _server = server ?? buildRpcServer();
+  const _server = server ?? getRpcServer();
   const _store = store ?? defaultStore;
   const _log = log ?? logger;
   const _contractId =

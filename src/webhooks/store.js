@@ -19,6 +19,7 @@ const crypto = require('crypto');
 
 const VALID_EVENTS = ['invoice.created', 'invoice.funding_received', 'invoice.funded'];
 const MAX_DELIVERIES_PER_WEBHOOK = 50;
+const MAX_RAW_BODY_BYTES = 64 * 1024;
 
 /**
  * Internal shape:
@@ -52,7 +53,7 @@ function createWebhook({ url, pinnedUrl, host, events }) {
     url,
     pinnedUrl,
     host,
-    events: [...events],
+    events: [...new Set(events)],
     secret, // retained in-memory for signing; never exposed via GET
     createdAt: new Date().toISOString(),
   };
@@ -62,6 +63,14 @@ function createWebhook({ url, pinnedUrl, host, events }) {
 
   // Return the secret here — this is the only time it is visible
   return { id, secret, url, events: record.events, createdAt: record.createdAt };
+}
+
+/**
+ * Returns the number of registered webhook subscriptions.
+ * @returns {number}
+ */
+function countWebhooks() {
+  return webhooks.size;
 }
 
 /**
@@ -138,6 +147,18 @@ function getDeliveries(webhookId) {
   return deliveries.get(webhookId);
 }
 
+/**
+ * Returns a single delivery record for a webhook by deliveryId.
+ * @param {string} webhookId
+ * @param {string} deliveryId
+ * @returns {object|undefined}
+ */
+function getDelivery(webhookId, deliveryId) {
+  const log = deliveries.get(webhookId);
+  if (!log) { return undefined; }
+  return log.find((d) => d.deliveryId === deliveryId);
+}
+
 /** Strips fields that must not be in API responses. */
 function publicView({ secret: _s, pinnedUrl: _p, host: _h, ...pub }) {
   return pub;
@@ -151,7 +172,9 @@ function reset() {
 
 module.exports = {
   VALID_EVENTS,
+  MAX_RAW_BODY_BYTES,
   createWebhook,
+  countWebhooks,
   listWebhooks,
   getWebhook,
   getWebhookInternal,
@@ -159,5 +182,6 @@ module.exports = {
   getWebhooksForEvent,
   appendDelivery,
   getDeliveries,
+  getDelivery,
   reset,
 };
