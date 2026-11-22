@@ -14,6 +14,8 @@
 
 const { runOnce } = require('../../src/indexer/escrow-indexer');
 const { createEventStore } = require('../../src/indexer/EventStore');
+const { getRpcServer, setRpcServer, resetRpcServer } = require('../../src/stellar/rpc');
+const config = require('../../src/config');
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -349,5 +351,60 @@ describe('runOnce — cursor advancement', () => {
     await runOnce({ server, store, contractId: CONTRACT_ID, log: silentLog });
 
     expect(store.getCursor()).toBe('pre-existing');
+  });
+});
+
+describe('runOnce — shared Soroban RPC client', () => {
+  afterEach(() => {
+    resetRpcServer();
+    jest.restoreAllMocks();
+  });
+
+  test('uses shared client from setRpcServer when no server is passed and reuses it across runs', async () => {
+    const sharedServer = {
+      getEvents: jest.fn().mockResolvedValue({
+        events: partialPage(1, 2),
+        cursor: 'shared-cursor',
+        latestLedger: 250,
+        oldestLedger: 1,
+      }),
+    };
+    setRpcServer(sharedServer);
+
+    const store = createEventStore();
+    await runOnce({ store, contractId: CONTRACT_ID, log: silentLog });
+    await runOnce({ store, contractId: CONTRACT_ID, log: silentLog });
+
+    expect(sharedServer.getEvents).toHaveBeenCalledTimes(2);
+  });
+
+  test('two runs without injected server reuse a single rpc.Server instance', async () => {
+    const { rpc } = require('@stellar/stellar-sdk');
+    const getEvents = jest.fn().mockResolvedValue({
+      events: [],
+      cursor: null,
+      latestLedger: 300,
+      oldestLedger: 1,
+    });
+    const serverSpy = jest.spyOn(rpc, 'Server').mockImplementation(() => ({ getEvents }));
+
+    const store = createEventStore();
+    await runOnce({ store, contractId: CONTRACT_ID, log: silentLog });
+    await runOnce({ store, contractId: CONTRACT_ID, log: silentLog });
+
+    expect(serverSpy).toHaveBeenCalledTimes(1);
+    expect(getEvents).toHaveBeenCalledTimes(2);
+  });
+
+  test('getRpcServer allows http://localhost RPC URLs', () => {
+    const originalUrl = config.rpcUrl;
+    config.rpcUrl = 'http://localhost:8000/soroban/rpc';
+    try {
+      const client = getRpcServer();
+      expect(client).toBeDefined();
+      expect(getRpcServer()).toBe(client);
+    } finally {
+      config.rpcUrl = originalUrl;
+    }
   });
 });

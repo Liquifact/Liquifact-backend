@@ -47,7 +47,12 @@ app.use((req, res, next) => {
   res.set('Permissions-Policy', 'interest-cohort=()');
   return (/^\/docs(\/|$)/.test(req.path) ? docsHelmet : apiHelmet)(req, res, next);
 });
-app.use(cors({ origin: config.corsOrigins.includes('*') ? '*' : config.corsOrigins }));
+app.use(cors({
+  origin: config.corsOrigins.includes('*') ? '*' : config.corsOrigins,
+  exposedHeaders: ['Idempotent-Replayed', 'Idempotency-Key', 'Retry-After', 'ETag'],
+  allowedHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key', 'X-Api-Key', 'X-Request-Id'],
+  maxAge: 600,
+}));
 app.use(express.json({ limit: '100kb' }));
 
 if (config.apiKeys.length === 0 && config.nodeEnv !== 'test') {

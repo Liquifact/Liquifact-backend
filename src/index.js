@@ -15,7 +15,10 @@ try {
 }
 
 if (require.main === module) {
-  app.listen(config.port, () => {
+  const { createServer, installSignalHandlers } = require('./server');
+  const server = createServer(app);
+  installSignalHandlers(server, { timeoutMs: config.shutdownTimeoutMs });
+  server.listen(config.port, () => {
     console.log(`LiquiFact API listening on http://localhost:${config.port} (docs: /docs)`);
   });
 }

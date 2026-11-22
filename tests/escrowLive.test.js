@@ -201,3 +201,33 @@ describe('OpenAPI — escrow schemas', () => {
     expect(snapshotSchema.$ref).toBe('#/components/schemas/EscrowState');
   });
 });
+
+describe('readEscrowOnChain — RPC timeout timer cleanup', () => {
+  const { readEscrowOnChain } = require('../src/routes/escrow');
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  test('clears timeout timer after a successful read', async () => {
+    jest.useFakeTimers();
+    await readEscrowOnChain();
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  test('clears timeout timer after a failed RPC read', async () => {
+    jest.useFakeTimers();
+    mockSim.fail = true;
+    await expect(readEscrowOnChain()).rejects.toThrow('RPC unavailable');
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  test('rejects with "RPC timeout" when simulation exceeds timeoutMs', async () => {
+    jest.useFakeTimers();
+    simSpy.mockImplementationOnce(() => new Promise(() => {}));
+    const readPromise = readEscrowOnChain(undefined, 6000);
+    jest.advanceTimersByTime(6000);
+    await expect(readPromise).rejects.toThrow('RPC timeout');
+    expect(jest.getTimerCount()).toBe(0);
+  });
+});

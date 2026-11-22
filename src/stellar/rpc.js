@@ -26,7 +26,10 @@ let server = null;
 function getRpcServer() {
   if (!server) {
     const { rpc } = require('@stellar/stellar-sdk');
-    server = new rpc.Server(config.rpcUrl);
+    const url = config.rpcUrl;
+    server = new rpc.Server(url, {
+      allowHttp: typeof url === 'string' && url.startsWith('http://'),
+    });
   }
   return server;
 }

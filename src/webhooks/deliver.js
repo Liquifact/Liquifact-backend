@@ -101,18 +101,44 @@ async function attempt(wh, rawBody, eventId, signatureHeader) {
  */
 
 /**
- * Runs delivery with retries for one webhook+event pair.
+ * Executes the retry loop for a prepared delivery record.
  *
- * @param {object} wh internal webhook record (must contain .secret for signing)
- * @param {string} eventType
- * @param {object} invoice
+ * @param {object} wh internal webhook record
+ * @param {object} deliveryRecord delivery record already appended to store
+ * @param {string} rawBody serialised event envelope
+ * @param {string} signatureHeader signed header value
  * @returns {Promise<void>}
  */
-async function deliverToWebhook(wh, eventType, invoice) {
-  const { envelope, rawBody } = buildEnvelope(eventType, invoice);
-  const eventId = envelope.id;
+async function executeDelivery(wh, deliveryRecord, rawBody, signatureHeader) {
+  for (let i = 0; i < MAX_ATTEMPTS; i++) {
+    if (i > 0) {
+      const delay = withJitter(BASE_DELAYS[i - 1]);
+      await sleep(delay);
+    }
 
-  // Sign once with the stored plaintext secret (kept in memory only)
+    const result = await attempt(wh, rawBody, deliveryRecord.eventId, signatureHeader);
+    const attemptLog = { attempt: i + 1, ...result };
+    deliveryRecord.attempts.push(attemptLog);
+
+    const success = result.status !== null && result.status >= 200 && result.status < 300;
+    if (success) {
+      deliveryRecord.status = 'delivered';
+      return;
+    }
+  }
+
+  deliveryRecord.status = 'failed';
+}
+
+/**
+ * Creates a delivery record, persists a bounded rawBody, and appends it to the store.
+ *
+ * @param {object} wh internal webhook record
+ * @param {{ eventId: string, eventType: string, rawBody: string, replayedFrom?: string }} opts
+ * @returns {{ deliveryRecord: object, signatureHeader: string }}
+ */
+function prepareDelivery(wh, { eventId, eventType, rawBody, replayedFrom }) {
+  // Sign with a fresh timestamp using the stored plaintext secret (kept in memory only)
   const signatureHeader = sign(wh.secret, rawBody);
 
   const deliveryRecord = {
@@ -126,27 +152,68 @@ async function deliverToWebhook(wh, eventType, invoice) {
     createdAt: new Date().toISOString(),
   };
 
+  if (typeof rawBody === 'string' && Buffer.byteLength(rawBody, 'utf8') <= webhookStore.MAX_RAW_BODY_BYTES) {
+    deliveryRecord.rawBody = rawBody;
+  }
+
+  if (replayedFrom) {
+    deliveryRecord.replayedFrom = replayedFrom;
+  }
+
   // Append initial record immediately so it's visible
   webhookStore.appendDelivery(wh.id, deliveryRecord);
 
-  for (let i = 0; i < MAX_ATTEMPTS; i++) {
-    if (i > 0) {
-      const delay = withJitter(BASE_DELAYS[i - 1]);
-      await sleep(delay);
-    }
+  return { deliveryRecord, signatureHeader };
+}
 
-    const result = await attempt(wh, rawBody, eventId, signatureHeader);
-    const attemptLog = { attempt: i + 1, ...result };
-    deliveryRecord.attempts.push(attemptLog);
+/**
+ * Runs delivery with retries for one webhook+event pair.
+ *
+ * @param {object} wh internal webhook record (must contain .secret for signing)
+ * @param {string} eventType
+ * @param {object} invoice
+ * @returns {Promise<void>}
+ */
+async function deliverToWebhook(wh, eventType, invoice) {
+  const { envelope, rawBody } = buildEnvelope(eventType, invoice);
+  const { deliveryRecord, signatureHeader } = prepareDelivery(wh, {
+    eventId: envelope.id,
+    eventType,
+    rawBody,
+  });
 
-    const success = result.status !== null && result.status >= 200 && result.status < 300;
-    if (success) {
-      deliveryRecord.status = 'delivered';
-      return;
-    }
-  }
+  await executeDelivery(wh, deliveryRecord, rawBody, signatureHeader);
+}
 
-  deliveryRecord.status = 'failed';
+/**
+ * Replays a previously recorded delivery with a fresh signature timestamp
+ * while preserving the original eventId so receivers can deduplicate.
+ *
+ * Appends the new delivery record synchronously and runs delivery asynchronously.
+ *
+ * @param {object} wh internal webhook record (must contain .secret for signing)
+ * @param {object} originalDelivery stored delivery record with rawBody
+ * @returns {{ deliveryId: string, eventId: string, replayedFrom: string, status: string }}
+ */
+function replayDelivery(wh, originalDelivery) {
+  const { deliveryRecord, signatureHeader } = prepareDelivery(wh, {
+    eventId: originalDelivery.eventId,
+    eventType: originalDelivery.eventType,
+    rawBody: originalDelivery.rawBody,
+    replayedFrom: originalDelivery.deliveryId,
+  });
+
+  // Fire and forget — errors are caught so the HTTP handler never rejects
+  executeDelivery(wh, deliveryRecord, originalDelivery.rawBody, signatureHeader).catch((err) => {
+    console.error(`[webhook-deliver] unhandled replay error for ${wh.id}:`, err);
+  });
+
+  return {
+    deliveryId: deliveryRecord.deliveryId,
+    eventId: deliveryRecord.eventId,
+    replayedFrom: deliveryRecord.replayedFrom,
+    status: deliveryRecord.status,
+  };
 }
 
 /**
@@ -191,4 +258,4 @@ function startListening() {
 }
 
 // Exported for tests
-module.exports = { dispatch, startListening, buildEnvelope, deliverToWebhook, sleep };
+module.exports = { dispatch, startListening, buildEnvelope, deliverToWebhook, replayDelivery, sleep };
