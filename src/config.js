@@ -162,16 +162,6 @@ function envInt(raw, fallback, min = 0) {
 }
 
 /**
- * @param {string|undefined} raw environment value
- * @param {number} fallback value used when raw is missing or not a positive integer
- * @returns {number} parsed positive integer
- */
-function positiveInt(raw, fallback) {
-  const n = Number(raw);
-  return Number.isInteger(n) && n > 0 ? n : fallback;
-}
-
-/**
  * Loads, normalizes and validates configuration from an environment object.
  *
  * @param {Record<string, string|undefined>} [env=process.env]
