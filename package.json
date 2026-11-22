@@ -14,7 +14,8 @@
     "lint": "eslint .",
     "build": "node scripts/check.js",
     "apikey:new": "node scripts/new-api-key.js",
-    "test": "jest --runInBand"
+    "test": "jest --runInBand",
+    "test:coverage": "jest --runInBand --coverage"
   },
   "dependencies": {
     "@asteasolutions/zod-to-openapi": "7.3.4",
@@ -33,6 +34,19 @@
     "globals": "^16.5.0",
     "jest": "^30.2.0",
     "supertest": "^7.1.4"
+  },
+  "jest": {
+    "collectCoverageFrom": ["src/**/*.js"],
+    "coverageThreshold": {
+      "global": {
+        "statements": 90,
+        "branches": 81,
+        "functions": 92,
+        "lines": 91
+      }
+    },
+    "coveragePathIgnorePatterns": ["coverage/"
+    ]
   },
   "scarfSettings": {
     "enabled": false

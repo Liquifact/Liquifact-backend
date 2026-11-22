@@ -105,6 +105,9 @@ function createEventStore({ maxEvents = DEFAULT_MAX_EVENTS } = {}) {
       const idx = all.findIndex((e) => e.id === after);
       if (idx !== -1) {
         startIdx = idx + 1;
+      } else {
+        // Cursor not found - treat as invalid, do not silently restart
+        return { error: 'INVALID_CURSOR' };
       }
     }
 
