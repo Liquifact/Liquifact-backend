@@ -44,9 +44,9 @@ function buildRpcServer() {
  * @param {number}     [opts.maxPages=5]     - Maximum pages to fetch per call.
  * @param {object}     [opts.server]         - Soroban RPC server (injected in tests).
  * @param {object}     [opts.store]          - EventStore (injected in tests).
- * @param {string}     [opts.contractId]     - Override contract id (default: env).
+ * @param {string}     [opts.contractId]   - Override contract id (default: env).
  * @param {object}     [opts.log]            - Logger (injected in tests).
- * @returns {Promise<{ ingested: number, cursor: string | null, latestLedger: number }>}
+ * @returns {Promise<{ ingested: number, skipped: number, decodeFailures: number, cursor: string | null, latestLedger: number }>}
  */
 async function runOnce({
   maxPages = 5,
@@ -71,6 +71,8 @@ async function runOnce({
   }
 
   let ingested = 0;
+  let skipped = 0;
+  let decodeFailures = 0;
   let latestLedger = 0;
   let currentCursor = _store.getCursor();
 
@@ -128,9 +130,19 @@ async function runOnce({
     for (const raw of rawEvents) {
       try {
         const decoded = decodeEvent(raw);
-        ingested += _store.append([decoded]);
+        const appended = _store.append([decoded]);
+        // _store.append returns the number of events actually appended.
+        // It returns 0 for duplicates (idempotent: skip duplicates).
+        // It does NOT throw for duplicates.
+        ingested += appended;
+        // If appended is 0, the event was a duplicate (already stored)
+        if (appended === 0) {
+          skipped++;
+        }
       } catch (err) {
+        decodeFailures++;
         _log.warn({ err, eventId: raw?.id }, 'Failed to decode event; skipping');
+        // Keep processing subsequent events when an individual event fails to decode.
       }
     }
 
@@ -147,7 +159,7 @@ async function runOnce({
     }
   }
 
-  return { ingested, cursor: _store.getCursor(), latestLedger };
+  return { ingested, skipped, decodeFailures, cursor: _store.getCursor(), latestLedger };
 }
 
 module.exports = { runOnce, buildRpcServer };

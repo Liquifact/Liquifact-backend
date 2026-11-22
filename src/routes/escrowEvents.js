@@ -116,6 +116,16 @@ router.get('/', (req, res) => {
 
   const result = defaultStore.query({ type, investor, fromLedger, limit, after });
 
+  if (result.error) {
+    return res.status(400).json({
+      type: 'https://liquifact.io/problems/invalid-cursor',
+      title: 'Invalid Cursor',
+      status: 400,
+      code: 'INVALID_CURSOR',
+      detail: result.error,
+    });
+  }
+
   return res.json(result);
 });
 
