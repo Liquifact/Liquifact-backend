@@ -34,6 +34,8 @@ describe('POST /api/invoices — authentication', () => {
     const res = await request(app).post('/api/invoices').send(validInvoice);
     expect(res.status).toBe(401);
     expect(res.body.code).toBe('UNAUTHENTICATED');
+    expect(res.headers['content-type']).toMatch(/^application\/problem\+json\b/);
+    expect(res.body.error).toBe('API key required');
     expect(res.headers['www-authenticate']).toBe('Bearer');
   });
 
@@ -65,6 +67,8 @@ describe('POST /api/invoices — authentication', () => {
       .send({ amount: 10, investor: validInvestor });
     expect(res.status).toBe(403);
     expect(res.body.code).toBe('FORBIDDEN');
+    expect(res.headers['content-type']).toMatch(/^application\/problem\+json\b/);
+    expect(res.body.error).toBe('Role "sme" is not allowed on this endpoint');
   });
 
   test('X-API-Key header is accepted', async () => {
@@ -240,6 +244,8 @@ describe('unconfigured API keys', () => {
       .send(validInvoice);
     expect(res.status).toBe(503);
     expect(res.body.code).toBe('AUTH_NOT_CONFIGURED');
+    expect(res.headers['content-type']).toMatch(/^application\/problem\+json\b/);
+    expect(res.body.error).toBe('API key authentication is not configured');
     // GET routes stay public even in this state.
     expect((await request(isolatedApp).get('/api/invoices')).status).toBe(200);
   });
@@ -340,6 +346,54 @@ describe('configuration parsing', () => {
   });
 });
 
+describe('admin-token authentication', () => {
+  test('401 and 503 failures return RFC 7807 problem responses', async () => {
+    const previousToken = process.env.ADMIN_API_TOKEN;
+    try {
+      process.env.ADMIN_API_TOKEN = 'correct-admin-token';
+      const unauthorized = await request(app)
+        .post('/api/invoices/INV_0001/escrow')
+        .set('Authorization', 'Bearer wrong-admin-token')
+        .send({ contractId: 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC' });
+      expect(unauthorized.status).toBe(401);
+      expect(unauthorized.headers['content-type']).toMatch(/^application\/problem\+json\b/);
+      expect(unauthorized.headers['www-authenticate']).toBe('Bearer');
+      expect(unauthorized.body.code).toBe('UNAUTHORIZED');
+      expect(unauthorized.body.error).toBe('Admin token required');
+
+      delete process.env.ADMIN_API_TOKEN;
+      const unconfigured = await request(app)
+        .post('/api/invoices/INV_0001/escrow')
+        .set('Authorization', 'Bearer correct-admin-token')
+        .send({ contractId: 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC' });
+      expect(unconfigured.status).toBe(503);
+      expect(unconfigured.headers['content-type']).toMatch(/^application\/problem\+json\b/);
+      expect(unconfigured.body.code).toBe('ADMIN_TOKEN_NOT_CONFIGURED');
+      expect(unconfigured.body.error).toBe('Admin API is not configured');
+    } finally {
+      if (previousToken === undefined) {
+        delete process.env.ADMIN_API_TOKEN;
+      } else {
+        process.env.ADMIN_API_TOKEN = previousToken;
+      }
+    }
+  });
+
+  test('admin and API-key problem codes are available from the catalog', async () => {
+    for (const code of [
+      'UNAUTHENTICATED',
+      'FORBIDDEN',
+      'AUTH_NOT_CONFIGURED',
+      'UNAUTHORIZED',
+      'ADMIN_TOKEN_NOT_CONFIGURED',
+    ]) {
+      const res = await request(app).get(`/errors/${code}`);
+      expect(res.status).toBe(200);
+      expect(res.body.code).toBe(code);
+    }
+  });
+});
+
 describe('OpenAPI — security', () => {
   test('documents the ApiKeyAuth scheme and applies it to mutating operations', async () => {
     const spec = (await request(app).get('/openapi.json')).body;
@@ -354,13 +408,13 @@ describe('OpenAPI — security', () => {
       expect(operation.security).toEqual([{ ApiKeyAuth: [] }]);
       expect(operation.responses['401']).toBeDefined();
       expect(operation.responses['403']).toBeDefined();
-      expect(operation.responses['401'].content['application/json'].schema.properties.code.enum).toContain(
+      expect(operation.responses['401'].content['application/problem+json'].schema.properties.code.enum).toContain(
         'UNAUTHENTICATED',
       );
-      expect(operation.responses['403'].content['application/json'].schema.properties.code.enum).toContain(
+      expect(operation.responses['403'].content['application/problem+json'].schema.properties.code.enum).toContain(
         'FORBIDDEN',
       );
-      expect(operation.responses['503'].content['application/json'].schema.properties.code.enum).toContain(
+      expect(operation.responses['503'].content['application/problem+json'].schema.properties.code.enum).toContain(
         'AUTH_NOT_CONFIGURED',
       );
     }
