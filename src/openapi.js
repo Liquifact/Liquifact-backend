@@ -548,6 +548,7 @@ const ForbiddenProblem = authProblem(['FORBIDDEN']);
 const AuthNotConfiguredProblem = authProblem(['AUTH_NOT_CONFIGURED']);
 const UnauthorizedProblem = authProblem(['UNAUTHORIZED']);
 const AdminTokenNotConfiguredProblem = authProblem(['ADMIN_TOKEN_NOT_CONFIGURED']);
+const NotInvoiceOwnerProblem = authProblem(['NOT_INVOICE_OWNER']);
 
 /** Mutating operations guarded by `requireRole` (src/middleware/auth.js) and the roles they accept. */
 const API_KEY_OPERATIONS = [
@@ -578,12 +579,16 @@ function applyApiKeySecurity(spec) {
     // Keep any route-specific 403 (e.g. SME_NOT_VERIFIED) alongside FORBIDDEN.
     const existing403 = operation.responses[403];
     const extraCode = existing403 && /^[A-Z_]+/.exec(existing403.description);
+    const ownershipScoped = path === '/api/invoices/{id}/cancel' || path === '/api/invoices/{id}/document';
+    const forbiddenCodes = ownershipScoped
+      ? ['FORBIDDEN', 'NOT_INVOICE_OWNER', ...(extraCode ? [extraCode[0]] : [])]
+      : (extraCode ? ['FORBIDDEN', extraCode[0]] : ['FORBIDDEN']);
     operation.responses = {
       ...operation.responses,
       401: { description: 'Missing, malformed or unknown API key', ...problemJson(authProblem(['UNAUTHENTICATED'])) },
       403: {
         description: `API key role not allowed (needs ${roles.join(' or ')})${existing403 ? `; or ${existing403.description}` : ''}`,
-        ...problemJson(authProblem(extraCode ? ['FORBIDDEN', extraCode[0]] : ['FORBIDDEN'])),
+        ...problemJson(authProblem(forbiddenCodes)),
       },
       503: { description: 'API_KEYS not configured in production (fail closed)', ...problemJson(authProblem(['AUTH_NOT_CONFIGURED'])) },
     };
@@ -663,6 +668,7 @@ function createSpec(baseUrl) {
         AuthNotConfiguredProblem,
         UnauthorizedProblem,
         AdminTokenNotConfiguredProblem,
+        NotInvoiceOwnerProblem,
         ErrorCatalogEntry,
         ValidationFailedProblem,
         EscrowLiveUnavailableProblem,
@@ -967,6 +973,7 @@ function createSpec(baseUrl) {
           parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
           responses: {
             200: { description: 'Invoice cancelled', ...json({ type: 'object', properties: { data: Invoice } }) },
+            403: { description: 'NOT_INVOICE_OWNER', ...problemJson({ $ref: '#/components/schemas/NotInvoiceOwnerProblem' }) },
             404: { description: 'Not found', ...json(ErrorBody) },
             409: { description: 'Invoice not cancellable', ...json(ErrorBody) },
           },
@@ -1095,6 +1102,7 @@ function createSpec(baseUrl) {
               }),
             },
             400: { description: 'Missing or extra file field', ...json(ErrorBody) },
+            403: { description: 'NOT_INVOICE_OWNER', ...problemJson({ $ref: '#/components/schemas/NotInvoiceOwnerProblem' }) },
             404: { description: 'Invoice not found', ...json(ErrorBody) },
             409: { description: 'Invoice not open or document already exists', ...json(ErrorBody) },
             413: { description: 'File exceeds the 5 MiB limit', ...json(ErrorBody) },

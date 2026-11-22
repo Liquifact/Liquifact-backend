@@ -11,6 +11,11 @@ const ERROR_CATALOG = {
     status: 403,
     description: 'The authenticated principal does not have permission to perform this operation.',
   },
+  NOT_INVOICE_OWNER: {
+    title: 'Not Invoice Owner',
+    status: 403,
+    description: 'Only the SME key that created the invoice may mutate it.',
+  },
   AUTH_NOT_CONFIGURED: {
     title: 'API Key Authentication Not Configured',
     status: 503,
