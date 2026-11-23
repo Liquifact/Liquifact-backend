@@ -10,7 +10,7 @@
  */
 
 const { Router } = require('express');
-const { defaultStore } = require('../indexer/EventStore');
+const { defaultStore } = require('../indexer/defaultEventStore');
 
 const router = Router();
 

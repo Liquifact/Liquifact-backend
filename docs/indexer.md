@@ -6,6 +6,21 @@
 
 ---
 
+## Soroban event-store persistence
+
+The Soroban escrow indexer keeps decoded events and its RPC pagination cursor
+in memory by default. To persist them across process restarts, set
+`INDEXER_STATE_FILE` to a writable file path. The file stores events as
+append-only NDJSON records; the cursor is written to a sibling
+`<path>.cursor` file using an atomic rename. The parent directory is created
+when needed.
+
+On startup, valid event records are replayed in order and the in-memory
+`MAX_EVENTS` FIFO cap is applied. A malformed record is warned about and
+skipped; an incomplete final line is ignored with a warning. A missing cursor
+file starts indexing without a stored cursor. If `INDEXER_STATE_FILE` is unset
+or blank, the indexer uses its existing in-memory store.
+
 ## Overview
 
 The indexer surface exposes one HTTP route: a cursor-paginated, admin-only read

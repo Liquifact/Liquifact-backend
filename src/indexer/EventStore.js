@@ -24,13 +24,24 @@
 const DEFAULT_MAX_EVENTS = 10_000;
 
 /**
+ * @typedef {object} EventStore
+ * @property {(events: object[]) => number} append
+ * @property {(params?: object) => { data: object[], nextCursor: string | null }} query
+ * @property {() => string | null} getCursor
+ * @property {(cursor: string) => void} setCursor
+ * @property {() => number} size
+ * @property {() => void} clear
+ */
+
+/**
  * Create a new in-memory EventStore instance.
  *
  * @param {object} [opts]
  * @param {number} [opts.maxEvents=10000] - Maximum number of events to retain.
+ * @param {(event: object) => void} [opts.onAppend] - Called before a new event is stored.
  * @returns {EventStore}
  */
-function createEventStore({ maxEvents = DEFAULT_MAX_EVENTS } = {}) {
+function createEventStore({ maxEvents = DEFAULT_MAX_EVENTS, onAppend } = {}) {
   /** @type {Map<string, object>} event id → decoded event */
   const events = new Map();
 
@@ -52,6 +63,8 @@ function createEventStore({ maxEvents = DEFAULT_MAX_EVENTS } = {}) {
       const id = String(evt.id ?? '');
       if (!id) {continue;}
       if (events.has(id)) {continue;} // idempotent: skip duplicates
+
+      if (onAppend) {onAppend(evt);}
 
       // Evict oldest entry if at cap
       if (events.size >= maxEvents) {
@@ -149,4 +162,4 @@ function createEventStore({ maxEvents = DEFAULT_MAX_EVENTS } = {}) {
 /** Singleton store shared across the process lifetime. */
 const defaultStore = createEventStore();
 
-module.exports = { createEventStore, defaultStore };
+module.exports = { createEventStore, defaultStore, DEFAULT_MAX_EVENTS };

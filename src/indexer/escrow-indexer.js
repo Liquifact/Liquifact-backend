@@ -18,7 +18,7 @@
 
 const { rpc } = require('@stellar/stellar-sdk');
 const { decodeEvent } = require('./decode');
-const { defaultStore } = require('./EventStore');
+const { defaultStore } = require('./defaultEventStore');
 const logger = require('../logger');
 const config = require('../config');
 

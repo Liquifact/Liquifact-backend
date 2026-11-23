@@ -332,6 +332,7 @@ function loadConfig(env = process.env) {
     corsOrigins,
     txWaitMs,
     protocolFeeBps,
+    indexerStateFile: env.INDEXER_STATE_FILE?.trim() || null,
     auditMaxEntries: positiveInt(env.AUDIT_MAX_ENTRIES, 10000),
     // Readiness probe: per-check timeout, maximum accepted ledger age and how
     // long a probe result may be reused before the RPC is called again.
