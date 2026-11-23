@@ -305,8 +305,6 @@ async function runOnce({
     const cursors = {};
     let lastCursor = null;
 
-    skipped += result.skipped;
-    decodeFailures += result.decodeFailures;
     for (const chunk of chunks) {
       const cursorKey = cursorKeyForChunk(chunk, contracts.length);
       const result = await indexChunk({
@@ -318,6 +316,8 @@ async function runOnce({
         maxPages,
       });
       ingested += result.ingested;
+      skipped += result.skipped;
+      decodeFailures += result.decodeFailures;
       latestLedger = result.latestLedger || latestLedger;
       lastCursor = result.cursor;
       cursors[cursorKey ?? 'default'] = result.cursor;
@@ -325,6 +325,8 @@ async function runOnce({
 
     return {
       ingested,
+      skipped,
+      decodeFailures,
       cursor: contracts.length <= 1 ? _store.getCursor() : lastCursor,
       cursors,
       contracts,
@@ -335,8 +337,6 @@ async function runOnce({
   }
 }
 
-    skipped,
-    decodeFailures,
 function isRunOnceInFlight() {
   return runOnceInFlight;
 }

@@ -17,8 +17,10 @@ const {
   ERROR_BASE_URI,
 } = require('./errors');
 const { getReadiness } = require('./services/readiness');
+const { accessLogMiddleware } = require('./middleware/access-log');
 
 const app = express();
+app.use(accessLogMiddleware);
 app.disable('x-powered-by');
 app.set('trust proxy', config.trustProxy);
 app.set('json replacer', (_key, value) => (typeof value === 'bigint' ? value.toString() : value));
@@ -110,6 +112,7 @@ const ENDPOINTS = [
   { method: 'GET', path: '/api/reconciliation/latest', description: 'Cached scheduled reconciliation report and age (admin)' },
   { method: 'GET', path: '/api/reconciliation/:id', description: 'Reconcile one invoice against escrow state' },
   { method: 'POST', path: '/api/smes', description: 'Register an SME for KYB review' },
+  { method: 'GET', path: '/api/smes', description: 'List SMEs with status filter and pagination (admin)' },
   { method: 'GET', path: '/api/smes/:id', description: 'Get an SME (PII for admins only)' },
   { method: 'POST', path: '/api/smes/:id/review', description: 'Review an SME: verify | reject | suspend (admin)' },
   { method: 'POST', path: '/api/webhooks', description: 'Register a webhook subscription (admin)' },

@@ -29,22 +29,6 @@ const IfMatchHeader = {
   schema: { type: 'string', example: '"3"' },
 };
 
-const PreconditionFailedProblem = {
-  ...Problem,
-  properties: {
-    ...Problem.properties,
-    code: { type: 'string', enum: ['PRECONDITION_FAILED'] },
-  },
-};
-
-const PreconditionRequiredProblem = {
-  ...Problem,
-  properties: {
-    ...Problem.properties,
-    code: { type: 'string', enum: ['PRECONDITION_REQUIRED'] },
-  },
-};
-
 const FundingError = {
   type: 'object',
   required: ['error'],
@@ -149,6 +133,22 @@ const Problem = {
       },
     },
     error: { type: 'string', description: 'Legacy field equal to title for backward compatibility (will be removed in next release)' },
+  },
+};
+
+const PreconditionFailedProblem = {
+  ...Problem,
+  properties: {
+    ...Problem.properties,
+    code: { type: 'string', enum: ['PRECONDITION_FAILED'] },
+  },
+};
+
+const PreconditionRequiredProblem = {
+  ...Problem,
+  properties: {
+    ...Problem.properties,
+    code: { type: 'string', enum: ['PRECONDITION_REQUIRED'] },
   },
 };
 
@@ -566,21 +566,6 @@ const authErrorBody = (codes) => ({
   required: ['error', 'code'],
   properties: { error: { type: 'string' }, code: { type: 'string', enum: codes } },
 });
-
-const authProblem = (codes) => ({
-  type: 'object',
-  required: ['type', 'title', 'status', 'code', 'instance', 'error'],
-  properties: {
-    ...Problem.properties,
-    code: { type: 'string', description: 'A stable, machine-readable error code', enum: codes },
-  },
-});
-
-const UnauthenticatedProblem = authProblem(['UNAUTHENTICATED']);
-const ForbiddenProblem = authProblem(['FORBIDDEN']);
-const AuthNotConfiguredProblem = authProblem(['AUTH_NOT_CONFIGURED']);
-const UnauthorizedProblem = authProblem(['UNAUTHORIZED']);
-const AdminTokenNotConfiguredProblem = authProblem(['ADMIN_TOKEN_NOT_CONFIGURED']);
 
 const authProblem = (codes) => ({
   type: 'object',
@@ -1318,6 +1303,7 @@ function createSpec(baseUrl) {
               description: 'Filter by investor Stellar G-address.',
             },
             { name: 'fromLedger', in: 'query', schema: { type: 'integer', minimum: 0 } },
+            { name: 'toLedger', in: 'query', schema: { type: 'integer', minimum: 0 } },
             { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 } },
             { name: 'after', in: 'query', schema: { type: 'string' } },
           ],
@@ -1372,9 +1358,10 @@ function createSpec(baseUrl) {
           summary: 'List decoded escrow contract events',
           description: 'Returns decoded Soroban escrow contract events stored by the indexer. Supports filtering by type, investor address, and fromLedger. Uses cursor-based pagination via limit and after parameters.',
           parameters: [
-            { name: 'type', in: 'query', schema: { type: 'string', description: 'Filter events by decoded event type.' } },
+            { name: 'type', in: 'query', schema: { type: 'string', enum: EVENT_TYPES, description: 'Filter events by decoded event type.' } },
             { name: 'investor', in: 'query', schema: { type: 'string', description: 'Filter events by investor Stellar address (G...).' } },
             { name: 'fromLedger', in: 'query', schema: { type: 'integer', minimum: 0, description: 'Include only events at or after this ledger sequence.' } },
+            { name: 'toLedger', in: 'query', schema: { type: 'integer', minimum: 0, description: 'Include only events at or before this ledger sequence.' } },
             { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200, default: 50, description: 'Maximum number of events to return (1-200).' } },
             { name: 'after', in: 'query', schema: { type: 'string', description: 'Return events after this event id (cursor-based pagination).' } },
           ],
@@ -1673,6 +1660,48 @@ function createSpec(baseUrl) {
         },
       },
       '/api/smes': {
+        get: {
+          tags: ['SMEs'],
+          summary: 'List SMEs with status filter and pagination (admin)',
+          description: 'Lists all SME records with optional status filtering and cursor-based pagination. PII fields (contactEmail, registrationNumber) are included for admins.',
+          security: adminSecurity,
+          parameters: [
+            {
+              name: 'status',
+              in: 'query',
+              schema: { type: 'string', enum: ['pending', 'verified', 'rejected', 'suspended'] },
+              description: 'Filter SMEs by review status.',
+            },
+            {
+              name: 'limit',
+              in: 'query',
+              schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 },
+              description: 'Maximum number of SMEs to return (1-100).',
+            },
+            {
+              name: 'cursor',
+              in: 'query',
+              schema: { type: 'string' },
+              description: 'Cursor to paginate results after this SME ID.',
+            },
+          ],
+          responses: {
+            200: {
+              description: 'Paginated list of SMEs.',
+              ...json({
+                type: 'object',
+                required: ['data', 'nextCursor'],
+                properties: {
+                  data: { type: 'array', items: ref('SmeRecord') },
+                  nextCursor: { type: 'string', nullable: true },
+                },
+              }),
+            },
+            400: { description: 'Invalid query parameters (INVALID_STATUS, INVALID_LIMIT, INVALID_CURSOR)', ...json(ref('ErrorResponse')) },
+            401: { description: 'UNAUTHORIZED: admin token required', ...json(ref('ErrorResponse')) },
+            503: { description: 'ADMIN_TOKEN_NOT_CONFIGURED', ...json(ref('ErrorResponse')) },
+          },
+        },
         post: {
           tags: ['SMEs'],
           summary: 'Register an SME for KYB review',

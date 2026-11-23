@@ -7,7 +7,6 @@ const { StrKey } = require('@stellar/stellar-sdk');
 const store = require('../data/store');
 const { auditContext } = require('../audit/middleware');
 const contributions = require('../data/contributions');
-const config = require('../config');
 const { toMinor, fromMinor, couponMinor, daysBetween, annualisedBps } = require('../domain/returns');
 const { ApiError, badRequest, notFound, conflict, unprocessable, sendProblem } = require('../errors');
 const { parseInvoiceQuery, queryInvoices, InvoiceQueryError } = require('../services/invoice-query');
