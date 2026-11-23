@@ -188,6 +188,22 @@ router.post('/', requireRole('sme', 'admin'), uploadSingle, (req, res) => {
 });
 
 /**
+ * Parse an If-None-Match header value and report whether it matches the given ETag.
+ * Supports the wildcard "*", comma-separated lists, and weak ("W/") validators.
+ *
+ * @param {string|undefined} header - Raw If-None-Match header value.
+ * @param {string} etag - Strong ETag value including quotes, e.g. "\"abc\"".
+ * @returns {boolean} True when the client's cached representation matches.
+ */
+function etagMatches(header, etag) {
+  if (typeof header !== 'string' || header.trim() === '') { return false; }
+  if (header.trim() === '*') { return true; }
+  const stripWeak = (tag) => tag.trim().replace(/^W\//, '');
+  const target = stripWeak(etag);
+  return header.split(',').some((candidate) => stripWeak(candidate) === target);
+}
+
+/**
  * GET /api/invoices/:id/document
  * Stream the PDF file.
  */
@@ -207,12 +223,18 @@ router.get('/', (req, res) => {
   }
 
   const safeName = sanitiseName(meta.originalName);
+  const etag = `"${meta.sha256Hex}"`;
+
+  res.set('ETag', etag);
+  res.set('X-Content-Type-Options', 'nosniff');
+
+  if (etagMatches(req.get('If-None-Match'), etag)) {
+    return res.status(304).end();
+  }
 
   res.set('Content-Type', 'application/pdf');
   res.set('Content-Disposition', `attachment; filename="${safeName}"`);
   res.set('Content-Length', String(buf.length));
-  res.set('X-Content-Type-Options', 'nosniff');
-  res.set('ETag', `"${meta.sha256Hex}"`);
 
   return res.send(buf);
 });
