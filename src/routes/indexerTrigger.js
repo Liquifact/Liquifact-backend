@@ -129,7 +129,7 @@ router.post('/run', requireCronSecret, async (req, res) => {
         detail: 'An indexer run is already in progress.',
       });
     }
-    logger.error({ err }, 'Indexer trigger run failed');
+    logger.error('Indexer trigger run failed', { err: err?.message ?? String(err) });
     return res.status(500).json({
       type: 'https://liquifact.io/problems/indexer-error',
       title: 'Indexer Error',
