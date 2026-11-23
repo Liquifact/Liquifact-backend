@@ -30,7 +30,7 @@
  */
 
 const { decodeEvent } = require('./decode');
-const { defaultStore } = require('./EventStore');
+const { defaultStore } = require('./defaultEventStore');
 const { getRpcServer } = require('../stellar/rpc');
 const dataStore = require('../data/store');
 const logger = require('../logger');
@@ -236,6 +236,16 @@ async function indexChunk({ server, store, log, contractIds, cursorKey, maxPages
   return { ingested, cursor: store.getCursor(cursorKey), latestLedger };
 }
 
+let runOnceInFlight = false;
+
+class IndexerBusyError extends Error {
+  constructor() {
+    super('An indexer run is already in progress');
+    this.name = 'IndexerBusyError';
+    this.code = 'INDEXER_BUSY';
+  }
+}
+
 /**
  * Run one indexing pass over every linked escrow contract. Contract ids are
  * chunked into groups of five per RPC filter; each chunk is paged up to
@@ -264,50 +274,63 @@ async function runOnce({
   data,
   log,
 } = {}) {
-  const _server = server ?? buildRpcServer();
-  const _store = store ?? defaultStore;
-  const _log = log ?? logger;
-  const _data = data ?? dataStore;
-
-  const contracts = collectContractIds({ contractId, data: _data });
-
-  if (contracts.length === 0) {
-    throw new Error(
-      'No contract id configured. Set SOROBAN_CONTRACT_ID or ESCROW_CONTRACT_ID.',
-    );
+  if (runOnceInFlight) {
+    throw new IndexerBusyError();
   }
+  runOnceInFlight = true;
 
-  const chunks = chunkContractIds(contracts);
+  try {
+    const _server = server ?? buildRpcServer();
+    const _store = store ?? defaultStore;
+    const _log = log ?? logger;
+    const _data = data ?? dataStore;
 
-  let ingested = 0;
-  let latestLedger = 0;
-  /** @type {Record<string, string | null>} */
-  const cursors = {};
-  let lastCursor = null;
+    const contracts = collectContractIds({ contractId, data: _data });
 
-  for (const chunk of chunks) {
-    const cursorKey = cursorKeyForChunk(chunk, contracts.length);
-    const result = await indexChunk({
-      server: _server,
-      store: _store,
-      log: _log,
-      contractIds: chunk,
-      cursorKey,
-      maxPages,
-    });
-    ingested += result.ingested;
-    latestLedger = result.latestLedger || latestLedger;
-    lastCursor = result.cursor;
-    cursors[cursorKey ?? 'default'] = result.cursor;
+    if (contracts.length === 0) {
+      throw new Error(
+        'No contract id configured. Set SOROBAN_CONTRACT_ID or ESCROW_CONTRACT_ID.',
+      );
+    }
+
+    const chunks = chunkContractIds(contracts);
+
+    let ingested = 0;
+    let latestLedger = 0;
+    /** @type {Record<string, string | null>} */
+    const cursors = {};
+    let lastCursor = null;
+
+    for (const chunk of chunks) {
+      const cursorKey = cursorKeyForChunk(chunk, contracts.length);
+      const result = await indexChunk({
+        server: _server,
+        store: _store,
+        log: _log,
+        contractIds: chunk,
+        cursorKey,
+        maxPages,
+      });
+      ingested += result.ingested;
+      latestLedger = result.latestLedger || latestLedger;
+      lastCursor = result.cursor;
+      cursors[cursorKey ?? 'default'] = result.cursor;
+    }
+
+    return {
+      ingested,
+      cursor: contracts.length <= 1 ? _store.getCursor() : lastCursor,
+      cursors,
+      contracts,
+      latestLedger,
+    };
+  } finally {
+    runOnceInFlight = false;
   }
+}
 
-  return {
-    ingested,
-    cursor: contracts.length <= 1 ? _store.getCursor() : lastCursor,
-    cursors,
-    contracts,
-    latestLedger,
-  };
+function isRunOnceInFlight() {
+  return runOnceInFlight;
   return { ingested, skipped, decodeFailures, cursor: _store.getCursor(), latestLedger };
 }
 
@@ -317,4 +340,5 @@ module.exports = {
   collectContractIds,
   chunkContractIds,
   MAX_CONTRACT_IDS_PER_FILTER,
+  isRunOnceInFlight,
 };
