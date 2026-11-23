@@ -63,12 +63,15 @@ function buildRpcServer() {
  * @param {string} [opts.contractId] - Explicit contract id override.
  * @param {object} [opts.data] - Invoice data store (injected in tests).
  * @returns {string[]} distinct, sorted contract ids.
+ * @param {string}     [opts.contractId]   - Override contract id (default: env).
+ * @returns {Promise<{ ingested: number, skipped: number, decodeFailures: number, cursor: string | null, latestLedger: number }>}
  */
 function collectContractIds({ contractId, data } = {}) {
   if (contractId !== undefined) {
     const trimmed = String(contractId).trim();
     return trimmed ? [trimmed] : [];
   }
+  const _server = server ?? getRpcServer();
 
   const ids = new Set();
   const configured = String(
@@ -201,8 +204,19 @@ async function indexChunk({ server, store, log, contractIds, cursorKey, maxPages
       try {
         const decoded = decodeEvent(raw, fallbackContractId);
         ingested += store.append([decoded]);
+        const appended = _store.append([decoded]);
+        // _store.append returns the number of events actually appended.
+        // It returns 0 for duplicates (idempotent: skip duplicates).
+        // It does NOT throw for duplicates.
+        ingested += appended;
+        // If appended is 0, the event was a duplicate (already stored)
+        if (appended === 0) {
+          skipped++;
+        }
       } catch (err) {
+        decodeFailures++;
         log.warn({ err, eventId: raw?.id }, 'Failed to decode event; skipping');
+        // Keep processing subsequent events when an individual event fails to decode.
       }
     }
 
@@ -317,6 +331,7 @@ async function runOnce({
 
 function isRunOnceInFlight() {
   return runOnceInFlight;
+  return { ingested, skipped, decodeFailures, cursor: _store.getCursor(), latestLedger };
 }
 
 module.exports = {

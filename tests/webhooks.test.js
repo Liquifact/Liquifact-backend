@@ -355,6 +355,45 @@ describe('admin webhook routes', () => {
     delete process.env.ADMIN_API_TOKEN;
   });
 
+  test('GET /api/webhooks/:id/deliveries filters by status and applies limit', async () => {
+    process.env.ADMIN_API_TOKEN = 'tok';
+    const create = await request(app)
+      .post('/api/webhooks')
+      .set('Authorization', 'Bearer tok')
+      .send({ url: 'http://localhost:9999/hook', events: ['invoice.created'] });
+    const { id } = create.body.data;
+    for (const status of ['failed', 'delivered', 'failed', 'pending']) {
+      webhookStore.appendDelivery(id, { status });
+    }
+
+    const filtered = await request(app)
+      .get(`/api/webhooks/${id}/deliveries?status=failed`)
+      .set('Authorization', 'Bearer tok');
+    expect(filtered.status).toBe(200);
+    expect(filtered.body.data.map((item) => item.status)).toEqual(['failed', 'failed']);
+
+    const limited = await request(app)
+      .get(`/api/webhooks/${id}/deliveries?limit=2`)
+      .set('Authorization', 'Bearer tok');
+    expect(limited.status).toBe(200);
+    expect(limited.body.data).toHaveLength(2);
+    delete process.env.ADMIN_API_TOKEN;
+  });
+
+  test.each([
+    ['/api/webhooks/wh_fake/deliveries?status=unknown', 'invalid status'],
+    ['/api/webhooks/wh_fake/deliveries?limit=0', 'limit below minimum'],
+    ['/api/webhooks/wh_fake/deliveries?limit=51', 'limit above maximum'],
+    ['/api/webhooks/wh_fake/deliveries?limit=1.5', 'non-integer limit'],
+  ])('GET %s returns 400 for %s', async (path) => {
+    process.env.ADMIN_API_TOKEN = 'tok';
+    const res = await request(app)
+      .get(path)
+      .set('Authorization', 'Bearer tok');
+    expect(res.status).toBe(400);
+    delete process.env.ADMIN_API_TOKEN;
+  });
+
   test('POST /api/webhooks de-duplicates event types on registration', async () => {
     process.env.ADMIN_API_TOKEN = 'tok';
     const res = await request(app)

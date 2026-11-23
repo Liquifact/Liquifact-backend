@@ -15,6 +15,10 @@
  *   - Failed events do not prevent subsequent valid events from being ingested
  */
 
+/* eslint-env es6 */
+
+/* eslint-env es6 */
+
 const {
   runOnce,
   collectContractIds,
@@ -76,7 +80,7 @@ function fakeDataStore(contractIds = []) {
   };
 }
 
-/** Make a full events page (100 events = "full page" ) */
+/** Make a full events page (100 events = "full page") */
 function fullPage(startId) {
   return Array.from({ length: 100 }, (_, i) => makeRawEvent(startId + i));
 }
@@ -104,7 +108,7 @@ const LINKED_CONTRACTS = [
   'CLINK0000000000000000000000000000000000000000000000000006',
 ];
 
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------//
 // Tests
 // ---------------------------------------------------------------------------//
 
