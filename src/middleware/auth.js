@@ -103,6 +103,51 @@ function authenticate(key) {
 }
 
 /**
+ * Builds a sanitised route label (`METHOD /base/path`) without query strings
+ * so audit entries identify the targeted endpoint without leaking query params.
+ *
+ * @param {import('express').Request} req incoming request
+ * @returns {string} route label
+ */
+function resolveRoute(req) {
+  const base = typeof req.baseUrl === 'string' ? req.baseUrl : '';
+  const routePath =
+    req.route && typeof req.route.path === 'string'
+      ? req.route.path
+      : typeof req.path === 'string'
+        ? req.path
+        : '';
+  const fullPath = routePath === '/' && base ? base : `${base}${routePath}`;
+  return `${req.method || 'UNKNOWN'} ${fullPath || '/'}`;
+}
+
+/**
+ * Records a denied authentication/authorization attempt in the audit log when
+ * `req.audit` is attached. Never logs raw keys or key hashes.
+ *
+ * @param {import('express').Request} req incoming request
+ * @param {{ statusCode: number, reason: string, keyId?: string | null }} details denial details
+ */
+function recordAuthDenied(req, { statusCode, reason, keyId = null }) {
+  if (typeof req.audit !== 'function') {
+    return;
+  }
+  req.audit({
+    action: 'auth.denied',
+    resourceType: 'auth',
+    resourceId: keyId,
+    actor: keyId || 'anonymous',
+    outcome: 'rejected',
+    statusCode,
+    metadata: {
+      reason,
+      route: resolveRoute(req),
+      keyId,
+    },
+  });
+}
+
+/**
  * Builds middleware that authenticates the request and enforces one of the
  * given roles. Attach it per-route so GET routes stay public.
  *
@@ -120,6 +165,7 @@ function requireRole(...roles) {
   const guard = function apiKeyGuard(req, res, next) {
     if (config.apiKeys.length === 0 && config.nodeEnv === 'production') {
       // Misconfigured production deployment: fail closed, never open.
+      recordAuthDenied(req, { statusCode: 503, reason: 'auth_not_configured' });
       return res
         .status(503)
         .json({ error: 'API key authentication is not configured', code: 'AUTH_NOT_CONFIGURED' });
@@ -128,8 +174,10 @@ function requireRole(...roles) {
     if (extracted.state !== 'ok') {
       res.set('WWW-Authenticate', 'Bearer');
       if (extracted.state === 'missing') {
+        recordAuthDenied(req, { statusCode: 401, reason: 'missing_key' });
         return res.status(401).json({ error: 'API key required', code: 'UNAUTHENTICATED' });
       }
+      recordAuthDenied(req, { statusCode: 401, reason: 'malformed_credentials' });
       return res
         .status(401)
         .json({ error: 'Malformed credentials; expected "Authorization: Bearer <key>"', code: 'UNAUTHENTICATED' });
@@ -137,9 +185,11 @@ function requireRole(...roles) {
     const principal = authenticate(extracted.key);
     if (principal === null) {
       res.set('WWW-Authenticate', 'Bearer');
+      recordAuthDenied(req, { statusCode: 401, reason: 'unknown_key' });
       return res.status(401).json({ error: 'Unknown API key', code: 'UNAUTHENTICATED' });
     }
     if (!roles.includes(principal.role)) {
+      recordAuthDenied(req, { statusCode: 403, reason: 'forbidden_role', keyId: principal.keyId });
       return res.status(403).json({
         error: `Role "${principal.role}" is not allowed on this endpoint`,
         code: 'FORBIDDEN',

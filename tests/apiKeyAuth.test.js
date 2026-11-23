@@ -22,6 +22,7 @@ process.env.API_KEYS = [
 
 const app = require('../src/app');
 const config = require('../src/config');
+const { auditLog } = require('../src/audit/audit-log');
 const { constantTimeEqual, sha256Hex, requireRole } = require('../src/middleware/auth');
 
 const bearer = (key) => ({ authorization: `Bearer ${key}` });
@@ -372,5 +373,144 @@ describe('OpenAPI — security', () => {
     const data = spec.paths['/api/invoices'].post.responses['201'].content['application/json'].schema.properties.data;
     expect(data.$ref).toBe('#/components/schemas/Invoice');
     expect(spec.components.schemas.Invoice.properties.createdBy).toBeDefined();
+  });
+});
+
+describe('audit logging of denied authentication attempts (#1646)', () => {
+  beforeEach(() => {
+    auditLog.resetForTests();
+  });
+
+  test('missing key, malformed credentials, unknown key and forbidden role each record an auth.denied entry', async () => {
+    const unknownKey = 'lf_unknown_secret_key_999999';
+
+    const missing = await request(app)
+      .post('/api/invoices')
+      .set('X-Forwarded-For', '198.51.100.42')
+      .send(validInvoice);
+    expect(missing.status).toBe(401);
+    expect(missing.body).toEqual({ error: 'API key required', code: 'UNAUTHENTICATED' });
+
+    const malformed = await request(app)
+      .post('/api/invoices')
+      .set('authorization', 'Basic dXNlcjpwYXNz')
+      .set('X-Forwarded-For', '198.51.100.42')
+      .send(validInvoice);
+    expect(malformed.status).toBe(401);
+    expect(malformed.body).toEqual({
+      error: 'Malformed credentials; expected "Authorization: Bearer <key>"',
+      code: 'UNAUTHENTICATED',
+    });
+
+    const unknown = await request(app)
+      .post('/api/invoices')
+      .set(bearer(unknownKey))
+      .set('X-Forwarded-For', '198.51.100.42')
+      .send(validInvoice);
+    expect(unknown.status).toBe(401);
+    expect(unknown.body).toEqual({ error: 'Unknown API key', code: 'UNAUTHENTICATED' });
+
+    const forbidden = await request(app)
+      .post('/api/invoices/INV_0002/fund')
+      .set(bearer(SME_KEY))
+      .set('X-Forwarded-For', '198.51.100.42')
+      .send({ amount: 10, investor: validInvestor });
+    expect(forbidden.status).toBe(403);
+    expect(forbidden.body).toEqual({
+      error: 'Role "sme" is not allowed on this endpoint',
+      code: 'FORBIDDEN',
+    });
+
+    const entries = auditLog.entries();
+    expect(entries).toHaveLength(4);
+
+    expect(entries[0]).toMatchObject({
+      action: 'auth.denied',
+      resourceType: 'auth',
+      resourceId: null,
+      actor: 'anonymous',
+      ip: '198.51.100.0/24',
+      outcome: 'rejected',
+      statusCode: 401,
+      metadata: {
+        reason: 'missing_key',
+        route: 'POST /api/invoices',
+        keyId: null,
+      },
+    });
+
+    expect(entries[1]).toMatchObject({
+      action: 'auth.denied',
+      resourceType: 'auth',
+      resourceId: null,
+      actor: 'anonymous',
+      ip: '198.51.100.0/24',
+      outcome: 'rejected',
+      statusCode: 401,
+      metadata: {
+        reason: 'malformed_credentials',
+        route: 'POST /api/invoices',
+        keyId: null,
+      },
+    });
+
+    expect(entries[2]).toMatchObject({
+      action: 'auth.denied',
+      resourceType: 'auth',
+      resourceId: null,
+      actor: 'anonymous',
+      ip: '198.51.100.0/24',
+      outcome: 'rejected',
+      statusCode: 401,
+      metadata: {
+        reason: 'unknown_key',
+        route: 'POST /api/invoices',
+        keyId: null,
+      },
+    });
+
+    expect(entries[3]).toMatchObject({
+      action: 'auth.denied',
+      resourceType: 'auth',
+      resourceId: 'test-sme',
+      actor: 'test-sme',
+      ip: '198.51.100.0/24',
+      outcome: 'rejected',
+      statusCode: 403,
+      metadata: {
+        reason: 'forbidden_role',
+        route: 'POST /api/invoices/:id/fund',
+        keyId: 'test-sme',
+      },
+    });
+
+    const serialised = JSON.stringify(entries);
+    expect(serialised).not.toContain('198.51.100.42');
+    expect(serialised).not.toContain(unknownKey);
+    expect(serialised).not.toContain(sha256(unknownKey));
+    expect(serialised).not.toContain(SME_KEY);
+    expect(serialised).not.toContain(sha256(SME_KEY));
+    expect(serialised).not.toContain('dXNlcjpwYXNz');
+
+    expect(auditLog.verify()).toEqual({ valid: true, entries: 4 });
+  });
+
+  test('never logs raw key or hash for X-API-Key header attempts either', async () => {
+    const unknownKey = 'lf_x_api_key_secret_888888';
+
+    await request(app).post('/api/invoices').set('x-api-key', unknownKey).send(validInvoice);
+    await request(app)
+      .post('/api/invoices/INV_0002/fund')
+      .set('x-api-key', SME_KEY)
+      .send({ amount: 10, investor: validInvestor });
+
+    const entries = auditLog.entries();
+    expect(entries).toHaveLength(2);
+    const serialised = JSON.stringify(entries);
+    expect(serialised).not.toContain(unknownKey);
+    expect(serialised).not.toContain(sha256(unknownKey));
+    expect(serialised).not.toContain(SME_KEY);
+    expect(serialised).not.toContain(sha256(SME_KEY));
+    expect(auditLog.verify()).toEqual({ valid: true, entries: 2 });
   });
 });
