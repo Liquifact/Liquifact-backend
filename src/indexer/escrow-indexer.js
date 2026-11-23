@@ -30,7 +30,7 @@
  */
 
 const { decodeEvent } = require('./decode');
-const { defaultStore } = require('./EventStore');
+const { defaultStore } = require('./defaultEventStore');
 const { getRpcServer } = require('../stellar/rpc');
 const dataStore = require('../data/store');
 const logger = require('../logger');

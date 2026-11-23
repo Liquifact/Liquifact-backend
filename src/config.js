@@ -344,6 +344,7 @@ function loadConfig(env = process.env) {
     corsOrigins,
     txWaitMs,
     protocolFeeBps,
+    indexerStateFile: env.INDEXER_STATE_FILE?.trim() || null,
     shutdownTimeoutMs,
     auditMaxEntries: envInt(env.AUDIT_MAX_ENTRIES, 10000, 1),
     webhooksMax,
