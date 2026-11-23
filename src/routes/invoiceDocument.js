@@ -16,8 +16,10 @@ const multer = require('multer');
 const store = require('../data/store');
 const { defaultDocumentStore } = require('../data/documentStore');
 
-const { requireRole } = require('../middleware/auth');
+const { requireRole, assertOwnerOrAdmin } = require('../middleware/auth');
+const { auditContext } = require('../audit/middleware');
 const router = express.Router({ mergeParams: true });
+router.use(auditContext());
 
 // ── Constants ────────────────────────────────────────────────────────────────\
 
@@ -124,14 +126,20 @@ function uploadSingle(req, res, next) {
  * Allows re-uploads (replaces existing document for the same invoice).
  * Returns 410 DOCUMENT_EVICTED when an LRU eviction occurs.
  */
-router.post('/', requireRole('sme', 'admin'), uploadSingle, (req, res) => {
+router.post('/', requireRole('sme', 'admin'), (req, res, next) => {
   const { id } = req.params;
-
-  // Invoice must exist
   const invoice = store.get(id);
   if (!invoice) {
     return res.status(404).json({ error: 'Invoice not found' });
   }
+  const ownership = assertOwnerOrAdmin(req, res, invoice, { action: 'invoice.document.upload' });
+  if (ownership !== true) {
+    return ownership;
+  }
+  return next();
+}, uploadSingle, (req, res) => {
+  const { id } = req.params;
+  const invoice = store.get(id);
 
   // Invoice must be open
   if (invoice.status !== 'open') {

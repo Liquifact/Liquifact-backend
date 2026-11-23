@@ -11,7 +11,7 @@
 
 const { Router } = require('express');
 const { StrKey } = require('@stellar/stellar-sdk');
-const { defaultStore } = require('../indexer/EventStore');
+const { defaultStore } = require('../indexer/defaultEventStore');
 const { EVENT_TYPES } = require('../indexer/decode');
 const { badRequest } = require('../errors');
 

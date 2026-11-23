@@ -33,6 +33,7 @@ describe('POST /api/internal/indexer/run — authentication', () => {
   beforeEach(() => {
     originalSecret = process.env.CRON_SECRET;
     jest.clearAllMocks();
+    runOnce.mockReset();
     runOnce.mockResolvedValue({ ingested: 0, cursor: null, latestLedger: 100 });
   });
 
@@ -213,5 +214,81 @@ describe('POST /api/internal/indexer/run — authentication', () => {
     } finally {
       stderrSpy.mockRestore();
     }
+  });
+
+  test('returns 409 INDEXER_BUSY with Retry-After for an overlapping run', async () => {
+    process.env.CRON_SECRET = 'my-secret';
+    let resolveRun;
+    const deferred = new Promise((resolve) => { resolveRun = resolve; });
+    runOnce
+      .mockImplementationOnce(() => deferred)
+      .mockRejectedValueOnce(Object.assign(new Error('already running'), { code: 'INDEXER_BUSY' }));
+    const app = createApp();
+
+    const first = request(app)
+      .post('/api/internal/indexer/run')
+      .set('Authorization', 'Bearer my-secret')
+      .send({})
+      .then((res) => res);
+
+    // Wait until the deferred mock is actually invoked
+    for (let i = 0; i < 20 && runOnce.mock.calls.length === 0; i++) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    const second = await request(app)
+      .post('/api/internal/indexer/run')
+      .set('Authorization', 'Bearer my-secret')
+      .send({});
+
+    expect(second.status).toBe(409);
+    expect(second.headers['retry-after']).toBe('1');
+    expect(second.headers['content-type']).toMatch(/application\/problem\+json/);
+    expect(second.body).toMatchObject({
+      status: 409,
+      code: 'INDEXER_BUSY',
+      title: 'Indexer Busy',
+    });
+
+    resolveRun({ ingested: 0, cursor: null, latestLedger: 100 });
+    await first;
+  });
+
+  test('allows sequential runs after success', async () => {
+    process.env.CRON_SECRET = 'my-secret';
+    const app = createApp();
+
+    const first = await request(app)
+      .post('/api/internal/indexer/run')
+      .set('Authorization', 'Bearer my-secret')
+      .send({});
+    const second = await request(app)
+      .post('/api/internal/indexer/run')
+      .set('Authorization', 'Bearer my-secret')
+      .send({});
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(runOnce).toHaveBeenCalledTimes(2);
+  });
+
+  test('allows a subsequent run after an earlier run fails', async () => {
+    process.env.CRON_SECRET = 'my-secret';
+    runOnce
+      .mockRejectedValueOnce(new Error('rpc down'))
+      .mockResolvedValueOnce({ ingested: 0, cursor: null, latestLedger: 100 });
+    const app = createApp();
+
+    const failed = await request(app)
+      .post('/api/internal/indexer/run')
+      .set('Authorization', 'Bearer my-secret')
+      .send({});
+    const retry = await request(app)
+      .post('/api/internal/indexer/run')
+      .set('Authorization', 'Bearer my-secret')
+      .send({});
+
+    expect(failed.status).toBe(500);
+    expect(retry.status).toBe(200);
   });
 });

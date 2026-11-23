@@ -7,11 +7,33 @@
 const dns = require('dns').promises;
 const { validateWebhookUrl, isPrivate } = require('../src/webhooks/ssrf');
 
+const reservedCases = [
+  ['0.0.0.0', true], ['0.255.255.255', true], ['1.0.0.0', false],
+  ['100.63.255.255', false], ['100.64.0.0', true],
+  ['100.127.255.255', true], ['100.128.0.0', false],
+  ['191.255.255.255', false], ['192.0.0.0', true],
+  ['192.0.0.255', true], ['192.0.1.0', false],
+  ['198.17.255.255', false], ['198.18.0.0', true],
+  ['198.19.255.255', true], ['198.20.0.0', false],
+  ['223.255.255.255', false], ['224.0.0.0', true],
+  ['239.255.255.255', true], ['240.0.0.0', true], ['255.255.255.255', true],
+  ['::', true], ['0:0:0:0:0:0:0:0', true], ['::2', false],
+  ['feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff', false],
+  ['ff00::', true], ['ff02::1', true], ['ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff', true],
+];
+
+const mappedCases = reservedCases.filter(([ip]) => !ip.includes(':'))
+  .map(([ip, blocked]) => [`::ffff:${ip}`, blocked]);
+
 // ---------------------------------------------------------------------------
 // isPrivate unit tests
 // ---------------------------------------------------------------------------
 
 describe('isPrivate', () => {
+  test.each([...reservedCases, ...mappedCases])('%s reserved=%s', (ip, blocked) => {
+    expect(isPrivate(ip)).toBe(blocked);
+  });
+
   test.each([
     ['127.0.0.1', true],
     ['127.0.0.2', true],
@@ -46,6 +68,40 @@ describe('validateWebhookUrl', () => {
     process.env.NODE_ENV = origEnv;
     jest.restoreAllMocks();
   });
+
+  test.each([...reservedCases, ...mappedCases])('literal %s reserved=%s', async (ip, blocked) => {
+    process.env.NODE_ENV = 'production';
+    const host = ip.includes(':') ? `[${ip}]` : ip;
+    const url = `https://${host}:8443/hook`;
+    if (blocked) {
+      await expect(validateWebhookUrl(url)).rejects.toThrow(/private.*SSRF/);
+    } else {
+      await expect(validateWebhookUrl(url)).resolves.toEqual({
+        url, pinnedUrl: url, host: new URL(url).host,
+      });
+    }
+  });
+
+  test.each([...reservedCases, ...mappedCases])('DNS %s reserved=%s', async (ip, blocked) => {
+    process.env.NODE_ENV = 'production';
+    // Include a public result first to ensure every answer is checked.
+    jest.spyOn(dns, 'resolve4').mockResolvedValue(ip.includes(':') ? ['8.8.8.8'] : ['8.8.8.8', ip]);
+    jest.spyOn(dns, 'resolve6').mockResolvedValue(ip.includes(':') ? [ip] : []);
+    const result = validateWebhookUrl('https://example.com/hook');
+    if (blocked) {
+      await expect(result).rejects.toThrow(/private.*SSRF/);
+    } else {
+      await expect(result).resolves.toMatchObject({ pinnedUrl: 'https://8.8.8.8/hook' });
+    }
+  });
+
+  test.each(['0.0.0.0', '100.64.0.1', '198.18.0.1', '224.0.0.1', '255.255.255.255', '::', 'ff02::1'])(
+    'rejects %s outside production too', async ip => {
+      process.env.NODE_ENV = 'development';
+      const host = ip.includes(':') ? `[${ip}]` : ip;
+      await expect(validateWebhookUrl(`https://${host}/hook`)).rejects.toThrow(/private.*SSRF/);
+    },
+  );
 
   test('rejects plain http:// in production', async () => {
     process.env.NODE_ENV = 'production';

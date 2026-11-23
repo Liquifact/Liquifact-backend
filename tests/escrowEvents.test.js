@@ -10,7 +10,7 @@ const request = require('supertest');
 const { EVENT_TYPES } = require('../src/indexer/decode');
 
 // Access the real defaultStore directly — the route uses this same singleton
-const { defaultStore } = require('../src/indexer/EventStore');
+const { createEventStore, defaultStore } = require('../src/indexer/EventStore');
 
 // Build app once
 const { createApp } = require('../src/app');
@@ -281,5 +281,50 @@ describe('GET /api/escrow/events', () => {
     const typeParameter = res.body.paths['/api/escrow/events'].get.parameters
       .find((parameter) => parameter.name === 'type');
     expect(typeParameter.schema.enum).toEqual(EVENT_TYPES);
+  });
+
+  test('uses the sequence cursor index and stops after limit plus one matching event', () => {
+    const store = createEventStore({ maxEvents: 10_000 });
+    let filterIterations = 0;
+    let cursorIdReads = 0;
+    const events = Array.from({ length: 10_000 }, (_, i) => {
+      const id = `event-${i}`;
+      return {
+        get id() {
+          cursorIdReads++;
+          return id;
+        },
+        get type() {
+          filterIterations++;
+          return 'funded';
+        },
+        ledger: i,
+        contractId: 'CDUMMY',
+        data: {},
+      };
+    });
+    store.append(events);
+
+    filterIterations = 0;
+    cursorIdReads = 0;
+    const result = store.query({ type: 'funded', limit: 2, after: 'event-9990' });
+
+    expect(filterIterations).toBe(3);
+    expect(cursorIdReads).toBe(1);
+    expect(result.data.map((event) => event.id)).toEqual(['event-9991', 'event-9992']);
+    expect(result.nextCursor).toBe('event-9992');
+  });
+
+  test('eviction removes cursor indexes while duplicate appends remain idempotent', () => {
+    const store = createEventStore({ maxEvents: 2 });
+    const first = makeEvent({ id: 'first' });
+    const second = makeEvent({ id: 'second' });
+    const third = makeEvent({ id: 'third' });
+
+    expect(store.append([first, second])).toBe(2);
+    expect(store.append([first])).toBe(0);
+    expect(store.append([third])).toBe(1);
+    expect(store.query({ after: 'first' })).toEqual({ error: 'INVALID_CURSOR' });
+    expect(store.query({ limit: 2 }).data.map((event) => event.id)).toEqual(['second', 'third']);
   });
 });
