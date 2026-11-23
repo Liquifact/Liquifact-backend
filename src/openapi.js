@@ -1010,12 +1010,18 @@ function createSpec(baseUrl) {
         get: {
           tags: ['Investors'],
           summary: 'Investor portfolio summary and expected returns',
-          parameters: [{ name: 'address', in: 'path', required: true, schema: { type: 'string' } }],
+          parameters: [
+            { name: 'address', in: 'path', required: true, schema: { type: 'string' } },
+            { name: 'status', in: 'query', schema: { type: 'string', pattern: '^(open|funded|settled|cancelled)(,(open|funded|settled|cancelled))*$' }, description: 'Comma-separated invoice statuses' },
+            { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 } },
+            { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'Invoice ID from the previous page nextCursor' },
+          ],
           responses: {
             200: {
               description: 'Investor portfolio',
               ...json({
                 type: 'object',
+                required: ['investor', 'positions', 'totalsByCurrency', 'nextCursor'],
                 properties: {
                   investor: { type: 'string' },
                   positions: {
@@ -1034,6 +1040,7 @@ function createSpec(baseUrl) {
                       },
                     },
                   },
+                  nextCursor: { type: 'string', nullable: true, description: 'Invoice ID for the next page, or null when no more positions remain' },
                   totalsByCurrency: {
                     type: 'object',
                     additionalProperties: {
@@ -1048,7 +1055,7 @@ function createSpec(baseUrl) {
                 },
               }),
             },
-            400: { description: 'Invalid investor address', ...problemJson({ $ref: '#/components/schemas/Problem' }) },
+            400: { description: 'Invalid investor address or query parameter', ...problemJson({ $ref: '#/components/schemas/Problem' }) },
           },
         },
       },
