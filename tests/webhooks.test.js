@@ -153,6 +153,67 @@ describe('webhook delivery', () => {
     }
   });
 
+  test.each([
+    ['settle', 'INV_0003', 'invoice.settled', 'settled'],
+    ['cancel', 'INV_0001', 'invoice.cancelled', 'cancelled'],
+  ])('invoice.%s delivers its presented invoice with a valid signature', async (action, invoiceId, eventType, status) => {
+    const regRes = await request(app)
+      .post('/api/webhooks')
+      .set({ authorization: `Bearer ${ADMIN_TOKEN}` })
+      .send({
+        url: `http://127.0.0.1:${receiver.port}/hook`,
+        events: [eventType],
+      });
+    expect(regRes.status).toBe(201);
+    const { secret } = regRes.body.data;
+
+    const transitionRes = await request(app)
+      .post(`/api/invoices/${invoiceId}/${action}`)
+      .set(authHeader())
+      .send();
+    expect(transitionRes.status).toBe(200);
+    expect(transitionRes.body.data.status).toBe(status);
+
+    await waitFor(receiver.received, 1);
+    expect(receiver.received).toHaveLength(1);
+    const call = receiver.received[0];
+    const envelope = JSON.parse(call.body);
+    expect(envelope.type).toBe(eventType);
+    expect(envelope.data.invoice.id).toBe(invoiceId);
+    expect(envelope.data.invoice.status).toBe(status);
+    expect(envelope.data.invoice).toHaveProperty('remainingCapacity');
+    expect(verifySignature(secret, call.headers['liquifact-signature'], call.body).ok).toBe(true);
+  });
+
+  test('rejected settle and cancel transitions do not emit webhook events', async () => {
+    const regRes = await request(app)
+      .post('/api/webhooks')
+      .set({ authorization: `Bearer ${ADMIN_TOKEN}` })
+      .send({
+        url: `http://127.0.0.1:${receiver.port}/hook`,
+        events: ['invoice.settled', 'invoice.cancelled'],
+      });
+    expect(regRes.status).toBe(201);
+
+    // INV_0001 is open and cannot be settled; INV_0003 is seeded as funded.
+    const rejectedSettle = await request(app)
+      .post('/api/invoices/INV_0001/settle')
+      .set(authHeader())
+      .send();
+    expect(rejectedSettle.status).toBe(409);
+
+    // Settle outside the route to make a terminal invoice for the rejected cancel check.
+    store.settle(store.get('INV_0003'));
+    const rejectedCancel = await request(app)
+      .post('/api/invoices/INV_0003/cancel')
+      .set(authHeader())
+      .send();
+    expect(rejectedCancel.status).toBe(409);
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(receiver.received).toHaveLength(0);
+  });
+
   test('webhook receiver being down does NOT change POST /api/invoices status', async () => {
     // Register webhook pointing at a port that is not listening
     await request(app)
@@ -265,6 +326,20 @@ describe('admin webhook routes', () => {
     expect(getRes.status).toBe(200);
     expect(getRes.body.data[0].secret).toBeUndefined();
 
+    delete process.env.ADMIN_API_TOKEN;
+  });
+
+  test('POST /api/webhooks accepts settled and cancelled event names', async () => {
+    process.env.ADMIN_API_TOKEN = 'tok';
+    const res = await request(app)
+      .post('/api/webhooks')
+      .set({ authorization: 'Bearer tok' })
+      .send({
+        url: 'http://localhost:9999/hook',
+        events: ['invoice.settled', 'invoice.cancelled'],
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.data.events).toEqual(['invoice.settled', 'invoice.cancelled']);
     delete process.env.ADMIN_API_TOKEN;
   });
 
