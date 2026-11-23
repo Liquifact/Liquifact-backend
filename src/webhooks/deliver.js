@@ -7,6 +7,8 @@
  *  - 5 s per-attempt timeout
  *  - Exponential backoff + jitter: delays ~1s, 4s, 16s, 64s, 256s
  *  - Max 5 attempts
+ *  - Permanent 4xx (except 408/425/429) stops immediately
+ *  - Retry-After on 408/425/429/5xx overrides the backoff, capped at 256 s
  *  - No redirect following
  *  - Per-delivery attempt log (in-memory, capped per webhook)
  *
@@ -28,6 +30,11 @@ const RECONCILIATION_DRIFT_EVENT = 'invoice.reconciliation_drift';
 // Base delays in ms: 1s, 4s, 16s, 64s, 256s
 const BASE_DELAYS = [1000, 4000, 16000, 64000, 256000];
 
+// Statuses where retrying will never succeed: 4xx except 408 (timeout),
+// 425 (too early) and 429 (rate-limited). Everything else retries.
+const RETRYABLE_4XX = new Set([408, 425, 429]);
+const MAX_RETRY_AFTER_MS = BASE_DELAYS[BASE_DELAYS.length - 1];
+
 /**
  * Adds up to 25% jitter to a delay.
  * @param {number} delayMs
@@ -35,6 +42,48 @@ const BASE_DELAYS = [1000, 4000, 16000, 64000, 256000];
  */
 function withJitter(delayMs) {
   return Math.floor(delayMs * (1 + Math.random() * 0.25));
+}
+
+/**
+ * Parses a Retry-After header (seconds or HTTP-date). Returns milliseconds,
+ * or undefined when absent/unparseable. Clamped to MAX_RETRY_AFTER_MS.
+ *
+ * @param {string|undefined|null} header
+ * @returns {number|undefined}
+ */
+function parseRetryAfter(header) {
+  if (header == null) { return undefined; }
+  const raw = String(header).trim();
+  if (raw === '') { return undefined; }
+  // delta-seconds
+  if (/^\d+$/.test(raw)) {
+    return Math.min(Number(raw) * 1000, MAX_RETRY_AFTER_MS);
+  }
+  // HTTP-date
+  const when = Date.parse(raw);
+  if (Number.isNaN(when)) { return undefined; }
+  const delta = when - Date.now();
+  if (delta <= 0) { return 0; }
+  return Math.min(delta, MAX_RETRY_AFTER_MS);
+}
+
+/**
+ * Whether a status code is worth retrying.
+ *  - null (network error) → retry
+ *  - 5xx → retry
+ *  - 4xx in {408, 425, 429} → retry
+ *  - everything else (2xx, 3xx, other 4xx) → do not retry
+ *
+ * @param {number|null} status
+ * @returns {boolean}
+ */
+function isRetryableStatus(status) {
+  if (status === null) { return true; }
+  if (status >= 500) { return true; }
+  if (status >= 400 && status < 500) {
+    return RETRYABLE_4XX.has(status);
+  }
+  return false;
 }
 
 /**
@@ -62,7 +111,7 @@ function buildEnvelope(type, invoice) {
  * @param {string} rawBody serialised event envelope
  * @param {string} eventId event envelope id
  * @param {string} signatureHeader signed header value
- * @returns {Promise<{ status: number|null, durationMs: number, error?: string }>}
+ * @returns {Promise<{ status: number|null, durationMs: number, retryAfterMs?: number, error?: string }>}
  */
 async function attempt(wh, rawBody, eventId, signatureHeader) {
   const start = Date.now();
@@ -79,30 +128,23 @@ async function attempt(wh, rawBody, eventId, signatureHeader) {
       signal: AbortSignal.timeout(TIMEOUT_MS),
       redirect: 'manual', // do not follow redirects
     });
-    return { status: res.status, durationMs: Date.now() - start };
+    const retryAfterMs = parseRetryAfter(res.headers?.get?.('retry-after'));
+    return { status: res.status, durationMs: Date.now() - start, retryAfterMs };
   } catch (err) {
     return { status: null, durationMs: Date.now() - start, error: err.message };
   }
 }
 
 /**
- * Derives a per-delivery signing secret from the stored secret hash.
- *
- * We cannot recover the original secret once created (it is shown once and
- * hashed). Instead we sign using the stored hash bytes as the HMAC key.
- * Receivers verify using the original secret; this function is not used by
- * consumers — see signature.js#sign.
- *
- * Implementation note: the secretHash is sha256(originalSecretBytes) stored as
- * hex. We use those 32 raw bytes as the HMAC key. This is a different key from
- * what the external verifySignature uses (which re-encodes the original
- * base64url secret). To bridge this: we store the raw 32-byte secret as
- * base64url alongside secretHash, but ONLY in memory and ONLY for signing.
- * The raw secret is never exposed via API responses.
- */
-
-/**
  * Executes the retry loop for a prepared delivery record.
+ *
+ * Behaviour:
+ *  - 2xx → status 'delivered', stop.
+ *  - Permanent 4xx (anything 4xx not in {408, 425, 429}) → status 'failed',
+ *    reason 'permanent_4xx', stop after exactly one attempt.
+ *  - Retryable (5xx, 408/425/429, network error) → wait (Retry-After if
+ *    present, else the standard backoff at this index), retry.
+ *  - All retries exhausted → status 'failed', reason 'attempts_exhausted'.
  *
  * @param {object} wh internal webhook record
  * @param {object} deliveryRecord delivery record already appended to store
@@ -111,14 +153,18 @@ async function attempt(wh, rawBody, eventId, signatureHeader) {
  * @returns {Promise<void>}
  */
 async function executeDelivery(wh, deliveryRecord, rawBody, signatureHeader) {
+  let pendingDelayMs;
+
   for (let i = 0; i < MAX_ATTEMPTS; i++) {
     if (i > 0) {
-      const delay = withJitter(BASE_DELAYS[i - 1]);
-      await sleep(delay);
+      const base = pendingDelayMs !== undefined ? pendingDelayMs : BASE_DELAYS[i - 1];
+      pendingDelayMs = undefined;
+      await sleep(withJitter(base));
     }
 
     const result = await attempt(wh, rawBody, deliveryRecord.eventId, signatureHeader);
     const attemptLog = { attempt: i + 1, ...result };
+    delete attemptLog.retryAfterMs; // internal hint, don't persist it
     deliveryRecord.attempts.push(attemptLog);
 
     const success = result.status !== null && result.status >= 200 && result.status < 300;
@@ -126,9 +172,22 @@ async function executeDelivery(wh, deliveryRecord, rawBody, signatureHeader) {
       deliveryRecord.status = 'delivered';
       return;
     }
+
+    if (!isRetryableStatus(result.status)) {
+      deliveryRecord.status = 'failed';
+      deliveryRecord.reason = 'permanent_4xx';
+      return;
+    }
+
+    if (result.retryAfterMs !== undefined) {
+      pendingDelayMs = result.retryAfterMs;
+    }
   }
 
   deliveryRecord.status = 'failed';
+  if (!deliveryRecord.reason) {
+    deliveryRecord.reason = 'attempts_exhausted';
+  }
 }
 
 /**

@@ -267,3 +267,18 @@ The issue-specific contract tests in
 they cover the cryptographic input, freshness guard, canonicalization,
 permanent/transient retry behavior, retry caps, and dead-letter fields. Keep
 them green when changing the delivery or replay implementation.
+
+
+## Retry policy
+
+Deliveries are retried up to **5 attempts** with exponential backoff + jitter
+(~1s, 4s, 16s, 64s, 256s).
+
+- **2xx** → `delivered`, no retry.
+- **4xx other than 408 / 425 / 429** → permanent failure. Exactly one attempt;
+  the record is marked `status: "failed", reason: "permanent_4xx"`.
+- **408 / 425 / 429** → retryable. If the response carries a `Retry-After`
+  header (delta-seconds or HTTP-date), that value is used as the delay for the
+  next attempt, clamped to 256 000 ms. Otherwise the standard backoff applies.
+- **5xx and network errors** → retryable with the standard backoff.
+- After the final attempt fails, `reason` is set to `"attempts_exhausted"`.
