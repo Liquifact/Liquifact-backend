@@ -538,6 +538,21 @@ const authErrorBody = (codes) => ({
   properties: { error: { type: 'string' }, code: { type: 'string', enum: codes } },
 });
 
+const authProblem = (codes) => ({
+  type: 'object',
+  required: ['type', 'title', 'status', 'code', 'instance', 'error'],
+  properties: {
+    ...Problem.properties,
+    code: { type: 'string', description: 'A stable, machine-readable error code', enum: codes },
+  },
+});
+
+const UnauthenticatedProblem = authProblem(['UNAUTHENTICATED']);
+const ForbiddenProblem = authProblem(['FORBIDDEN']);
+const AuthNotConfiguredProblem = authProblem(['AUTH_NOT_CONFIGURED']);
+const UnauthorizedProblem = authProblem(['UNAUTHORIZED']);
+const AdminTokenNotConfiguredProblem = authProblem(['ADMIN_TOKEN_NOT_CONFIGURED']);
+
 /** Mutating operations guarded by `requireRole` (src/middleware/auth.js) and the roles they accept. */
 const API_KEY_OPERATIONS = [
   ['/api/invoices', 'post', ['sme', 'admin']],
@@ -569,12 +584,12 @@ function applyApiKeySecurity(spec) {
     const extraCode = existing403 && /^[A-Z_]+/.exec(existing403.description);
     operation.responses = {
       ...operation.responses,
-      401: { description: 'Missing, malformed or unknown API key', ...json(authErrorBody(['UNAUTHENTICATED'])) },
+      401: { description: 'Missing, malformed or unknown API key', ...problemJson(authProblem(['UNAUTHENTICATED'])) },
       403: {
         description: `API key role not allowed (needs ${roles.join(' or ')})${existing403 ? `; or ${existing403.description}` : ''}`,
-        ...json(authErrorBody(extraCode ? ['FORBIDDEN', extraCode[0]] : ['FORBIDDEN'])),
+        ...problemJson(authProblem(extraCode ? ['FORBIDDEN', extraCode[0]] : ['FORBIDDEN'])),
       },
-      503: { description: 'API_KEYS not configured in production (fail closed)', ...json(authErrorBody(['AUTH_NOT_CONFIGURED'])) },
+      503: { description: 'API_KEYS not configured in production (fail closed)', ...problemJson(authProblem(['AUTH_NOT_CONFIGURED'])) },
     };
   }
   return spec;
@@ -653,6 +668,11 @@ function createSpec(baseUrl) {
       schemas: {
         ...GENERATED_SCHEMAS,
         Problem,
+        UnauthenticatedProblem,
+        ForbiddenProblem,
+        AuthNotConfiguredProblem,
+        UnauthorizedProblem,
+        AdminTokenNotConfiguredProblem,
         ErrorCatalogEntry,
         ValidationFailedProblem,
         EscrowLiveUnavailableProblem,
@@ -927,11 +947,11 @@ function createSpec(baseUrl) {
           responses: {
             200: { description: 'Invoice linked or already linked to the same contract', ...json({ type: 'object', properties: { data: Invoice } }) },
             400: { description: 'INVALID_CONTRACT_ID', ...json(LinkError) },
-            401: { description: 'UNAUTHORIZED', ...json(LinkError) },
+            401: { description: 'UNAUTHORIZED', ...problemJson(authProblem(['UNAUTHORIZED'])) },
             404: { description: 'INVOICE_NOT_FOUND', ...json(LinkError) },
             409: { description: 'ALREADY_LINKED or CONTRACT_IN_USE', ...json(LinkError) },
             422: { description: 'ESCROW_TERMS_MISMATCH or ESCROW_NOT_FOUND', ...json(LinkError) },
-            503: { description: 'ADMIN_TOKEN_NOT_CONFIGURED', ...json(LinkError) },
+            503: { description: 'ADMIN_TOKEN_NOT_CONFIGURED', ...problemJson(authProblem(['ADMIN_TOKEN_NOT_CONFIGURED'])) },
           },
         },
         get: {

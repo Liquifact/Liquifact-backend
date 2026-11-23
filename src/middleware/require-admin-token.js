@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const { sendProblem } = require('../errors');
 
 const digest = (text) => crypto.createHash('sha256').update(text).digest();
 
@@ -40,15 +41,19 @@ function hasValidAdminToken(req) {
 function requireAdminToken(req, res, next) {
   const expected = process.env.ADMIN_API_TOKEN;
   if (!expected) {
-    res.status(503).json({ error: 'Admin API is not configured', code: 'ADMIN_TOKEN_NOT_CONFIGURED' });
-    return;
+    return sendProblem(req, res, 'ADMIN_TOKEN_NOT_CONFIGURED', {
+      detail: 'Admin API is not configured',
+      extra: { error: 'Admin API is not configured' },
+    });
   }
   if (!hasValidAdminToken(req)) {
     res.set('WWW-Authenticate', 'Bearer');
-    res.status(401).json({ error: 'Admin token required', code: 'UNAUTHORIZED' });
-    return;
+    return sendProblem(req, res, 'UNAUTHORIZED', {
+      detail: 'Admin token required',
+      extra: { error: 'Admin token required' },
+    });
   }
-  next();
+  return next();
 }
 
 // Marker for the route-table guard test: this guard admits only the admin secret.

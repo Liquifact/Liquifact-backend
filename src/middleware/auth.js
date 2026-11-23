@@ -21,6 +21,7 @@
 
 const crypto = require('crypto');
 const config = require('../config');
+const { sendProblem } = require('../errors');
 
 /**
  * SHA-256 hex digest of a presented key.
@@ -120,29 +121,38 @@ function requireRole(...roles) {
   const guard = function apiKeyGuard(req, res, next) {
     if (config.apiKeys.length === 0 && config.nodeEnv === 'production') {
       // Misconfigured production deployment: fail closed, never open.
-      return res
-        .status(503)
-        .json({ error: 'API key authentication is not configured', code: 'AUTH_NOT_CONFIGURED' });
+      return sendProblem(req, res, 'AUTH_NOT_CONFIGURED', {
+        detail: 'API key authentication is not configured',
+        extra: { error: 'API key authentication is not configured' },
+      });
     }
     const extracted = extractKey(req);
     if (extracted.state !== 'ok') {
       res.set('WWW-Authenticate', 'Bearer');
       if (extracted.state === 'missing') {
-        return res.status(401).json({ error: 'API key required', code: 'UNAUTHENTICATED' });
+        return sendProblem(req, res, 'UNAUTHENTICATED', {
+          detail: 'API key required',
+          extra: { error: 'API key required' },
+        });
       }
-      return res
-        .status(401)
-        .json({ error: 'Malformed credentials; expected "Authorization: Bearer <key>"', code: 'UNAUTHENTICATED' });
+      return sendProblem(req, res, 'UNAUTHENTICATED', {
+        detail: 'Malformed credentials; expected "Authorization: Bearer <key>"',
+        extra: { error: 'Malformed credentials; expected "Authorization: Bearer <key>"' },
+      });
     }
     const principal = authenticate(extracted.key);
     if (principal === null) {
       res.set('WWW-Authenticate', 'Bearer');
-      return res.status(401).json({ error: 'Unknown API key', code: 'UNAUTHENTICATED' });
+      return sendProblem(req, res, 'UNAUTHENTICATED', {
+        detail: 'Unknown API key',
+        extra: { error: 'Unknown API key' },
+      });
     }
     if (!roles.includes(principal.role)) {
-      return res.status(403).json({
-        error: `Role "${principal.role}" is not allowed on this endpoint`,
-        code: 'FORBIDDEN',
+      const detail = `Role "${principal.role}" is not allowed on this endpoint`;
+      return sendProblem(req, res, 'FORBIDDEN', {
+        detail,
+        extra: { error: detail },
       });
     }
     req.principal = principal;
