@@ -17,6 +17,7 @@ describe('loadConfig', () => {
     );
     expect(config.frontendUrl).toBe('https://liquifact-frontend.vercel.app');
     expect(config.corsOrigins).toEqual(['*']);
+    expect(config.trustProxy).toBe(false);
     expect(config.version).toBeDefined();
   });
 
@@ -199,5 +200,51 @@ describe('loadConfig', () => {
       expect(err.errors.some((e) => e.includes('CORS_ALLOWED_ORIGINS contains invalid origin'))).toBe(true);
       expect(err.message).toContain('Invalid configuration:');
     }
+  });
+
+  describe('TRUST_PROXY', () => {
+    test('defaults to false outside Vercel and 1 hop when VERCEL=1', () => {
+      expect(loadConfig({}).trustProxy).toBe(false);
+      expect(loadConfig({ TRUST_PROXY: '' }).trustProxy).toBe(false);
+      expect(loadConfig({ VERCEL: '1' }).trustProxy).toBe(1);
+      expect(loadConfig({ VERCEL: '1', TRUST_PROXY: '' }).trustProxy).toBe(1);
+      expect(loadConfig({ VERCEL: '1', TRUST_PROXY: 'false' }).trustProxy).toBe(false);
+    });
+
+    test('accepts false, hop counts, IPs, CIDRs, and subnet lists', () => {
+      expect(loadConfig({ TRUST_PROXY: 'false' }).trustProxy).toBe(false);
+      expect(loadConfig({ TRUST_PROXY: 'FALSE' }).trustProxy).toBe(false);
+      expect(loadConfig({ TRUST_PROXY: '0' }).trustProxy).toBe(0);
+      expect(loadConfig({ TRUST_PROXY: '1' }).trustProxy).toBe(1);
+      expect(loadConfig({ TRUST_PROXY: '2' }).trustProxy).toBe(2);
+      expect(loadConfig({ TRUST_PROXY: '127.0.0.1' }).trustProxy).toBe('127.0.0.1');
+      expect(loadConfig({ TRUST_PROXY: '10.0.0.0/8' }).trustProxy).toBe('10.0.0.0/8');
+      expect(loadConfig({ TRUST_PROXY: '::1' }).trustProxy).toBe('::1');
+      expect(loadConfig({ TRUST_PROXY: 'fc00::/7' }).trustProxy).toBe('fc00::/7');
+      expect(loadConfig({ TRUST_PROXY: 'loopback' }).trustProxy).toBe('loopback');
+      expect(loadConfig({ TRUST_PROXY: 'loopback, 10.0.0.0/8, fc00::/7' }).trustProxy).toBe(
+        'loopback, 10.0.0.0/8, fc00::/7',
+      );
+    });
+
+    test.each([
+      'true',
+      '-1',
+      '1.5',
+      'invalid',
+      '10.0.0.0/33',
+      '::1/129',
+      '10.0.0.0/8/16',
+      '10.0.0.0/',
+      '127.0.0.1,',
+      ',',
+    ])('rejects invalid TRUST_PROXY="%s" with ConfigError', (value) => {
+      expect(() => loadConfig({ TRUST_PROXY: value })).toThrow(ConfigError);
+      try {
+        loadConfig({ TRUST_PROXY: value });
+      } catch (err) {
+        expect(err.errors.some((e) => e.includes('TRUST_PROXY'))).toBe(true);
+      }
+    });
   });
 });

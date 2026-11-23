@@ -20,7 +20,7 @@ const { getReadiness } = require('./services/readiness');
 
 const app = express();
 app.disable('x-powered-by');
-app.set('trust proxy', true);
+app.set('trust proxy', config.trustProxy);
 app.set('json replacer', (_key, value) => (typeof value === 'bigint' ? value.toString() : value));
 
 const API_CSP = { useDefaults: false, directives: { defaultSrc: ["'none'"], frameAncestors: ["'none'"] } };
