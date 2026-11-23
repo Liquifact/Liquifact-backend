@@ -491,7 +491,10 @@ const WebhookSubscription = {
     url: { type: 'string', format: 'uri', example: 'https://example.com/hooks' },
     events: {
       type: 'array',
-      items: { type: 'string', enum: ['invoice.created', 'invoice.funding_received', 'invoice.funded'] },
+      items: {
+        type: 'string',
+        enum: ['invoice.created', 'invoice.funding_received', 'invoice.funded', 'invoice.reconciliation_drift'],
+      },
     },
     createdAt: { type: 'string', format: 'date-time' },
   },
@@ -564,6 +567,37 @@ const authErrorBody = (codes) => ({
   properties: { error: { type: 'string' }, code: { type: 'string', enum: codes } },
 });
 
+const authProblem = (codes) => ({
+  type: 'object',
+  required: ['type', 'title', 'status', 'code', 'instance', 'error'],
+  properties: {
+    ...Problem.properties,
+    code: { type: 'string', description: 'A stable, machine-readable error code', enum: codes },
+  },
+});
+
+const UnauthenticatedProblem = authProblem(['UNAUTHENTICATED']);
+const ForbiddenProblem = authProblem(['FORBIDDEN']);
+const AuthNotConfiguredProblem = authProblem(['AUTH_NOT_CONFIGURED']);
+const UnauthorizedProblem = authProblem(['UNAUTHORIZED']);
+const AdminTokenNotConfiguredProblem = authProblem(['ADMIN_TOKEN_NOT_CONFIGURED']);
+
+const authProblem = (codes) => ({
+  type: 'object',
+  required: ['type', 'title', 'status', 'code', 'instance', 'error'],
+  properties: {
+    ...Problem.properties,
+    code: { type: 'string', description: 'A stable, machine-readable error code', enum: codes },
+  },
+});
+
+const UnauthenticatedProblem = authProblem(['UNAUTHENTICATED']);
+const ForbiddenProblem = authProblem(['FORBIDDEN']);
+const AuthNotConfiguredProblem = authProblem(['AUTH_NOT_CONFIGURED']);
+const UnauthorizedProblem = authProblem(['UNAUTHORIZED']);
+const AdminTokenNotConfiguredProblem = authProblem(['ADMIN_TOKEN_NOT_CONFIGURED']);
+const NotInvoiceOwnerProblem = authProblem(['NOT_INVOICE_OWNER']);
+
 /** Mutating operations guarded by `requireRole` (src/middleware/auth.js) and the roles they accept. */
 const API_KEY_OPERATIONS = [
   ['/api/invoices', 'post', ['sme', 'admin']],
@@ -593,14 +627,19 @@ function applyApiKeySecurity(spec) {
     // Keep any route-specific 403 (e.g. SME_NOT_VERIFIED) alongside FORBIDDEN.
     const existing403 = operation.responses[403];
     const extraCode = existing403 && /^[A-Z_]+/.exec(existing403.description);
+    const ownershipScoped = path === '/api/invoices/{id}/cancel' || path === '/api/invoices/{id}/document';
+    const forbiddenCodes = ownershipScoped
+      ? ['FORBIDDEN', 'NOT_INVOICE_OWNER', ...(extraCode ? [extraCode[0]] : [])]
+      : (extraCode ? ['FORBIDDEN', extraCode[0]] : ['FORBIDDEN']);
     operation.responses = {
       ...operation.responses,
-      401: { description: 'Missing, malformed or unknown API key', ...json(authErrorBody(['UNAUTHENTICATED'])) },
+      401: { description: 'Missing, malformed or unknown API key', ...problemJson(authProblem(['UNAUTHENTICATED'])) },
       403: {
         description: `API key role not allowed (needs ${roles.join(' or ')})${existing403 ? `; or ${existing403.description}` : ''}`,
-        ...json(authErrorBody(extraCode ? ['FORBIDDEN', extraCode[0]] : ['FORBIDDEN'])),
+        ...problemJson(authProblem(forbiddenCodes)),
+        ...problemJson(authProblem(extraCode ? ['FORBIDDEN', extraCode[0]] : ['FORBIDDEN'])),
       },
-      503: { description: 'API_KEYS not configured in production (fail closed)', ...json(authErrorBody(['AUTH_NOT_CONFIGURED'])) },
+      503: { description: 'API_KEYS not configured in production (fail closed)', ...problemJson(authProblem(['AUTH_NOT_CONFIGURED'])) },
     };
   }
   return spec;
@@ -651,6 +690,7 @@ function createSpec(baseUrl) {
       { name: 'Investors' },
       { name: 'Escrow' },
       { name: 'Reconciliation' },
+      { name: 'Internal' },
       { name: 'Audit' },
       { name: 'Webhooks' },
       { name: 'SMEs' },
@@ -669,10 +709,26 @@ function createSpec(baseUrl) {
           scheme: 'bearer',
           description: 'Shared admin secret: `Authorization: Bearer <ADMIN_API_TOKEN>`',
         },
+        cronBearer: {
+          type: 'http',
+          scheme: 'bearer',
+          description: 'Scheduler secret: `Authorization: Bearer <CRON_SECRET>`',
+        },
       },
       schemas: {
         ...GENERATED_SCHEMAS,
         Problem,
+        UnauthenticatedProblem,
+        ForbiddenProblem,
+        AuthNotConfiguredProblem,
+        UnauthorizedProblem,
+        AdminTokenNotConfiguredProblem,
+        UnauthenticatedProblem,
+        ForbiddenProblem,
+        AuthNotConfiguredProblem,
+        UnauthorizedProblem,
+        AdminTokenNotConfiguredProblem,
+        NotInvoiceOwnerProblem,
         ErrorCatalogEntry,
         ValidationFailedProblem,
         EscrowLiveUnavailableProblem,
@@ -947,11 +1003,11 @@ function createSpec(baseUrl) {
           responses: {
             200: { description: 'Invoice linked or already linked to the same contract', ...json({ type: 'object', properties: { data: Invoice } }) },
             400: { description: 'INVALID_CONTRACT_ID', ...json(LinkError) },
-            401: { description: 'UNAUTHORIZED', ...json(LinkError) },
+            401: { description: 'UNAUTHORIZED', ...problemJson(authProblem(['UNAUTHORIZED'])) },
             404: { description: 'INVOICE_NOT_FOUND', ...json(LinkError) },
             409: { description: 'ALREADY_LINKED or CONTRACT_IN_USE', ...json(LinkError) },
             422: { description: 'ESCROW_TERMS_MISMATCH or ESCROW_NOT_FOUND', ...json(LinkError) },
-            503: { description: 'ADMIN_TOKEN_NOT_CONFIGURED', ...json(LinkError) },
+            503: { description: 'ADMIN_TOKEN_NOT_CONFIGURED', ...problemJson(authProblem(['ADMIN_TOKEN_NOT_CONFIGURED'])) },
           },
         },
         get: {
@@ -988,6 +1044,7 @@ function createSpec(baseUrl) {
           parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
           responses: {
             200: { description: 'Invoice cancelled', ...json({ type: 'object', properties: { data: Invoice } }) },
+            403: { description: 'NOT_INVOICE_OWNER', ...problemJson({ $ref: '#/components/schemas/NotInvoiceOwnerProblem' }) },
             404: { description: 'Not found', ...json(ErrorBody) },
             409: { description: 'Invoice not cancellable', ...json(ErrorBody) },
           },
@@ -1116,6 +1173,7 @@ function createSpec(baseUrl) {
               }),
             },
             400: { description: 'Missing or extra file field', ...json(ErrorBody) },
+            403: { description: 'NOT_INVOICE_OWNER', ...problemJson({ $ref: '#/components/schemas/NotInvoiceOwnerProblem' }) },
             404: { description: 'Invoice not found', ...json(ErrorBody) },
             409: { description: 'Invoice not open or document already exists', ...json(ErrorBody) },
             413: { description: 'File exceeds the 5 MiB limit', ...json(ErrorBody) },
@@ -1551,6 +1609,62 @@ function createSpec(baseUrl) {
           },
         },
       },
+      '/api/reconciliation/latest': {
+        get: {
+          tags: ['Reconciliation'],
+          summary: 'Get the latest scheduled reconciliation report',
+          description:
+            'Returns the report cached by POST /api/internal/reconciliation/run together with its age. ' +
+            'Admin token required; 404 when no scheduled run has completed yet.',
+          security: adminSecurity,
+          responses: {
+            200: {
+              description: 'Cached reconciliation report and age',
+              ...json({
+                type: 'object',
+                required: ['report', 'ageMs', 'ageSeconds'],
+                properties: {
+                  report: ReconciliationReport,
+                  checkedAt: { type: 'string', format: 'date-time' },
+                  ageMs: { type: 'integer', nullable: true, description: 'Milliseconds since report.checkedAt' },
+                  ageSeconds: { type: 'integer', nullable: true, description: 'ageMs floored to seconds' },
+                },
+              }),
+            },
+            401: { description: 'Missing or invalid admin token', ...json(ErrorBody) },
+            404: { description: 'No reconciliation report available', ...json(ErrorBody) },
+            503: { description: 'ADMIN_API_TOKEN is not configured on the server', ...json(ErrorBody) },
+          },
+        },
+      },
+      '/api/internal/reconciliation/run': {
+        post: {
+          tags: ['Internal', 'Reconciliation'],
+          summary: 'Run scheduled reconciliation and emit drift alerts',
+          description:
+            'Runs reconcileAll(), caches the report for GET /api/reconciliation/latest, and emits one ' +
+            'invoice.reconciliation_drift webhook event per invoice transitioning from in_sync to drift/error. ' +
+            'Protected by Bearer CRON_SECRET; returns 404 when CRON_SECRET is unset.',
+          security: [{ cronBearer: [] }],
+          responses: {
+            200: {
+              description: 'Reconciliation report with alert counts',
+              ...json({
+                type: 'object',
+                required: [...ReconciliationReport.required, 'alerts', 'alertedInvoiceIds'],
+                properties: {
+                  ...ReconciliationReport.properties,
+                  alerts: { type: 'integer', description: 'Number of drift webhook events emitted' },
+                  alertedInvoiceIds: { type: 'array', items: { type: 'string' } },
+                },
+              }),
+            },
+            401: { description: 'Missing or invalid CRON_SECRET bearer token', ...problemJson({ $ref: '#/components/schemas/Problem' }) },
+            404: { description: 'Endpoint not available (CRON_SECRET not configured)', ...json(ErrorBody) },
+            500: { description: 'Reconciliation run failed', ...problemJson({ $ref: '#/components/schemas/Problem' }) },
+          },
+        },
+      },
       '/api/smes': {
         post: {
           tags: ['SMEs'],
@@ -1617,7 +1731,10 @@ function createSpec(baseUrl) {
                 },
                 events: {
                   type: 'array',
-                  items: { type: 'string', enum: ['invoice.created', 'invoice.funding_received', 'invoice.funded'] },
+                  items: {
+        type: 'string',
+        enum: ['invoice.created', 'invoice.funding_received', 'invoice.funded', 'invoice.reconciliation_drift'],
+      },
                   example: ['invoice.created', 'invoice.funded'],
                 },
               },
@@ -1661,15 +1778,20 @@ function createSpec(baseUrl) {
       '/api/webhooks/{id}/deliveries': {
         get: {
           tags: ['Webhooks'],
-          summary: 'Last 50 delivery records for a webhook',
+          summary: 'Delivery records for a webhook, optionally filtered by status and limited to 1–50 records',
           security: adminSecurity,
-          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          parameters: [
+            { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+            { name: 'status', in: 'query', required: false, schema: { type: 'string', enum: ['pending', 'delivered', 'failed'] } },
+            { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 50, default: 50 } },
+          ],
           responses: {
             200: {
               description: 'Delivery log (most recent first)',
               ...json({ type: 'object', properties: { data: { type: 'array', items: DeliveryRecord } } }),
             },
             404: { description: 'Webhook not found', ...json(ErrorBody) },
+            400: { description: 'Invalid status or limit', ...json(ErrorBody) },
             ...adminErrors,
           },
         },

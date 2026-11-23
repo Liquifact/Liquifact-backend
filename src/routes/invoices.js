@@ -18,7 +18,7 @@ const { validate } = require('../middleware/validate');
 const emitter = require('../webhooks/emitter');
 const { parseAmount, formatAmount } = require('../lib/money');
 const idempotency = require('../middleware/idempotency');
-const { requireRole } = require('../middleware/auth');
+const { requireRole, assertOwnerOrAdmin } = require('../middleware/auth');
 const smes = require('../data/smes');
 
 const router = express.Router();
@@ -488,6 +488,10 @@ router.post('/:id/cancel', requireRole('sme', 'admin'), idParam('invoice.cancel'
     return rejectPrecondition(req, res, preconditionRejection, 'invoice.cancel');
   }
   const before = { fundedAmount: invoice.fundedAmount, status: invoice.status };
+  const ownership = assertOwnerOrAdmin(req, res, invoice, { action: 'invoice.cancel', before });
+  if (ownership !== true) {
+    return ownership;
+  }
   if (invoice.status !== 'open' && invoice.status !== 'funded') {
     return audit.reject(409, `Invoice is ${invoice.status}; only open or funded invoices can be cancelled`, before);
   }
