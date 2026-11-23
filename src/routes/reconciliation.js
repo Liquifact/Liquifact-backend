@@ -4,12 +4,32 @@ const express = require('express');
 const config = require('../config');
 const store = require('../data/store');
 const { reconcileInvoice } = require('../services/reconciliation');
+const { requireAdminToken } = require('../middleware/require-admin-token');
 const escrowRoute = require('./escrow');
 
 const router = express.Router();
 
 /** Maximum concurrent RPC calls. */
 const MAX_CONCURRENCY = 4;
+
+/** Latest report produced by the scheduled trigger (in-memory, per instance). */
+let latestReport = null;
+
+/** @param {object} report @returns {object} the stored report */
+function setLatestReport(report) {
+  latestReport = report;
+  return latestReport;
+}
+
+/** @returns {object|null} the cached report */
+function getLatestReport() {
+  return latestReport;
+}
+
+/** Clears the cached report (used by tests). */
+function resetLatestReport() {
+  latestReport = null;
+}
 
 /**
  * Fetches the escrow state for one contractId.
@@ -20,9 +40,8 @@ const MAX_CONCURRENCY = 4;
  */
 async function fetchEscrow(contractId) {
   try {
-    void contractId; // reserved for future multi-contract support
-    const data = await escrowRoute.readEscrowOnChain();
-    return { data };
+    const result = await escrowRoute.readEscrowOnChain(contractId);
+    return { data: result ? result.native : result };
   } catch (err) {
     return { error: err.message || String(err) };
   }
@@ -124,6 +143,25 @@ router.get('/', async (_req, res) => {
   res.json(report);
 });
 
+// ── GET /api/reconciliation/latest ────────────────────────────────────────
+
+router.get('/latest', requireAdminToken, (_req, res) => {
+  if (!latestReport) {
+    return res.status(404).json({ error: 'No reconciliation report available' });
+  }
+
+  const checkedAtMs = Date.parse(latestReport.checkedAt);
+  const ageMs = Number.isFinite(checkedAtMs) ? Math.max(0, Date.now() - checkedAtMs) : null;
+
+  return res.json({
+    ...latestReport,
+    report: latestReport,
+    checkedAt: latestReport.checkedAt,
+    ageMs,
+    ageSeconds: ageMs === null ? null : Math.floor(ageMs / 1000),
+  });
+});
+
 // ── GET /api/reconciliation/:invoiceId ────────────────────────────────────
 
 router.get('/:invoiceId', async (req, res) => {
@@ -155,3 +193,6 @@ router.get('/:invoiceId', async (req, res) => {
 
 module.exports = router;
 module.exports.reconcileAll = reconcileAll;
+module.exports.getLatestReport = getLatestReport;
+module.exports.setLatestReport = setLatestReport;
+module.exports.resetLatestReport = resetLatestReport;

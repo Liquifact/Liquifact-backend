@@ -15,10 +15,6 @@
  *   - Failed events do not prevent subsequent valid events from being ingested
  */
 
-/* eslint-env es6 */
-
-/* eslint-env es6 */
-
 const {
   runOnce,
   collectContractIds,
@@ -27,7 +23,6 @@ const {
 } = require('../../src/indexer/escrow-indexer');
 const { createEventStore } = require('../../src/indexer/EventStore');
 const { getRpcServer, setRpcServer, resetRpcServer } = require('../../src/stellar/rpc');
-const config = require('../../src/config');
 const config = require('../../src/config');
 
 // ---------------------------------------------------------------------------//
@@ -195,7 +190,7 @@ describe('runOnce — result structure', () => {
     expect(typeof result.ingested).toBe('number');
     expect(typeof result.skipped).toBe('number');
     expect(typeof result.decodeFailures).toBe('number');
-    expect(typeof result.cursor).toBe('string' || null);
+    expect(result.cursor === null || typeof result.cursor === 'string').toBe(true);
     expect(typeof result.latestLedger).toBe('number');
   });
 });
@@ -616,20 +611,19 @@ describe('runOnce — shared Soroban RPC client', () => {
   });
 
   test('two runs without injected server reuse a single rpc.Server instance', async () => {
-    const { rpc } = require('@stellar/stellar-sdk');
-    const getEvents = jest.fn().mockResolvedValue({
+    const firstClient = getRpcServer();
+    const getEvents = jest.spyOn(firstClient, 'getEvents').mockResolvedValue({
       events: [],
       cursor: null,
       latestLedger: 300,
       oldestLedger: 1,
     });
-    const serverSpy = jest.spyOn(rpc, 'Server').mockImplementation(() => ({ getEvents }));
 
     const store = createEventStore();
     await runOnce({ store, contractId: CONTRACT_ID, log: silentLog });
     await runOnce({ store, contractId: CONTRACT_ID, log: silentLog });
 
-    expect(serverSpy).toHaveBeenCalledTimes(1);
+    expect(getRpcServer()).toBe(firstClient);
     expect(getEvents).toHaveBeenCalledTimes(2);
   });
 
@@ -643,5 +637,83 @@ describe('runOnce — shared Soroban RPC client', () => {
     } finally {
       config.rpcUrl = originalUrl;
     }
+  });
+});
+
+describe('runOnce — structured logger argument order (#1616)', () => {
+  afterEach(() => {
+    delete process.env.INDEXER_START_LEDGER;
+    jest.restoreAllMocks();
+  });
+
+  test('failed getEvents writes valid structured JSON to stderr with message first and err text', async () => {
+    const stderrLines = [];
+    const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrLines.push(String(chunk));
+      return true;
+    });
+
+    const store = createEventStore();
+    const server = {
+      getEvents: jest.fn().mockRejectedValue(new Error('RPC timeout')),
+    };
+
+    await expect(runOnce({ server, store, contractId: CONTRACT_ID })).rejects.toThrow('RPC timeout');
+
+    expect(stderrSpy).toHaveBeenCalledTimes(1);
+    const parsed = JSON.parse(stderrLines[0]);
+    expect(parsed.level).toBe('error');
+    expect(parsed.message).toBe('Soroban RPC getEvents failed; leaving cursor unchanged');
+    expect(parsed.err).toBe('RPC timeout');
+    expect(parsed.contractIds).toEqual([CONTRACT_ID]);
+    expect(parsed['0']).toBeUndefined();
+  });
+
+  test('clamped getEvents warning and failure pass (message, meta) to injected log', async () => {
+    process.env.INDEXER_START_LEDGER = '5';
+    const store = createEventStore();
+    const log = { warn: jest.fn(), error: jest.fn(), info: jest.fn() };
+    const server = {
+      getEvents: jest
+        .fn()
+        .mockResolvedValueOnce({ events: [], cursor: null, latestLedger: 200, oldestLedger: 50 })
+        .mockRejectedValueOnce(new Error('clamped RPC failure')),
+    };
+
+    await expect(runOnce({ server, store, contractId: CONTRACT_ID, log })).rejects.toThrow('clamped RPC failure');
+
+    expect(log.warn).toHaveBeenCalledWith(
+      'INDEXER_START_LEDGER is older than oldest retained ledger; clamping to oldestLedger',
+      { startLedger: 5, oldestLedger: 50 },
+    );
+    expect(log.error).toHaveBeenCalledWith('Soroban RPC getEvents (clamped) failed', {
+      err: 'clamped RPC failure',
+    });
+  });
+
+  test('decode failure passes (message, meta) to injected log', async () => {
+    const store = createEventStore();
+    const log = { warn: jest.fn(), error: jest.fn(), info: jest.fn() };
+    const badRawEvent = {
+      id: 'bad-evt-1',
+      get topic() {
+        throw new Error('malformed xdr');
+      },
+    };
+    const server = {
+      getEvents: jest.fn().mockResolvedValue({
+        events: [badRawEvent],
+        cursor: 'c1',
+        latestLedger: 120,
+        oldestLedger: 1,
+      }),
+    };
+
+    const result = await runOnce({ server, store, contractId: CONTRACT_ID, log });
+    expect(result.decodeFailures).toBe(1);
+    expect(log.warn).toHaveBeenCalledWith('Failed to decode event; skipping', {
+      err: 'malformed xdr',
+      eventId: 'bad-evt-1',
+    });
   });
 });

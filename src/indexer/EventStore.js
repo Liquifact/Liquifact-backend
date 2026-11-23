@@ -29,15 +29,33 @@ const DEFAULT_MAX_EVENTS = 10_000;
 const DEFAULT_CURSOR_KEY = '__default__';
 
 /**
+ * @typedef {object} EventStore
+ * @property {(events: object[]) => number} append
+ * @property {(params?: object) => { data: object[], nextCursor: string | null }} query
+ * @property {() => string | null} getCursor
+ * @property {(cursor: string) => void} setCursor
+ * @property {() => number} size
+ * @property {() => void} clear
+ */
+
+/**
  * Create a new in-memory EventStore instance.
  *
  * @param {object} [opts]
  * @param {number} [opts.maxEvents=10000] - Maximum number of events to retain.
+ * @param {(event: object) => void} [opts.onAppend] - Called before a new event is stored.
  * @returns {EventStore}
  */
-function createEventStore({ maxEvents = DEFAULT_MAX_EVENTS } = {}) {
+function createEventStore({ maxEvents = DEFAULT_MAX_EVENTS, onAppend } = {}) {
   /** @type {Map<string, object>} event id → decoded event */
   const events = new Map();
+
+  /** @type {Map<string, number>} event id → insertion sequence */
+  const sequenceById = new Map();
+
+  /** @type {Map<number, string>} insertion sequence → event id */
+  const idBySequence = new Map();
+  let nextSequence = 0;
 
   /** @type {Map<string, string>} cursor key → Soroban RPC pagination token */
   const cursors = new Map();
@@ -58,13 +76,21 @@ function createEventStore({ maxEvents = DEFAULT_MAX_EVENTS } = {}) {
       if (!id) {continue;}
       if (events.has(id)) {continue;} // idempotent: skip duplicates
 
+      if (onAppend) {onAppend(evt);}
+
       // Evict oldest entry if at cap
       if (events.size >= maxEvents) {
         const oldestKey = events.keys().next().value;
         events.delete(oldestKey);
+        const oldestSequence = sequenceById.get(oldestKey);
+        sequenceById.delete(oldestKey);
+        idBySequence.delete(oldestSequence);
       }
 
       events.set(id, evt);
+      sequenceById.set(id, nextSequence);
+      idBySequence.set(nextSequence, id);
+      nextSequence++;
       appended++;
     }
     return appended;
@@ -105,33 +131,30 @@ function createEventStore({ maxEvents = DEFAULT_MAX_EVENTS } = {}) {
    */
   function query({ type, investor, contractId, fromLedger, limit = 50, after } = {}) {
     const maxLimit = Math.min(Math.max(1, Number(limit) || 50), 200);
-    const all = [...events.values()];
-
-    // Cursor-based pagination: skip until we pass the `after` id
-    let startIdx = 0;
+    let startSequence = idBySequence.keys().next().value ?? nextSequence;
     if (after) {
-      const idx = all.findIndex((e) => e.id === after);
-      if (idx !== -1) {
-        startIdx = idx + 1;
-      } else {
-        // Cursor not found - treat as invalid, do not silently restart
+      const cursorSequence = sequenceById.get(after);
+      if (cursorSequence === undefined) {
         return { error: 'INVALID_CURSOR' };
       }
+      startSequence = cursorSequence + 1;
     }
 
-    const slice = all.slice(startIdx);
+    const matches = [];
+    for (let sequence = startSequence; sequence < nextSequence && matches.length <= maxLimit; sequence++) {
+      const id = idBySequence.get(sequence);
+      if (id === undefined) {continue;}
+      const evt = events.get(id);
+      if (!evt) {continue;}
+      if (type && evt.type !== type) {continue;}
+      if (investor && evt.data?.investor !== investor) {continue;}
+      if (contractId && evt.contractId !== contractId) {continue;}
+      if (fromLedger != null && evt.ledger < Number(fromLedger)) {continue;}
+      matches.push(evt);
+    }
 
-    // Apply filters
-    const filtered = slice.filter((evt) => {
-      if (type && evt.type !== type) {return false;}
-      if (investor && evt.data?.investor !== investor) {return false;}
-      if (contractId && evt.contractId !== contractId) {return false;}
-      if (fromLedger != null && evt.ledger < Number(fromLedger)) {return false;}
-      return true;
-    });
-
-    const page = filtered.slice(0, maxLimit);
-    const nextCursor = filtered.length > maxLimit ? page[page.length - 1]?.id ?? null : null;
+    const page = matches.slice(0, maxLimit);
+    const nextCursor = matches.length > maxLimit ? page[page.length - 1]?.id ?? null : null;
 
     return { data: page, nextCursor };
   }
@@ -152,6 +175,8 @@ function createEventStore({ maxEvents = DEFAULT_MAX_EVENTS } = {}) {
    */
   function clear() {
     events.clear();
+    sequenceById.clear();
+    idBySequence.clear();
     cursors.clear();
   }
 
@@ -161,4 +186,5 @@ function createEventStore({ maxEvents = DEFAULT_MAX_EVENTS } = {}) {
 /** Singleton store shared across the process lifetime. */
 const defaultStore = createEventStore();
 
+module.exports = { createEventStore, defaultStore, DEFAULT_MAX_EVENTS };
 module.exports = { createEventStore, defaultStore, DEFAULT_CURSOR_KEY };

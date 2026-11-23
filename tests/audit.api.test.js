@@ -165,10 +165,86 @@ describe('recording mutations', () => {
     expect(entries()[1].requestId).toBe(unsafe.headers['x-request-id']);
   });
 
-  test('the client IP is stored truncated', async () => {
-    await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).set('X-Forwarded-For', '203.0.113.77').send({ amount: 1, investor: INVESTOR });
-    expect(entries()[0].ip).toBe('203.0.113.0/24');
+  test('spoofed X-Forwarded-For is ignored by default and client IP is stored truncated', async () => {
+    await request(app)
+      .post('/api/invoices/INV_0002/fund')
+      .set(authHeader())
+      .set('X-Forwarded-For', '203.0.113.77')
+      .send({ amount: 1, investor: INVESTOR });
+    expect(entries()[0].ip).not.toBe('203.0.113.0/24');
+    expect(['127.0.0.0/24', '0:0:0::/48']).toContain(entries()[0].ip);
     expect(JSON.stringify(entries())).not.toContain('203.0.113.77');
+  });
+
+  test('audit ip honors TRUST_PROXY hop-count and CIDR settings and ignores spoofed hops', async () => {
+    /**
+     * Loads an isolated app + auditLog pair with a specific TRUST_PROXY env value.
+     *
+     * @param {string|undefined} trustProxyValue TRUST_PROXY env override
+     * @returns {{ isolatedApp: object, isolatedAuditLog: object }} isolated instances
+     */
+    function loadIsolated(trustProxyValue) {
+      const prevTrustProxy = process.env.TRUST_PROXY;
+      const prevVercel = process.env.VERCEL;
+      let isolatedApp;
+      let isolatedAuditLog;
+      try {
+        delete process.env.VERCEL;
+        if (trustProxyValue === undefined) {
+          delete process.env.TRUST_PROXY;
+        } else {
+          process.env.TRUST_PROXY = trustProxyValue;
+        }
+        jest.isolateModules(() => {
+          isolatedAuditLog = require('../src/audit/audit-log').auditLog;
+          isolatedAuditLog.resetForTests();
+          isolatedApp = require('../src/app');
+        });
+      } finally {
+        if (prevTrustProxy === undefined) {
+          delete process.env.TRUST_PROXY;
+        } else {
+          process.env.TRUST_PROXY = prevTrustProxy;
+        }
+        if (prevVercel === undefined) {
+          delete process.env.VERCEL;
+        } else {
+          process.env.VERCEL = prevVercel;
+        }
+      }
+      return { isolatedApp, isolatedAuditLog };
+    }
+
+    // 1. Hop count = 1: trusts the rightmost proxy-appended IP, ignoring spoofed leftmost entries
+    const hop1 = loadIsolated('1');
+    await request(hop1.isolatedApp)
+      .post('/api/invoices/INV_0002/fund')
+      .set(authHeader())
+      .set('X-Forwarded-For', '198.51.100.5, 203.0.113.77')
+      .send({ amount: 1, investor: INVESTOR });
+    expect(hop1.isolatedAuditLog.entries()[0].ip).toBe('203.0.113.0/24');
+    expect(JSON.stringify(hop1.isolatedAuditLog.entries())).not.toContain('203.0.113.77');
+    expect(JSON.stringify(hop1.isolatedAuditLog.entries())).not.toContain('198.51.100');
+
+    // 2. CIDR list covering loopback: honors X-Forwarded-For from the local test socket
+    const cidrTrusted = loadIsolated('127.0.0.0/8, ::1/128');
+    await request(cidrTrusted.isolatedApp)
+      .post('/api/invoices/INV_0002/fund')
+      .set(authHeader())
+      .set('X-Forwarded-For', '203.0.113.77')
+      .send({ amount: 1, investor: INVESTOR });
+    expect(cidrTrusted.isolatedAuditLog.entries()[0].ip).toBe('203.0.113.0/24');
+    expect(JSON.stringify(cidrTrusted.isolatedAuditLog.entries())).not.toContain('203.0.113.77');
+
+    // 3. CIDR list NOT covering loopback: ignores spoofed X-Forwarded-For
+    const cidrUntrusted = loadIsolated('10.0.0.0/8');
+    await request(cidrUntrusted.isolatedApp)
+      .post('/api/invoices/INV_0002/fund')
+      .set(authHeader())
+      .set('X-Forwarded-For', '203.0.113.77')
+      .send({ amount: 1, investor: INVESTOR });
+    expect(cidrUntrusted.isolatedAuditLog.entries()[0].ip).not.toBe('203.0.113.0/24');
+    expect(['127.0.0.0/24', '0:0:0::/48']).toContain(cidrUntrusted.isolatedAuditLog.entries()[0].ip);
   });
 
   test('the chain verifies after a mix of mutations', async () => {
@@ -178,6 +254,53 @@ describe('recording mutations', () => {
     const res = await admin(request(app).get('/api/audit/verify'));
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ valid: true, entries: 3 });
+  });
+
+  test('failed authentication and forbidden role attempts are audited as auth.denied and preserve the chain', async () => {
+    const crypto = require('crypto');
+    const unknownKey = 'lf_bruteforce_attempt_0001';
+    const unknownHash = crypto.createHash('sha256').update(unknownKey).digest('hex');
+    const smeHash = crypto.createHash('sha256').update(KEYS.sme).digest('hex');
+
+    const missing = await request(app)
+      .post('/api/invoices')
+      .set('X-Forwarded-For', '203.0.113.99')
+      .send(NEW_INVOICE);
+    expect(missing.status).toBe(401);
+
+    const unknown = await request(app)
+      .post('/api/invoices')
+      .set('Authorization', `Bearer ${unknownKey}`)
+      .set('X-Forwarded-For', '203.0.113.99')
+      .send(NEW_INVOICE);
+    expect(unknown.status).toBe(401);
+
+    const forbidden = await request(app)
+      .post('/api/invoices/INV_0002/fund')
+      .set(authHeader('sme'))
+      .set('X-Forwarded-For', '203.0.113.99')
+      .send({ amount: 10, investor: INVESTOR });
+    expect(forbidden.status).toBe(403);
+
+    const listed = await admin(request(app).get('/api/audit?action=auth.denied'));
+    expect(listed.status).toBe(200);
+    expect(listed.body.count).toBe(3);
+    expect(listed.body.data.map((e) => e.metadata.reason)).toEqual(['missing_key', 'unknown_key', 'forbidden_role']);
+    expect(listed.body.data.map((e) => e.actor)).toEqual(['anonymous', 'anonymous', 'test-sme']);
+    expect(listed.body.data.map((e) => e.ip)).toEqual(['203.0.113.0/24', '203.0.113.0/24', '203.0.113.0/24']);
+    expect(listed.body.data[2].metadata.keyId).toBe('test-sme');
+    expect(listed.body.data[2].metadata.route).toBe('POST /api/invoices/:id/fund');
+
+    const bodyText = JSON.stringify(listed.body);
+    expect(bodyText).not.toContain('203.0.113.99');
+    expect(bodyText).not.toContain(unknownKey);
+    expect(bodyText).not.toContain(unknownHash);
+    expect(bodyText).not.toContain(KEYS.sme);
+    expect(bodyText).not.toContain(smeHash);
+
+    const verified = await admin(request(app).get('/api/audit/verify'));
+    expect(verified.status).toBe(200);
+    expect(verified.body).toEqual({ valid: true, entries: 3 });
   });
 });
 

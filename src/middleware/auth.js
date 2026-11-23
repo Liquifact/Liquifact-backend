@@ -21,6 +21,7 @@
 
 const crypto = require('crypto');
 const config = require('../config');
+const { sendProblem } = require('../errors');
 
 /**
  * SHA-256 hex digest of a presented key.
@@ -103,6 +104,51 @@ function authenticate(key) {
 }
 
 /**
+ * Builds a sanitised route label (`METHOD /base/path`) without query strings
+ * so audit entries identify the targeted endpoint without leaking query params.
+ *
+ * @param {import('express').Request} req incoming request
+ * @returns {string} route label
+ */
+function resolveRoute(req) {
+  const base = typeof req.baseUrl === 'string' ? req.baseUrl : '';
+  const routePath =
+    req.route && typeof req.route.path === 'string'
+      ? req.route.path
+      : typeof req.path === 'string'
+        ? req.path
+        : '';
+  const fullPath = routePath === '/' && base ? base : `${base}${routePath}`;
+  return `${req.method || 'UNKNOWN'} ${fullPath || '/'}`;
+}
+
+/**
+ * Records a denied authentication/authorization attempt in the audit log when
+ * `req.audit` is attached. Never logs raw keys or key hashes.
+ *
+ * @param {import('express').Request} req incoming request
+ * @param {{ statusCode: number, reason: string, keyId?: string | null }} details denial details
+ */
+function recordAuthDenied(req, { statusCode, reason, keyId = null }) {
+  if (typeof req.audit !== 'function') {
+    return;
+  }
+  req.audit({
+    action: 'auth.denied',
+    resourceType: 'auth',
+    resourceId: keyId,
+    actor: keyId || 'anonymous',
+    outcome: 'rejected',
+    statusCode,
+    metadata: {
+      reason,
+      route: resolveRoute(req),
+      keyId,
+    },
+  });
+}
+
+/**
  * Builds middleware that authenticates the request and enforces one of the
  * given roles. Attach it per-route so GET routes stay public.
  *
@@ -120,29 +166,43 @@ function requireRole(...roles) {
   const guard = function apiKeyGuard(req, res, next) {
     if (config.apiKeys.length === 0 && config.nodeEnv === 'production') {
       // Misconfigured production deployment: fail closed, never open.
-      return res
-        .status(503)
-        .json({ error: 'API key authentication is not configured', code: 'AUTH_NOT_CONFIGURED' });
+      recordAuthDenied(req, { statusCode: 503, reason: 'auth_not_configured' });
+      return sendProblem(req, res, 'AUTH_NOT_CONFIGURED', {
+        detail: 'API key authentication is not configured',
+        extra: { error: 'API key authentication is not configured' },
+      });
     }
     const extracted = extractKey(req);
     if (extracted.state !== 'ok') {
       res.set('WWW-Authenticate', 'Bearer');
       if (extracted.state === 'missing') {
-        return res.status(401).json({ error: 'API key required', code: 'UNAUTHENTICATED' });
+        recordAuthDenied(req, { statusCode: 401, reason: 'missing_key' });
+        return sendProblem(req, res, 'UNAUTHENTICATED', {
+          detail: 'API key required',
+          extra: { error: 'API key required' },
+        });
       }
-      return res
-        .status(401)
-        .json({ error: 'Malformed credentials; expected "Authorization: Bearer <key>"', code: 'UNAUTHENTICATED' });
+      recordAuthDenied(req, { statusCode: 401, reason: 'malformed_credentials' });
+      return sendProblem(req, res, 'UNAUTHENTICATED', {
+        detail: 'Malformed credentials; expected "Authorization: Bearer <key>"',
+        extra: { error: 'Malformed credentials; expected "Authorization: Bearer <key>"' },
+      });
     }
     const principal = authenticate(extracted.key);
     if (principal === null) {
       res.set('WWW-Authenticate', 'Bearer');
-      return res.status(401).json({ error: 'Unknown API key', code: 'UNAUTHENTICATED' });
+      recordAuthDenied(req, { statusCode: 401, reason: 'unknown_key' });
+      return sendProblem(req, res, 'UNAUTHENTICATED', {
+        detail: 'Unknown API key',
+        extra: { error: 'Unknown API key' },
+      });
     }
     if (!roles.includes(principal.role)) {
-      return res.status(403).json({
-        error: `Role "${principal.role}" is not allowed on this endpoint`,
-        code: 'FORBIDDEN',
+      recordAuthDenied(req, { statusCode: 403, reason: 'forbidden_role', keyId: principal.keyId });
+      const detail = `Role "${principal.role}" is not allowed on this endpoint`;
+      return sendProblem(req, res, 'FORBIDDEN', {
+        detail,
+        extra: { error: detail },
       });
     }
     req.principal = principal;
@@ -155,10 +215,56 @@ function requireRole(...roles) {
   return guard;
 }
 
+/**
+ * Enforces invoice ownership for SME mutations.
+ *
+ * Admin principals bypass ownership. SME principals may mutate only invoices
+ * whose `createdBy` exactly matches the authenticated API key id. Records
+ * without `createdBy`, including seeded demo invoices, are not claimable and
+ * remain available only to admins.
+ *
+ * @param {import('express').Request} req request
+ * @param {import('express').Response} res response
+ * @param {object|null} invoice invoice record
+ * @param {{ action?: string, before?: object|null }} [options] audit context
+ * @returns {true|import('express').Response} true when allowed
+ */
+function assertOwnerOrAdmin(req, res, invoice, { action = 'invoice.mutation', before = null } = {}) {
+  const principal = req.principal;
+  if (principal?.role === 'admin') {
+    return true;
+  }
+  if (
+    principal?.role === 'sme' &&
+    typeof invoice?.createdBy === 'string' &&
+    invoice.createdBy === principal.keyId
+  ) {
+    return true;
+  }
+
+  if (typeof req.audit === 'function') {
+    req.audit({
+      action,
+      resourceType: 'invoice',
+      resourceId: req.params?.id || invoice?.id,
+      outcome: 'rejected',
+      statusCode: 403,
+      before,
+      metadata: { code: 'NOT_INVOICE_OWNER' },
+    });
+  }
+  const detail = 'Only the SME that created this invoice may perform this mutation';
+  return sendProblem(req, res, 'NOT_INVOICE_OWNER', {
+    detail,
+    extra: { error: detail },
+  });
+}
+
 module.exports = {
   authenticate,
   constantTimeEqual,
   extractKey,
   requireRole,
   sha256Hex,
+  assertOwnerOrAdmin,
 };

@@ -7,8 +7,8 @@
  *  - https: is always required; http: is allowed only for localhost when
  *    NODE_ENV !== 'production'.
  *  - In production, the resolved IP addresses of the hostname must not fall
- *    inside any private, link-local, or loopback range (RFC 1918, 127.0.0.0/8,
- *    169.254.0.0/16, ::1, fc00::/7).
+ *    inside any private, link-local, loopback, unspecified, CGNAT, multicast,
+ *    or reserved range.
  *
  * DNS rebinding mitigation: we resolve the hostname once for validation and
  * re-resolve inside the fetch by pinning the numeric IP in the URL that is
@@ -21,13 +21,29 @@ const net = require('net');
 
 /** @param {string} ip IPv4 dotted-decimal or IPv6 string */
 function isPrivate(ip) {
-  // Normalise IPv6-mapped IPv4 addresses: ::ffff:1.2.3.4
-  const v4mapped = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
-  const addr = v4mapped ? v4mapped[1] : ip;
+  // Canonicalise IPv6 so expanded and IPv4-mapped spellings use the same checks.
+  const normalized = net.isIPv6(ip) ? new URL(`https://[${ip}]`).hostname.slice(1, -1) : ip;
+  const v4mapped = normalized.match(/^::ffff:([\da-f]+):([\da-f]+)$/i);
+  const addr = v4mapped
+    ? v4mapped.slice(1).flatMap(group => {
+      const value = parseInt(group, 16);
+      return [value >> 8, value & 0xff];
+    }).join('.')
+    : normalized;
 
   if (net.isIPv4(addr)) {
     const parts = addr.split('.').map(Number);
-    const [a, b] = parts;
+    const [a, b, c] = parts;
+    // 0.0.0.0/8 (this network)
+    if (a === 0) { return true; }
+    // 100.64.0.0/10 (shared address space / CGNAT)
+    if (a === 100 && b >= 64 && b <= 127) { return true; }
+    // 192.0.0.0/24 (IETF protocol assignments)
+    if (a === 192 && b === 0 && c === 0) { return true; }
+    // 198.18.0.0/15 (benchmarking)
+    if (a === 198 && (b === 18 || b === 19)) { return true; }
+    // 224.0.0.0/4 (multicast) and 240.0.0.0/4 (reserved / broadcast)
+    if (a >= 224) { return true; }
     // 127.0.0.0/8
     if (a === 127) { return true; }
     // 10.0.0.0/8
@@ -43,8 +59,8 @@ function isPrivate(ip) {
 
   if (net.isIPv6(addr)) {
     const lower = addr.toLowerCase();
-    // ::1 loopback
-    if (lower === '::1') { return true; }
+    // Unspecified and loopback (IPv6 was canonicalised above).
+    if (lower === '::' || lower === '::1') { return true; }
     // Expand the first group for prefix checks
     // fc00::/7 (unique local) — covers fc00:: through fdff::
     // fe80::/10 (link-local) — covers fe80:: through febf::
@@ -56,6 +72,8 @@ function isPrivate(ip) {
     const firstByte16 = parseInt(firstGroup || '0', 16);
     // fc00::/7: first byte masked with 0xfe === 0xfc
     const fb = (firstByte16 >> 8) & 0xff;
+    // ff00::/8 (multicast)
+    if (fb === 0xff) { return true; }
     if ((fb & 0xfe) === 0xfc) { return true; }
     // fe80::/10: top 10 bits of 0xfe80 = 1111111010
     if ((firstByte16 & 0xffc0) === 0xfe80) { return true; }
@@ -84,7 +102,9 @@ async function validateWebhookUrl(urlString) {
   }
 
   const isProd = process.env.NODE_ENV === 'production';
-  const { protocol, hostname, port } = parsed;
+  const { protocol, port } = parsed;
+  // WHATWG URL hostnames include brackets around IPv6 literals.
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
   const portSuffix = port ? `:${port}` : '';
 
   if (protocol === 'http:') {
@@ -96,7 +116,7 @@ async function validateWebhookUrl(urlString) {
       throw new Error('http: URLs are only allowed for localhost in non-production environments');
     }
     // http://localhost in dev — allow without DNS check
-    return { url: urlString, pinnedUrl: urlString, host: hostname };
+    return { url: urlString, pinnedUrl: urlString, host: parsed.hostname };
   }
 
   if (protocol !== 'https:') {
@@ -108,7 +128,7 @@ async function validateWebhookUrl(urlString) {
     if (isPrivate(hostname)) {
       throw new Error(`hostname resolves to a private/reserved address (${hostname}); SSRF not allowed`);
     }
-    return { url: urlString, pinnedUrl: urlString, host: `${hostname}${portSuffix}` };
+    return { url: urlString, pinnedUrl: urlString, host: `${parsed.hostname}${portSuffix}` };
   }
 
   // Resolve hostname to IPs and check all of them

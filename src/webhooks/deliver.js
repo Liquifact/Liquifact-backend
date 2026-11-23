@@ -24,6 +24,7 @@ const emitter = require('./emitter');
 
 const TIMEOUT_MS = 5000;
 const MAX_ATTEMPTS = 5;
+const RECONCILIATION_DRIFT_EVENT = 'invoice.reconciliation_drift';
 // Base delays in ms: 1s, 4s, 16s, 64s, 256s
 const BASE_DELAYS = [1000, 4000, 16000, 64000, 256000];
 
@@ -255,6 +256,8 @@ function startListening() {
   emitter.on('invoice.created', (invoice) => dispatch('invoice.created', invoice));
   emitter.on('invoice.funding_received', (invoice) => dispatch('invoice.funding_received', invoice));
   emitter.on('invoice.funded', (invoice) => dispatch('invoice.funded', invoice));
+  emitter.on(RECONCILIATION_DRIFT_EVENT, (invoice) =>
+    dispatch(RECONCILIATION_DRIFT_EVENT, invoice));
 }
 
 // Exported for tests
