@@ -240,6 +240,9 @@ class ApiError extends Error {
       Object.assign(problem, this.extra)
     }
     problem.error = this.extra?.error || this.title;
+    if (req?.id) {
+      problem.requestId = req.id
+    }
     problem.error = this.title
     return problem
   }
