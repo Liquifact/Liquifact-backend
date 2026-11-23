@@ -157,7 +157,7 @@ describe('GET /api/reconciliation', () => {
   beforeEach(() => {
     store.reset();
     // Default: return the deploy snapshot (in-sync).
-    escrowRoute.readEscrowOnChain.mockResolvedValue({ ...DEPLOY_SNAPSHOT });
+    escrowRoute.readEscrowOnChain.mockResolvedValue({ native: { ...DEPLOY_SNAPSHOT }, latestLedger: 123456 });
   });
 
   afterEach(() => {
@@ -169,7 +169,7 @@ describe('GET /api/reconciliation', () => {
     await request(app).post('/api/invoices/INV_0001/fund').set(authHeader()).send({ amount: 10, investor: 'GBTUJNOF2WAAUPKCJHBB76ID5HGN6KMTUG43F3Z344T7QRTP7B7TVPVC' });
 
     // RPC still returns funded_amount: "0" (deploy snapshot).
-    escrowRoute.readEscrowOnChain.mockResolvedValue({ ...DEPLOY_SNAPSHOT });
+    escrowRoute.readEscrowOnChain.mockResolvedValue({ native: { ...DEPLOY_SNAPSHOT }, latestLedger: 123456 });
 
     const res = await request(app).get('/api/reconciliation/INV_0001');
     expect(res.status).toBe(200);
@@ -194,12 +194,45 @@ describe('GET /api/reconciliation', () => {
   });
 
   test('seed INV_0001 vs DEPLOY_SNAPSHOT is in_sync (proves unit conversion)', async () => {
-    escrowRoute.readEscrowOnChain.mockResolvedValue({ ...DEPLOY_SNAPSHOT });
+    escrowRoute.readEscrowOnChain.mockResolvedValue({ native: { ...DEPLOY_SNAPSHOT }, latestLedger: 123456 });
 
     const res = await request(app).get('/api/reconciliation/INV_0001');
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('in_sync');
     expect(res.body.mismatches).toHaveLength(0);
+    expect(escrowRoute.readEscrowOnChain).toHaveBeenCalledWith(store.get('INV_0001').escrowContractId);
+  });
+
+  test('passes each invoice contract id and calls once for invoices sharing a contract', async () => {
+    const sharedContract = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC';
+    store.get('INV_0001').escrowContractId = sharedContract;
+    store.get('INV_0002').escrowContractId = sharedContract;
+    escrowRoute.readEscrowOnChain.mockResolvedValue({
+      native: { ...DEPLOY_SNAPSHOT },
+      latestLedger: 123456,
+    });
+
+    const res = await request(app).get('/api/reconciliation');
+    expect(res.status).toBe(200);
+    expect(escrowRoute.readEscrowOnChain).toHaveBeenCalledTimes(1);
+    expect(escrowRoute.readEscrowOnChain).toHaveBeenCalledWith(sharedContract);
+  });
+
+  test('fetches each invoice contract independently', async () => {
+    const contractA = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1';
+    const contractB = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2';
+    store.get('INV_0001').escrowContractId = contractA;
+    store.get('INV_0002').escrowContractId = contractB;
+    escrowRoute.readEscrowOnChain.mockImplementation(async (contractId) => ({
+      native: { ...DEPLOY_SNAPSHOT },
+      latestLedger: contractId === contractA ? 111 : 222,
+    }));
+
+    const res = await request(app).get('/api/reconciliation');
+    expect(res.status).toBe(200);
+    expect(escrowRoute.readEscrowOnChain).toHaveBeenCalledTimes(2);
+    expect(escrowRoute.readEscrowOnChain).toHaveBeenCalledWith(contractA);
+    expect(escrowRoute.readEscrowOnChain).toHaveBeenCalledWith(contractB);
   });
 
   test('GET /api/reconciliation/INV_0002 → 409 NOT_ON_CHAIN (onChain: false)', async () => {
@@ -214,7 +247,7 @@ describe('GET /api/reconciliation', () => {
   });
 
   test('GET /api/reconciliation returns summary with expected shape', async () => {
-    escrowRoute.readEscrowOnChain.mockResolvedValue({ ...DEPLOY_SNAPSHOT });
+    escrowRoute.readEscrowOnChain.mockResolvedValue({ native: { ...DEPLOY_SNAPSHOT }, latestLedger: 123456 });
 
     const res = await request(app).get('/api/reconciliation');
     expect(res.status).toBe(200);

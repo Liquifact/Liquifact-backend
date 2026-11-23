@@ -1,5 +1,6 @@
 'use strict';
 
+const net = require('net');
 const { StrKey } = require('@stellar/stellar-sdk');
 
 class ConfigError extends Error {
@@ -162,6 +163,101 @@ function envInt(raw, fallback, min = 0) {
     return fallback;
   }
   return value;
+}
+
+const TRUST_PROXY_PRESETS = new Set(['loopback', 'linklocal', 'uniquelocal']);
+
+/**
+ * Validates one token in a `TRUST_PROXY` CIDR/IP/subnet list.
+ * Accepts IPv4/IPv6 addresses, IPv4/IPv6 CIDRs, and Express/proxy-addr
+ * subnet presets (`loopback`, `linklocal`, `uniquelocal`).
+ *
+ * @param {string} token trimmed entry
+ * @returns {boolean} whether the token is a valid proxy address/range
+ */
+function isValidProxyEntry(token) {
+  if (!token) {
+    return false;
+  }
+  const lower = token.toLowerCase();
+  if (TRUST_PROXY_PRESETS.has(lower)) {
+    return true;
+  }
+  const slashIndex = token.indexOf('/');
+  if (slashIndex === -1) {
+    return net.isIP(token) !== 0;
+  }
+  if (token.indexOf('/', slashIndex + 1) !== -1) {
+    return false;
+  }
+  const addr = token.slice(0, slashIndex);
+  const prefixRaw = token.slice(slashIndex + 1);
+  if (!/^\d+$/.test(prefixRaw)) {
+    return false;
+  }
+  const prefix = Number(prefixRaw);
+  if (net.isIPv4(addr)) {
+    return prefix >= 0 && prefix <= 32;
+  }
+  if (net.isIPv6(addr)) {
+    return prefix >= 0 && prefix <= 128;
+  }
+  return false;
+}
+
+/**
+ * Parses `TRUST_PROXY` for Express `app.set('trust proxy', ...)`.
+ *
+ * Accepted values:
+ *   - unset / empty: `1` when `VERCEL=1`, otherwise `false`
+ *   - `'false'`: `false`
+ *   - non-negative integer string (e.g. `'0'`, `'1'`, `'2'`): hop count number
+ *   - comma-separated IP / CIDR / subnet preset list (e.g. `'loopback, 10.0.0.0/8'`)
+ *
+ * `'true'` and any malformed values are rejected so startup fails with `ConfigError`.
+ *
+ * @param {string|undefined} raw raw `TRUST_PROXY` value
+ * @param {Record<string, string|undefined>} env environment object
+ * @param {string[]} errors accumulated configuration errors
+ * @returns {boolean|number|string} Express `trust proxy` setting
+ */
+function parseTrustProxy(raw, env, errors) {
+  if (raw === undefined || raw.trim() === '') {
+    return env.VERCEL === '1' ? 1 : false;
+  }
+  const trimmed = raw.trim();
+  const lower = trimmed.toLowerCase();
+  if (lower === 'false') {
+    return false;
+  }
+  if (/^\d+$/.test(trimmed)) {
+    const hops = Number(trimmed);
+    if (Number.isSafeInteger(hops)) {
+      return hops;
+    }
+  }
+  const tokens = trimmed.split(',').map((t) => t.trim());
+  if (tokens.every((token) => isValidProxyEntry(token))) {
+    return tokens.map((t) => (TRUST_PROXY_PRESETS.has(t.toLowerCase()) ? t.toLowerCase() : t)).join(', ');
+  }
+  errors.push(
+    `TRUST_PROXY must be "false", a non-negative integer hop count, or a comma-separated list of IPs/CIDRs/presets (got "${raw}")`,
+  );
+  return false;
+}
+
+/**
+ * Parses a boolean environment flag ("true"/"1" => true).
+ *
+ * @param {string|undefined} raw raw environment value
+ * @param {boolean} fallback value used when unset
+ * @returns {boolean}
+ */
+function envBool(raw, fallback = false) {
+  if (raw === undefined || raw === '') {
+    return fallback;
+  }
+  return raw.trim().toLowerCase() === 'true' || raw.trim() === '1';
 }
 
 /**
@@ -334,6 +430,9 @@ function loadConfig(env = process.env) {
     }
   }
 
+  // Express trust proxy setting (default: 1 hop on Vercel, false otherwise).
+  const trustProxy = parseTrustProxy(env.TRUST_PROXY, env, errors);
+
   if (errors.length > 0) {
     throw new ConfigError(errors);
   }
@@ -358,10 +457,15 @@ function loadConfig(env = process.env) {
     corsOrigins,
     txWaitMs,
     protocolFeeBps,
+    indexerStateFile: env.INDEXER_STATE_FILE?.trim() || null,
     shutdownTimeoutMs,
     logLevel,
-    auditMaxEntries: positiveInt(env.AUDIT_MAX_ENTRIES, 10000),
+    auditMaxEntries: envInt(env.AUDIT_MAX_ENTRIES, 10000, 1),
     webhooksMax,
+    // Optimistic concurrency: when true, fund/settle/cancel/escrow-link
+    // mutations must send an If-Match header (428 Precondition Required otherwise).
+    requireIfMatch: envBool(env.REQUIRE_IF_MATCH, false),
+    trustProxy,
     // Readiness probe: per-check timeout, maximum accepted ledger age and how
     // long a probe result may be reused before the RPC is called again.
     readyCheckTimeoutMs: envInt(env.READY_CHECK_TIMEOUT_MS, 2000, 1),
