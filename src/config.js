@@ -104,6 +104,9 @@ function isValidRpcUrl(urlStr) {
 // Roles an API key can carry. `admin` is accepted wherever a role is required.
 const ROLES = ['sme', 'investor', 'admin'];
 
+// Accepted LOG_LEVEL values, lowest to highest severity.
+const LOG_LEVELS = ['debug', 'info', 'warn', 'error'];
+
 /**
  * Parses `API_KEYS` (`id:role:sha256hex`, comma separated). Only SHA-256
  * hashes are kept; raw keys are never stored. Problems are pushed to `errors`
@@ -402,6 +405,17 @@ function loadConfig(env = process.env) {
     }
   }
 
+  // Log level (debug | info | warn | error, default info).
+  let logLevel = 'info';
+  if (env.LOG_LEVEL !== undefined && env.LOG_LEVEL.trim() !== '') {
+    const normalizedLevel = env.LOG_LEVEL.trim().toLowerCase();
+    if (!LOG_LEVELS.includes(normalizedLevel)) {
+      errors.push(`LOG_LEVEL must be one of ${LOG_LEVELS.join(', ')} (got "${env.LOG_LEVEL}")`);
+    } else {
+      logLevel = normalizedLevel;
+    }
+  }
+
   // API keys for mutating routes (see middleware/auth.js)
   const apiKeys = parseApiKeys(env.API_KEYS, errors);
 
@@ -445,6 +459,7 @@ function loadConfig(env = process.env) {
     protocolFeeBps,
     indexerStateFile: env.INDEXER_STATE_FILE?.trim() || null,
     shutdownTimeoutMs,
+    logLevel,
     auditMaxEntries: envInt(env.AUDIT_MAX_ENTRIES, 10000, 1),
     webhooksMax,
     // Optimistic concurrency: when true, fund/settle/cancel/escrow-link
