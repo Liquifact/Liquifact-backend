@@ -105,7 +105,9 @@ const ENDPOINTS = [
   { method: 'GET', path: '/errors/:code', description: 'Error catalog entry by code' },
   { method: 'GET', path: '/api/escrow/events', description: 'Query decoded escrow contract events (paginated)' },
   { method: 'POST', path: '/api/internal/indexer/run', description: 'Manually trigger escrow event indexer (internal, Bearer CRON_SECRET)' },
+  { method: 'POST', path: '/api/internal/reconciliation/run', description: 'Run scheduled reconciliation and emit drift alerts (internal, Bearer CRON_SECRET)' },
   { method: 'GET', path: '/api/reconciliation', description: 'Reconcile all on-chain invoices against escrow state' },
+  { method: 'GET', path: '/api/reconciliation/latest', description: 'Cached scheduled reconciliation report and age (admin)' },
   { method: 'GET', path: '/api/reconciliation/:id', description: 'Reconcile one invoice against escrow state' },
   { method: 'POST', path: '/api/smes', description: 'Register an SME for KYB review' },
   { method: 'GET', path: '/api/smes/:id', description: 'Get an SME (PII for admins only)' },
@@ -185,6 +187,7 @@ require('./webhooks/deliver').startListening();
 // Escrow event indexer routes (feat/escrow-event-indexer)
 app.use('/api/escrow/events', require('./routes/escrowEvents'));
 app.use('/api/internal/indexer', require('./routes/indexerTrigger'));
+app.use('/api/internal/reconciliation', require('./routes/reconciliationTrigger'));
 
 // 404 handler for unknown routes
 app.use((_req, _res, _next) => {

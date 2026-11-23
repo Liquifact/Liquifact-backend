@@ -17,7 +17,12 @@
 
 const crypto = require('crypto');
 
-const VALID_EVENTS = ['invoice.created', 'invoice.funding_received', 'invoice.funded'];
+const VALID_EVENTS = [
+  'invoice.created',
+  'invoice.funding_received',
+  'invoice.funded',
+  'invoice.reconciliation_drift',
+];
 const MAX_DELIVERIES_PER_WEBHOOK = 50;
 const MAX_RAW_BODY_BYTES = 64 * 1024;
 

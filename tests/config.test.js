@@ -17,6 +17,7 @@ describe('loadConfig', () => {
     );
     expect(config.frontendUrl).toBe('https://liquifact-frontend.vercel.app');
     expect(config.corsOrigins).toEqual(['*']);
+    expect(config.indexerStateFile).toBeNull();
     expect(config.trustProxy).toBe(false);
     expect(config.version).toBeDefined();
   });
@@ -79,6 +80,11 @@ describe('loadConfig', () => {
       SOROBAN_RPC_URL: 'http://127.0.0.1:8000',
     });
     expect(configIp.rpcUrl).toBe('http://127.0.0.1:8000');
+  });
+
+  test('reads INDEXER_STATE_FILE as the persistent indexer state path', () => {
+    const config = loadConfig({ INDEXER_STATE_FILE: ' /var/lib/liquifact/indexer.ndjson ' });
+    expect(config.indexerStateFile).toBe('/var/lib/liquifact/indexer.ndjson');
   });
 
   describe('table-driven validation failures', () => {

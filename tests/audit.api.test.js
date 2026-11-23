@@ -253,6 +253,53 @@ describe('recording mutations', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ valid: true, entries: 3 });
   });
+
+  test('failed authentication and forbidden role attempts are audited as auth.denied and preserve the chain', async () => {
+    const crypto = require('crypto');
+    const unknownKey = 'lf_bruteforce_attempt_0001';
+    const unknownHash = crypto.createHash('sha256').update(unknownKey).digest('hex');
+    const smeHash = crypto.createHash('sha256').update(KEYS.sme).digest('hex');
+
+    const missing = await request(app)
+      .post('/api/invoices')
+      .set('X-Forwarded-For', '203.0.113.99')
+      .send(NEW_INVOICE);
+    expect(missing.status).toBe(401);
+
+    const unknown = await request(app)
+      .post('/api/invoices')
+      .set('Authorization', `Bearer ${unknownKey}`)
+      .set('X-Forwarded-For', '203.0.113.99')
+      .send(NEW_INVOICE);
+    expect(unknown.status).toBe(401);
+
+    const forbidden = await request(app)
+      .post('/api/invoices/INV_0002/fund')
+      .set(authHeader('sme'))
+      .set('X-Forwarded-For', '203.0.113.99')
+      .send({ amount: 10, investor: INVESTOR });
+    expect(forbidden.status).toBe(403);
+
+    const listed = await admin(request(app).get('/api/audit?action=auth.denied'));
+    expect(listed.status).toBe(200);
+    expect(listed.body.count).toBe(3);
+    expect(listed.body.data.map((e) => e.metadata.reason)).toEqual(['missing_key', 'unknown_key', 'forbidden_role']);
+    expect(listed.body.data.map((e) => e.actor)).toEqual(['anonymous', 'anonymous', 'test-sme']);
+    expect(listed.body.data.map((e) => e.ip)).toEqual(['203.0.113.0/24', '203.0.113.0/24', '203.0.113.0/24']);
+    expect(listed.body.data[2].metadata.keyId).toBe('test-sme');
+    expect(listed.body.data[2].metadata.route).toBe('POST /api/invoices/:id/fund');
+
+    const bodyText = JSON.stringify(listed.body);
+    expect(bodyText).not.toContain('203.0.113.99');
+    expect(bodyText).not.toContain(unknownKey);
+    expect(bodyText).not.toContain(unknownHash);
+    expect(bodyText).not.toContain(KEYS.sme);
+    expect(bodyText).not.toContain(smeHash);
+
+    const verified = await admin(request(app).get('/api/audit/verify'));
+    expect(verified.status).toBe(200);
+    expect(verified.body).toEqual({ valid: true, entries: 3 });
+  });
 });
 
 describe('redaction', () => {

@@ -8,6 +8,9 @@ const { formatAmount, mulBps } = require('../lib/money');
 const { badRequest } = require('../errors');
 
 const router = express.Router();
+const PORTFOLIO_STATUSES = ['open', 'funded', 'settled', 'cancelled'];
+const DEFAULT_PORTFOLIO_LIMIT = 50;
+const MAX_PORTFOLIO_LIMIT = 100;
 
 /**
  * Computes coupon floored in integer minor units (same as the escrow contract).
@@ -28,14 +31,36 @@ router.get('/:address/portfolio', (req, res) => {
     throw badRequest('INVALID_INVESTOR_ADDRESS');
   }
 
-  const investorContributions = contributions.listByInvestor(address);
-  if (investorContributions.length === 0) {
-    return res.json({
-      investor: address,
-      positions: [],
-      totalsByCurrency: {},
-    });
+  let limit = DEFAULT_PORTFOLIO_LIMIT;
+  if (req.query.limit !== undefined) {
+    if (
+      typeof req.query.limit !== 'string'
+      || !/^\d+$/.test(req.query.limit)
+      || Number(req.query.limit) < 1
+      || Number(req.query.limit) > MAX_PORTFOLIO_LIMIT
+    ) {
+      throw badRequest('INVALID_LIMIT');
+    }
+    limit = Number(req.query.limit);
   }
+
+  let statuses;
+  if (req.query.status !== undefined) {
+    if (
+      typeof req.query.status !== 'string'
+      || req.query.status.split(',').some((status) => !PORTFOLIO_STATUSES.includes(status))
+    ) {
+      throw badRequest('INVALID_STATUS_FILTER');
+    }
+    statuses = new Set(req.query.status.split(','));
+  }
+
+  const cursor = req.query.cursor;
+  if (cursor !== undefined && (typeof cursor !== 'string' || cursor.length === 0)) {
+    throw badRequest('INVALID_CURSOR');
+  }
+
+  const investorContributions = contributions.listByInvestor(address);
 
   // Aggregate multiple contributions by the same investor to one invoice
   const byInvoice = new Map();
@@ -50,6 +75,9 @@ router.get('/:address/portfolio', (req, res) => {
   for (const [invoiceId, principalMinor] of byInvoice.entries()) {
     const invoice = store.get(invoiceId);
     if (!invoice) {
+      continue;
+    }
+    if (statuses && !statuses.has(invoice.status)) {
       continue;
     }
 
@@ -72,6 +100,7 @@ router.get('/:address/portfolio', (req, res) => {
       expectedPayout,
     });
 
+    // Totals intentionally cover the full status-filtered set, not just this page.
     const curr = invoice.currency;
     if (!totalsByCurrency[curr]) {
       totalsByCurrency[curr] = {
@@ -86,6 +115,22 @@ router.get('/:address/portfolio', (req, res) => {
     totalsByCurrency[curr].payoutMinor += payoutMinor;
   }
 
+  positions.sort((a, b) => (a.invoiceId < b.invoiceId ? -1 : a.invoiceId > b.invoiceId ? 1 : 0));
+
+  let startIndex = 0;
+  if (cursor !== undefined) {
+    const cursorIndex = positions.findIndex((position) => position.invoiceId === cursor);
+    if (cursorIndex === -1) {
+      throw badRequest('INVALID_CURSOR');
+    }
+    startIndex = cursorIndex + 1;
+  }
+
+  const page = positions.slice(startIndex, startIndex + limit);
+  const nextCursor = page.length > 0 && startIndex + limit < positions.length
+    ? page[page.length - 1].invoiceId
+    : null;
+
   const formattedTotals = {};
   for (const [curr, t] of Object.entries(totalsByCurrency)) {
     formattedTotals[curr] = {
@@ -97,8 +142,9 @@ router.get('/:address/portfolio', (req, res) => {
 
   return res.json({
     investor: address,
-    positions,
+    positions: page,
     totalsByCurrency: formattedTotals,
+    nextCursor,
   });
 });
 

@@ -244,6 +244,20 @@ function parseTrustProxy(raw, env, errors) {
 }
 
 /**
+ * Parses a boolean environment flag ("true"/"1" => true).
+ *
+ * @param {string|undefined} raw raw environment value
+ * @param {boolean} fallback value used when unset
+ * @returns {boolean}
+ */
+function envBool(raw, fallback = false) {
+  if (raw === undefined || raw === '') {
+    return fallback;
+  }
+  return raw.trim().toLowerCase() === 'true' || raw.trim() === '1';
+}
+
+/**
  * Loads, normalizes and validates configuration from an environment object.
  *
  * @param {Record<string, string|undefined>} [env=process.env]
@@ -429,9 +443,13 @@ function loadConfig(env = process.env) {
     corsOrigins,
     txWaitMs,
     protocolFeeBps,
+    indexerStateFile: env.INDEXER_STATE_FILE?.trim() || null,
     shutdownTimeoutMs,
     auditMaxEntries: envInt(env.AUDIT_MAX_ENTRIES, 10000, 1),
     webhooksMax,
+    // Optimistic concurrency: when true, fund/settle/cancel/escrow-link
+    // mutations must send an If-Match header (428 Precondition Required otherwise).
+    requireIfMatch: envBool(env.REQUIRE_IF_MATCH, false),
     trustProxy,
     // Readiness probe: per-check timeout, maximum accepted ledger age and how
     // long a probe result may be reused before the RPC is called again.
