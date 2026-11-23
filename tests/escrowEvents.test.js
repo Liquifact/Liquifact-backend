@@ -181,6 +181,19 @@ describe('GET /api/escrow/events', () => {
     expect(res.status).toBe(400);
   });
 
+  test.each(['10abc', '1e2', '-1', '5.5', ''])(
+    'returns 400 for malformed limit=%s',
+    async (badLimit) => {
+      const res = await request(app).get(`/api/escrow/events?limit=${encodeURIComponent(badLimit)}`);
+      expect(res.status).toBe(400);
+    },
+  );
+
+  test('returns 400 for repeated limit query param', async () => {
+    const res = await request(app).get('/api/escrow/events?limit=1&limit=2');
+    expect(res.status).toBe(400);
+  });
+
   test('accepts limit=1', async () => {
     defaultStore.append([makeEvent({ id: '1-1' })]);
     const res = await request(app).get('/api/escrow/events?limit=1');
@@ -203,6 +216,27 @@ describe('GET /api/escrow/events', () => {
   test('returns 400 for non-integer fromLedger', async () => {
     const res = await request(app).get('/api/escrow/events?fromLedger=abc');
     expect(res.status).toBe(400);
+  });
+
+  test.each(['10abc', '1e2', '-1', '5.5', '5.9', ''])(
+    'returns 400 for malformed fromLedger=%s',
+    async (badLedger) => {
+      const res = await request(app).get(`/api/escrow/events?fromLedger=${encodeURIComponent(badLedger)}`);
+      expect(res.status).toBe(400);
+    },
+  );
+
+  test('returns 400 for repeated fromLedger, contractId, or after query params', async () => {
+    expect((await request(app).get('/api/escrow/events?fromLedger=1&fromLedger=2')).status).toBe(400);
+    expect((await request(app).get('/api/escrow/events?contractId=CA&contractId=CB')).status).toBe(400);
+    expect((await request(app).get('/api/escrow/events?after=1-1&after=2-1')).status).toBe(400);
+  });
+
+  test('accepts fromLedger=0', async () => {
+    defaultStore.append([makeEvent({ id: '0-1', ledger: 0 })]);
+    const res = await request(app).get('/api/escrow/events?fromLedger=0');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(1);
   });
 
   // ── cursor pagination ─────────────────────────────────────────────────────

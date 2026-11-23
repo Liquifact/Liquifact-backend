@@ -16,6 +16,23 @@ const { EVENT_TYPES } = require('../indexer/decode');
 const { badRequest } = require('../errors');
 
 const router = Router();
+const STRICT_UINT = /^\d+$/;
+
+/**
+ * Parses a single query parameter as a strict non-negative safe integer.
+ * Rejects repeated params (arrays), empty strings, signs, decimals, scientific
+ * notation, and trailing characters.
+ *
+ * @param {unknown} raw raw query value from `req.query`
+ * @returns {number | null} parsed integer, or `null` when invalid
+ */
+function parseStrictNonNegativeInt(raw) {
+  if (typeof raw !== 'string' || !STRICT_UINT.test(raw)) {
+    return null;
+  }
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
 
 /**
  * @swagger
@@ -79,10 +96,18 @@ const router = Router();
  */
 router.get('/', (req, res) => {
   const { type, investor, after } = req.query;
+
+  if (req.query.contractId !== undefined && typeof req.query.contractId !== 'string') {
+    throw badRequest('VALIDATION_FAILED', '`contractId` must be a single string.');
+  }
   const contractId =
     typeof req.query.contractId === 'string' && req.query.contractId.trim()
       ? req.query.contractId.trim()
       : undefined;
+
+  if (after !== undefined && typeof after !== 'string') {
+    throw badRequest('VALIDATION_FAILED', '`after` must be a single string.');
+  }
 
   if (type !== undefined && (typeof type !== 'string' || !EVENT_TYPES.includes(type))) {
     throw badRequest('VALIDATION_FAILED', `\`type\` must be one of: ${EVENT_TYPES.join(', ')}.`);
@@ -92,12 +117,12 @@ router.get('/', (req, res) => {
     throw badRequest('INVALID_INVESTOR_ADDRESS');
   }
 
-  // Validate limit
+  // Validate limit (strict integer 1-200)
   const rawLimit = req.query.limit;
   let limit = 50;
   if (rawLimit !== undefined) {
-    const parsed = parseInt(rawLimit, 10);
-    if (Number.isNaN(parsed) || parsed < 1 || parsed > 200) {
+    const parsed = parseStrictNonNegativeInt(rawLimit);
+    if (parsed === null || parsed < 1 || parsed > 200) {
       return res.status(400).json({
         type: 'https://liquifact.io/problems/validation-error',
         title: 'Validation Error',
@@ -108,11 +133,11 @@ router.get('/', (req, res) => {
     limit = parsed;
   }
 
-  // Validate fromLedger
+  // Validate fromLedger (strict non-negative integer)
   let fromLedger;
   if (req.query.fromLedger !== undefined) {
-    const parsed = parseInt(req.query.fromLedger, 10);
-    if (Number.isNaN(parsed) || parsed < 0) {
+    const parsed = parseStrictNonNegativeInt(req.query.fromLedger);
+    if (parsed === null) {
       return res.status(400).json({
         type: 'https://liquifact.io/problems/validation-error',
         title: 'Validation Error',
