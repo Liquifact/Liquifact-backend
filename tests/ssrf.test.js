@@ -52,6 +52,35 @@ describe('isPrivate', () => {
     ['1.1.1.1', false],
     ['172.32.0.1', false], // just outside 172.16/12
     ['192.169.0.1', false],
+    // IPv4-mapped hex forms and bracketed IPv6 literals
+    ['::ffff:7f00:1', true],
+    ['[::ffff:7f00:1]', true],
+    ['[::ffff:a00:1]', true],
+    ['::ffff:a00:1', true],
+    // 6to4 embedded addresses (2002::/16)
+    ['2002:a00:1::', true], // 6to4 of 10.0.0.1
+    ['[2002:a00:1::]', true],
+    ['2002:7f00:1::', true], // 6to4 of 127.0.0.1
+    ['2002:c0a8:101::', true], // 6to4 of 192.168.1.1
+    // NAT64 prefix (64:ff9b::/96)
+    ['64:ff9b::10.0.0.1', true],
+    ['64:ff9b::a00:1', true],
+    ['64:ff9b::7f00:1', true],
+    ['[64:ff9b::a00:1]', true],
+    // mixed-case input
+    ['::FFFF:7F00:1', true],
+    ['[::FfFf:A00:1]', true],
+    ['2002:A00:1::', true],
+    ['64:FF9B::A00:1', true],
+    // public IPv6 mapped/6to4/NAT64 forms remain allowed
+    ['::ffff:8.8.8.8', false],
+    ['::ffff:808:808', false],
+    ['[::ffff:808:808]', false],
+    ['64:ff9b::8.8.8.8', false],
+    ['64:ff9b::808:808', false],
+    ['2002:808:808::', false], // 6to4 of 8.8.8.8
+    ['2001:4860:4860::8888', false],
+    ['[2001:4860:4860::8888]', false],
   ])('%s → isPrivate=%s', (ip, expected) => {
     expect(isPrivate(ip)).toBe(expected);
   });
@@ -148,5 +177,52 @@ describe('validateWebhookUrl', () => {
 
   test('rejects invalid URL string', async () => {
     await expect(validateWebhookUrl('not-a-url')).rejects.toThrow(/invalid URL/);
+  });
+
+  describe('IPv6-mapped, 6to4, and NAT64 SSRF guards', () => {
+    test.each([
+      'https://[::ffff:7f00:1]/',
+      'https://[::ffff:a00:1]',
+      'https://[2002:a00:1::]/hook',
+      'https://[64:ff9b::a00:1]/hook',
+      'https://[::FFFF:7F00:1]/',
+      'https://[::FfFf:A00:1]/hook',
+    ])('rejects literal %s in production', async (url) => {
+      process.env.NODE_ENV = 'production';
+      await expect(validateWebhookUrl(url)).rejects.toThrow(/private.*SSRF/);
+    });
+
+    test('allows public IPv6 literal and pins it', async () => {
+      process.env.NODE_ENV = 'production';
+      const url = 'https://[2001:4860:4860::8888]/hook';
+      const result = await validateWebhookUrl(url);
+      expect(result.url).toBe(url);
+      expect(result.pinnedUrl).toBe(url);
+    });
+
+    test.each([
+      ['::ffff:7f00:1'],
+      ['::ffff:a00:1'],
+      ['2002:a00:1::'],
+      ['64:ff9b::a00:1'],
+      ['::FFFF:7F00:1'],
+    ])('rejects DNS-resolved AAAA record %s in production', async (ip) => {
+      process.env.NODE_ENV = 'production';
+      jest.spyOn(dns, 'resolve4').mockResolvedValue([]);
+      jest.spyOn(dns, 'resolve6').mockResolvedValue([ip]);
+      await expect(validateWebhookUrl('https://webhook.example.com/hook')).rejects.toThrow(
+        /private.*SSRF/,
+      );
+    });
+
+    test('allows DNS-resolved public AAAA record in production', async () => {
+      process.env.NODE_ENV = 'production';
+      jest.spyOn(dns, 'resolve4').mockResolvedValue([]);
+      jest.spyOn(dns, 'resolve6').mockResolvedValue(['2001:4860:4860::8888']);
+      const result = await validateWebhookUrl('https://webhook.example.com/hook');
+      expect(result.url).toBe('https://webhook.example.com/hook');
+      expect(result.pinnedUrl).toBe('https://[2001:4860:4860::8888]/hook');
+      expect(result.host).toBe('webhook.example.com');
+    });
   });
 });
