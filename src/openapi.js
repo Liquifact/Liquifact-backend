@@ -560,8 +560,26 @@ const IdempotencyHeaders = {
   },
 };
 
+const IdempotencyProblem = problemJson({ $ref: '#/components/schemas/Problem' });
+
+/**
+ * Shared idempotency failures. Every code is also resolvable through
+ * GET /errors/{code}; the legacy `error` field repeats the code.
+ */
 const IdempotencyErrors = {
-  422: { description: 'IDEMPOTENCY_KEY_REUSED: the key was used with a different payload', ...json(ErrorBody) },
+  400: {
+    description: 'IDEMPOTENCY_KEY_REQUIRED or INVALID_IDEMPOTENCY_KEY: the key is missing when required, or not 8-128 letters, digits, _ or -',
+    ...IdempotencyProblem,
+  },
+  409: {
+    description: 'IDEMPOTENCY_IN_PROGRESS: a request with this key is still in flight; retry after Retry-After',
+    headers: { 'Retry-After': { description: 'Seconds to wait before retrying', schema: { type: 'string' } } },
+    ...IdempotencyProblem,
+  },
+  422: {
+    description: 'IDEMPOTENCY_KEY_REUSED: the key was already used with a different payload',
+    ...IdempotencyProblem,
+  },
 };
 
 const authErrorBody = (codes) => ({
@@ -882,18 +900,18 @@ function createSpec(baseUrl) {
           responses: {
             201: { description: 'Created', headers: IdempotencyHeaders, ...json({ type: 'object', properties: { data: Invoice } }) },
             400: {
-              description: 'Validation failed (VALIDATION_FAILED, unknown keys rejected), or missing/invalid Idempotency-Key',
-              ...problemJson({ $ref: '#/components/schemas/Problem' }),
+              description: 'Validation failed (VALIDATION_FAILED, unknown keys rejected), or IDEMPOTENCY_KEY_REQUIRED / INVALID_IDEMPOTENCY_KEY',
+              ...IdempotencyProblem,
             },
             403: { description: 'SME_NOT_VERIFIED (REQUIRE_SME_VERIFICATION=true and the SME is not verified)', ...json(ref('ErrorResponse')) },
             404: { description: 'SME_NOT_FOUND (unknown smeId)', ...json(ref('ErrorResponse')) },
             409: {
               description: 'Duplicate invoice or possible duplicate receivable, or IDEMPOTENCY_IN_PROGRESS (retry after Retry-After)',
-              headers: { 'Retry-After': { schema: { type: 'string' } } },
+              headers: { 'Retry-After': { description: 'Seconds to wait before retrying', schema: { type: 'string' } } },
               ...json(DuplicateError),
             },
             415: { description: 'Content-Type must be application/json (UNSUPPORTED_MEDIA_TYPE)', ...problemJson({ $ref: '#/components/schemas/Problem' }) },
-            ...IdempotencyErrors,
+            422: IdempotencyErrors[422],
           },
         },
       },
@@ -955,13 +973,13 @@ function createSpec(baseUrl) {
             200: { description: 'Updated invoice', headers: IdempotencyHeaders, ...json(FundResponse) },
             400: {
               description: 'Invalid amount (non-finite, non-positive, above face value), missing/invalid investor, ' +
-                'unknown body key or invalid id (VALIDATION_FAILED)',
+                'unknown body key or invalid id (VALIDATION_FAILED), or IDEMPOTENCY_KEY_REQUIRED / INVALID_IDEMPOTENCY_KEY',
               ...json(FundingError),
             },
             404: { description: 'Not found', ...json(ErrorBody) },
             409: {
               description: 'Invoice not open, or IDEMPOTENCY_IN_PROGRESS (retry after Retry-After)',
-              headers: { 'Retry-After': { schema: { type: 'string' } } },
+              headers: { 'Retry-After': { description: 'Seconds to wait before retrying', schema: { type: 'string' } } },
               ...json(ErrorBody),
             },
             415: { description: 'Content-Type must be application/json (UNSUPPORTED_MEDIA_TYPE)', ...problemJson({ $ref: '#/components/schemas/Problem' }) },
@@ -1665,13 +1683,25 @@ function createSpec(baseUrl) {
         post: {
           tags: ['SMEs'],
           summary: 'Register an SME for KYB review',
-          description: 'Creates the SME with status `pending`. contactEmail and registrationNumber are PII and are only returned to admins.',
+          description:
+            'Creates the SME with status `pending`. contactEmail and registrationNumber are PII and are only returned to admins. ' +
+            'Supports the same Idempotency-Key contract as invoice creation: repeating the key with the same payload replays ' +
+            'the original 201 (Idempotent-Replayed: true), while reusing it with a different payload returns 422.',
+          parameters: [IdempotencyKeyParam],
           requestBody: { required: true, ...json(ref('CreateSmeRequest')) },
           responses: {
-            201: { description: 'SME created (pending review)', ...json({ type: 'object', properties: { data: ref('SmeRecord') } }) },
-            400: { description: 'Invalid SME fields (VALIDATION_FAILED)', ...problemJson({ $ref: '#/components/schemas/Problem' }) },
-            409: { description: 'SME_DUPLICATE: same country + registration number, or same Stellar address', ...json(ref('ErrorResponse')) },
+            201: { description: 'SME created (pending review)', headers: IdempotencyHeaders, ...json({ type: 'object', properties: { data: ref('SmeRecord') } }) },
+            400: {
+              description: 'Invalid SME fields (VALIDATION_FAILED), or IDEMPOTENCY_KEY_REQUIRED / INVALID_IDEMPOTENCY_KEY',
+              ...IdempotencyProblem,
+            },
+            409: {
+              description: 'SME_DUPLICATE: same country + registration number, or same Stellar address; or IDEMPOTENCY_IN_PROGRESS',
+              headers: { 'Retry-After': { description: 'Seconds to wait before retrying', schema: { type: 'string' } } },
+              ...json(ref('ErrorResponse')),
+            },
             415: { description: 'Content-Type must be application/json', ...problemJson({ $ref: '#/components/schemas/Problem' }) },
+            422: IdempotencyErrors[422],
           },
         },
       },
