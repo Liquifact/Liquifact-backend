@@ -176,6 +176,16 @@ const ERROR_CATALOG = {
     status: 409,
     description: 'The invoice is not in a status that allows this transition.',
   },
+  PRECONDITION_FAILED: {
+    title: 'Precondition Failed',
+    status: 412,
+    description: 'The If-Match precondition did not match the current version of the invoice.',
+  },
+  PRECONDITION_REQUIRED: {
+    title: 'Precondition Required',
+    status: 428,
+    description: 'This operation requires an If-Match header carrying the current invoice version.',
+  },
   ROUTE_NOT_FOUND: {
     title: 'Route Not Found',
     status: 404,

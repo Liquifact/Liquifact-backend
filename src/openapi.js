@@ -16,6 +16,35 @@ const GENERATED_SCHEMAS = new OpenApiGeneratorV3(registry.definitions).generateC
 const ref = (name) => ({ $ref: `#/components/schemas/${name}` });
 const Invoice = ref('Invoice');
 
+/**
+ * Optimistic concurrency: fund/settle/cancel/escrow-link honor an optional
+ * If-Match header carrying the invoice's strong ETag. A missing header yields
+ * 428 only when REQUIRE_IF_MATCH=true; a stale value yields 412.
+ */
+const IfMatchHeader = {
+  name: 'If-Match',
+  in: 'header',
+  required: false,
+  description: 'Strong ETag of the invoice version the client last read (e.g. "\"3\""). Mismatch returns 412 PRECONDITION_FAILED; absence returns 428 when REQUIRE_IF_MATCH=true.',
+  schema: { type: 'string', example: '"3"' },
+};
+
+const PreconditionFailedProblem = {
+  ...Problem,
+  properties: {
+    ...Problem.properties,
+    code: { type: 'string', enum: ['PRECONDITION_FAILED'] },
+  },
+};
+
+const PreconditionRequiredProblem = {
+  ...Problem,
+  properties: {
+    ...Problem.properties,
+    code: { type: 'string', enum: ['PRECONDITION_REQUIRED'] },
+  },
+};
+
 const FundingError = {
   type: 'object',
   required: ['error'],
