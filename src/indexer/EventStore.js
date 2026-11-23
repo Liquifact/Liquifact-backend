@@ -8,8 +8,10 @@
  * - Bounded: capped at MAX_EVENTS entries; oldest entries evicted when the cap
  *   is reached (FIFO eviction). This prevents unbounded memory growth in a
  *   serverless / single-process environment.
- * - Cursor persistence: a single string cursor (Soroban RPC pagination token)
- *   is stored alongside the events.
+ * - Cursor persistence: Soroban RPC pagination tokens are stored per cursor
+ *   key. The default key holds the cursor for the single configured contract;
+ *   multi-contract indexing stores one cursor per contract chunk (see
+ *   `src/indexer/escrow-indexer.js`).
  *
  * Cap and eviction
  * ────────────────
@@ -23,6 +25,9 @@
 
 const DEFAULT_MAX_EVENTS = 10_000;
 
+/** Cursor key used when the caller does not scope the cursor to a chunk. */
+const DEFAULT_CURSOR_KEY = '__default__';
+
 /**
  * Create a new in-memory EventStore instance.
  *
@@ -34,8 +39,8 @@ function createEventStore({ maxEvents = DEFAULT_MAX_EVENTS } = {}) {
   /** @type {Map<string, object>} event id → decoded event */
   const events = new Map();
 
-  /** @type {string | null} */
-  let cursor = null;
+  /** @type {Map<string, string>} cursor key → Soroban RPC pagination token */
+  const cursors = new Map();
 
   /**
    * Append decoded events idempotently.
@@ -66,22 +71,24 @@ function createEventStore({ maxEvents = DEFAULT_MAX_EVENTS } = {}) {
   }
 
   /**
-   * Return the current pagination cursor.
+   * Return the pagination cursor for a key.
    *
+   * @param {string} [key] cursor key (defaults to the single-contract cursor)
    * @returns {string | null}
    */
-  function getCursor() {
-    return cursor;
+  function getCursor(key = DEFAULT_CURSOR_KEY) {
+    return cursors.get(key) ?? null;
   }
 
   /**
-   * Persist a new cursor value.
+   * Persist a new cursor value for a key.
    *
    * @param {string} newCursor
+   * @param {string} [key] cursor key (defaults to the single-contract cursor)
    * @returns {void}
    */
-  function setCursor(newCursor) {
-    cursor = String(newCursor);
+  function setCursor(newCursor, key = DEFAULT_CURSOR_KEY) {
+    cursors.set(key, String(newCursor));
   }
 
   /**
@@ -90,12 +97,13 @@ function createEventStore({ maxEvents = DEFAULT_MAX_EVENTS } = {}) {
    * @param {object} [params]
    * @param {string} [params.type]       - Filter by event type.
    * @param {string} [params.investor]   - Filter by investor address in data.
+   * @param {string} [params.contractId] - Filter by originating escrow contract id.
    * @param {number} [params.fromLedger] - Include only events at or after this ledger.
    * @param {number} [params.limit=50]   - Maximum results to return (1–200).
    * @param {string} [params.after]      - Return events after this event id (cursor-based pagination).
    * @returns {{ data: object[], nextCursor: string | null }}
    */
-  function query({ type, investor, fromLedger, limit = 50, after } = {}) {
+  function query({ type, investor, contractId, fromLedger, limit = 50, after } = {}) {
     const maxLimit = Math.min(Math.max(1, Number(limit) || 50), 200);
     const all = [...events.values()];
 
@@ -105,6 +113,9 @@ function createEventStore({ maxEvents = DEFAULT_MAX_EVENTS } = {}) {
       const idx = all.findIndex((e) => e.id === after);
       if (idx !== -1) {
         startIdx = idx + 1;
+      } else {
+        // Cursor not found - treat as invalid, do not silently restart
+        return { error: 'INVALID_CURSOR' };
       }
     }
 
@@ -114,6 +125,7 @@ function createEventStore({ maxEvents = DEFAULT_MAX_EVENTS } = {}) {
     const filtered = slice.filter((evt) => {
       if (type && evt.type !== type) {return false;}
       if (investor && evt.data?.investor !== investor) {return false;}
+      if (contractId && evt.contractId !== contractId) {return false;}
       if (fromLedger != null && evt.ledger < Number(fromLedger)) {return false;}
       return true;
     });
@@ -140,7 +152,7 @@ function createEventStore({ maxEvents = DEFAULT_MAX_EVENTS } = {}) {
    */
   function clear() {
     events.clear();
-    cursor = null;
+    cursors.clear();
   }
 
   return { append, getCursor, setCursor, query, size, clear };
@@ -149,4 +161,4 @@ function createEventStore({ maxEvents = DEFAULT_MAX_EVENTS } = {}) {
 /** Singleton store shared across the process lifetime. */
 const defaultStore = createEventStore();
 
-module.exports = { createEventStore, defaultStore };
+module.exports = { createEventStore, defaultStore, DEFAULT_CURSOR_KEY };

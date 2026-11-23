@@ -107,6 +107,39 @@ describe('GET /api/escrow/events', () => {
     expect(res.body.code).toBe('INVALID_INVESTOR_ADDRESS');
   });
 
+  // ── contractId filter ────────────────────────────────────────────────────
+
+  test('filters by originating contractId', async () => {
+    defaultStore.append([
+      makeEvent({ id: '250-1', contractId: 'CCONTRACT_A' }),
+      makeEvent({ id: '250-2', contractId: 'CCONTRACT_B' }),
+      makeEvent({ id: '250-3', contractId: 'CCONTRACT_B' }),
+    ]);
+    const res = await request(app).get('/api/escrow/events?contractId=CCONTRACT_B');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(2);
+    expect(res.body.data.every((e) => e.contractId === 'CCONTRACT_B')).toBe(true);
+  });
+
+  test('returns empty array when contractId matches nothing', async () => {
+    defaultStore.append([makeEvent({ id: '251-1', contractId: 'CCONTRACT_A' })]);
+    const res = await request(app).get('/api/escrow/events?contractId=CMISSING');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(0);
+  });
+
+  test('combines contractId + type filter', async () => {
+    defaultStore.append([
+      makeEvent({ id: '252-1', type: 'funded', contractId: 'CCONTRACT_A' }),
+      makeEvent({ id: '252-2', type: 'settled', contractId: 'CCONTRACT_A' }),
+      makeEvent({ id: '252-3', type: 'funded', contractId: 'CCONTRACT_B' }),
+    ]);
+    const res = await request(app).get('/api/escrow/events?contractId=CCONTRACT_A&type=funded');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(1);
+    expect(res.body.data[0].id).toBe('252-1');
+  });
+
   // ── fromLedger filter ─────────────────────────────────────────────────────
 
   test('filters by fromLedger', async () => {
