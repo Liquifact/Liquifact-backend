@@ -26,6 +26,36 @@ const ERROR_CATALOG = {
     status: 503,
     description: 'The admin API token is not configured for this deployment.',
   },
+  UNAUTHENTICATED: {
+    title: 'Unauthenticated',
+    status: 401,
+    description: 'Authentication is required or the provided credentials are invalid.',
+  },
+  FORBIDDEN: {
+    title: 'Forbidden',
+    status: 403,
+    description: 'The authenticated principal does not have permission to perform this operation.',
+  },
+  NOT_INVOICE_OWNER: {
+    title: 'Not Invoice Owner',
+    status: 403,
+    description: 'Only the SME key that created the invoice may mutate it.',
+  },
+  AUTH_NOT_CONFIGURED: {
+    title: 'API Key Authentication Not Configured',
+    status: 503,
+    description: 'API key authentication is not configured for this deployment.',
+  },
+  UNAUTHORIZED: {
+    title: 'Unauthorized',
+    status: 401,
+    description: 'The provided admin token is missing or invalid.',
+  },
+  ADMIN_TOKEN_NOT_CONFIGURED: {
+    title: 'Admin Token Not Configured',
+    status: 503,
+    description: 'The admin API token is not configured for this deployment.',
+  },
   MALFORMED_JSON: {
     title: 'Malformed JSON',
     status: 400,

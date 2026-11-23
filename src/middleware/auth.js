@@ -165,10 +165,56 @@ function requireRole(...roles) {
   return guard;
 }
 
+/**
+ * Enforces invoice ownership for SME mutations.
+ *
+ * Admin principals bypass ownership. SME principals may mutate only invoices
+ * whose `createdBy` exactly matches the authenticated API key id. Records
+ * without `createdBy`, including seeded demo invoices, are not claimable and
+ * remain available only to admins.
+ *
+ * @param {import('express').Request} req request
+ * @param {import('express').Response} res response
+ * @param {object|null} invoice invoice record
+ * @param {{ action?: string, before?: object|null }} [options] audit context
+ * @returns {true|import('express').Response} true when allowed
+ */
+function assertOwnerOrAdmin(req, res, invoice, { action = 'invoice.mutation', before = null } = {}) {
+  const principal = req.principal;
+  if (principal?.role === 'admin') {
+    return true;
+  }
+  if (
+    principal?.role === 'sme' &&
+    typeof invoice?.createdBy === 'string' &&
+    invoice.createdBy === principal.keyId
+  ) {
+    return true;
+  }
+
+  if (typeof req.audit === 'function') {
+    req.audit({
+      action,
+      resourceType: 'invoice',
+      resourceId: req.params?.id || invoice?.id,
+      outcome: 'rejected',
+      statusCode: 403,
+      before,
+      metadata: { code: 'NOT_INVOICE_OWNER' },
+    });
+  }
+  const detail = 'Only the SME that created this invoice may perform this mutation';
+  return sendProblem(req, res, 'NOT_INVOICE_OWNER', {
+    detail,
+    extra: { error: detail },
+  });
+}
+
 module.exports = {
   authenticate,
   constantTimeEqual,
   extractKey,
   requireRole,
   sha256Hex,
+  assertOwnerOrAdmin,
 };
