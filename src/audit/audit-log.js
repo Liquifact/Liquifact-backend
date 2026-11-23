@@ -25,6 +25,7 @@
 const crypto = require('crypto');
 const net = require('net');
 const config = require('../config');
+const { createFileStore, AuditIntegrityError } = require('./file-store');
 
 const GENESIS_HASH = '0'.repeat(64);
 const OUTCOMES = ['success', 'rejected'];
@@ -351,7 +352,13 @@ function createAuditLog({ store = createMemoryStore(), now = () => new Date() } 
     },
 
     /** @returns {object} verifyChain result for the retained entries */
-    verify: () => verifyChain(store.entries()),
+    verify() {
+      if (typeof store.corrupt === 'function' && store.corrupt()) {
+        const c = store.corrupt();
+        return { valid: false, brokenAt: c.brokenAt };
+      }
+      return verifyChain(store.entries());
+    },
 
     /** Empties the log. Not reachable from the HTTP API; tests only. */
     resetForTests() {
@@ -362,16 +369,39 @@ function createAuditLog({ store = createMemoryStore(), now = () => new Date() } 
   };
 }
 
-const auditLog = createAuditLog({ store: createMemoryStore({ maxEntries: config.auditMaxEntries }) });
+/**
+ * Selects the default audit store from configuration: durable file store when
+ * `AUDIT_LOG_FILE` is set, otherwise the bounded in-memory store.
+ *
+ * @param {object} [cfg=config] configuration object
+ * @returns {object} store instance
+ */
+function createConfiguredStore(cfg = config) {
+  if (cfg.auditLogFile) {
+    return createFileStore({
+      path: cfg.auditLogFile,
+      maxEntries: cfg.auditMaxEntries,
+      rotateBytes: cfg.auditRotateBytes,
+      verifyChain,
+    });
+  }
+  return createMemoryStore({ maxEntries: cfg.auditMaxEntries });
+}
+
+const auditLog = createAuditLog({ store: createConfiguredStore(config) });
 
 module.exports = {
   GENESIS_HASH,
   canonicalJson,
   computeHash,
   verifyChain,
+  deepFreeze,
   redact,
   truncateIp,
   createMemoryStore,
+  createFileStore,
+  createConfiguredStore,
+  AuditIntegrityError,
   createAuditLog,
   auditLog,
   append: (input) => auditLog.append(input),

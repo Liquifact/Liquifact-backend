@@ -133,16 +133,43 @@ describe('POST /api/internal/indexer/run — authentication', () => {
     expect(runOnce).toHaveBeenCalledWith(expect.objectContaining({ maxPages: 10 }));
   });
 
-  test('clamps maxPages to 20', async () => {
+  test.each([
+    ['0 (below minimum)', 0],
+    ['21 (above maximum)', 21],
+    ['"abc" (non-numeric string)', 'abc'],
+    ['1.5 (non-integer float)', 1.5],
+  ])('returns 400 VALIDATION_FAILED when maxPages is %s', async (_label, invalidMaxPages) => {
     process.env.CRON_SECRET = 'my-secret';
     const app = createApp();
 
-    await request(app)
+    const res = await request(app)
       .post('/api/internal/indexer/run')
       .set('Authorization', 'Bearer my-secret')
-      .send({ maxPages: 999 });
+      .send({ maxPages: invalidMaxPages });
 
-    expect(runOnce).toHaveBeenCalledWith(expect.objectContaining({ maxPages: 20 }));
+    expect(res.status).toBe(400);
+    expect(res.headers['content-type']).toMatch(/application\/problem\+json/);
+    expect(res.body).toMatchObject({
+      status: 400,
+      code: 'VALIDATION_FAILED',
+      title: 'Validation Failed',
+    });
+    expect(runOnce).not.toHaveBeenCalled();
+  });
+
+  test('accepts boundary maxPages values 1 and 20', async () => {
+    process.env.CRON_SECRET = 'my-secret';
+    const app = createApp();
+
+    for (const maxPages of [1, 20]) {
+      const res = await request(app)
+        .post('/api/internal/indexer/run')
+        .set('Authorization', 'Bearer my-secret')
+        .send({ maxPages });
+
+      expect(res.status).toBe(200);
+      expect(runOnce).toHaveBeenCalledWith(expect.objectContaining({ maxPages }));
+    }
   });
 
   test('uses default maxPages=5 when not supplied', async () => {

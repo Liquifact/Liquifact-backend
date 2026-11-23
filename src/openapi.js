@@ -2,6 +2,7 @@
 
 const config = require('./config');
 const { SORTS } = require('./services/invoice-query');
+const { EVENT_TYPES } = require('./indexer/decode');
 
 const { OpenApiGeneratorV3 } = require('@asteasolutions/zod-to-openapi');
 const { registry } = require('./schemas');
@@ -461,7 +462,10 @@ const WebhookSubscription = {
     url: { type: 'string', format: 'uri', example: 'https://example.com/hooks' },
     events: {
       type: 'array',
-      items: { type: 'string', enum: ['invoice.created', 'invoice.funding_received', 'invoice.funded'] },
+      items: {
+        type: 'string',
+        enum: ['invoice.created', 'invoice.funding_received', 'invoice.funded', 'invoice.reconciliation_drift'],
+      },
     },
     createdAt: { type: 'string', format: 'date-time' },
   },
@@ -636,6 +640,7 @@ function createSpec(baseUrl) {
       { name: 'Investors' },
       { name: 'Escrow' },
       { name: 'Reconciliation' },
+      { name: 'Internal' },
       { name: 'Audit' },
       { name: 'Webhooks' },
       { name: 'SMEs' },
@@ -653,6 +658,11 @@ function createSpec(baseUrl) {
           type: 'http',
           scheme: 'bearer',
           description: 'Shared admin secret: `Authorization: Bearer <ADMIN_API_TOKEN>`',
+        },
+        cronBearer: {
+          type: 'http',
+          scheme: 'bearer',
+          description: 'Scheduler secret: `Authorization: Bearer <CRON_SECRET>`',
         },
       },
       schemas: {
@@ -672,6 +682,17 @@ function createSpec(baseUrl) {
         Escrow,
         LinkError,
         InvestorPosition,
+        DecodedEscrowEvent: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            type: { type: 'string' },
+            investor: { type: 'string' },
+            ledger: { type: 'integer' },
+            createdAt: { type: 'string', format: 'date-time' },
+            decoded: { type: 'object' },
+          },
+        },
         EscrowState,
         EscrowLiveResponse,
         HealthResponse,
@@ -1213,6 +1234,44 @@ function createSpec(baseUrl) {
           },
         },
       },
+      '/api/escrow/events': {
+        get: {
+          tags: ['Escrow'],
+          summary: 'List decoded escrow contract events',
+          description: 'Supports filtering by event type, investor Stellar public key, and minimum ledger, with cursor-based pagination.',
+          parameters: [
+            {
+              name: 'type',
+              in: 'query',
+              schema: { type: 'string', enum: EVENT_TYPES },
+              description: 'Filter by decoded event type.',
+            },
+            {
+              name: 'investor',
+              in: 'query',
+              schema: { type: 'string' },
+              description: 'Filter by investor Stellar G-address.',
+            },
+            { name: 'fromLedger', in: 'query', schema: { type: 'integer', minimum: 0 } },
+            { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 } },
+            { name: 'after', in: 'query', schema: { type: 'string' } },
+          ],
+          responses: {
+            200: {
+              description: 'Paginated list of decoded escrow events.',
+              ...json({
+                type: 'object',
+                required: ['data', 'nextCursor'],
+                properties: {
+                  data: { type: 'array', items: { type: 'object' } },
+                  nextCursor: { type: 'string', nullable: true },
+                },
+              }),
+            },
+            400: { description: 'Invalid query parameter.', ...problemJson({ $ref: '#/components/schemas/Problem' }) },
+          },
+        },
+      },
       '/api/escrow/investors/{address}': {
         get: {
           tags: ['Escrow'],
@@ -1236,6 +1295,57 @@ function createSpec(baseUrl) {
                 type: 'object',
                 required: ['code', 'method'],
                 properties: { code: { type: 'string', enum: ['ESCROW_READ_FAILED'] }, method: { type: 'string' } },
+              }),
+            },
+          },
+        },
+      },
+
+      '/api/escrow/events': {
+        get: {
+          tags: ['Escrow'],
+          summary: 'List decoded escrow contract events',
+          description: 'Returns decoded Soroban escrow contract events stored by the indexer. Supports filtering by type, investor address, and fromLedger. Uses cursor-based pagination via limit and after parameters.',
+          parameters: [
+            { name: 'type', in: 'query', schema: { type: 'string', description: 'Filter events by decoded event type.' } },
+            { name: 'investor', in: 'query', schema: { type: 'string', description: 'Filter events by investor Stellar address (G...).' } },
+            { name: 'fromLedger', in: 'query', schema: { type: 'integer', minimum: 0, description: 'Include only events at or after this ledger sequence.' } },
+            { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200, default: 50, description: 'Maximum number of events to return (1-200).' } },
+            { name: 'after', in: 'query', schema: { type: 'string', description: 'Return events after this event id (cursor-based pagination).' } },
+          ],
+          responses: {
+            200: {
+              description: 'Paginated list of decoded escrow events',
+              ...json({
+                type: 'object',
+                required: ['data', 'nextCursor'],
+                properties: {
+                  data: {
+                    type: 'array',
+                    items: { $ref: '#/components/schemas/DecodedEscrowEvent' },
+                    description: 'List of decoded escrow events.'
+                  },
+                  nextCursor: {
+                    type: 'string',
+                    nullable: true,
+                    description: 'Cursor for the next page; null when no further records remain.'
+                  },
+                },
+              }),
+            },
+            400: {
+              description: 'Invalid or evicted cursor',
+              ...problemJson({
+                type: 'object',
+                required: ['type', 'title', 'status', 'code', 'instance'],
+                properties: {
+                  type: { type: 'string', format: 'uri' },
+                  title: { type: 'string' },
+                  status: { type: 'integer' },
+                  code: { type: 'string', enum: ['INVALID_CURSOR'] },
+                  detail: { type: 'string' },
+                  instance: { type: 'string', format: 'uri' },
+                },
               }),
             },
           },
@@ -1441,6 +1551,62 @@ function createSpec(baseUrl) {
           },
         },
       },
+      '/api/reconciliation/latest': {
+        get: {
+          tags: ['Reconciliation'],
+          summary: 'Get the latest scheduled reconciliation report',
+          description:
+            'Returns the report cached by POST /api/internal/reconciliation/run together with its age. ' +
+            'Admin token required; 404 when no scheduled run has completed yet.',
+          security: adminSecurity,
+          responses: {
+            200: {
+              description: 'Cached reconciliation report and age',
+              ...json({
+                type: 'object',
+                required: ['report', 'ageMs', 'ageSeconds'],
+                properties: {
+                  report: ReconciliationReport,
+                  checkedAt: { type: 'string', format: 'date-time' },
+                  ageMs: { type: 'integer', nullable: true, description: 'Milliseconds since report.checkedAt' },
+                  ageSeconds: { type: 'integer', nullable: true, description: 'ageMs floored to seconds' },
+                },
+              }),
+            },
+            401: { description: 'Missing or invalid admin token', ...json(ErrorBody) },
+            404: { description: 'No reconciliation report available', ...json(ErrorBody) },
+            503: { description: 'ADMIN_API_TOKEN is not configured on the server', ...json(ErrorBody) },
+          },
+        },
+      },
+      '/api/internal/reconciliation/run': {
+        post: {
+          tags: ['Internal', 'Reconciliation'],
+          summary: 'Run scheduled reconciliation and emit drift alerts',
+          description:
+            'Runs reconcileAll(), caches the report for GET /api/reconciliation/latest, and emits one ' +
+            'invoice.reconciliation_drift webhook event per invoice transitioning from in_sync to drift/error. ' +
+            'Protected by Bearer CRON_SECRET; returns 404 when CRON_SECRET is unset.',
+          security: [{ cronBearer: [] }],
+          responses: {
+            200: {
+              description: 'Reconciliation report with alert counts',
+              ...json({
+                type: 'object',
+                required: [...ReconciliationReport.required, 'alerts', 'alertedInvoiceIds'],
+                properties: {
+                  ...ReconciliationReport.properties,
+                  alerts: { type: 'integer', description: 'Number of drift webhook events emitted' },
+                  alertedInvoiceIds: { type: 'array', items: { type: 'string' } },
+                },
+              }),
+            },
+            401: { description: 'Missing or invalid CRON_SECRET bearer token', ...problemJson({ $ref: '#/components/schemas/Problem' }) },
+            404: { description: 'Endpoint not available (CRON_SECRET not configured)', ...json(ErrorBody) },
+            500: { description: 'Reconciliation run failed', ...problemJson({ $ref: '#/components/schemas/Problem' }) },
+          },
+        },
+      },
       '/api/smes': {
         post: {
           tags: ['SMEs'],
@@ -1507,7 +1673,10 @@ function createSpec(baseUrl) {
                 },
                 events: {
                   type: 'array',
-                  items: { type: 'string', enum: ['invoice.created', 'invoice.funding_received', 'invoice.funded'] },
+                  items: {
+        type: 'string',
+        enum: ['invoice.created', 'invoice.funding_received', 'invoice.funded', 'invoice.reconciliation_drift'],
+      },
                   example: ['invoice.created', 'invoice.funded'],
                 },
               },
@@ -1551,15 +1720,55 @@ function createSpec(baseUrl) {
       '/api/webhooks/{id}/deliveries': {
         get: {
           tags: ['Webhooks'],
-          summary: 'Last 50 delivery records for a webhook',
+          summary: 'Delivery records for a webhook, optionally filtered by status and limited to 1–50 records',
           security: adminSecurity,
-          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          parameters: [
+            { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+            { name: 'status', in: 'query', required: false, schema: { type: 'string', enum: ['pending', 'delivered', 'failed'] } },
+            { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 50, default: 50 } },
+          ],
           responses: {
             200: {
               description: 'Delivery log (most recent first)',
               ...json({ type: 'object', properties: { data: { type: 'array', items: DeliveryRecord } } }),
             },
             404: { description: 'Webhook not found', ...json(ErrorBody) },
+            400: { description: 'Invalid status or limit', ...json(ErrorBody) },
+            ...adminErrors,
+          },
+        },
+      },
+      '/api/webhooks/{id}/deliveries/{deliveryId}/replay': {
+        post: {
+          tags: ['Webhooks'],
+          summary: 'Replay a webhook delivery',
+          description:
+            'Re-signs the stored raw event body with a fresh timestamp, preserves the original eventId for deduplication, and appends a new delivery record.',
+          security: adminSecurity,
+          parameters: [
+            { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+            { name: 'deliveryId', in: 'path', required: true, schema: { type: 'string' } },
+          ],
+          responses: {
+            202: {
+              description: 'Replay accepted and queued for asynchronous delivery',
+              ...json({
+                type: 'object',
+                properties: {
+                  data: {
+                    type: 'object',
+                    properties: {
+                      deliveryId: { type: 'string', example: 'dlv_a1b2c3d4e5f6' },
+                      eventId: { type: 'string', example: 'evt_1a2b3c4d5e6f7a8b' },
+                      replayedFrom: { type: 'string', example: 'dlv_001122334455' },
+                      status: { type: 'string', enum: ['pending'] },
+                    },
+                  },
+                },
+              }),
+            },
+            404: { description: 'Webhook or delivery not found', ...json(ErrorBody) },
+            409: { description: 'Delivery is still pending or payload is unavailable', ...json(ErrorBody) },
             ...adminErrors,
           },
         },
