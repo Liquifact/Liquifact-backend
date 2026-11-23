@@ -163,10 +163,86 @@ describe('recording mutations', () => {
     expect(entries()[1].requestId).toMatch(/^[0-9a-f-]{36}$/);
   });
 
-  test('the client IP is stored truncated', async () => {
-    await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).set('X-Forwarded-For', '203.0.113.77').send({ amount: 1, investor: INVESTOR });
-    expect(entries()[0].ip).toBe('203.0.113.0/24');
+  test('spoofed X-Forwarded-For is ignored by default and client IP is stored truncated', async () => {
+    await request(app)
+      .post('/api/invoices/INV_0002/fund')
+      .set(authHeader())
+      .set('X-Forwarded-For', '203.0.113.77')
+      .send({ amount: 1, investor: INVESTOR });
+    expect(entries()[0].ip).not.toBe('203.0.113.0/24');
+    expect(['127.0.0.0/24', '0:0:0::/48']).toContain(entries()[0].ip);
     expect(JSON.stringify(entries())).not.toContain('203.0.113.77');
+  });
+
+  test('audit ip honors TRUST_PROXY hop-count and CIDR settings and ignores spoofed hops', async () => {
+    /**
+     * Loads an isolated app + auditLog pair with a specific TRUST_PROXY env value.
+     *
+     * @param {string|undefined} trustProxyValue TRUST_PROXY env override
+     * @returns {{ isolatedApp: object, isolatedAuditLog: object }} isolated instances
+     */
+    function loadIsolated(trustProxyValue) {
+      const prevTrustProxy = process.env.TRUST_PROXY;
+      const prevVercel = process.env.VERCEL;
+      let isolatedApp;
+      let isolatedAuditLog;
+      try {
+        delete process.env.VERCEL;
+        if (trustProxyValue === undefined) {
+          delete process.env.TRUST_PROXY;
+        } else {
+          process.env.TRUST_PROXY = trustProxyValue;
+        }
+        jest.isolateModules(() => {
+          isolatedAuditLog = require('../src/audit/audit-log').auditLog;
+          isolatedAuditLog.resetForTests();
+          isolatedApp = require('../src/app');
+        });
+      } finally {
+        if (prevTrustProxy === undefined) {
+          delete process.env.TRUST_PROXY;
+        } else {
+          process.env.TRUST_PROXY = prevTrustProxy;
+        }
+        if (prevVercel === undefined) {
+          delete process.env.VERCEL;
+        } else {
+          process.env.VERCEL = prevVercel;
+        }
+      }
+      return { isolatedApp, isolatedAuditLog };
+    }
+
+    // 1. Hop count = 1: trusts the rightmost proxy-appended IP, ignoring spoofed leftmost entries
+    const hop1 = loadIsolated('1');
+    await request(hop1.isolatedApp)
+      .post('/api/invoices/INV_0002/fund')
+      .set(authHeader())
+      .set('X-Forwarded-For', '198.51.100.5, 203.0.113.77')
+      .send({ amount: 1, investor: INVESTOR });
+    expect(hop1.isolatedAuditLog.entries()[0].ip).toBe('203.0.113.0/24');
+    expect(JSON.stringify(hop1.isolatedAuditLog.entries())).not.toContain('203.0.113.77');
+    expect(JSON.stringify(hop1.isolatedAuditLog.entries())).not.toContain('198.51.100');
+
+    // 2. CIDR list covering loopback: honors X-Forwarded-For from the local test socket
+    const cidrTrusted = loadIsolated('127.0.0.0/8, ::1/128');
+    await request(cidrTrusted.isolatedApp)
+      .post('/api/invoices/INV_0002/fund')
+      .set(authHeader())
+      .set('X-Forwarded-For', '203.0.113.77')
+      .send({ amount: 1, investor: INVESTOR });
+    expect(cidrTrusted.isolatedAuditLog.entries()[0].ip).toBe('203.0.113.0/24');
+    expect(JSON.stringify(cidrTrusted.isolatedAuditLog.entries())).not.toContain('203.0.113.77');
+
+    // 3. CIDR list NOT covering loopback: ignores spoofed X-Forwarded-For
+    const cidrUntrusted = loadIsolated('10.0.0.0/8');
+    await request(cidrUntrusted.isolatedApp)
+      .post('/api/invoices/INV_0002/fund')
+      .set(authHeader())
+      .set('X-Forwarded-For', '203.0.113.77')
+      .send({ amount: 1, investor: INVESTOR });
+    expect(cidrUntrusted.isolatedAuditLog.entries()[0].ip).not.toBe('203.0.113.0/24');
+    expect(['127.0.0.0/24', '0:0:0::/48']).toContain(cidrUntrusted.isolatedAuditLog.entries()[0].ip);
   });
 
   test('the chain verifies after a mix of mutations', async () => {
