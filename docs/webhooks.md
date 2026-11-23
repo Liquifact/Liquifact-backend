@@ -2,6 +2,39 @@ Webhooks
 
 LiquiFact backend emits webhooks to notify tenant systems about important escrow events.
 
+## Invoice Lifecycle Events
+
+The `/api/webhooks` subscription API supports these invoice events:
+
+- `invoice.created` — an invoice was created.
+- `invoice.funding_received` — an investor contribution was recorded.
+- `invoice.funded` — an invoice became fully funded.
+- `invoice.settled` — a funded invoice was successfully settled.
+- `invoice.cancelled` — an open or funded invoice was successfully cancelled.
+- `invoice.reconciliation_drift` — reconciliation detected an invoice drift.
+
+Settlement and cancellation events are emitted only after the invoice state
+transition succeeds. Rejected transitions do not emit an event. Deliveries use
+the same signed envelope for every event:
+
+```json
+{
+  "id": "evt_0123456789abcdef",
+  "type": "invoice.settled",
+  "createdAt": "2026-11-23T12:00:00.000Z",
+  "data": {
+    "invoice": {
+      "id": "INV_0001",
+      "status": "settled"
+    }
+  }
+}
+```
+
+Subscribers receive this envelope as the request body; the invoice is its
+presented API representation, including computed fields such as
+`remainingCapacity`.
+
 ## Event Types
 
 Currently, the following events are supported:

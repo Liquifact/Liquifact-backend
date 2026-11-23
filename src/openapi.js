@@ -29,22 +29,6 @@ const IfMatchHeader = {
   schema: { type: 'string', example: '"3"' },
 };
 
-const PreconditionFailedProblem = {
-  ...Problem,
-  properties: {
-    ...Problem.properties,
-    code: { type: 'string', enum: ['PRECONDITION_FAILED'] },
-  },
-};
-
-const PreconditionRequiredProblem = {
-  ...Problem,
-  properties: {
-    ...Problem.properties,
-    code: { type: 'string', enum: ['PRECONDITION_REQUIRED'] },
-  },
-};
-
 const FundingError = {
   type: 'object',
   required: ['error'],
@@ -150,6 +134,22 @@ const Problem = {
       },
     },
     error: { type: 'string', description: 'Legacy field equal to title for backward compatibility (will be removed in next release)' },
+  },
+};
+
+const PreconditionFailedProblem = {
+  ...Problem,
+  properties: {
+    ...Problem.properties,
+    code: { type: 'string', enum: ['PRECONDITION_FAILED'] },
+  },
+};
+
+const PreconditionRequiredProblem = {
+  ...Problem,
+  properties: {
+    ...Problem.properties,
+    code: { type: 'string', enum: ['PRECONDITION_REQUIRED'] },
   },
 };
 
@@ -496,7 +496,7 @@ const WebhookSubscription = {
       type: 'array',
       items: {
         type: 'string',
-        enum: ['invoice.created', 'invoice.funding_received', 'invoice.funded', 'invoice.reconciliation_drift'],
+        enum: ['invoice.created', 'invoice.funding_received', 'invoice.funded', 'invoice.settled', 'invoice.cancelled', 'invoice.reconciliation_drift'],
       },
     },
     createdAt: { type: 'string', format: 'date-time' },
@@ -585,20 +585,6 @@ const AuthNotConfiguredProblem = authProblem(['AUTH_NOT_CONFIGURED']);
 const UnauthorizedProblem = authProblem(['UNAUTHORIZED']);
 const AdminTokenNotConfiguredProblem = authProblem(['ADMIN_TOKEN_NOT_CONFIGURED']);
 
-const authProblem = (codes) => ({
-  type: 'object',
-  required: ['type', 'title', 'status', 'code', 'instance', 'error'],
-  properties: {
-    ...Problem.properties,
-    code: { type: 'string', description: 'A stable, machine-readable error code', enum: codes },
-  },
-});
-
-const UnauthenticatedProblem = authProblem(['UNAUTHENTICATED']);
-const ForbiddenProblem = authProblem(['FORBIDDEN']);
-const AuthNotConfiguredProblem = authProblem(['AUTH_NOT_CONFIGURED']);
-const UnauthorizedProblem = authProblem(['UNAUTHORIZED']);
-const AdminTokenNotConfiguredProblem = authProblem(['ADMIN_TOKEN_NOT_CONFIGURED']);
 const NotInvoiceOwnerProblem = authProblem(['NOT_INVOICE_OWNER']);
 
 /** Mutating operations guarded by `requireRole` (src/middleware/auth.js) and the roles they accept. */
@@ -1743,7 +1729,7 @@ function createSpec(baseUrl) {
                   type: 'array',
                   items: {
         type: 'string',
-        enum: ['invoice.created', 'invoice.funding_received', 'invoice.funded', 'invoice.reconciliation_drift'],
+        enum: ['invoice.created', 'invoice.funding_received', 'invoice.funded', 'invoice.settled', 'invoice.cancelled', 'invoice.reconciliation_drift'],
       },
                   example: ['invoice.created', 'invoice.funded'],
                 },
