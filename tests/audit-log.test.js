@@ -210,6 +210,51 @@ describe('query', () => {
     expect(second.data.map((e) => e.seq)).toEqual([4]);
     expect(second.nextAfter).toBeNull();
   });
+
+  /** Log with entries one minute apart from 2026-11-23T10:00Z, actors/outcomes as given. */
+  function timedLog(rows) {
+    const start = Date.parse('2026-11-23T10:00:00.000Z');
+    let i = 0;
+    const log = createAuditLog({ now: () => new Date(start + i * 60000) });
+    rows.forEach(([actor, outcome], n) => {
+      i = n;
+      log.append(event(n, { actor, outcome, statusCode: outcome === 'success' ? 200 : 409 }));
+    });
+    return { log, at: (n) => start + n * 60000 };
+  }
+
+  test('filters by actor and by outcome (#1665)', () => {
+    const { log } = timedLog([['a', 'success'], ['b', 'rejected'], ['a', 'rejected'], ['b', 'success']]);
+    expect(log.query({ actor: 'a' }).data.map((e) => e.seq)).toEqual([1, 3]);
+    expect(log.query({ actor: 'b' }).data.map((e) => e.seq)).toEqual([2, 4]);
+    expect(log.query({ outcome: 'rejected' }).data.map((e) => e.seq)).toEqual([2, 3]);
+    expect(log.query({ outcome: 'error' }).data).toEqual([]);
+    expect(log.query({ actor: 'a', outcome: 'success' }).data.map((e) => e.seq)).toEqual([1]);
+  });
+
+  test('from/to are inclusive epoch-ms bounds on `at` (#1665)', () => {
+    const { log, at } = timedLog([['a', 'success'], ['a', 'success'], ['a', 'success'], ['a', 'success']]);
+    expect(log.query({ from: at(1) }).data.map((e) => e.seq)).toEqual([2, 3, 4]);
+    expect(log.query({ to: at(1) }).data.map((e) => e.seq)).toEqual([1, 2]);
+    expect(log.query({ from: at(1), to: at(2) }).data.map((e) => e.seq)).toEqual([2, 3]);
+    expect(log.query({ from: at(1) + 1, to: at(2) - 1 }).data).toEqual([]);
+    expect(log.query({ from: at(0), to: at(3) }).data).toHaveLength(4);
+  });
+
+  test('combined filters keep the after/limit cursor semantics (#1665)', () => {
+    const { log, at } = timedLog([
+      ['a', 'rejected'], ['b', 'rejected'], ['a', 'rejected'], ['a', 'success'], ['a', 'rejected'], ['a', 'rejected'],
+    ]);
+    const filter = { actor: 'a', outcome: 'rejected', from: at(1) };
+    const first = log.query({ ...filter, limit: 2 });
+    expect(first.data.map((e) => e.seq)).toEqual([3, 5]);
+    expect(first.nextAfter).toBe(5);
+    const second = log.query({ ...filter, limit: 2, after: first.nextAfter });
+    expect(second.data.map((e) => e.seq)).toEqual([6]);
+    expect(second.nextAfter).toBeNull();
+    // An exactly-full last page has no next cursor, as before.
+    expect(log.query({ ...filter, limit: 3 }).nextAfter).toBeNull();
+  });
 });
 
 describe('redaction', () => {
