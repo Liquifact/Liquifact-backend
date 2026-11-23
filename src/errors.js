@@ -169,6 +169,9 @@ class ApiError extends Error {
     if (this.extra !== undefined) {
       Object.assign(problem, this.extra)
     }
+    if (req?.id) {
+      problem.requestId = req.id
+    }
     problem.error = this.title
     return problem
   }

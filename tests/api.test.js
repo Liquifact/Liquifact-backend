@@ -23,6 +23,24 @@ beforeEach(() => {
 });
 
 describe('system', () => {
+  test('generates and returns a request id on successful responses', async () => {
+    const res = await request(app).get('/health');
+    expect(res.headers['x-request-id']).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  test('propagates a valid request id to the response and problem body', async () => {
+    const res = await request(app).get('/nope').set('X-Request-Id', 'req-123');
+    expect(res.headers['x-request-id']).toBe('req-123');
+    expect(res.body.requestId).toBe('req-123');
+  });
+
+  test('replaces an invalid incoming request id', async () => {
+    const res = await request(app).get('/nope').set('X-Request-Id', 'bad id!<script>');
+    expect(res.headers['x-request-id']).toMatch(/^[0-9a-f-]{36}$/);
+    expect(res.body.requestId).toBe(res.headers['x-request-id']);
+    expect(res.body.requestId).not.toBe('bad id!<script>');
+  });
+
   test('GET /health', async () => {
     const res = await request(app).get('/health');
     expect(res.status).toBe(200);
@@ -81,6 +99,7 @@ describe('system', () => {
     expect(res.body.code).toBe('MALFORMED_JSON');
     expect(res.body.title).toBe('Malformed JSON');
     expect(res.body.detail).toBe('The request body contains invalid JSON');
+    expect(res.body.requestId).toBe(res.headers['x-request-id']);
     expect(JSON.stringify(res.body)).not.toContain('Unexpected');
     expect(JSON.stringify(res.body)).not.toContain('position');
   });
@@ -881,6 +900,7 @@ describe('CORS', () => {
       'idempotency-key',
       'retry-after',
       'etag',
+      'x-request-id',
     ]));
   });
 

@@ -144,7 +144,7 @@ describe('recording mutations', () => {
     const created = await request(app).post('/api/invoices').set(authHeader()).send(NEW_INVOICE);
     expect(Object.keys(created.body)).toEqual(['data']);
     const bad = await request(app).post('/api/invoices').set(authHeader()).send({});
-    expect(Object.keys(bad.body).sort()).toEqual(['code', 'detail', 'details', 'error', 'errors', 'instance', 'status', 'title', 'type']);
+    expect(Object.keys(bad.body).sort()).toEqual(['code', 'detail', 'details', 'error', 'errors', 'instance', 'requestId', 'status', 'title', 'type']);
     const funded = await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount: 1, investor: INVESTOR });
     expect(Object.keys(funded.body)).toEqual(['data']);
   });
@@ -157,10 +157,12 @@ describe('recording mutations', () => {
   });
 
   test('a safe client request id is kept; an unsafe one is replaced', async () => {
-    await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).set('X-Request-Id', 'req-123').send({ amount: 1, investor: INVESTOR });
-    await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).set('X-Request-Id', 'bad id!<script>').send({ amount: 1, investor: INVESTOR });
-    expect(entries()[0].requestId).toBe('req-123');
-    expect(entries()[1].requestId).toMatch(/^[0-9a-f-]{36}$/);
+    const safe = await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).set('X-Request-Id', 'req-123').send({ amount: 1, investor: INVESTOR });
+    const unsafe = await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).set('X-Request-Id', 'bad id!<script>').send({ amount: 1, investor: INVESTOR });
+    expect(safe.headers['x-request-id']).toBe('req-123');
+    expect(unsafe.headers['x-request-id']).toMatch(/^[0-9a-f-]{36}$/);
+    expect(entries()[0].requestId).toBe(safe.headers['x-request-id']);
+    expect(entries()[1].requestId).toBe(unsafe.headers['x-request-id']);
   });
 
   test('the client IP is stored truncated', async () => {
