@@ -170,7 +170,7 @@ router.post('/run', requireCronSecret, async (req, res) => {
     const result = await runOnce({ maxPages });
     return res.json(result);
   } catch (err) {
-    logger.error({ err }, 'Indexer trigger run failed');
+    logger.error('Indexer trigger run failed', { err: err?.message ?? String(err) });
     return res.status(500).json({
       type: 'https://liquifact.io/problems/indexer-error',
       title: 'Indexer Error',

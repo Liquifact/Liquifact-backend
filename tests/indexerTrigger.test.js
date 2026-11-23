@@ -184,18 +184,34 @@ describe('POST /api/internal/indexer/run — authentication', () => {
     expect(runOnce).toHaveBeenCalledWith(expect.objectContaining({ maxPages: 5 }));
   });
 
-  test('returns 500 when runOnce throws', async () => {
+  test('returns 500 when runOnce throws and logs structured JSON error', async () => {
     process.env.CRON_SECRET = 'my-secret';
     runOnce.mockRejectedValueOnce(new Error('rpc down'));
+    const stderrLines = [];
+    const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrLines.push(String(chunk));
+      return true;
+    });
     const app = createApp();
 
-    const res = await request(app)
-      .post('/api/internal/indexer/run')
-      .set('Authorization', 'Bearer my-secret')
-      .send({});
+    try {
+      const res = await request(app)
+        .post('/api/internal/indexer/run')
+        .set('Authorization', 'Bearer my-secret')
+        .send({});
 
-    expect(res.status).toBe(500);
-    expect(res.body.status).toBe(500);
-    expect(res.body.detail).toMatch(/rpc down/);
+      expect(res.status).toBe(500);
+      expect(res.body.status).toBe(500);
+      expect(res.body.detail).toMatch(/rpc down/);
+
+      expect(stderrSpy).toHaveBeenCalled();
+      const parsed = JSON.parse(stderrLines[stderrLines.length - 1]);
+      expect(parsed.level).toBe('error');
+      expect(parsed.message).toBe('Indexer trigger run failed');
+      expect(parsed.err).toBe('rpc down');
+      expect(parsed['0']).toBeUndefined();
+    } finally {
+      stderrSpy.mockRestore();
+    }
   });
 });
