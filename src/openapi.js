@@ -1236,11 +1236,32 @@ function createSpec(baseUrl) {
         get: {
           tags: ['Audit'],
           summary: 'List audit log entries (admin)',
-          description: 'Oldest first. Page with `after` set to the previous response\'s `nextAfter`.',
+          description:
+            'Oldest first. Filters are optional and combine with AND. Page with `after` set to the previous ' +
+            'response\'s `nextAfter`; keep the same filters on every page.',
           security: adminSecurity,
           parameters: [
             { name: 'resourceId', in: 'query', schema: { type: 'string' }, description: 'Only entries for this resource' },
             { name: 'action', in: 'query', schema: { type: 'string' }, description: 'Only this action, e.g. invoice.fund' },
+            { name: 'actor', in: 'query', schema: { type: 'string' }, description: 'Only entries by this actor (API key id, or "anonymous")' },
+            {
+              name: 'outcome',
+              in: 'query',
+              schema: { type: 'string', enum: ['success', 'rejected', 'error'] },
+              description: 'Only entries with this outcome. `error` is reserved; no entry records it yet.',
+            },
+            {
+              name: 'from',
+              in: 'query',
+              schema: { type: 'string', format: 'date-time' },
+              description: 'Only entries at or after this ISO 8601 timestamp (time zone required), e.g. 2026-11-23T10:00:00Z',
+            },
+            {
+              name: 'to',
+              in: 'query',
+              schema: { type: 'string', format: 'date-time' },
+              description: 'Only entries at or before this ISO 8601 timestamp (time zone required). Must not be earlier than `from`.',
+            },
             { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 } },
             { name: 'after', in: 'query', schema: { type: 'integer', minimum: 0 }, description: 'Only entries with seq greater than this' },
           ],

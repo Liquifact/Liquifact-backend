@@ -29,6 +29,11 @@ const { createFileStore, AuditIntegrityError } = require('./file-store');
 
 const GENESIS_HASH = '0'.repeat(64);
 const OUTCOMES = ['success', 'rejected'];
+/**
+ * Outcomes accepted by the `outcome` query filter. `error` is accepted for
+ * forward compatibility; nothing records it yet, so it currently matches no entry.
+ */
+const QUERY_OUTCOMES = ['success', 'rejected', 'error'];
 
 const MAX_DEPTH = 6;
 const MAX_STRING = 512;
@@ -333,19 +338,33 @@ function createAuditLog({ store = createMemoryStore(), now = () => new Date() } 
     entries: () => store.entries(),
 
     /**
-     * Filters retained entries and returns one page, oldest first.
+     * Filters retained entries and returns one page, oldest first. Every filter
+     * is optional and they combine with AND. `from`/`to` are inclusive bounds on
+     * the entry's `at` time, in epoch milliseconds. Paging is by `seq` only, so
+     * a cursor stays valid whichever filters are applied.
      *
-     * @param {{ resourceId?: string, action?: string, limit?: number, after?: number }} [filter] query
+     * @param {{ resourceId?: string, action?: string, actor?: string, outcome?: string,
+     *   from?: number, to?: number, limit?: number, after?: number }} [filter] query
      * @returns {{ data: object[], nextAfter: number|null }} page and cursor for the next one
      */
-    query({ resourceId, action, limit = 50, after = 0 } = {}) {
+    query({ resourceId, action, actor, outcome, from, to, limit = 50, after = 0 } = {}) {
+      const inRange = (e) => {
+        if (from === undefined && to === undefined) {
+          return true;
+        }
+        const at = Date.parse(e.at);
+        return (from === undefined || at >= from) && (to === undefined || at <= to);
+      };
       const matches = store
         .entries()
         .filter(
           (e) =>
             e.seq > after &&
             (resourceId === undefined || e.resourceId === resourceId) &&
-            (action === undefined || e.action === action),
+            (action === undefined || e.action === action) &&
+            (actor === undefined || e.actor === actor) &&
+            (outcome === undefined || e.outcome === outcome) &&
+            inRange(e),
         );
       const data = matches.slice(0, limit);
       return { data, nextAfter: data.length && matches.length > limit ? data[data.length - 1].seq : null };
@@ -392,6 +411,8 @@ const auditLog = createAuditLog({ store: createConfiguredStore(config) });
 
 module.exports = {
   GENESIS_HASH,
+  OUTCOMES,
+  QUERY_OUTCOMES,
   canonicalJson,
   computeHash,
   verifyChain,

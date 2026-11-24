@@ -287,7 +287,10 @@ describe('recording mutations', () => {
     expect(listed.body.count).toBe(3);
     expect(listed.body.data.map((e) => e.metadata.reason)).toEqual(['missing_key', 'unknown_key', 'forbidden_role']);
     expect(listed.body.data.map((e) => e.actor)).toEqual(['anonymous', 'anonymous', 'test-sme']);
-    expect(listed.body.data.map((e) => e.ip)).toEqual(['203.0.113.0/24', '203.0.113.0/24', '203.0.113.0/24']);
+    // TRUST_PROXY is off by default (#1709), so the spoofed X-Forwarded-For is ignored and the
+    // socket address is stored truncated, as in the "spoofed X-Forwarded-For" test above.
+    listed.body.data.forEach((e) => expect(['127.0.0.0/24', '0:0:0::/48']).toContain(e.ip));
+    expect(JSON.stringify(listed.body.data)).not.toContain('203.0.113');
     expect(listed.body.data[2].metadata.keyId).toBe('test-sme');
     expect(listed.body.data[2].metadata.route).toBe('POST /api/invoices/:id/fund');
 
@@ -367,6 +370,143 @@ describe('GET /api/audit', () => {
       expect(typeof res.body.error).toBe('string');
     },
   );
+});
+
+describe('GET /api/audit actor, outcome and time range filters (#1665)', () => {
+  // Six entries ten minutes apart, starting 2026-11-23T10:00:00.000Z:
+  //   seq 1 10:00 alice success   seq 4 10:30 bob   success
+  //   seq 2 10:10 bob   rejected  seq 5 10:40 alice rejected
+  //   seq 3 10:20 alice rejected  seq 6 10:50 alice success
+  const START = Date.parse('2026-11-23T10:00:00.000Z');
+  const ROWS = [
+    ['alice', 'success'],
+    ['bob', 'rejected'],
+    ['alice', 'rejected'],
+    ['bob', 'success'],
+    ['alice', 'rejected'],
+    ['alice', 'success'],
+  ];
+
+  function seededApi() {
+    let clock = START;
+    const log = createAuditLog({ now: () => new Date(clock) });
+    ROWS.forEach(([actor, outcome], i) => {
+      clock = START + i * 10 * 60 * 1000;
+      log.append({
+        action: 'invoice.fund',
+        resourceType: 'invoice',
+        resourceId: i % 2 ? 'INV_0001' : 'INV_0002',
+        actor,
+        outcome,
+        statusCode: outcome === 'success' ? 200 : 409,
+      });
+    });
+    const mini = express();
+    mini.use('/api/audit', createAuditRouter(log));
+    return mini;
+  }
+
+  const seqs = async (mini, query) => {
+    const res = await admin(request(mini).get(`/api/audit?${query}`));
+    expect(res.status).toBe(200);
+    expect(res.body.count).toBe(res.body.data.length);
+    return res.body.data.map((e) => e.seq);
+  };
+
+  test('actor narrows to that actor only', async () => {
+    const mini = seededApi();
+    expect(await seqs(mini, 'actor=alice')).toEqual([1, 3, 5, 6]);
+    expect(await seqs(mini, 'actor=bob')).toEqual([2, 4]);
+    expect(await seqs(mini, 'actor=nobody')).toEqual([]);
+  });
+
+  test('outcome narrows to that outcome; error is accepted and matches nothing yet', async () => {
+    const mini = seededApi();
+    expect(await seqs(mini, 'outcome=success')).toEqual([1, 4, 6]);
+    expect(await seqs(mini, 'outcome=rejected')).toEqual([2, 3, 5]);
+    expect(await seqs(mini, 'outcome=error')).toEqual([]);
+  });
+
+  test('from and to are inclusive bounds on the entry time', async () => {
+    const mini = seededApi();
+    expect(await seqs(mini, 'from=2026-11-23T10:20:00Z')).toEqual([3, 4, 5, 6]);
+    expect(await seqs(mini, 'to=2026-11-23T10:20:00Z')).toEqual([1, 2, 3]);
+    expect(await seqs(mini, 'from=2026-11-23T10:15:00Z&to=2026-11-23T10:35:00Z')).toEqual([3, 4]);
+    expect(await seqs(mini, 'from=2026-11-23T10:30:00Z&to=2026-11-23T10:30:00Z')).toEqual([4]);
+    expect(await seqs(mini, 'from=2026-11-23T12:00:00Z')).toEqual([]);
+  });
+
+  test('timestamps with an offset or fractional seconds compare as instants', async () => {
+    const mini = seededApi();
+    // 11:20+01:00 is 10:20Z; encode "+" so it is not read as a space.
+    expect(await seqs(mini, `from=${encodeURIComponent('2026-11-23T11:20:00+01:00')}`)).toEqual([3, 4, 5, 6]);
+    expect(await seqs(mini, 'to=2026-11-23T10:09:59.999Z')).toEqual([1]);
+  });
+
+  test('filters combine with each other and with resourceId and action', async () => {
+    const mini = seededApi();
+    expect(await seqs(mini, 'actor=alice&outcome=rejected')).toEqual([3, 5]);
+    expect(await seqs(mini, 'actor=alice&outcome=success&from=2026-11-23T10:05:00Z')).toEqual([6]);
+    expect(await seqs(mini, 'actor=alice&resourceId=INV_0002&to=2026-11-23T10:40:00Z')).toEqual([1, 3, 5]);
+    expect(await seqs(mini, 'action=invoice.fund&outcome=rejected&from=2026-11-23T10:10:00Z&to=2026-11-23T10:30:00Z')).toEqual([2, 3]);
+    expect(await seqs(mini, 'action=invoice.create&actor=alice')).toEqual([]);
+  });
+
+  test('combined filters page with limit and after exactly as unfiltered queries do', async () => {
+    const mini = seededApi();
+    const q = 'actor=alice&from=2026-11-23T10:00:00Z&to=2026-11-23T10:50:00Z';
+    const first = await admin(request(mini).get(`/api/audit?${q}&limit=2`));
+    expect(first.body.data.map((e) => e.seq)).toEqual([1, 3]);
+    expect(first.body.nextAfter).toBe(3);
+    const second = await admin(request(mini).get(`/api/audit?${q}&limit=2&after=${first.body.nextAfter}`));
+    expect(second.body.data.map((e) => e.seq)).toEqual([5, 6]);
+    expect(second.body.nextAfter).toBeNull();
+    // A cursor taken from a filtered page still means "seq greater than", with or without filters.
+    expect(await seqs(mini, 'after=3')).toEqual([4, 5, 6]);
+    expect(await seqs(mini, 'outcome=rejected&limit=1&after=2')).toEqual([3]);
+  });
+
+  test('filters apply to entries recorded by the real routes', async () => {
+    await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount: 1, investor: INVESTOR }); // seq 1 success
+    await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount: 10 }); // seq 2 rejected
+    const rejected = await admin(request(app).get('/api/audit?actor=test-admin&outcome=rejected'));
+    expect(rejected.status).toBe(200);
+    expect(rejected.body.data.map((e) => e.seq)).toEqual([2]);
+    const future = await admin(request(app).get('/api/audit?from=2999-01-01T00:00:00Z'));
+    expect(future.body.data).toEqual([]);
+  });
+
+  test.each([
+    'outcome=failed',
+    'outcome=SUCCESS',
+    'outcome=',
+    'from=yesterday',
+    'from=2026-11-23',
+    'from=2026-11-23T10:00:00',
+    'to=2026-02-30T00:00:00Z',
+    'to=2026-11-23T24:00:00Z',
+    'from=2026-11-23T10:00:60Z',
+    'from=1700000000000',
+    'from=',
+    'from=2026-11-23T11:00:00Z&to=2026-11-23T10:00:00Z',
+    'actor=a&actor=b',
+    'outcome=success&outcome=rejected',
+    'from=2026-11-23T10:00:00Z&from=2026-11-23T11:00:00Z',
+  ])('rejects invalid filter "%s" with 400', async (query) => {
+    const res = await admin(request(seededApi()).get(`/api/audit?${query}`));
+    expect(res.status).toBe(400);
+    expect(typeof res.body.error).toBe('string');
+  });
+
+  test('error messages name the bad parameter', async () => {
+    const mini = seededApi();
+    const bad = async (query) => (await admin(request(mini).get(`/api/audit?${query}`))).body.error;
+    expect(await bad('outcome=nope')).toMatch(/^outcome must be one of success, rejected, error$/);
+    expect(await bad('from=nope')).toMatch(/^from must be an ISO 8601 timestamp/);
+    expect(await bad('to=nope')).toMatch(/^to must be an ISO 8601 timestamp/);
+    expect(await bad('from=2026-11-23T11:00:00Z&to=2026-11-23T10:00:00Z')).toBe('from must not be later than to');
+    expect(await bad('actor=a&actor=b')).toBe('actor must be a single value');
+  });
 });
 
 describe('admin-only access', () => {
@@ -471,7 +611,11 @@ describe('OpenAPI', () => {
 
     const list = spec.paths['/api/audit'].get;
     expect(list.security).toEqual([{ adminBearer: [] }]);
-    expect(list.parameters.map((p) => p.name)).toEqual(['resourceId', 'action', 'limit', 'after']);
+    expect(list.parameters.map((p) => p.name)).toEqual(['resourceId', 'action', 'actor', 'outcome', 'from', 'to', 'limit', 'after']);
+    const param = (name) => list.parameters.find((p) => p.name === name);
+    expect(param('outcome').schema.enum).toEqual(['success', 'rejected', 'error']);
+    expect(param('from').schema).toEqual({ type: 'string', format: 'date-time' });
+    expect(param('to').schema).toEqual({ type: 'string', format: 'date-time' });
     expect(Object.keys(list.responses).sort()).toEqual(['200', '400', '401', '503']);
     expect(list.responses[200].content['application/json'].schema.$ref).toBe('#/components/schemas/AuditList');
 
