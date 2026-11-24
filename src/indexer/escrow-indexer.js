@@ -35,6 +35,14 @@ const { getRpcServer } = require('../stellar/rpc');
 const dataStore = require('../data/store');
 const logger = require('../logger');
 const config = require('../config');
+const {
+  indexerIngestedTotal,
+  indexerLastLedger,
+  escrowIndexerEventsProcessedTotal,
+  escrowIndexerEventsSkippedTotal,
+  escrowIndexerCycleFailuresTotal,
+  escrowIndexerLastCursorAdvanceTimestampSeconds,
+} = require('../metrics/registry');
 
 /** Soroban RPC allows at most this many contract ids per event filter. */
 const MAX_CONTRACT_IDS_PER_FILTER = 5;
@@ -227,6 +235,11 @@ async function indexChunk({ server, store, log, contractIds, cursorKey, maxPages
     if (newCursor && newCursor !== currentCursor) {
       store.setCursor(newCursor, cursorKey);
       currentCursor = newCursor;
+      escrowIndexerLastCursorAdvanceTimestampSeconds.set(Math.floor(Date.now() / 1000));
+    }
+
+    if (latestLedger > 0) {
+      indexerLastLedger.set(latestLedger);
     }
 
     // Stop paging if this page was not full (no more events available)

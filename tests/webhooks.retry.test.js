@@ -122,6 +122,132 @@ describe('delivery retries', () => {
     expect(record.attempts[0].error).toMatch(/ECONNREFUSED/);
     expect(record.status).toBe('failed');
   });
+
+  test('410 permanent: exactly one attempt, reason permanent_4xx', async () => {
+    const created = webhookStore.createWebhook({
+      url: 'https://example.com/hook',
+      pinnedUrl: 'https://93.184.216.34/hook',
+      host: 'example.com',
+      events: ['invoice.created'],
+    });
+    const internal = webhookStore.getWebhookInternal(created.id);
+
+    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({
+      status: 410,
+      headers: { get: () => null },
+    });
+
+    const deliveryPromise = deliverToWebhook(internal, 'invoice.created', { id: 'INV_410' });
+    for (let i = 0; i < 10; i++) {
+      await Promise.resolve();
+      jest.runAllTimers();
+    }
+    await deliveryPromise;
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const record = webhookStore.getDeliveries(created.id)[0];
+    expect(record.status).toBe('failed');
+    expect(record.reason).toBe('permanent_4xx');
+    expect(record.attempts.length).toBe(1);
+  });
+
+  test('400 permanent: exactly one attempt (client error, not retryable)', async () => {
+    const created = webhookStore.createWebhook({
+      url: 'https://example.com/hook',
+      pinnedUrl: 'https://93.184.216.34/hook',
+      host: 'example.com',
+      events: ['invoice.created'],
+    });
+    const internal = webhookStore.getWebhookInternal(created.id);
+
+    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({
+      status: 400,
+      headers: { get: () => null },
+    });
+
+    const deliveryPromise = deliverToWebhook(internal, 'invoice.created', { id: 'INV_400' });
+    for (let i = 0; i < 10; i++) {
+      await Promise.resolve();
+      jest.runAllTimers();
+    }
+    await deliveryPromise;
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(webhookStore.getDeliveries(created.id)[0].reason).toBe('permanent_4xx');
+  });
+
+  test('429 with Retry-After: 2 waits ~2s before retrying', async () => {
+    const created = webhookStore.createWebhook({
+      url: 'https://example.com/hook',
+      pinnedUrl: 'https://93.184.216.34/hook',
+      host: 'example.com',
+      events: ['invoice.created'],
+    });
+    const internal = webhookStore.getWebhookInternal(created.id);
+
+    let calls = 0;
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async () => {
+      calls += 1;
+      if (calls === 1) {
+        return { status: 429, headers: { get: (h) => (h === 'retry-after' ? '2' : null) } };
+      }
+      return { status: 200, headers: { get: () => null } };
+    });
+
+    const deliveryPromise = deliverToWebhook(internal, 'invoice.created', { id: 'INV_429' });
+    await Promise.resolve();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Not yet: needs ~2000ms (with up to 25% jitter, so advance generously but less than jitter could stretch past 2000+500)
+    jest.advanceTimersByTime(1900);
+    await Promise.resolve();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Now it should fire (2500 covers jitter up to +25% of 2000)
+    jest.advanceTimersByTime(700);
+    for (let i = 0; i < 5; i++) {
+      await Promise.resolve();
+      jest.runAllTimers();
+    }
+    await deliveryPromise;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(webhookStore.getDeliveries(created.id)[0].status).toBe('delivered');
+  });
+
+  test('Retry-After HTTP-date is honored', async () => {
+    const created = webhookStore.createWebhook({
+      url: 'https://example.com/hook',
+      pinnedUrl: 'https://93.184.216.34/hook',
+      host: 'example.com',
+      events: ['invoice.created'],
+    });
+    const internal = webhookStore.getWebhookInternal(created.id);
+
+    let calls = 0;
+    const dateInTwoSecs = new Date(Date.now() + 2000).toUTCString();
+    jest.spyOn(global, 'fetch').mockImplementation(async () => {
+      calls += 1;
+      if (calls === 1) {
+        return { status: 503, headers: { get: (h) => (h === 'retry-after' ? dateInTwoSecs : null) } };
+      }
+      return { status: 200, headers: { get: () => null } };
+    });
+
+    const deliveryPromise = deliverToWebhook(internal, 'invoice.created', { id: 'INV_DATE' });
+    jest.advanceTimersByTime(1000);
+    await Promise.resolve();
+    // Still within the Retry-After window (2s), so still 1 attempt.
+    expect(calls).toBe(1);
+
+    jest.advanceTimersByTime(2000);
+    for (let i = 0; i < 5; i++) {
+      await Promise.resolve();
+      jest.runAllTimers();
+    }
+    await deliveryPromise;
+    expect(calls).toBe(2);
+  });
 });
 
 describe('manual webhook delivery replay', () => {

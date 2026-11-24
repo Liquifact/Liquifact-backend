@@ -130,6 +130,14 @@ describe('GET /api/escrow/live — fallback', () => {
     expect(res.body.source).toBe('snapshot');
     expect(res.body.warning).toEqual({ code: 'LIVE_READ_FAILED' });
   });
+
+  test('fallback uses the same fixed capturedAt as the snapshot endpoint', async () => {
+    mockSim.fail = true;
+    const res = await request(app).get('/api/escrow/live');
+    const snapshotRes = await request(app).get('/api/escrow');
+    expect(res.body.snapshotCapturedAt).toBe(snapshotRes.body.snapshotCapturedAt);
+    expect(res.body.snapshotCapturedAt).toBe('2024-01-15T00:00:00.000Z');
+  });
 });
 
 describe('GET /api/escrow/live?strict=true', () => {
@@ -180,6 +188,18 @@ describe('GET /api/escrow — snapshot decoding', () => {
     expect(DEPLOY_SNAPSHOT.invoice_id).toBe('INV_0001');
     expect(DEPLOY_SNAPSHOT.yield_bps).toBe(800);
     expect(typeof DEPLOY_SNAPSHOT.capturedAt).toBe('string');
+  });
+
+  test('capturedAt is stable across module reloads', () => {
+    const first = require('../src/routes/escrow');
+    const firstCapturedAt = first.DEPLOY_SNAPSHOT.capturedAt;
+
+    jest.resetModules();
+    const second = require('../src/routes/escrow');
+    const secondCapturedAt = second.DEPLOY_SNAPSHOT.capturedAt;
+
+    expect(firstCapturedAt).toBe(secondCapturedAt);
+    expect(firstCapturedAt).toBe('2024-01-15T00:00:00.000Z');
   });
 });
 

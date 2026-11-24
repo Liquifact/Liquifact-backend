@@ -328,5 +328,249 @@ describe('SME onboarding and invoice verification (#1557)', () => {
       expect(recreated.id).toMatch(/^SME_/);
       expect(recreated.stellarAddress).toBe(validSme.stellarAddress);
     });
+
+    test('listSmes returns detached copies so caller mutations do not leak', () => {
+      const created = createSme(validSme);
+      const { listSmes } = require('../src/data/smes');
+      const listed = listSmes();
+      expect(listed.data).toHaveLength(1);
+      listed.data[0].legalName = 'Hacked Name';
+      listed.data[0].reviewHistory.push({ decision: 'tampered' });
+
+      const rechecked = listSmes();
+      expect(rechecked.data[0].legalName).toBe(validSme.legalName);
+      expect(rechecked.data[0].reviewHistory).toHaveLength(0);
+    });
+  });
+
+  describe('GET /api/smes (admin list with filtering and pagination)', () => {
+    test('requires admin access and reports 503 if unconfigured, 401 if unauthorized', async () => {
+      delete process.env.ADMIN_API_TOKEN;
+      const unconfigured = await request(app).get('/api/smes');
+      expect(unconfigured.status).toBe(503);
+
+      process.env.ADMIN_API_TOKEN = TOKEN;
+      const unauthorized = await request(app).get('/api/smes');
+      expect(unauthorized.status).toBe(401);
+
+      const wrongToken = await request(app).get('/api/smes').set('Authorization', 'Bearer wrong-token');
+      expect(wrongToken.status).toBe(401);
+
+      const authorized = await request(app).get('/api/smes').set('Authorization', `Bearer ${TOKEN}`);
+      expect(authorized.status).toBe(200);
+      expect(authorized.body.data).toEqual([]);
+      expect(authorized.body.nextCursor).toBeNull();
+    });
+
+    test('lists SMEs in creation order with PII included for admins', async () => {
+      process.env.ADMIN_API_TOKEN = TOKEN;
+      const sme1 = (await createRecord({ registrationNumber: 'reg-1', stellarAddress: VALID_ADDRESS })).body.data;
+      const sme2 = (await createRecord({ registrationNumber: 'reg-2', stellarAddress: OTHER_ADDRESS })).body.data;
+
+      const res = await request(app).get('/api/smes').set('Authorization', `Bearer ${TOKEN}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data).toHaveLength(2);
+      expect(res.body.data[0].id).toBe(sme1.id);
+      expect(res.body.data[1].id).toBe(sme2.id);
+      expect(res.body.data[0].contactEmail).toBe(validSme.contactEmail);
+      expect(res.body.data[0].registrationNumber).toBe('reg-1');
+      expect(res.body.nextCursor).toBeNull();
+    });
+
+    test('filters SMEs by status', async () => {
+      process.env.ADMIN_API_TOKEN = TOKEN;
+      const pendingSme = (await createRecord({ registrationNumber: 'reg-p', stellarAddress: VALID_ADDRESS })).body.data;
+      const verifiedSme = (await createRecord({ registrationNumber: 'reg-v', stellarAddress: OTHER_ADDRESS })).body.data;
+      await review(verifiedSme.id, 'verify', 'KYB verified');
+
+      const pendingRes = await request(app)
+        .get('/api/smes?status=pending')
+        .set('Authorization', `Bearer ${TOKEN}`);
+      expect(pendingRes.status).toBe(200);
+      expect(pendingRes.body.data).toHaveLength(1);
+      expect(pendingRes.body.data[0].id).toBe(pendingSme.id);
+
+      const verifiedRes = await request(app)
+        .get('/api/smes?status=verified')
+        .set('Authorization', `Bearer ${TOKEN}`);
+      expect(verifiedRes.status).toBe(200);
+      expect(verifiedRes.body.data).toHaveLength(1);
+      expect(verifiedRes.body.data[0].id).toBe(verifiedSme.id);
+
+      const rejectedRes = await request(app)
+        .get('/api/smes?status=rejected')
+        .set('Authorization', `Bearer ${TOKEN}`);
+      expect(rejectedRes.status).toBe(200);
+      expect(rejectedRes.body.data).toHaveLength(0);
+    });
+
+    test('rejects invalid status filter with 400', async () => {
+      process.env.ADMIN_API_TOKEN = TOKEN;
+      const res = await request(app)
+        .get('/api/smes?status=unknown')
+        .set('Authorization', `Bearer ${TOKEN}`);
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('INVALID_STATUS');
+    });
+
+    test('paginates using limit and cursor', async () => {
+      const { Keypair } = require('@stellar/stellar-sdk');
+      process.env.ADMIN_API_TOKEN = TOKEN;
+      const ids = [];
+      for (let i = 1; i <= 5; i++) {
+        const res = await createRecord({
+          registrationNumber: `reg-${i}`,
+          stellarAddress: Keypair.random().publicKey(),
+        });
+        expect(res.status).toBe(201);
+        ids.push(res.body.data.id);
+      }
+
+      // Page 1: limit 2
+      const page1 = await request(app)
+        .get('/api/smes?limit=2')
+        .set('Authorization', `Bearer ${TOKEN}`);
+      expect(page1.status).toBe(200);
+      expect(page1.body.data).toHaveLength(2);
+      expect(page1.body.data.map((s) => s.id)).toEqual([ids[0], ids[1]]);
+      expect(page1.body.nextCursor).toBe(ids[1]);
+
+      // Page 2: after page 1 cursor
+      const page2 = await request(app)
+        .get(`/api/smes?limit=2&cursor=${page1.body.nextCursor}`)
+        .set('Authorization', `Bearer ${TOKEN}`);
+      expect(page2.status).toBe(200);
+      expect(page2.body.data).toHaveLength(2);
+      expect(page2.body.data.map((s) => s.id)).toEqual([ids[2], ids[3]]);
+      expect(page2.body.nextCursor).toBe(ids[3]);
+
+      // Page 3: last item
+      const page3 = await request(app)
+        .get(`/api/smes?limit=2&cursor=${page2.body.nextCursor}`)
+        .set('Authorization', `Bearer ${TOKEN}`);
+      expect(page3.status).toBe(200);
+      expect(page3.body.data).toHaveLength(1);
+      expect(page3.body.data[0].id).toBe(ids[4]);
+      expect(page3.body.nextCursor).toBeNull();
+    });
+
+    test.each(['0', '101', '-5', 'abc'])(
+      'rejects invalid limit=%s with 400',
+      async (badLimit) => {
+        process.env.ADMIN_API_TOKEN = TOKEN;
+        const res = await request(app)
+          .get(`/api/smes?limit=${badLimit}`)
+          .set('Authorization', `Bearer ${TOKEN}`);
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('INVALID_LIMIT');
+      },
+    );
+
+    test('rejects unknown cursor with 400', async () => {
+      process.env.ADMIN_API_TOKEN = TOKEN;
+      const res = await request(app)
+        .get('/api/smes?cursor=SME_nonexistent')
+        .set('Authorization', `Bearer ${TOKEN}`);
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('INVALID_CURSOR');
+    });
+
+    test('appears in root index and OpenAPI paths', async () => {
+      const rootRes = await request(app).get('/');
+      expect(rootRes.status).toBe(200);
+      const rootEndpoint = rootRes.body.endpoints.find(
+        (ep) => ep.path === '/api/smes' && ep.method === 'GET',
+      );
+      expect(rootEndpoint).toBeDefined();
+
+      const openapiRes = await request(app).get('/openapi.json');
+      expect(openapiRes.status).toBe(200);
+      expect(openapiRes.body.paths['/api/smes'].get).toBeDefined();
+    });
+  });
+});
+
+describe('SME registration idempotency (#1632)', () => {
+  const idempotency = require('../src/middleware/idempotency');
+
+  const idempotentCreate = (key, payload = validSme) =>
+    request(app).post('/api/smes').set(authHeader()).set('Idempotency-Key', key).send(payload);
+
+  beforeEach(() => {
+    resetSmes();
+    store.reset();
+    idempotency.resetStore();
+  });
+
+  test('same key and same payload replays the original 201 without creating a duplicate', async () => {
+    const key = 'sme-replay-key-1';
+    const first = await idempotentCreate(key);
+    expect(first.status).toBe(201);
+    expect(first.headers['idempotency-key']).toBe(key);
+    expect(first.headers['idempotent-replayed']).toBeUndefined();
+
+    const second = await idempotentCreate(key);
+    expect(second.status).toBe(201);
+    expect(second.headers['idempotency-key']).toBe(key);
+    expect(second.headers['idempotent-replayed']).toBe('true');
+    expect(second.body).toEqual(first.body);
+
+    const read = await request(app).get(`/api/smes/${first.body.data.id}`).set(authHeader());
+    expect(read.status).toBe(200);
+    expect(read.body.data.legalName).toBe(validSme.legalName);
+  });
+
+  test('same key with a different payload returns 422 problem+json and leaves the SME unchanged', async () => {
+    const key = 'sme-reuse-key-1';
+    const first = await idempotentCreate(key);
+    expect(first.status).toBe(201);
+
+    const second = await idempotentCreate(key, { ...validSme, legalName: 'Different Company Ltd' });
+    expect(second.status).toBe(422);
+    expect(second.headers['content-type']).toMatch(/^application\/problem\+json/);
+    expect(second.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
+    expect(second.body.error).toBe('IDEMPOTENCY_KEY_REUSED');
+
+    const read = await request(app).get(`/api/smes/${first.body.data.id}`).set(authHeader());
+    expect(read.body.data.legalName).toBe(validSme.legalName);
+  });
+
+  test('requests without an Idempotency-Key keep the existing non-idempotent behavior', async () => {
+    const response = await request(app).post('/api/smes').set(authHeader()).send(validSme);
+    expect(response.status).toBe(201);
+    expect(response.headers['idempotency-key']).toBeUndefined();
+    expect(response.headers['idempotent-replayed']).toBeUndefined();
+  });
+
+  test('authorization runs before idempotency and cannot be bypassed by replay', async () => {
+    const key = 'sme-auth-key-1';
+    const unauthorized = await request(app).post('/api/smes').set('Idempotency-Key', key).send(validSme);
+    expect(unauthorized.status).toBe(401);
+    expect(unauthorized.body.code).toBe('UNAUTHENTICATED');
+
+    const wrongRole = await request(app).post('/api/smes').set(authHeader('investor')).set('Idempotency-Key', key).send(validSme);
+    expect(wrongRole.status).toBe(403);
+    expect(wrongRole.body.code).toBe('FORBIDDEN');
+
+    const authorized = await idempotentCreate(key);
+    expect(authorized.status).toBe(201);
+    expect(authorized.headers['idempotent-replayed']).toBeUndefined();
+
+    const replay = await idempotentCreate(key);
+    expect(replay.status).toBe(201);
+    expect(replay.headers['idempotent-replayed']).toBe('true');
+  });
+
+  test('openapi documents the Idempotency-Key header, replay and error responses', async () => {
+    const { body: spec } = await request(app).get('/openapi.json');
+    const operation = spec.paths['/api/smes'].post;
+    const param = operation.parameters.find((p) => p.name === 'Idempotency-Key');
+    expect(param).toBeDefined();
+    expect(param.in).toBe('header');
+    expect(operation.responses['201'].headers['Idempotent-Replayed']).toBeDefined();
+    expect(operation.responses['201'].headers['Idempotency-Key']).toBeDefined();
+    expect(operation.responses['400']).toBeDefined();
+    expect(operation.responses['409']).toBeDefined();
+    expect(operation.responses['422'].content['application/problem+json']).toBeDefined();
   });
 });

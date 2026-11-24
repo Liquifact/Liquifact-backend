@@ -125,11 +125,12 @@ function createEventStore({ maxEvents = DEFAULT_MAX_EVENTS, onAppend } = {}) {
    * @param {string} [params.investor]   - Filter by investor address in data.
    * @param {string} [params.contractId] - Filter by originating escrow contract id.
    * @param {number} [params.fromLedger] - Include only events at or after this ledger.
+   * @param {number} [params.toLedger]   - Include only events at or before this ledger.
    * @param {number} [params.limit=50]   - Maximum results to return (1–200).
    * @param {string} [params.after]      - Return events after this event id (cursor-based pagination).
    * @returns {{ data: object[], nextCursor: string | null }}
    */
-  function query({ type, investor, contractId, fromLedger, limit = 50, after } = {}) {
+  function query({ type, investor, contractId, fromLedger, toLedger, limit = 50, after } = {}) {
     const maxLimit = Math.min(Math.max(1, Number(limit) || 50), 200);
     let startSequence = idBySequence.keys().next().value ?? nextSequence;
     if (after) {
@@ -150,6 +151,7 @@ function createEventStore({ maxEvents = DEFAULT_MAX_EVENTS, onAppend } = {}) {
       if (investor && evt.data?.investor !== investor) {continue;}
       if (contractId && evt.contractId !== contractId) {continue;}
       if (fromLedger != null && evt.ledger < Number(fromLedger)) {continue;}
+      if (toLedger != null && evt.ledger > Number(toLedger)) {continue;}
       matches.push(evt);
     }
 

@@ -7,7 +7,7 @@ const { StrKey } = require('@stellar/stellar-sdk');
 const store = require('../data/store');
 const { auditContext } = require('../audit/middleware');
 const contributions = require('../data/contributions');
-const { toMinor, fromMinor, couponMinor, daysBetween, annualisedBps } = require('../domain/returns');
+const { toMinor, fromMinor, couponMinor, daysBetween, daysToMaturity, annualisedBps } = require('../domain/returns');
 const { ApiError, badRequest, notFound, conflict, unprocessable, sendProblem } = require('../errors');
 const { parseInvoiceQuery, queryInvoices, InvoiceQueryError } = require('../services/invoice-query');
 const { requireAdminToken } = require('../middleware/require-admin-token');
@@ -250,7 +250,7 @@ function applySmeIdentity(value) {
   return null;
 }
 
-router.post('/', requireRole('sme', 'admin'), idempotency, validate({ body: CreateInvoiceBody, audit: 'invoice.create', fieldCodes: { amount: 'INVALID_AMOUNT' } }), (req, res) => {
+router.post('/', mutatingLimiter, requireRole('sme', 'admin'), idempotency, validate({ body: CreateInvoiceBody, audit: 'invoice.create', fieldCodes: { amount: 'INVALID_AMOUNT' } }), (req, res) => {
   // Record the opaque API key id that created the invoice (safe to return publicly).
   const value = { ...toInvoiceValue(req.validatedBody), createdBy: req.principal.keyId };
   const smeRejection = applySmeIdentity(value);
@@ -292,7 +292,7 @@ router.post('/', requireRole('sme', 'admin'), idempotency, validate({ body: Crea
   return res.status(201).json({ data: present(invoice) });
 });
 
-router.post('/:id/fund', requireRole('investor', 'admin'), idempotency, validate({ params: InvoiceIdParam, body: FundInvoiceBodyShape, audit: 'invoice.fund' }), (req, res) => {
+router.post('/:id/fund', mutatingLimiter, requireRole('investor', 'admin'), idempotency, validate({ params: InvoiceIdParam, body: FundInvoiceBodyShape, audit: 'invoice.fund' }), (req, res) => {
   const record = (details) =>
     req.audit({ action: 'invoice.fund', resourceType: 'invoice', resourceId: req.params.id, ...details });
   const reject = (statusCode, error, details, extra = {}) => {
@@ -348,6 +348,10 @@ router.post('/:id/fund', requireRole('investor', 'admin'), idempotency, validate
       before,
       metadata: requested,
     });
+  }
+  const currentDaysToMaturity = daysToMaturity(invoice.dueDate);
+  if (currentDaysToMaturity <= 0) {
+    return reject(409, 'INVOICE_MATURED', { before, metadata: requested });
   }
 
   // Contributions are accepted in full or rejected; allowPartial explicitly caps at remaining capacity.
@@ -454,12 +458,12 @@ function transitionAudit(req, res, action) {
     },
     success(before, updated) {
       record({ outcome: 'success', statusCode: 200, before, after: { fundedAmount: updated.fundedAmount, status: updated.status } });
-      return res.json({ data: updated });
+      return res.json({ data: present(updated) });
     },
   };
 }
 
-router.post('/:id/settle', requireRole('admin'), idParam('invoice.settle'), (req, res) => {
+router.post('/:id/settle', mutatingLimiter, requireRole('admin'), idParam('invoice.settle'), (req, res) => {
   const audit = transitionAudit(req, res, 'invoice.settle');
   const invoice = store.get(req.params.id);
   if (!invoice) {
@@ -478,7 +482,7 @@ router.post('/:id/settle', requireRole('admin'), idParam('invoice.settle'), (req
   return audit.success(before, updated);
 });
 
-router.post('/:id/cancel', requireRole('sme', 'admin'), idParam('invoice.cancel'), (req, res) => {
+router.post('/:id/cancel', mutatingLimiter, requireRole('sme', 'admin'), idParam('invoice.cancel'), (req, res) => {
   const audit = transitionAudit(req, res, 'invoice.cancel');
   const invoice = store.get(req.params.id);
   if (!invoice) {
@@ -590,7 +594,7 @@ async function readEscrow(contractId) {
   return result ? result.native : result;
 }
 
-router.post('/:id/escrow', requireAdminToken, idParam(), async (req, res) => {
+router.post('/:id/escrow', requireAdminToken, mutatingLimiter, idParam(), async (req, res) => {
   const { contractId } = req.body || {};
   if (typeof contractId !== 'string' || !StrKey.isValidContract(contractId)) {
     return res.status(400).json({ code: 'INVALID_CONTRACT_ID', error: 'Invalid Stellar contract ID' });

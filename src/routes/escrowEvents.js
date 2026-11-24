@@ -68,6 +68,12 @@ function parseStrictNonNegativeInt(raw) {
  *           minimum: 0
  *         description: Include only events at or after this ledger sequence.
  *       - in: query
+ *         name: toLedger
+ *         schema:
+ *           type: integer
+ *           minimum: 0
+ *         description: Include only events at or before this ledger sequence.
+ *       - in: query
  *         name: limit
  *         schema:
  *           type: integer
@@ -148,11 +154,37 @@ router.get('/', (req, res) => {
     fromLedger = parsed;
   }
 
+  // Validate toLedger (strict non-negative integer)
+  let toLedger;
+  if (req.query.toLedger !== undefined) {
+    const parsed = parseStrictNonNegativeInt(req.query.toLedger);
+    if (parsed === null) {
+      return res.status(400).json({
+        type: 'https://liquifact.io/problems/validation-error',
+        title: 'Validation Error',
+        status: 400,
+        detail: '`toLedger` must be a non-negative integer.',
+      });
+    }
+    toLedger = parsed;
+  }
+
+  // Reject inverted range (toLedger < fromLedger)
+  if (fromLedger !== undefined && toLedger !== undefined && toLedger < fromLedger) {
+    return res.status(400).json({
+      type: 'https://liquifact.io/problems/validation-error',
+      title: 'Validation Error',
+      status: 400,
+      detail: '`toLedger` must be greater than or equal to `fromLedger`.',
+    });
+  }
+
   const result = defaultStore.query({
     type,
     investor,
     contractId,
     fromLedger,
+    toLedger,
     limit,
     after,
   });

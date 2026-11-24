@@ -137,3 +137,14 @@ See `migrations/20260625000000_create_background_jobs.sql` for the full `backgro
 ## Testing
 
 There is currently no dedicated test file for `src/workers/jobPersistence.js`. Coverage for the surrounding `JobQueue`/`BackgroundWorker` call sites should be checked in the existing worker/queue test suites before relying on this contract in new code.
+
+## Invoice and Contribution Storage Adapters (`DATA_FILE`)
+
+Liquifact supports modular storage backends for invoices and investor contributions via a repository adapter pattern (`src/data/store.js` facade):
+
+- **MemoryAdapter (`src/data/memory-adapter.js`)**: Default in-memory store initialized with seed records.
+- **JsonFileAdapter (`src/data/json-file-adapter.js`)**: Enabled when `DATA_FILE` is set to a file path. Persists data as a JSON snapshot with:
+  - Exact BigInt string encoding for 7-decimal minor units (`amountMinor`, `fundedAmountMinor`)
+  - Atomic POSIX file replacement via temporary write and rename
+  - Debounced writes to prevent file I/O contention during bursts
+  - Fast index reconstruction (exact and fuzzy duplicate indexes) on cold starts and reloads

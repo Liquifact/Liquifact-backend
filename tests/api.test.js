@@ -7,8 +7,10 @@ const { authHeader } = require('./helpers/auth');
 const request = require('supertest');
 const SwaggerParser = require('@apidevtools/swagger-parser');
 const app = require('../src/app');
+const { buildSpec } = require('../src/openapi');
 const store = require('../src/data/store');
 const { defaultDocumentStore } = require('../src/data/documentStore');
+const { setTestClock, resetTestClock } = require('../src/utils/clock');
 
 const FIXTURE_PATH = path.join(__dirname, 'fixtures', 'sample.pdf');
 const FIXTURE_BYTES = fs.readFileSync(FIXTURE_PATH);
@@ -20,6 +22,7 @@ beforeEach(() => {
   store.reset();
   defaultDocumentStore.clear();
   idempotency.resetStore();
+  resetTestClock();
 });
 
 describe('system', () => {
@@ -389,6 +392,10 @@ describe('invoices', () => {
     const res = await request(app).post('/api/invoices/INV_0002/settle').set(authHeader());
     expect(res.status).toBe(200);
     expect(res.body.data.status).toBe('settled');
+    expect(res.body.data.remainingCapacity).toBe('0');
+    expect(res.body.data.decimals).toBe(7);
+    const detail = await request(app).get('/api/invoices/INV_0002');
+    expect(res.body.data).toEqual(detail.body.data);
   });
 
   test('settle rejects non-funded invoice', async () => {
@@ -400,6 +407,10 @@ describe('invoices', () => {
     const res = await request(app).post('/api/invoices/INV_0001/cancel').set(authHeader());
     expect(res.status).toBe(200);
     expect(res.body.data.status).toBe('cancelled');
+    expect(res.body.data.remainingCapacity).toBeDefined();
+    expect(res.body.data.decimals).toBe(7);
+    const detail = await request(app).get('/api/invoices/INV_0001');
+    expect(res.body.data).toEqual(detail.body.data);
   });
 
   test('cancel moves funded invoice to cancelled', async () => {
@@ -408,6 +419,10 @@ describe('invoices', () => {
     const res = await request(app).post('/api/invoices/INV_0002/cancel').set(authHeader());
     expect(res.status).toBe(200);
     expect(res.body.data.status).toBe('cancelled');
+    expect(res.body.data.remainingCapacity).toBe('0');
+    expect(res.body.data.decimals).toBe(7);
+    const detail = await request(app).get('/api/invoices/INV_0002');
+    expect(res.body.data).toEqual(detail.body.data);
   });
 
   test('cancel rejects settled invoice', async () => {
@@ -421,6 +436,119 @@ describe('invoices', () => {
   test('settle and cancel return 404 for missing invoice', async () => {
     expect((await request(app).post('/api/invoices/missing/settle').set(authHeader())).status).toBe(404);
     expect((await request(app).post('/api/invoices/missing/cancel').set(authHeader())).status).toBe(404);
+  });
+
+  describe('maturity guard', () => {
+    const INVESTOR = 'GBTUJNOF2WAAUPKCJHBB76ID5HGN6KMTUG43F3Z344T7QRTP7B7TVPVC';
+
+    test('funding a matured invoice (due date is today) returns 409 INVOICE_MATURED', async () => {
+      setTestClock('2026-11-24');
+      const created = await request(app).post('/api/invoices').set(authHeader()).send({
+        sme: 'Test SME',
+        debtor: 'Buyer',
+        amount: 500,
+        dueDate: '2026-11-24',
+      });
+      expect(created.status).toBe(201);
+      const res = await request(app)
+        .post(`/api/invoices/${created.body.data.id}/fund`)
+        .set(authHeader())
+        .send({ amount: 100, investor: INVESTOR });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('INVOICE_MATURED');
+      resetTestClock();
+    });
+
+    test('funding a matured invoice (due date was yesterday) returns 409 INVOICE_MATURED', async () => {
+      setTestClock('2026-11-24');
+      const created = await request(app).post('/api/invoices').set(authHeader()).send({
+        sme: 'Test SME',
+        debtor: 'Buyer',
+        amount: 500,
+        dueDate: '2026-11-23',
+      });
+      expect(created.status).toBe(201);
+      const res = await request(app)
+        .post(`/api/invoices/${created.body.data.id}/fund`)
+        .set(authHeader())
+        .send({ amount: 100, investor: INVESTOR });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('INVOICE_MATURED');
+      resetTestClock();
+    });
+
+    test('funding the day before maturity succeeds', async () => {
+      setTestClock('2026-11-23');
+      const created = await request(app).post('/api/invoices').set(authHeader()).send({
+        sme: 'Test SME',
+        debtor: 'Buyer',
+        amount: 500,
+        dueDate: '2026-11-24',
+      });
+      expect(created.status).toBe(201);
+      const res = await request(app)
+        .post(`/api/invoices/${created.body.data.id}/fund`)
+        .set(authHeader())
+        .send({ amount: 100, investor: INVESTOR });
+      expect(res.status).toBe(200);
+      expect(res.body.data.status).toBe('open');
+      expect(res.body.data.fundedAmount).toBe('100');
+      resetTestClock();
+    });
+
+    test('quote and fund use the same date logic', async () => {
+      setTestClock('2026-11-24');
+      const created = await request(app).post('/api/invoices').set(authHeader()).send({
+        sme: 'Test SME',
+        debtor: 'Buyer',
+        amount: 500,
+        dueDate: '2026-11-24',
+      });
+      expect(created.status).toBe(201);
+
+      const quote = await request(app)
+        .get(`/api/invoices/${created.body.data.id}/quote?amount=100`);
+      expect(quote.status).toBe(409);
+      expect(quote.body.code).toBe('INVOICE_MATURED');
+
+      const fund = await request(app)
+        .post(`/api/invoices/${created.body.data.id}/fund`)
+        .set(authHeader())
+        .send({ amount: 100, investor: INVESTOR });
+      expect(fund.status).toBe(409);
+      expect(fund.body.code).toBe('INVOICE_MATURED');
+      resetTestClock();
+    });
+
+    test('maturity rejection is audited with before state', async () => {
+      const auditLog = require('../src/audit/audit-log').auditLog;
+      auditLog.resetForTests();
+      setTestClock('2026-11-24');
+      const created = await request(app).post('/api/invoices').set(authHeader()).send({
+        sme: 'Test SME',
+        debtor: 'Buyer',
+        amount: 500,
+        dueDate: '2026-11-24',
+      });
+      expect(created.status).toBe(201);
+
+      const fund = await request(app)
+        .post(`/api/invoices/${created.body.data.id}/fund`)
+        .set(authHeader())
+        .send({ amount: 100, investor: INVESTOR });
+      expect(fund.status).toBe(409);
+      expect(fund.body.code).toBe('INVOICE_MATURED');
+
+      const entries = auditLog.entries();
+      const fundEntry = entries.find((e) => e.action === 'invoice.fund');
+      expect(fundEntry).toBeDefined();
+      expect(fundEntry.outcome).toBe('rejected');
+      expect(fundEntry.statusCode).toBe(409);
+      expect(fundEntry.metadata.error).toBe('INVOICE_MATURED');
+      expect(fundEntry.before).toEqual({ fundedAmount: '0', status: 'open' });
+      resetTestClock();
+      auditLog.resetForTests();
+    });
   });
 });
 
@@ -939,5 +1067,60 @@ describe('CORS', () => {
       .set('Origin', 'https://evil.example');
     expect(disallowedGet.status).toBe(200);
     expect(disallowedGet.headers['access-control-allow-origin']).toBeUndefined();
+  });
+});
+
+describe('root endpoint index completeness (#1629)', () => {
+  const normalizePath = (value) => value.replace(/\{[^}]+\}/g, ':param').replace(/:[A-Za-z0-9_]+/g, ':param');
+
+  // Routes served by the app but intentionally absent from the OpenAPI document.
+  const NON_SPEC_ROUTES = new Set([
+    'GET /',
+    'GET /healthz',
+    'GET /docs',
+    'GET /openapi.json',
+    'POST /api/internal/indexer/run',
+  ]);
+
+  test('lists every documented path and method, with no malformed or undocumented entries', async () => {
+    const spec = buildSpec('https://api.test');
+    const { body } = await request(app).get('/');
+
+    const index = body.endpoints.map((entry) => {
+      expect(typeof entry.method).toBe('string');
+      expect(typeof entry.path).toBe('string');
+      expect(typeof entry.description).toBe('string');
+      expect(entry.path.startsWith('/')).toBe(true);
+      expect(entry.description.trim().length).toBeGreaterThan(0);
+      return `${entry.method.toUpperCase()} ${normalizePath(entry.path)}`;
+    });
+
+    const documented = [];
+    for (const [path, operations] of Object.entries(spec.paths)) {
+      for (const method of Object.keys(operations)) {
+        if (!['get', 'post', 'put', 'patch', 'delete'].includes(method)) {
+          continue;
+        }
+        documented.push(`${method.toUpperCase()} ${normalizePath(path)}`);
+      }
+    }
+
+    expect(documented.length).toBeGreaterThan(0);
+    expect(documented.filter((route) => !index.includes(route))).toEqual([]);
+    expect(index.filter((route) => !documented.includes(route) && !NON_SPEC_ROUTES.has(route))).toEqual([]);
+  });
+
+  test('includes the settle, cancel, healthz and error catalog routes', async () => {
+    const { body } = await request(app).get('/');
+    const routes = body.endpoints.map((entry) => `${entry.method} ${entry.path}`);
+    for (const route of [
+      'POST /api/invoices/:id/settle',
+      'POST /api/invoices/:id/cancel',
+      'GET /healthz',
+      'GET /api/escrow/attestations',
+      'GET /errors/:code',
+    ]) {
+      expect(routes).toContain(route);
+    }
   });
 });
