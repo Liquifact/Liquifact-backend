@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const { sendProblem } = require('../errors');
+const { idempotencyReplaysTotal } = require('../metrics/registry');
 
 const MAX_ENTRIES = parseInt(process.env.IDEMPOTENCY_MAX_ENTRIES, 10) || 10000;
 const TTL_SECONDS = parseInt(process.env.IDEMPOTENCY_TTL_SECONDS, 10) || 86400; // 24 hours
@@ -179,6 +180,7 @@ function idempotency(req, res, next) {
 
   // Replay cached response
   if (existing && existing.state === 'done') {
+    idempotencyReplaysTotal.inc();
     res.set('Idempotent-Replayed', 'true');
     res.set('Idempotency-Key', idempotencyKey);
     return res.status(existing.status).json(existing.body);

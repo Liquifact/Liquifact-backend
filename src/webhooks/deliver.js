@@ -24,6 +24,7 @@ const { sign } = require('./signature');
 const webhookStore = require('./store');
 const emitter = require('./emitter');
 const webhookQueue = require('./queue');
+const { webhookDeliveriesTotal } = require('../metrics/registry');
 
 const TIMEOUT_MS = 5000;
 const MAX_ATTEMPTS = 5;
