@@ -64,22 +64,88 @@ function buildEnvelope(type, invoice) {
  * @param {string} signatureHeader signed header value
  * @returns {Promise<{ status: number|null, durationMs: number, error?: string }>}
  */
+const https = require('https');
+const http = require('http');
+const { URL } = require('url');
+const { resolveAndValidateForDelivery } = require('./ssrf');
+
+const MAX_RESPONSE_BYTES = 1024 * 1024; // 1 MiB
+
+/**
+ * @param {{ id: string, url: string, host?: string, secretHash?: string, pinnedUrl?: string }} wh
+ * @param {string} rawBody
+ * @param {string} eventId
+ * @param {string} signatureHeader
+ * @returns {Promise<{ status: number|null, durationMs: number, error?: string }>}
+ */
 async function attempt(wh, rawBody, eventId, signatureHeader) {
   const start = Date.now();
   try {
-    const res = await fetch(wh.pinnedUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'LiquiFact-Signature': signatureHeader,
-        'LiquiFact-Event-Id': eventId,
-        Host: wh.host,
-      },
-      body: rawBody,
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-      redirect: 'manual', // do not follow redirects
+    const targetUrl = wh.url || wh.pinnedUrl;
+    if (!targetUrl) {
+      return { status: null, durationMs: Date.now() - start, error: 'missing webhook url' };
+    }
+
+    const resolved = await resolveAndValidateForDelivery(targetUrl);
+    const parsed = new URL(targetUrl);
+    const isHttp = parsed.protocol === 'http:';
+    const lib = isHttp ? http : https;
+    const port = parsed.port
+      ? Number(parsed.port)
+      : isHttp
+        ? 80
+        : 443;
+    const path = `\( {parsed.pathname} \){parsed.search}`;
+    const hostname = parsed.hostname;
+    const family = resolved.family;
+
+    const status = await new Promise((resolve, reject) => {
+      const req = lib.request(
+        {
+          protocol: parsed.protocol,
+          hostname,
+          port,
+          path,
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(rawBody),
+            'LiquiFact-Signature': signatureHeader,
+            'LiquiFact-Event-Id': eventId,
+            Host: resolved.hostHeader,
+          },
+          // TLS: certificate verified against real hostname (not the IP).
+          servername: isHttp ? undefined : hostname,
+          // Connect to the IP we just validated; do not trust a second DNS lookup.
+          lookup: (_host, _opts, cb) => {
+            cb(null, resolved.address, family);
+          },
+          timeout: TIMEOUT_MS,
+          // Never follow redirects (http(s).request does not follow by default).
+        },
+        (res) => {
+          // 3xx: treat as final status, do not follow Location.
+          let total = 0;
+          res.on('data', (chunk) => {
+            total += chunk.length;
+            if (total > MAX_RESPONSE_BYTES) {
+              req.destroy(new Error('response body exceeds 1 MiB cap'));
+            }
+          });
+          res.on('end', () => resolve(res.statusCode ?? null));
+          res.on('error', reject);
+        },
+      );
+
+      req.on('timeout', () => {
+        req.destroy(new Error('webhook delivery timed out'));
+      });
+      req.on('error', reject);
+      req.write(rawBody);
+      req.end();
     });
-    return { status: res.status, durationMs: Date.now() - start };
+
+    return { status, durationMs: Date.now() - start };
   } catch (err) {
     return { status: null, durationMs: Date.now() - start, error: err.message };
   }
