@@ -11,7 +11,7 @@
  */
 
 const express = require('express');
-const { createSme, getSme, updateSmeReview } = require('../data/smes');
+const { createSme, getSme, listSmes, updateSmeReview } = require('../data/smes');
 const { requireAdminToken, hasValidAdminToken } = require('../middleware/require-admin-token');
 const { validate } = require('../middleware/validate');
 const { requireRole } = require('../middleware/auth');
@@ -40,6 +40,38 @@ function publicSme(record, includePii) {
   delete publicRecord.registrationNumber;
   return publicRecord;
 }
+
+router.get('/', requireAdminToken, (req, res) => {
+  const { status } = req.query;
+  const cursor = req.query.cursor || req.query.after;
+  const rawLimit = req.query.limit;
+
+  if (status !== undefined && !['pending', 'verified', 'rejected', 'suspended'].includes(status)) {
+    return res.status(400).json({ error: 'Invalid status filter', code: 'INVALID_STATUS' });
+  }
+
+  let limit = 50;
+  if (rawLimit !== undefined) {
+    const parsed = parseInt(rawLimit, 10);
+    if (!/^\d+$/.test(String(rawLimit).trim()) || parsed < 1 || parsed > 100) {
+      return res.status(400).json({ error: 'limit must be an integer between 1 and 100', code: 'INVALID_LIMIT' });
+    }
+    limit = parsed;
+  }
+
+  try {
+    const result = listSmes({ status, limit, cursor });
+    return res.json({
+      data: result.data.map((r) => publicSme(r, true)),
+      nextCursor: result.nextCursor,
+    });
+  } catch (error) {
+    if (error.code === 'INVALID_CURSOR') {
+      return res.status(400).json({ error: error.message, code: error.code });
+    }
+    throw error;
+  }
+});
 
 router.post('/', requireRole('sme', 'admin'), validate({ body: CreateSmeRequest }), (req, res) => {
   const body = req.validatedBody;

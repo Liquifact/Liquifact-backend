@@ -23,6 +23,7 @@ const crypto = require('crypto');
 const { sign } = require('./signature');
 const webhookStore = require('./store');
 const emitter = require('./emitter');
+const webhookQueue = require('./queue');
 
 const TIMEOUT_MS = 5000;
 const MAX_ATTEMPTS = 5;
@@ -136,7 +137,7 @@ async function attempt(wh, rawBody, eventId, signatureHeader) {
 }
 
 /**
- * Executes the retry loop for a prepared delivery record.
+ * Executes delivery with retries scheduled through the bounded queue.
  *
  * Behaviour:
  *  - 2xx → status 'delivered', stop.
@@ -152,26 +153,24 @@ async function attempt(wh, rawBody, eventId, signatureHeader) {
  * @param {string} signatureHeader signed header value
  * @returns {Promise<void>}
  */
-async function executeDelivery(wh, deliveryRecord, rawBody, signatureHeader) {
   let pendingDelayMs;
 
-  for (let i = 0; i < MAX_ATTEMPTS; i++) {
-    if (i > 0) {
       const base = pendingDelayMs !== undefined ? pendingDelayMs : BASE_DELAYS[i - 1];
       pendingDelayMs = undefined;
       await sleep(withJitter(base));
-    }
+function executeDelivery(wh, deliveryRecord, rawBody, signatureHeader) {
+  let attemptCount = 0;
 
-    const result = await attempt(wh, rawBody, deliveryRecord.eventId, signatureHeader);
-    const attemptLog = { attempt: i + 1, ...result };
     delete attemptLog.retryAfterMs; // internal hint, don't persist it
-    deliveryRecord.attempts.push(attemptLog);
+  return webhookQueue.enqueue({
+    webhookId: wh.id,
+    deliveryRecord,
+    task: async () => {
+      attemptCount++;
+      const result = await attempt(wh, rawBody, deliveryRecord.eventId, signatureHeader);
+      const attemptLog = { attempt: attemptCount, ...result };
+      deliveryRecord.attempts.push(attemptLog);
 
-    const success = result.status !== null && result.status >= 200 && result.status < 300;
-    if (success) {
-      deliveryRecord.status = 'delivered';
-      return;
-    }
 
     if (!isRetryableStatus(result.status)) {
       deliveryRecord.status = 'failed';
@@ -182,12 +181,24 @@ async function executeDelivery(wh, deliveryRecord, rawBody, signatureHeader) {
     if (result.retryAfterMs !== undefined) {
       pendingDelayMs = result.retryAfterMs;
     }
-  }
+      const success = result.status !== null && result.status >= 200 && result.status < 300;
+      if (success) {
+        deliveryRecord.status = 'delivered';
+        return { success: true, retryable: false };
+      }
 
-  deliveryRecord.status = 'failed';
   if (!deliveryRecord.reason) {
     deliveryRecord.reason = 'attempts_exhausted';
   }
+      if (attemptCount < MAX_ATTEMPTS) {
+        const delay = withJitter(BASE_DELAYS[attemptCount - 1]);
+        return { success: false, retryable: true, delayMs: delay };
+      }
+
+      deliveryRecord.status = 'failed';
+      return { success: false, retryable: false };
+    },
+  });
 }
 
 /**
@@ -322,4 +333,13 @@ function startListening() {
 }
 
 // Exported for tests
-module.exports = { dispatch, startListening, buildEnvelope, deliverToWebhook, replayDelivery, sleep };
+module.exports = {
+  dispatch,
+  startListening,
+  buildEnvelope,
+  deliverToWebhook,
+  replayDelivery,
+  sleep,
+  queue: webhookQueue,
+  drain: (timeoutMs) => webhookQueue.drain(timeoutMs),
+};

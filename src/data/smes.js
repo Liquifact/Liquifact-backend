@@ -92,6 +92,41 @@ function updateSmeReview(id, status, reviewEntry) {
 }
 
 /**
+ * Lists stored SMEs with optional status filtering and cursor-based pagination.
+ *
+ * @param {object} [params]
+ * @param {string} [params.status] Status filter.
+ * @param {number} [params.limit=50] Maximum records to return (1-100).
+ * @param {string} [params.after] Cursor SME id to start after.
+ * @param {string} [params.cursor] Alias for after.
+ * @returns {{ data: object[], nextCursor: string|null }} Detached copies of SME records.
+ */
+function listSmes({ status, limit = 50, after, cursor } = {}) {
+  let all = Array.from(records.values());
+  if (status) {
+    all = all.filter((sme) => sme.status === status);
+  }
+  const cursorId = after || cursor;
+  let startIndex = 0;
+  if (cursorId) {
+    const idx = all.findIndex((sme) => sme.id === cursorId);
+    if (idx === -1) {
+      const error = new Error('Invalid cursor');
+      error.code = 'INVALID_CURSOR';
+      throw error;
+    }
+    startIndex = idx + 1;
+  }
+  const maxLimit = Math.min(Math.max(1, Number(limit) || 50), 100);
+  const page = all.slice(startIndex, startIndex + maxLimit);
+  const nextCursor = startIndex + maxLimit < all.length && page.length > 0 ? page[page.length - 1].id : null;
+  return {
+    data: page.map(copySme),
+    nextCursor,
+  };
+}
+
+/**
  * Clears all in-memory SME records.
  *
  * @returns {void}
@@ -102,4 +137,4 @@ function resetSmes() {
   stellarAddressIndex.clear();
 }
 
-module.exports = { createSme, getSme, updateSmeReview, resetSmes };
+module.exports = { createSme, getSme, listSmes, updateSmeReview, resetSmes };
