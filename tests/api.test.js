@@ -392,6 +392,10 @@ describe('invoices', () => {
     const res = await request(app).post('/api/invoices/INV_0002/settle').set(authHeader());
     expect(res.status).toBe(200);
     expect(res.body.data.status).toBe('settled');
+    expect(res.body.data.remainingCapacity).toBe('0');
+    expect(res.body.data.decimals).toBe(7);
+    const detail = await request(app).get('/api/invoices/INV_0002');
+    expect(res.body.data).toEqual(detail.body.data);
   });
 
   test('settle rejects non-funded invoice', async () => {
@@ -403,6 +407,10 @@ describe('invoices', () => {
     const res = await request(app).post('/api/invoices/INV_0001/cancel').set(authHeader());
     expect(res.status).toBe(200);
     expect(res.body.data.status).toBe('cancelled');
+    expect(res.body.data.remainingCapacity).toBeDefined();
+    expect(res.body.data.decimals).toBe(7);
+    const detail = await request(app).get('/api/invoices/INV_0001');
+    expect(res.body.data).toEqual(detail.body.data);
   });
 
   test('cancel moves funded invoice to cancelled', async () => {
@@ -411,6 +419,10 @@ describe('invoices', () => {
     const res = await request(app).post('/api/invoices/INV_0002/cancel').set(authHeader());
     expect(res.status).toBe(200);
     expect(res.body.data.status).toBe('cancelled');
+    expect(res.body.data.remainingCapacity).toBe('0');
+    expect(res.body.data.decimals).toBe(7);
+    const detail = await request(app).get('/api/invoices/INV_0002');
+    expect(res.body.data).toEqual(detail.body.data);
   });
 
   test('cancel rejects settled invoice', async () => {
