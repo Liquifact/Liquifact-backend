@@ -420,3 +420,260 @@ describe('idempotency', () => {
     });
   });
 });
+
+describe('in-flight key cleanup (#1644)', () => {
+  const express = require('express');
+
+  const buildApp = (handler) => {
+    const testApp = express();
+    testApp.use(express.json());
+    testApp.use(idempotency);
+    testApp.post('/test', handler);
+    testApp.use((err, _req, res, _next) => res.status(500).json({ error: 'Internal server error' }));
+    return testApp;
+  };
+
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  test('releases the key when the client disconnects, so a retry can proceed', async () => {
+    let calls = 0;
+    const testApp = buildApp((_req, res) => {
+      calls += 1;
+      if (calls > 1) {
+        res.status(201).json({ data: { calls } });
+        return;
+      }
+      // Simulate the client going away before the handler responds.
+      res.destroy();
+    });
+
+    const first = request(testApp).post('/test').set('Idempotency-Key', 'abort-key-123').send({ a: 1 });
+    await first.catch(() => {});
+    await wait(30);
+
+    const retry = await request(testApp).post('/test').set('Idempotency-Key', 'abort-key-123').send({ a: 1 });
+    expect(retry.status).toBe(201);
+    expect(retry.headers['idempotent-replayed']).toBeUndefined();
+    expect(calls).toBe(2);
+  });
+
+  test('releases the key when a handler ends the response with res.status(204).end()', async () => {
+    let calls = 0;
+    const testApp = buildApp((_req, res) => {
+      calls += 1;
+      res.status(204).end();
+    });
+
+    const first = await request(testApp).post('/test').set('Idempotency-Key', 'no-content-key-1').send({ a: 1 });
+    expect(first.status).toBe(204);
+
+    const second = await request(testApp).post('/test').set('Idempotency-Key', 'no-content-key-1').send({ a: 1 });
+    expect(second.status).toBe(204);
+    expect(second.headers['idempotent-replayed']).toBeUndefined();
+    expect(calls).toBe(2);
+  });
+
+  test('releases the key when a handler throws before res.json', async () => {
+    let calls = 0;
+    const testApp = buildApp(() => {
+      calls += 1;
+      throw new Error('boom');
+    });
+
+    const first = await request(testApp).post('/test').set('Idempotency-Key', 'throwing-key-123').send({ a: 1 });
+    expect(first.status).toBe(500);
+
+    const second = await request(testApp).post('/test').set('Idempotency-Key', 'throwing-key-123').send({ a: 1 });
+    expect(second.status).toBe(500);
+    expect(second.headers['idempotent-replayed']).toBeUndefined();
+    expect(calls).toBe(2);
+  });
+
+  test('keeps a successfully cached response after the response closes', async () => {
+    let calls = 0;
+    const testApp = buildApp((_req, res) => {
+      calls += 1;
+      res.status(201).json({ data: { calls } });
+    });
+
+    const first = await request(testApp).post('/test').set('Idempotency-Key', 'cached-key-123').send({ a: 1 });
+    expect(first.status).toBe(201);
+    await wait(30);
+
+    const second = await request(testApp).post('/test').set('Idempotency-Key', 'cached-key-123').send({ a: 1 });
+    expect(second.status).toBe(201);
+    expect(second.headers['idempotent-replayed']).toBe('true');
+    expect(second.body).toEqual(first.body);
+    expect(calls).toBe(1);
+  });
+
+  test('only stores the first response when the wrapped res.json is called twice', async () => {
+    let calls = 0;
+    const testApp = buildApp((_req, res) => {
+      calls += 1;
+      res.status(201).json({ data: { n: 1 } });
+      res.json({ data: { n: 2 } });
+    });
+
+    const first = await request(testApp).post('/test').set('Idempotency-Key', 'double-json-key').send({ a: 1 });
+    expect(first.status).toBe(201);
+    expect(first.body).toEqual({ data: { n: 1 } });
+
+    const second = await request(testApp).post('/test').set('Idempotency-Key', 'double-json-key').send({ a: 1 });
+    expect(second.status).toBe(201);
+    expect(second.headers['idempotent-replayed']).toBe('true');
+    expect(second.body).toEqual({ data: { n: 1 } });
+    expect(calls).toBe(1);
+  });
+
+  test('does not delete a newer entry that replaced an expired in-flight one', async () => {
+    const originalTtl = process.env.IDEMPOTENCY_TTL_SECONDS;
+    process.env.IDEMPOTENCY_TTL_SECONDS = '1';
+    let testIdempotency;
+    jest.isolateModules(() => {
+      testIdempotency = require('../src/middleware/idempotency');
+    });
+    if (originalTtl === undefined) {
+      delete process.env.IDEMPOTENCY_TTL_SECONDS;
+    } else {
+      process.env.IDEMPOTENCY_TTL_SECONDS = originalTtl;
+    }
+
+    const testApp = express();
+    testApp.use(express.json());
+    testApp.use(testIdempotency);
+    let calls = 0;
+    let firstRes;
+    let secondRes;
+    testApp.post('/test', (_req, res) => {
+      calls += 1;
+      if (calls === 1) {
+        firstRes = res;
+      } else if (calls === 2) {
+        secondRes = res;
+      } else {
+        res.status(201).json({ data: { calls } });
+      }
+    });
+
+    const first = request(testApp).post('/test').set('Idempotency-Key', 'replace-key-123').send({ a: 1 });
+    first.catch(() => {});
+    await wait(20);
+    await wait(1100); // let the first in-flight entry expire
+
+    const second = request(testApp).post('/test').set('Idempotency-Key', 'replace-key-123').send({ a: 1 });
+    second.catch(() => {});
+    await wait(20);
+
+    firstRes.status(204).end(); // finishes without caching; must not delete the newer entry
+    await first;
+
+    const third = await request(testApp).post('/test').set('Idempotency-Key', 'replace-key-123').send({ a: 1 });
+    expect(third.status).toBe(409);
+    expect(third.body.error).toBe('IDEMPOTENCY_IN_PROGRESS');
+
+    secondRes.status(201).json({ data: { calls } });
+    await second;
+  });
+});
+
+describe('problem+json idempotency errors (#1645)', () => {
+  const express = require('express');
+  const { ERROR_CATALOG } = require('../src/errors');
+
+  const expectProblem = (res, status, code) => {
+    expect(res.status).toBe(status);
+    expect(res.headers['content-type']).toMatch(/^application\/problem\+json/);
+    expect(res.body.code).toBe(code);
+    expect(res.body.error).toBe(code);
+    expect(res.body.status).toBe(status);
+    expect(res.body.type).toBe(`https://liquifact-backend.vercel.app/errors/${code}`);
+  };
+
+  test('IDEMPOTENCY_KEY_REQUIRED is a 400 problem with the legacy error field', async () => {
+    process.env.IDEMPOTENCY_REQUIRED = 'true';
+    try {
+      const res = await request(app)
+        .post('/api/invoices').set(authHeader())
+        .send({ sme: 'Test SME', debtor: 'Buyer', amount: 500, dueDate: '2027-01-01' });
+      expectProblem(res, 400, 'IDEMPOTENCY_KEY_REQUIRED');
+    } finally {
+      delete process.env.IDEMPOTENCY_REQUIRED;
+    }
+  });
+
+  test('INVALID_IDEMPOTENCY_KEY is a 400 problem', async () => {
+    const res = await request(app)
+      .post('/api/invoices').set(authHeader())
+      .set('Idempotency-Key', 'invalid key!')
+      .send({ sme: 'Test SME', debtor: 'Buyer', amount: 500, dueDate: '2027-01-01' });
+    expectProblem(res, 400, 'INVALID_IDEMPOTENCY_KEY');
+  });
+
+  test('IDEMPOTENCY_KEY_REUSED is a 422 problem and leaves the original resource unchanged', async () => {
+    const key = 'problem-reuse-key';
+    const payload = { sme: 'Test SME', debtor: 'Buyer', amount: 500, dueDate: '2027-01-01' };
+    const first = await request(app).post('/api/invoices').set(authHeader()).set('Idempotency-Key', key).send(payload);
+    expect(first.status).toBe(201);
+
+    const second = await request(app)
+      .post('/api/invoices').set(authHeader()).set('Idempotency-Key', key)
+      .send({ ...payload, amount: 600 });
+    expectProblem(second, 422, 'IDEMPOTENCY_KEY_REUSED');
+    expect(store.get(first.body.data.id).amount).toBe('500');
+  });
+
+  test('IDEMPOTENCY_IN_PROGRESS is a 409 problem with Retry-After', async () => {
+    const testApp = express();
+    testApp.use(express.json());
+    testApp.use(idempotency);
+    testApp.post('/slow', async (_req, res) => {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      res.status(201).json({ data: { ok: true } });
+    });
+
+    const first = request(testApp).post('/slow').set('Idempotency-Key', 'problem-progress-key').send({ a: 1 });
+    first.catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const second = await request(testApp).post('/slow').set('Idempotency-Key', 'problem-progress-key').send({ a: 1 });
+
+    expectProblem(second, 409, 'IDEMPOTENCY_IN_PROGRESS');
+    expect(second.headers['retry-after']).toBe('1');
+    await first;
+  });
+
+  test.each([
+    ['IDEMPOTENCY_KEY_REQUIRED', 400],
+    ['INVALID_IDEMPOTENCY_KEY', 400],
+    ['IDEMPOTENCY_IN_PROGRESS', 409],
+    ['IDEMPOTENCY_KEY_REUSED', 422],
+  ])('%s resolves through GET /errors/:code', async (code, status) => {
+    expect(ERROR_CATALOG[code].status).toBe(status);
+    const res = await request(app).get(`/errors/${code}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ code, status, title: ERROR_CATALOG[code].title, description: ERROR_CATALOG[code].description });
+  });
+
+  test('successful replay is unchanged by the problem+json migration', async () => {
+    const key = 'problem-replay-key';
+    const payload = { sme: 'Test SME', debtor: 'Buyer', amount: 500, dueDate: '2027-01-01' };
+    const first = await request(app).post('/api/invoices').set(authHeader()).set('Idempotency-Key', key).send(payload);
+    const second = await request(app).post('/api/invoices').set(authHeader()).set('Idempotency-Key', key).send(payload);
+    expect(second.status).toBe(201);
+    expect(second.headers['idempotent-replayed']).toBe('true');
+    expect(second.body).toEqual(first.body);
+  });
+
+  test('openapi documents every idempotency error code and the retry header', async () => {
+    const spec = (await request(app).get('/openapi.json')).body;
+    for (const [path, method] of [['/api/invoices', 'post'], ['/api/smes', 'post']]) {
+      const operation = spec.paths[path][method];
+      expect(operation.parameters.find((p) => p.name === 'Idempotency-Key')).toBeDefined();
+      expect(operation.responses['400']).toBeDefined();
+      expect(operation.responses['409']).toBeDefined();
+      expect(operation.responses['422']).toBeDefined();
+      expect(operation.responses['409'].headers['Retry-After']).toBeDefined();
+      expect(operation.responses['422'].content['application/problem+json']).toBeDefined();
+    }
+  });
+});

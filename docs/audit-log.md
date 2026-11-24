@@ -75,6 +75,44 @@ Each entry in `src/audit/audit-log.js` carries a sequential `seq`, `prevHash`
     is rotated to `<path>.<n>` and a new `<path>` is started whose first entry's
     `prevHash` links to the previous segment's final `hash`.
 
+### Querying: `GET /api/audit`
+
+Admin only (`Authorization: Bearer $ADMIN_API_TOKEN`). Returns
+`{ data, count, nextAfter }`, oldest first. Every filter is optional and they
+combine with AND.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `resourceId` | string | Only entries for this resource, e.g. `INV_0002`. |
+| `action` | string | Only this action, e.g. `invoice.fund`. |
+| `actor` | string | Only entries by this actor (the API key id, or `anonymous`). |
+| `outcome` | `success` \| `rejected` \| `error` | Only entries with this outcome. `error` is reserved; no entry records it yet, so it matches nothing today. |
+| `from` | ISO 8601 timestamp | Only entries whose `at` is at or after this instant (inclusive). |
+| `to` | ISO 8601 timestamp | Only entries whose `at` is at or before this instant (inclusive). |
+| `limit` | integer 1–200 | Page size. Default `50`. |
+| `after` | integer ≥ 0 | Only entries with `seq` greater than this. Pass the previous page's `nextAfter`. |
+
+`from` and `to` must be full date-times with a time zone (`Z` or `±HH:MM`),
+e.g. `2026-11-23T10:00:00Z` or `2026-11-23T11:00:00.000+01:00`. Each must be
+a real calendar date and time. Any of these returns `400` with an `error`
+message:
+
+- a value that is not a valid timestamp, including a date with no time or a
+  time with no zone
+- `from` later than `to`
+- an `outcome` outside the list above
+- a parameter given more than once
+
+Paging works the same with or without filters: the cursor is the `seq` of the
+last entry returned, so keep the same filters on every page. `nextAfter` is
+`null` on the last page.
+
+```bash
+# Rejected attempts by one API key during one hour
+curl -H "Authorization: Bearer $ADMIN_API_TOKEN" \
+  "$BASE/api/audit?actor=partner-key-1&outcome=rejected&from=2026-11-23T10:00:00Z&to=2026-11-23T11:00:00Z&limit=100"
+```
+
 ### Environment Variables
 
 | Variable | Default | Description |

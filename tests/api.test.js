@@ -7,6 +7,7 @@ const { authHeader } = require('./helpers/auth');
 const request = require('supertest');
 const SwaggerParser = require('@apidevtools/swagger-parser');
 const app = require('../src/app');
+const { buildSpec } = require('../src/openapi');
 const store = require('../src/data/store');
 const { defaultDocumentStore } = require('../src/data/documentStore');
 const { setTestClock, resetTestClock } = require('../src/utils/clock');
@@ -1054,5 +1055,60 @@ describe('CORS', () => {
       .set('Origin', 'https://evil.example');
     expect(disallowedGet.status).toBe(200);
     expect(disallowedGet.headers['access-control-allow-origin']).toBeUndefined();
+  });
+});
+
+describe('root endpoint index completeness (#1629)', () => {
+  const normalizePath = (value) => value.replace(/\{[^}]+\}/g, ':param').replace(/:[A-Za-z0-9_]+/g, ':param');
+
+  // Routes served by the app but intentionally absent from the OpenAPI document.
+  const NON_SPEC_ROUTES = new Set([
+    'GET /',
+    'GET /healthz',
+    'GET /docs',
+    'GET /openapi.json',
+    'POST /api/internal/indexer/run',
+  ]);
+
+  test('lists every documented path and method, with no malformed or undocumented entries', async () => {
+    const spec = buildSpec('https://api.test');
+    const { body } = await request(app).get('/');
+
+    const index = body.endpoints.map((entry) => {
+      expect(typeof entry.method).toBe('string');
+      expect(typeof entry.path).toBe('string');
+      expect(typeof entry.description).toBe('string');
+      expect(entry.path.startsWith('/')).toBe(true);
+      expect(entry.description.trim().length).toBeGreaterThan(0);
+      return `${entry.method.toUpperCase()} ${normalizePath(entry.path)}`;
+    });
+
+    const documented = [];
+    for (const [path, operations] of Object.entries(spec.paths)) {
+      for (const method of Object.keys(operations)) {
+        if (!['get', 'post', 'put', 'patch', 'delete'].includes(method)) {
+          continue;
+        }
+        documented.push(`${method.toUpperCase()} ${normalizePath(path)}`);
+      }
+    }
+
+    expect(documented.length).toBeGreaterThan(0);
+    expect(documented.filter((route) => !index.includes(route))).toEqual([]);
+    expect(index.filter((route) => !documented.includes(route) && !NON_SPEC_ROUTES.has(route))).toEqual([]);
+  });
+
+  test('includes the settle, cancel, healthz and error catalog routes', async () => {
+    const { body } = await request(app).get('/');
+    const routes = body.endpoints.map((entry) => `${entry.method} ${entry.path}`);
+    for (const route of [
+      'POST /api/invoices/:id/settle',
+      'POST /api/invoices/:id/cancel',
+      'GET /healthz',
+      'GET /api/escrow/attestations',
+      'GET /errors/:code',
+    ]) {
+      expect(routes).toContain(route);
+    }
   });
 });

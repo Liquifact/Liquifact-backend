@@ -239,6 +239,64 @@ describe('GET /api/escrow/events', () => {
     expect(res.body.data).toHaveLength(1);
   });
 
+  // ── toLedger filter & validation ──────────────────────────────────────────
+
+  test('filters by toLedger (inclusive upper bound)', async () => {
+    defaultStore.append([
+      makeEvent({ id: '50-1', ledger: 50 }),
+      makeEvent({ id: '100-2', ledger: 100 }),
+      makeEvent({ id: '200-1', ledger: 200 }),
+    ]);
+    const res = await request(app).get('/api/escrow/events?toLedger=100');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(2);
+    expect(res.body.data.every((e) => e.ledger <= 100)).toBe(true);
+  });
+
+  test('filters by combined fromLedger and toLedger range', async () => {
+    defaultStore.append([
+      makeEvent({ id: '50-1', ledger: 50 }),
+      makeEvent({ id: '100-2', ledger: 100 }),
+      makeEvent({ id: '150-1', ledger: 150 }),
+      makeEvent({ id: '200-1', ledger: 200 }),
+    ]);
+    const res = await request(app).get('/api/escrow/events?fromLedger=100&toLedger=150');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(2);
+    expect(res.body.data.map((e) => e.ledger)).toEqual([100, 150]);
+  });
+
+  test('returns 400 when toLedger is less than fromLedger', async () => {
+    const res = await request(app).get('/api/escrow/events?fromLedger=200&toLedger=100');
+    expect(res.status).toBe(400);
+    expect(res.body.detail).toContain('toLedger` must be greater than or equal to `fromLedger`');
+  });
+
+  test('accepts toLedger equal to fromLedger', async () => {
+    defaultStore.append([
+      makeEvent({ id: '50-1', ledger: 50 }),
+      makeEvent({ id: '100-2', ledger: 100 }),
+      makeEvent({ id: '200-1', ledger: 200 }),
+    ]);
+    const res = await request(app).get('/api/escrow/events?fromLedger=100&toLedger=100');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(1);
+    expect(res.body.data[0].ledger).toBe(100);
+  });
+
+  test.each(['10abc', '1e2', '-1', '5.5', '5.9', ''])(
+    'returns 400 for malformed toLedger=%s',
+    async (badLedger) => {
+      const res = await request(app).get(`/api/escrow/events?toLedger=${encodeURIComponent(badLedger)}`);
+      expect(res.status).toBe(400);
+    },
+  );
+
+  test('returns 400 for repeated toLedger query param', async () => {
+    const res = await request(app).get('/api/escrow/events?toLedger=1&toLedger=2');
+    expect(res.status).toBe(400);
+  });
+
   // ── cursor pagination ─────────────────────────────────────────────────────
 
   test('returns nextCursor when there are more results than limit', async () => {

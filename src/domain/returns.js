@@ -1,24 +1,28 @@
 'use strict';
 
-const { parseDecimal, rescale, decimalToString } = require('../utils/decimal');
 const { todayAsIso } = require('../utils/clock');
+const { toMinorUnits, formatAmount, mulBps } = require('../lib/money');
 
 const MINOR_SCALE = 7;
 
 function toMinor(value) {
-  const parsed = parseDecimal(value);
-  if (parsed.scale > MINOR_SCALE) {
-    throw new TypeError('Amount supports at most 7 decimal places');
+  try {
+    return toMinorUnits(value);
+  } catch (err) {
+    if (err instanceof TypeError && err.message.includes('fractional digits')) {
+      throw new TypeError('Amount supports at most 7 decimal places');
+    }
+    throw err;
   }
-  return rescale(parsed, MINOR_SCALE);
 }
 
 function fromMinor(minor) {
-  return decimalToString(minor, MINOR_SCALE);
+  return formatAmount(typeof minor === 'bigint' ? minor : BigInt(minor), MINOR_SCALE);
 }
 
 function couponMinor(principalMinor, yieldBps) {
-  return (BigInt(principalMinor) * BigInt(yieldBps)) / 10000n;
+  const bps = Number(yieldBps || 0);
+  return mulBps(typeof principalMinor === 'bigint' ? principalMinor : BigInt(principalMinor), bps);
 }
 
 function daysBetween(asOf, maturity) {

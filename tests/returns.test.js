@@ -31,6 +31,25 @@ describe('investment return math', () => {
       expect(couponMinor(principalMinor, yieldBps)).toBe((principalMinor * BigInt(yieldBps)) / 10000n);
     }
   });
+
+  test('parity test over at least 200 combinations asserting old formula equals delegated couponMinor', () => {
+    const testPrincipals = [
+      1n, 2n, 3n, 7n, 10n, 50n, 100n, 500n, 1000n, 9999n, 10000n, 50000n,
+      10000000n, 50000000n, 100000000n, 7500000000n, 10000000000n, 1234567890123n,
+    ];
+    const testYields = [
+      0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 650, 800, 1000, 1250, 2500, 5000, 7500, 9999, 10000,
+    ];
+    let combinations = 0;
+    for (const p of testPrincipals) {
+      for (const y of testYields) {
+        const expected = (p * BigInt(y)) / 10000n;
+        expect(couponMinor(p, y)).toBe(expected);
+        combinations += 1;
+      }
+    }
+    expect(combinations).toBeGreaterThanOrEqual(200);
+  });
 });
 
 describe('GET /api/invoices/:id/quote', () => {

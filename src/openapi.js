@@ -560,8 +560,26 @@ const IdempotencyHeaders = {
   },
 };
 
+const IdempotencyProblem = problemJson({ $ref: '#/components/schemas/Problem' });
+
+/**
+ * Shared idempotency failures. Every code is also resolvable through
+ * GET /errors/{code}; the legacy `error` field repeats the code.
+ */
 const IdempotencyErrors = {
-  422: { description: 'IDEMPOTENCY_KEY_REUSED: the key was used with a different payload', ...json(ErrorBody) },
+  400: {
+    description: 'IDEMPOTENCY_KEY_REQUIRED or INVALID_IDEMPOTENCY_KEY: the key is missing when required, or not 8-128 letters, digits, _ or -',
+    ...IdempotencyProblem,
+  },
+  409: {
+    description: 'IDEMPOTENCY_IN_PROGRESS: a request with this key is still in flight; retry after Retry-After',
+    headers: { 'Retry-After': { description: 'Seconds to wait before retrying', schema: { type: 'string' } } },
+    ...IdempotencyProblem,
+  },
+  422: {
+    description: 'IDEMPOTENCY_KEY_REUSED: the key was already used with a different payload',
+    ...IdempotencyProblem,
+  },
 };
 
 const authErrorBody = (codes) => ({
@@ -882,18 +900,18 @@ function createSpec(baseUrl) {
           responses: {
             201: { description: 'Created', headers: IdempotencyHeaders, ...json({ type: 'object', properties: { data: Invoice } }) },
             400: {
-              description: 'Validation failed (VALIDATION_FAILED, unknown keys rejected), or missing/invalid Idempotency-Key',
-              ...problemJson({ $ref: '#/components/schemas/Problem' }),
+              description: 'Validation failed (VALIDATION_FAILED, unknown keys rejected), or IDEMPOTENCY_KEY_REQUIRED / INVALID_IDEMPOTENCY_KEY',
+              ...IdempotencyProblem,
             },
             403: { description: 'SME_NOT_VERIFIED (REQUIRE_SME_VERIFICATION=true and the SME is not verified)', ...json(ref('ErrorResponse')) },
             404: { description: 'SME_NOT_FOUND (unknown smeId)', ...json(ref('ErrorResponse')) },
             409: {
               description: 'Duplicate invoice or possible duplicate receivable, or IDEMPOTENCY_IN_PROGRESS (retry after Retry-After)',
-              headers: { 'Retry-After': { schema: { type: 'string' } } },
+              headers: { 'Retry-After': { description: 'Seconds to wait before retrying', schema: { type: 'string' } } },
               ...json(DuplicateError),
             },
             415: { description: 'Content-Type must be application/json (UNSUPPORTED_MEDIA_TYPE)', ...problemJson({ $ref: '#/components/schemas/Problem' }) },
-            ...IdempotencyErrors,
+            422: IdempotencyErrors[422],
           },
         },
       },
@@ -955,13 +973,13 @@ function createSpec(baseUrl) {
             200: { description: 'Updated invoice', headers: IdempotencyHeaders, ...json(FundResponse) },
             400: {
               description: 'Invalid amount (non-finite, non-positive, above face value), missing/invalid investor, ' +
-                'unknown body key or invalid id (VALIDATION_FAILED)',
+                'unknown body key or invalid id (VALIDATION_FAILED), or IDEMPOTENCY_KEY_REQUIRED / INVALID_IDEMPOTENCY_KEY',
               ...json(FundingError),
             },
             404: { description: 'Not found', ...json(ErrorBody) },
             409: {
               description: 'Invoice not open, or IDEMPOTENCY_IN_PROGRESS (retry after Retry-After)',
-              headers: { 'Retry-After': { schema: { type: 'string' } } },
+              headers: { 'Retry-After': { description: 'Seconds to wait before retrying', schema: { type: 'string' } } },
               ...json(ErrorBody),
             },
             415: { description: 'Content-Type must be application/json (UNSUPPORTED_MEDIA_TYPE)', ...problemJson({ $ref: '#/components/schemas/Problem' }) },
@@ -1236,11 +1254,32 @@ function createSpec(baseUrl) {
         get: {
           tags: ['Audit'],
           summary: 'List audit log entries (admin)',
-          description: 'Oldest first. Page with `after` set to the previous response\'s `nextAfter`.',
+          description:
+            'Oldest first. Filters are optional and combine with AND. Page with `after` set to the previous ' +
+            'response\'s `nextAfter`; keep the same filters on every page.',
           security: adminSecurity,
           parameters: [
             { name: 'resourceId', in: 'query', schema: { type: 'string' }, description: 'Only entries for this resource' },
             { name: 'action', in: 'query', schema: { type: 'string' }, description: 'Only this action, e.g. invoice.fund' },
+            { name: 'actor', in: 'query', schema: { type: 'string' }, description: 'Only entries by this actor (API key id, or "anonymous")' },
+            {
+              name: 'outcome',
+              in: 'query',
+              schema: { type: 'string', enum: ['success', 'rejected', 'error'] },
+              description: 'Only entries with this outcome. `error` is reserved; no entry records it yet.',
+            },
+            {
+              name: 'from',
+              in: 'query',
+              schema: { type: 'string', format: 'date-time' },
+              description: 'Only entries at or after this ISO 8601 timestamp (time zone required), e.g. 2026-11-23T10:00:00Z',
+            },
+            {
+              name: 'to',
+              in: 'query',
+              schema: { type: 'string', format: 'date-time' },
+              description: 'Only entries at or before this ISO 8601 timestamp (time zone required). Must not be earlier than `from`.',
+            },
             { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 } },
             { name: 'after', in: 'query', schema: { type: 'integer', minimum: 0 }, description: 'Only entries with seq greater than this' },
           ],
@@ -1307,6 +1346,7 @@ function createSpec(baseUrl) {
               description: 'Filter by investor Stellar G-address.',
             },
             { name: 'fromLedger', in: 'query', schema: { type: 'integer', minimum: 0 } },
+            { name: 'toLedger', in: 'query', schema: { type: 'integer', minimum: 0 } },
             { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 } },
             { name: 'after', in: 'query', schema: { type: 'string' } },
           ],
@@ -1361,9 +1401,10 @@ function createSpec(baseUrl) {
           summary: 'List decoded escrow contract events',
           description: 'Returns decoded Soroban escrow contract events stored by the indexer. Supports filtering by type, investor address, and fromLedger. Uses cursor-based pagination via limit and after parameters.',
           parameters: [
-            { name: 'type', in: 'query', schema: { type: 'string', description: 'Filter events by decoded event type.' } },
+            { name: 'type', in: 'query', schema: { type: 'string', enum: EVENT_TYPES, description: 'Filter events by decoded event type.' } },
             { name: 'investor', in: 'query', schema: { type: 'string', description: 'Filter events by investor Stellar address (G...).' } },
             { name: 'fromLedger', in: 'query', schema: { type: 'integer', minimum: 0, description: 'Include only events at or after this ledger sequence.' } },
+            { name: 'toLedger', in: 'query', schema: { type: 'integer', minimum: 0, description: 'Include only events at or before this ledger sequence.' } },
             { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200, default: 50, description: 'Maximum number of events to return (1-200).' } },
             { name: 'after', in: 'query', schema: { type: 'string', description: 'Return events after this event id (cursor-based pagination).' } },
           ],
@@ -1662,16 +1703,70 @@ function createSpec(baseUrl) {
         },
       },
       '/api/smes': {
+        get: {
+          tags: ['SMEs'],
+          summary: 'List SMEs with status filter and pagination (admin)',
+          description: 'Lists all SME records with optional status filtering and cursor-based pagination. PII fields (contactEmail, registrationNumber) are included for admins.',
+          security: adminSecurity,
+          parameters: [
+            {
+              name: 'status',
+              in: 'query',
+              schema: { type: 'string', enum: ['pending', 'verified', 'rejected', 'suspended'] },
+              description: 'Filter SMEs by review status.',
+            },
+            {
+              name: 'limit',
+              in: 'query',
+              schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 },
+              description: 'Maximum number of SMEs to return (1-100).',
+            },
+            {
+              name: 'cursor',
+              in: 'query',
+              schema: { type: 'string' },
+              description: 'Cursor to paginate results after this SME ID.',
+            },
+          ],
+          responses: {
+            200: {
+              description: 'Paginated list of SMEs.',
+              ...json({
+                type: 'object',
+                required: ['data', 'nextCursor'],
+                properties: {
+                  data: { type: 'array', items: ref('SmeRecord') },
+                  nextCursor: { type: 'string', nullable: true },
+                },
+              }),
+            },
+            400: { description: 'Invalid query parameters (INVALID_STATUS, INVALID_LIMIT, INVALID_CURSOR)', ...json(ref('ErrorResponse')) },
+            401: { description: 'UNAUTHORIZED: admin token required', ...json(ref('ErrorResponse')) },
+            503: { description: 'ADMIN_TOKEN_NOT_CONFIGURED', ...json(ref('ErrorResponse')) },
+          },
+        },
         post: {
           tags: ['SMEs'],
           summary: 'Register an SME for KYB review',
-          description: 'Creates the SME with status `pending`. contactEmail and registrationNumber are PII and are only returned to admins.',
+          description:
+            'Creates the SME with status `pending`. contactEmail and registrationNumber are PII and are only returned to admins. ' +
+            'Supports the same Idempotency-Key contract as invoice creation: repeating the key with the same payload replays ' +
+            'the original 201 (Idempotent-Replayed: true), while reusing it with a different payload returns 422.',
+          parameters: [IdempotencyKeyParam],
           requestBody: { required: true, ...json(ref('CreateSmeRequest')) },
           responses: {
-            201: { description: 'SME created (pending review)', ...json({ type: 'object', properties: { data: ref('SmeRecord') } }) },
-            400: { description: 'Invalid SME fields (VALIDATION_FAILED)', ...problemJson({ $ref: '#/components/schemas/Problem' }) },
-            409: { description: 'SME_DUPLICATE: same country + registration number, or same Stellar address', ...json(ref('ErrorResponse')) },
+            201: { description: 'SME created (pending review)', headers: IdempotencyHeaders, ...json({ type: 'object', properties: { data: ref('SmeRecord') } }) },
+            400: {
+              description: 'Invalid SME fields (VALIDATION_FAILED), or IDEMPOTENCY_KEY_REQUIRED / INVALID_IDEMPOTENCY_KEY',
+              ...IdempotencyProblem,
+            },
+            409: {
+              description: 'SME_DUPLICATE: same country + registration number, or same Stellar address; or IDEMPOTENCY_IN_PROGRESS',
+              headers: { 'Retry-After': { description: 'Seconds to wait before retrying', schema: { type: 'string' } } },
+              ...json(ref('ErrorResponse')),
+            },
             415: { description: 'Content-Type must be application/json', ...problemJson({ $ref: '#/components/schemas/Problem' }) },
+            422: IdempotencyErrors[422],
           },
         },
       },
