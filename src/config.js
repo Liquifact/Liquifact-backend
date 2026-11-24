@@ -107,6 +107,30 @@ const ROLES = ['sme', 'investor', 'admin'];
 // Accepted LOG_LEVEL values, lowest to highest severity.
 const LOG_LEVELS = ['debug', 'info', 'warn', 'error'];
 
+// Known placeholder secrets rejected in production
+const KNOWN_SECRET_PLACEHOLDERS = new Set(['change-me', 'change_me', 'secret', 'changeme', 'placeholder']);
+
+/**
+ * Validates secret strength in production: at least 32 characters and not a known placeholder.
+ * Does not include the secret value in the error message.
+ *
+ * @param {string} name environment variable name
+ * @param {string|undefined} value secret value
+ * @param {string[]} errors accumulated errors
+ */
+function validateProductionSecret(name, value, errors) {
+  if (value === undefined || value === '') {
+    return;
+  }
+  const trimmed = value.trim();
+  const lower = trimmed.toLowerCase();
+  if (KNOWN_SECRET_PLACEHOLDERS.has(lower)) {
+    errors.push(`${name} cannot be a known placeholder in production`);
+  } else if (trimmed.length < 32) {
+    errors.push(`${name} must be at least 32 characters in production`);
+  }
+}
+
 /**
  * Parses `API_KEYS` (`id:role:sha256hex`, comma separated). Only SHA-256
  * hashes are kept; raw keys are never stored. Problems are pushed to `errors`
@@ -433,6 +457,12 @@ function loadConfig(env = process.env) {
   // Express trust proxy setting (default: 1 hop on Vercel, false otherwise).
   const trustProxy = parseTrustProxy(env.TRUST_PROXY, env, errors);
 
+  // Secret strength validation in production
+  if (isProduction) {
+    validateProductionSecret('ADMIN_API_TOKEN', env.ADMIN_API_TOKEN, errors);
+    validateProductionSecret('CRON_SECRET', env.CRON_SECRET, errors);
+  }
+
   if (errors.length > 0) {
     throw new ConfigError(errors);
   }
@@ -475,6 +505,8 @@ function loadConfig(env = process.env) {
     ROLES,
     apiKeys,
     devApiKey: env.DEV_API_KEY || '',
+    adminApiToken: env.ADMIN_API_TOKEN || null,
+    cronSecret: env.CRON_SECRET || null,
     rateLimit,
     version,
   };
