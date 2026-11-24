@@ -21,6 +21,14 @@ const { decodeEvent } = require('./decode');
 const { defaultStore } = require('./EventStore');
 const logger = require('../logger');
 const config = require('../config');
+const {
+  indexerIngestedTotal,
+  indexerLastLedger,
+  escrowIndexerEventsProcessedTotal,
+  escrowIndexerEventsSkippedTotal,
+  escrowIndexerCycleFailuresTotal,
+  escrowIndexerLastCursorAdvanceTimestampSeconds,
+} = require('../metrics/registry');
 
 /**
  * Build a Soroban RPC Server instance from config.
@@ -98,6 +106,7 @@ async function runOnce({
     try {
       response = await _server.getEvents(request);
     } catch (err) {
+      escrowIndexerCycleFailuresTotal.inc();
       _log.error({ err }, 'Soroban RPC getEvents failed; leaving cursor unchanged');
       throw err; // propagate so caller knows the run failed
     }
@@ -116,6 +125,7 @@ async function runOnce({
       try {
         response = await _server.getEvents(request);
       } catch (err) {
+        escrowIndexerCycleFailuresTotal.inc();
         _log.error({ err }, 'Soroban RPC getEvents (clamped) failed');
         throw err;
       }
@@ -128,8 +138,14 @@ async function runOnce({
     for (const raw of rawEvents) {
       try {
         const decoded = decodeEvent(raw);
-        ingested += _store.append([decoded]);
+        const added = _store.append([decoded]);
+        ingested += added;
+        if (added > 0) {
+          indexerIngestedTotal.inc(added);
+          escrowIndexerEventsProcessedTotal.inc(added);
+        }
       } catch (err) {
+        escrowIndexerEventsSkippedTotal.inc();
         _log.warn({ err, eventId: raw?.id }, 'Failed to decode event; skipping');
       }
     }
@@ -139,6 +155,11 @@ async function runOnce({
     if (newCursor && newCursor !== currentCursor) {
       _store.setCursor(newCursor);
       currentCursor = newCursor;
+      escrowIndexerLastCursorAdvanceTimestampSeconds.set(Math.floor(Date.now() / 1000));
+    }
+
+    if (latestLedger > 0) {
+      indexerLastLedger.set(latestLedger);
     }
 
     // Stop paging if this page was not full (no more events available)

@@ -21,6 +21,7 @@ const crypto = require('crypto');
 const { sign } = require('./signature');
 const webhookStore = require('./store');
 const emitter = require('./emitter');
+const { webhookDeliveriesTotal } = require('../metrics/registry');
 
 const TIMEOUT_MS = 5000;
 const MAX_ATTEMPTS = 5;
@@ -142,11 +143,13 @@ async function deliverToWebhook(wh, eventType, invoice) {
     const success = result.status !== null && result.status >= 200 && result.status < 300;
     if (success) {
       deliveryRecord.status = 'delivered';
+      webhookDeliveriesTotal.inc({ status: 'delivered' });
       return;
     }
   }
 
   deliveryRecord.status = 'failed';
+  webhookDeliveriesTotal.inc({ status: 'failed' });
 }
 
 /**

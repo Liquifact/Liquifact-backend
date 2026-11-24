@@ -17,6 +17,8 @@ const {
   ERROR_BASE_URI,
 } = require('./errors');
 const { getReadiness } = require('./services/readiness');
+const { registry, CONTENT_TYPE: METRICS_CONTENT_TYPE, bodySizeLimitRejectionsTotal } = require('./metrics/registry');
+const { metricsMiddleware, requireMetricsAuth } = require('./middleware/metrics');
 
 const app = express();
 app.disable('x-powered-by');
@@ -48,6 +50,7 @@ app.use((req, res, next) => {
   return (/^\/docs(\/|$)/.test(req.path) ? docsHelmet : apiHelmet)(req, res, next);
 });
 app.use(cors({ origin: config.corsOrigins.includes('*') ? '*' : config.corsOrigins }));
+app.use(metricsMiddleware);
 app.use(express.json({ limit: '100kb' }));
 
 if (config.apiKeys.length === 0 && config.nodeEnv !== 'test') {
@@ -145,6 +148,12 @@ app.get('/ready', async (req, res) => {
   res.status(result.status === 'ready' ? 200 : 503).json(result);
 });
 
+// Internal Prometheus metrics endpoint (intentionally omitted from OpenAPI public paths).
+app.get('/metrics', requireMetricsAuth, (_req, res) => {
+  res.set('Content-Type', METRICS_CONTENT_TYPE);
+  res.status(200).send(registry.render());
+});
+
 app.get('/openapi.json', (req, res) => res.json(buildSpec(baseUrl(req))));
 
 mountDocs(app, config);
@@ -196,6 +205,7 @@ app.use((err, req, res, _next) => {
       );
     }
     if (err.type === 'entity.too.large') {
+      bodySizeLimitRejectionsTotal.inc({ type: req.path.includes('/document') ? 'invoice' : 'json' });
       return res.status(413).type('application/problem+json').json(
         badRequest('PAYLOAD_TOO_LARGE', 'The request body exceeds the maximum allowed size').toProblem(req)
       );
@@ -204,6 +214,7 @@ app.use((err, req, res, _next) => {
 
   // Handle express.json() limit error (sent as a different error type)
   if (err.type === 'entity.too.large') {
+    bodySizeLimitRejectionsTotal.inc({ type: req.path.includes('/document') ? 'invoice' : 'json' });
     return res.status(413).type('application/problem+json').json(
       badRequest('PAYLOAD_TOO_LARGE', 'The request body exceeds the maximum allowed size').toProblem(req)
     );
