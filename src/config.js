@@ -308,6 +308,42 @@ function loadConfig(env = process.env) {
   // API keys for mutating routes (see middleware/auth.js)
   const apiKeys = parseApiKeys(env.API_KEYS, errors);
 
+  // Rate limiting (sliding window, in-memory)
+  const MAX_RATE_LIMIT_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
+  const MAX_RATE_LIMIT_COUNT = 1_000_000;
+
+  function validatedRateLimitInt(name, raw, fallback, min, max) {
+    if (raw === undefined || raw === '') {
+      return fallback;
+    }
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < min || n > max) {
+      errors.push(`${name} must be an integer between ${min} and ${max} (got "${raw}")`);
+      return fallback;
+    }
+    return n;
+  }
+
+  const rateLimit = {
+    windowMs: validatedRateLimitInt('RATE_LIMIT_WINDOW_MS', env.RATE_LIMIT_WINDOW_MS, 60_000, 1, MAX_RATE_LIMIT_WINDOW_MS),
+    max: validatedRateLimitInt('RATE_LIMIT_MAX', env.RATE_LIMIT_MAX, 60, 1, MAX_RATE_LIMIT_COUNT),
+    maxClients: validatedRateLimitInt('RATE_LIMIT_MAX_CLIENTS', env.RATE_LIMIT_MAX_CLIENTS, 10_000, 1, MAX_RATE_LIMIT_COUNT),
+    adminAuthWindowMs: validatedRateLimitInt(
+      'ADMIN_AUTH_RATE_LIMIT_WINDOW_MS',
+      env.ADMIN_AUTH_RATE_LIMIT_WINDOW_MS,
+      60_000,
+      1,
+      MAX_RATE_LIMIT_WINDOW_MS,
+    ),
+    adminAuthMax: validatedRateLimitInt(
+      'ADMIN_AUTH_RATE_LIMIT_MAX',
+      env.ADMIN_AUTH_RATE_LIMIT_MAX,
+      10,
+      1,
+      MAX_RATE_LIMIT_COUNT,
+    ),
+  };
+
   if (errors.length > 0) {
     throw new ConfigError(errors);
   }
@@ -342,6 +378,7 @@ function loadConfig(env = process.env) {
     ROLES,
     apiKeys,
     devApiKey: env.DEV_API_KEY || '',
+    rateLimit,
     version,
   };
 }

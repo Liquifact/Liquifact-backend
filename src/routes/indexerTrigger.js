@@ -17,6 +17,7 @@
 const { Router } = require('express');
 const { runOnce } = require('../indexer/escrow-indexer');
 const logger = require('../logger');
+const { mutatingLimiter, checkAdminAuthLimit, recordAdminAuthFailure } = require('../middleware/rate-limit');
 
 const router = Router();
 
@@ -111,6 +112,9 @@ function safeEqual(a, b) {
  * @returns {void}
  */
 function requireCronSecret(req, res, next) {
+  if (!checkAdminAuthLimit(req, res)) {
+    return undefined;
+  }
   const secret = process.env.CRON_SECRET;
 
   // 404 when secret is not configured — the endpoint is invisible
@@ -123,6 +127,7 @@ function requireCronSecret(req, res, next) {
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
 
   if (!safeEqual(token, secret)) {
+    recordAdminAuthFailure(req, res);
     return res.status(401).json({
       type: 'https://liquifact.io/problems/unauthorized',
       title: 'Unauthorized',
@@ -135,7 +140,7 @@ function requireCronSecret(req, res, next) {
 // Marker for the route-table guard test (machine credential, not an API-key role).
 requireCronSecret.requiredRoles = ['cron'];
 
-router.post('/run', requireCronSecret, async (req, res) => {
+router.post('/run', requireCronSecret, mutatingLimiter, async (req, res) => {
   const maxPages = Math.min(
     Math.max(1, parseInt(req.body?.maxPages ?? '5', 10) || 5),
     20,

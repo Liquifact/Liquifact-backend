@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const { checkAdminAuthLimit, recordAdminAuthFailure } = require('./rate-limit');
 
 const digest = (text) => crypto.createHash('sha256').update(text).digest();
 
@@ -38,12 +39,16 @@ function hasValidAdminToken(req) {
  * @returns {void}
  */
 function requireAdminToken(req, res, next) {
+  if (!checkAdminAuthLimit(req, res)) {
+    return;
+  }
   const expected = process.env.ADMIN_API_TOKEN;
   if (!expected) {
     res.status(503).json({ error: 'Admin API is not configured', code: 'ADMIN_TOKEN_NOT_CONFIGURED' });
     return;
   }
   if (!hasValidAdminToken(req)) {
+    recordAdminAuthFailure(req, res);
     res.set('WWW-Authenticate', 'Bearer');
     res.status(401).json({ error: 'Admin token required', code: 'UNAUTHORIZED' });
     return;

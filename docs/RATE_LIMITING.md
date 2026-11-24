@@ -1,25 +1,29 @@
-# Persistence endpoint rate limiting
+# Sliding-window rate limiting
 
-Persistence writes use a per-client sliding-window limiter. The limiter is
-implemented in-process and is intended to prevent abuse and accidental local
-overload while keeping the existing persistence API response contract stable.
+Mutating endpoints, admin-token endpoints, and the internal cron trigger use an
+in-process per-client sliding-window rate limiter (`src/middleware/rate-limit.js`).
+This prevents brute-force attacks and request floods while keeping memory usage
+strictly bounded.
+
+## Protected routes
+
+- **Invoices**: `POST /api/invoices`, `POST /api/invoices/:id/fund`, `POST /api/invoices/:id/settle`, `POST /api/invoices/:id/cancel`, `POST /api/invoices/:id/escrow`
+- **Documents**: `POST /api/invoices/:id/document`
+- **SMEs**: `POST /api/smes`, `POST /api/smes/:id/review`
+- **Webhooks**: `POST /api/webhooks`, `DELETE /api/webhooks/:id`
+- **Admin & Cron Guards**: `requireAdminToken` and `requireCronSecret` (`POST /api/internal/indexer/run`) enforce a separate, stricter IP-keyed bucket for failed authentication attempts.
 
 ## Identity
 
-The middleware gives an authenticated API key priority over the client IP. API
-keys are hashed with SHA-256 before they become map keys, so the live secret
-never appears in limiter state, logs, or diagnostic output. The key is
-namespaced with `persistence:apikey:` to prevent collisions with IP identities.
+For mutating routes, the middleware gives a presented API key (`Authorization: Bearer <key>` or `X-API-Key: <key>`) priority over the client IP. API keys are hashed with SHA-256 before they become map keys (`mutating:apikey:<sha256hex>`), so raw secrets never appear in limiter state, logs, or diagnostic output.
 
-Requests without an API key use `req.ip`, falling back to the socket address.
-Applications behind a proxy must configure Express trust boundaries correctly;
-the limiter does not independently trust arbitrary forwarded headers. Two
-different API keys therefore retain separate budgets even when they share a
-NAT address, while anonymous requests from one client share one budget.
+Requests without an API key use `req.ip`, falling back to `req.socket.remoteAddress` (`mutating:ip:<ip>`). Two different API keys therefore retain independent budgets even when they share a NAT address, while anonymous requests from one IP share one budget.
+
+For failed admin/cron authentication attempts, the stricter bucket is keyed strictly by IP (`admin-auth-fail:ip:<ip>`) so rotating invalid tokens cannot bypass brute-force protection.
 
 ## Sliding-window algorithm
 
-Each client has a bounded record with four numeric fields:
+Each tracked client has a constant-size record with four numeric fields:
 
 ```text
 currentWindowStart, currentCount,
@@ -27,108 +31,64 @@ previousWindowStart, previousCount
 ```
 
 The current counter covers one configured window. The immediately previous
-counter is weighted by the remaining fraction of that window:
+counter is weighted by the remaining fraction of the current window:
 
 ```text
 estimated = currentCount + previousCount * (1 - elapsed / windowMs)
 ```
 
-The request is allowed only when the estimate is below the configured maximum.
-On success, the current counter is incremented synchronously. A rejected
-request does not change either counter. This removes the fixed-window edge
-burst where a caller could spend a complete quota just before and after a
-boundary.
+A request is allowed only when `estimated < max`. On success, `currentCount` is
+incremented synchronously. A rejected request does not mutate counters.
 
-The old implementation delegated to `express-rate-limit`'s fixed-window
-store. The new implementation stores constant-size state per identity and
-does not retain one timestamp for every request. Idle records are removed
-lazily after both counter windows expire. A process restart clears the map,
-which is the documented behavior for the in-memory implementation.
+### Bounded memory and eviction
+
+The store caps the number of tracked client identities at `RATE_LIMIT_MAX_CLIENTS`.
+When a new client arrives at capacity:
+
+1. Expired records (where both current and previous windows have elapsed) are pruned.
+2. If still at capacity, the least-recently-active client is evicted (LRU).
 
 ## HTTP contract
 
 Allowed and rejected requests expose:
 
 - `RateLimit-Limit`: the configured maximum;
-- `RateLimit-Remaining`: conservative whole-request capacity;
+- `RateLimit-Remaining`: conservative whole-request capacity remaining;
 - `RateLimit-Reset`: seconds until capacity is released.
 
-An exceeded request returns status `429`, `Retry-After`, and the existing
-legacy fields alongside the stable structured marker:
+An exceeded request returns status `429`, `Content-Type: application/problem+json`,
+a positive `Retry-After` header (in seconds), and an RFC 7807 problem body:
 
 ```json
 {
-  "error": "Too Many Requests",
-  "type": "rate_limited",
+  "type": "https://liquifact-backend.vercel.app/errors/RATE_LIMIT_EXCEEDED",
+  "title": "Too Many Requests",
+  "status": 429,
   "code": "RATE_LIMIT_EXCEEDED",
-  "message": "Rate limit exceeded. Maximum 10 requests per 60 seconds.",
-  "retryAfter": 60
+  "instance": "/api/invoices",
+  "detail": "Rate limit exceeded. Maximum 60 requests per 60 seconds.",
+  "retryAfter": 60,
+  "error": "Too Many Requests"
 }
 ```
 
-Keeping `error` and `code` avoids breaking clients that already consume the
-persistence middleware response. New clients can use `type: rate_limited` as
-the stable category without parsing the message text. Retry values are always
-positive and are repeated in the `Retry-After` header.
-
 ## Configuration
 
-`PERSISTENCE_RATE_LIMIT_WINDOW_MS` controls the window duration and defaults to
-60,000 milliseconds. `PERSISTENCE_RATE_LIMIT_MAX_REQUESTS` controls the quota
-and defaults to 10. Invalid, zero, fractional, negative, or oversized values
-fall back to those safe defaults. The accepted maximum window is 24 hours and
-the maximum request count is one million, preventing accidental unbounded
-memory or retry behavior from a malformed environment setting.
+All rate-limit settings are validated at startup in `src/config.js` (invalid values
+throw `ConfigError`):
 
-The configuration is read when a limiter is created, matching the existing
-middleware factory behavior. The factory accepts the historical Redis-client
-argument for source compatibility; this issue intentionally keeps the active
-implementation in memory. A future distributed adapter must preserve the same
-atomic decision, two-counter semantics, hashed identity, and response fields.
+| Environment variable              | Default  | Bounds            | Purpose                                              |
+| --------------------------------- | -------- | ----------------- | ---------------------------------------------------- |
+| `RATE_LIMIT_WINDOW_MS`            | `60000`  | `1` – `86400000`  | Sliding-window duration (ms) for mutating routes     |
+| `RATE_LIMIT_MAX`                  | `60`     | `1` – `1000000`   | Max requests per window per client                   |
+| `RATE_LIMIT_MAX_CLIENTS`          | `10000`  | `1` – `1000000`   | Maximum tracked client entries before eviction       |
+| `ADMIN_AUTH_RATE_LIMIT_WINDOW_MS` | `60000`  | `1` – `86400000`  | Sliding-window duration (ms) for failed admin auth   |
+| `ADMIN_AUTH_RATE_LIMIT_MAX`       | `10`     | `1` – `1000000`   | Max failed admin/cron auth attempts per window per IP |
 
 ## Failure and boundary guarantees
 
-The counter check and increment are synchronous in one Node event loop turn.
-Competing requests in the same process cannot both observe the same available
-slot and then overrun the limit. A process-local map cannot provide a global
-guarantee across workers, so a horizontally scaled deployment should enforce a
-shared edge quota or provide an atomic shared store before treating this as a
-tenant-wide limit.
-
-At a window boundary, the previous count starts with full weight and decays
-continuously. At the end of the next window, the old count is discarded. This
-makes the boundary behavior deterministic and avoids a sudden double budget.
-The `prune` hook is exposed on the returned limiter for controlled lifecycle
-maintenance and deterministic tests; normal requests also prune stale records
-before deciding.
-
-## Verification matrix
-
-The unit and integration suites cover:
-
-| Scenario                 | Expected result                           |
-| ------------------------ | ----------------------------------------- |
-| Under-limit requests     | 2xx/201 with correct remaining header     |
-| Exact limit              | Next request is 429 with structured error |
-| End/start boundary burst | Previous pressure remains weighted        |
-| Previous-window decay    | Capacity returns gradually                |
-| Full expiry              | New request starts a clean bounded record |
-| Two API keys             | Independent per-tenant budgets            |
-| Anonymous clients        | IP-scoped budget                          |
-| API-key identity         | Secret is hashed and never stored raw     |
-| Invalid configuration    | Safe bounded defaults                     |
-| Repeated rejection       | No counter or map growth                  |
-| Custom store             | Caller can inspect or manage lifecycle    |
-
-## Compatibility and rollback
-
-The middleware factory name, optional argument, environment variables, key
-precedence, 429 status, legacy error fields, and `Retry-After` behavior remain
-compatible. The internal map shape is new and exists only in process memory,
-so there is no database migration. Rolling back to the previous release is
-safe after restarting the process, which clears the compact records.
-
-This change is deliberately limited to persistence rate limiting. It does not
-alter unrelated global, KYC, Redis, queue, invoice, or webhook rate-limit
-policies. Those controls may have different operational scopes and should be
-migrated separately if they need the same sliding-window semantics.
+- Counter check and increment are synchronous in one Node event loop turn.
+- A process restart clears the in-memory map. For horizontally scaled deployments,
+  enforce a shared edge quota or plug in a distributed store.
+- The `prune()` and `reset()` hooks are exposed on limiter middleware instances
+  for deterministic lifecycle management and tests.

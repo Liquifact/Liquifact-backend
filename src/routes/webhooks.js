@@ -17,6 +17,7 @@ const express = require('express');
 const { validateWebhookUrl } = require('../webhooks/ssrf');
 const webhookStore = require('../webhooks/store');
 const { requireAdminToken } = require('../middleware/require-admin-token');
+const { mutatingLimiter } = require('../middleware/rate-limit');
 
 const router = express.Router();
 
@@ -27,7 +28,7 @@ router.use(requireAdminToken);
 // POST /api/webhooks
 // ---------------------------------------------------------------------------
 
-router.post('/', requireAdminToken, async (req, res) => {
+router.post('/', requireAdminToken, mutatingLimiter, async (req, res) => {
   const { url, events } = req.body || {};
 
   if (typeof url !== 'string' || !url.trim()) {
@@ -76,7 +77,7 @@ router.get('/', (req, res) => {
 // DELETE /api/webhooks/:id
 // ---------------------------------------------------------------------------
 
-router.delete('/:id', requireAdminToken, (req, res) => {
+router.delete('/:id', requireAdminToken, mutatingLimiter, (req, res) => {
   const deleted = webhookStore.deleteWebhook(req.params.id);
   if (!deleted) {
     return res.status(404).json({ error: 'Webhook not found' });
