@@ -7,7 +7,7 @@ const { StrKey } = require('@stellar/stellar-sdk');
 const store = require('../data/store');
 const { auditContext } = require('../audit/middleware');
 const contributions = require('../data/contributions');
-const { toMinor, fromMinor, couponMinor, daysBetween, annualisedBps } = require('../domain/returns');
+const { toMinor, fromMinor, couponMinor, daysBetween, daysToMaturity, annualisedBps } = require('../domain/returns');
 const { ApiError, badRequest, notFound, conflict, unprocessable, sendProblem } = require('../errors');
 const { parseInvoiceQuery, queryInvoices, InvoiceQueryError } = require('../services/invoice-query');
 const { requireAdminToken } = require('../middleware/require-admin-token');
@@ -348,6 +348,10 @@ router.post('/:id/fund', requireRole('investor', 'admin'), idempotency, validate
       before,
       metadata: requested,
     });
+  }
+  const currentDaysToMaturity = daysToMaturity(invoice.dueDate);
+  if (currentDaysToMaturity <= 0) {
+    return reject(409, 'INVOICE_MATURED', { before, metadata: requested });
   }
 
   // Contributions are accepted in full or rejected; allowPartial explicitly caps at remaining capacity.
