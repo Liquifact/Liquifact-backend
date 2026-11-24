@@ -19,6 +19,8 @@ describe('loadConfig', () => {
     expect(config.corsOrigins).toEqual(['*']);
     expect(config.indexerStateFile).toBeNull();
     expect(config.trustProxy).toBe(false);
+    expect(config.adminApiToken).toBeNull();
+    expect(config.cronSecret).toBeNull();
     expect(config.version).toBeDefined();
   });
 
@@ -250,6 +252,115 @@ describe('loadConfig', () => {
         loadConfig({ TRUST_PROXY: value });
       } catch (err) {
         expect(err.errors.some((e) => e.includes('TRUST_PROXY'))).toBe(true);
+      }
+    });
+  });
+
+  describe('ADMIN_API_TOKEN and CRON_SECRET strength', () => {
+    test('exposes adminApiToken and cronSecret on config object', () => {
+      const config = loadConfig({
+        ADMIN_API_TOKEN: 'dev-token',
+        CRON_SECRET: 'dev-cron',
+      });
+      expect(config.adminApiToken).toBe('dev-token');
+      expect(config.cronSecret).toBe('dev-cron');
+    });
+
+    test('non-production allows short and placeholder secrets', () => {
+      expect(() =>
+        loadConfig({
+          NODE_ENV: 'development',
+          ADMIN_API_TOKEN: 'short',
+          CRON_SECRET: 'change-me',
+        }),
+      ).not.toThrow();
+
+      expect(() =>
+        loadConfig({
+          NODE_ENV: 'test',
+          ADMIN_API_TOKEN: 'secret',
+          CRON_SECRET: 'short',
+        }),
+      ).not.toThrow();
+    });
+
+    test('production allows unset secrets', () => {
+      const config = loadConfig({
+        NODE_ENV: 'production',
+        ALLOW_ANY_ORIGIN: 'true',
+        CORS_ALLOWED_ORIGINS: '*',
+      });
+      expect(config.adminApiToken).toBeNull();
+      expect(config.cronSecret).toBeNull();
+    });
+
+    test('production accepts secrets with at least 32 characters and non-placeholder', () => {
+      const strongAdmin = 'a'.repeat(32);
+      const strongCron = 'b'.repeat(40);
+      const config = loadConfig({
+        NODE_ENV: 'production',
+        ALLOW_ANY_ORIGIN: 'true',
+        CORS_ALLOWED_ORIGINS: '*',
+        ADMIN_API_TOKEN: strongAdmin,
+        CRON_SECRET: strongCron,
+      });
+      expect(config.adminApiToken).toBe(strongAdmin);
+      expect(config.cronSecret).toBe(strongCron);
+    });
+
+    test.each([
+      {
+        name: 'short ADMIN_API_TOKEN in production',
+        env: { ADMIN_API_TOKEN: 'too-short-token' },
+        varName: 'ADMIN_API_TOKEN',
+        forbiddenValue: 'too-short-token',
+      },
+      {
+        name: 'placeholder change-me for ADMIN_API_TOKEN in production',
+        env: { ADMIN_API_TOKEN: 'change-me' },
+        varName: 'ADMIN_API_TOKEN',
+        forbiddenValue: 'change-me',
+      },
+      {
+        name: 'placeholder secret for ADMIN_API_TOKEN in production',
+        env: { ADMIN_API_TOKEN: 'secret' },
+        varName: 'ADMIN_API_TOKEN',
+        forbiddenValue: 'secret',
+      },
+      {
+        name: 'short CRON_SECRET in production',
+        env: { CRON_SECRET: 'too-short-cron' },
+        varName: 'CRON_SECRET',
+        forbiddenValue: 'too-short-cron',
+      },
+      {
+        name: 'placeholder change-me for CRON_SECRET in production',
+        env: { CRON_SECRET: 'change-me' },
+        varName: 'CRON_SECRET',
+        forbiddenValue: 'change-me',
+      },
+      {
+        name: 'placeholder secret for CRON_SECRET in production',
+        env: { CRON_SECRET: 'secret' },
+        varName: 'CRON_SECRET',
+        forbiddenValue: 'secret',
+      },
+    ])('rejects $name with ConfigError without leaking secret', ({ env, varName, forbiddenValue }) => {
+      const fullEnv = {
+        NODE_ENV: 'production',
+        ALLOW_ANY_ORIGIN: 'true',
+        CORS_ALLOWED_ORIGINS: '*',
+        ...env,
+      };
+
+      expect(() => loadConfig(fullEnv)).toThrow(ConfigError);
+      try {
+        loadConfig(fullEnv);
+      } catch (err) {
+        expect(err.message).toContain(varName);
+        expect(err.message).not.toContain(forbiddenValue);
+        expect(err.errors.some((e) => e.includes(varName))).toBe(true);
+        expect(err.errors.every((e) => !e.includes(forbiddenValue))).toBe(true);
       }
     });
   });

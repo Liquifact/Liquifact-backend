@@ -328,6 +328,165 @@ describe('SME onboarding and invoice verification (#1557)', () => {
       expect(recreated.id).toMatch(/^SME_/);
       expect(recreated.stellarAddress).toBe(validSme.stellarAddress);
     });
+
+    test('listSmes returns detached copies so caller mutations do not leak', () => {
+      const created = createSme(validSme);
+      const { listSmes } = require('../src/data/smes');
+      const listed = listSmes();
+      expect(listed.data).toHaveLength(1);
+      listed.data[0].legalName = 'Hacked Name';
+      listed.data[0].reviewHistory.push({ decision: 'tampered' });
+
+      const rechecked = listSmes();
+      expect(rechecked.data[0].legalName).toBe(validSme.legalName);
+      expect(rechecked.data[0].reviewHistory).toHaveLength(0);
+    });
+  });
+
+  describe('GET /api/smes (admin list with filtering and pagination)', () => {
+    test('requires admin access and reports 503 if unconfigured, 401 if unauthorized', async () => {
+      delete process.env.ADMIN_API_TOKEN;
+      const unconfigured = await request(app).get('/api/smes');
+      expect(unconfigured.status).toBe(503);
+
+      process.env.ADMIN_API_TOKEN = TOKEN;
+      const unauthorized = await request(app).get('/api/smes');
+      expect(unauthorized.status).toBe(401);
+
+      const wrongToken = await request(app).get('/api/smes').set('Authorization', 'Bearer wrong-token');
+      expect(wrongToken.status).toBe(401);
+
+      const authorized = await request(app).get('/api/smes').set('Authorization', `Bearer ${TOKEN}`);
+      expect(authorized.status).toBe(200);
+      expect(authorized.body.data).toEqual([]);
+      expect(authorized.body.nextCursor).toBeNull();
+    });
+
+    test('lists SMEs in creation order with PII included for admins', async () => {
+      process.env.ADMIN_API_TOKEN = TOKEN;
+      const sme1 = (await createRecord({ registrationNumber: 'reg-1', stellarAddress: VALID_ADDRESS })).body.data;
+      const sme2 = (await createRecord({ registrationNumber: 'reg-2', stellarAddress: OTHER_ADDRESS })).body.data;
+
+      const res = await request(app).get('/api/smes').set('Authorization', `Bearer ${TOKEN}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data).toHaveLength(2);
+      expect(res.body.data[0].id).toBe(sme1.id);
+      expect(res.body.data[1].id).toBe(sme2.id);
+      expect(res.body.data[0].contactEmail).toBe(validSme.contactEmail);
+      expect(res.body.data[0].registrationNumber).toBe('reg-1');
+      expect(res.body.nextCursor).toBeNull();
+    });
+
+    test('filters SMEs by status', async () => {
+      process.env.ADMIN_API_TOKEN = TOKEN;
+      const pendingSme = (await createRecord({ registrationNumber: 'reg-p', stellarAddress: VALID_ADDRESS })).body.data;
+      const verifiedSme = (await createRecord({ registrationNumber: 'reg-v', stellarAddress: OTHER_ADDRESS })).body.data;
+      await review(verifiedSme.id, 'verify', 'KYB verified');
+
+      const pendingRes = await request(app)
+        .get('/api/smes?status=pending')
+        .set('Authorization', `Bearer ${TOKEN}`);
+      expect(pendingRes.status).toBe(200);
+      expect(pendingRes.body.data).toHaveLength(1);
+      expect(pendingRes.body.data[0].id).toBe(pendingSme.id);
+
+      const verifiedRes = await request(app)
+        .get('/api/smes?status=verified')
+        .set('Authorization', `Bearer ${TOKEN}`);
+      expect(verifiedRes.status).toBe(200);
+      expect(verifiedRes.body.data).toHaveLength(1);
+      expect(verifiedRes.body.data[0].id).toBe(verifiedSme.id);
+
+      const rejectedRes = await request(app)
+        .get('/api/smes?status=rejected')
+        .set('Authorization', `Bearer ${TOKEN}`);
+      expect(rejectedRes.status).toBe(200);
+      expect(rejectedRes.body.data).toHaveLength(0);
+    });
+
+    test('rejects invalid status filter with 400', async () => {
+      process.env.ADMIN_API_TOKEN = TOKEN;
+      const res = await request(app)
+        .get('/api/smes?status=unknown')
+        .set('Authorization', `Bearer ${TOKEN}`);
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('INVALID_STATUS');
+    });
+
+    test('paginates using limit and cursor', async () => {
+      const { Keypair } = require('@stellar/stellar-sdk');
+      process.env.ADMIN_API_TOKEN = TOKEN;
+      const ids = [];
+      for (let i = 1; i <= 5; i++) {
+        const res = await createRecord({
+          registrationNumber: `reg-${i}`,
+          stellarAddress: Keypair.random().publicKey(),
+        });
+        expect(res.status).toBe(201);
+        ids.push(res.body.data.id);
+      }
+
+      // Page 1: limit 2
+      const page1 = await request(app)
+        .get('/api/smes?limit=2')
+        .set('Authorization', `Bearer ${TOKEN}`);
+      expect(page1.status).toBe(200);
+      expect(page1.body.data).toHaveLength(2);
+      expect(page1.body.data.map((s) => s.id)).toEqual([ids[0], ids[1]]);
+      expect(page1.body.nextCursor).toBe(ids[1]);
+
+      // Page 2: after page 1 cursor
+      const page2 = await request(app)
+        .get(`/api/smes?limit=2&cursor=${page1.body.nextCursor}`)
+        .set('Authorization', `Bearer ${TOKEN}`);
+      expect(page2.status).toBe(200);
+      expect(page2.body.data).toHaveLength(2);
+      expect(page2.body.data.map((s) => s.id)).toEqual([ids[2], ids[3]]);
+      expect(page2.body.nextCursor).toBe(ids[3]);
+
+      // Page 3: last item
+      const page3 = await request(app)
+        .get(`/api/smes?limit=2&cursor=${page2.body.nextCursor}`)
+        .set('Authorization', `Bearer ${TOKEN}`);
+      expect(page3.status).toBe(200);
+      expect(page3.body.data).toHaveLength(1);
+      expect(page3.body.data[0].id).toBe(ids[4]);
+      expect(page3.body.nextCursor).toBeNull();
+    });
+
+    test.each(['0', '101', '-5', 'abc'])(
+      'rejects invalid limit=%s with 400',
+      async (badLimit) => {
+        process.env.ADMIN_API_TOKEN = TOKEN;
+        const res = await request(app)
+          .get(`/api/smes?limit=${badLimit}`)
+          .set('Authorization', `Bearer ${TOKEN}`);
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('INVALID_LIMIT');
+      },
+    );
+
+    test('rejects unknown cursor with 400', async () => {
+      process.env.ADMIN_API_TOKEN = TOKEN;
+      const res = await request(app)
+        .get('/api/smes?cursor=SME_nonexistent')
+        .set('Authorization', `Bearer ${TOKEN}`);
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('INVALID_CURSOR');
+    });
+
+    test('appears in root index and OpenAPI paths', async () => {
+      const rootRes = await request(app).get('/');
+      expect(rootRes.status).toBe(200);
+      const rootEndpoint = rootRes.body.endpoints.find(
+        (ep) => ep.path === '/api/smes' && ep.method === 'GET',
+      );
+      expect(rootEndpoint).toBeDefined();
+
+      const openapiRes = await request(app).get('/openapi.json');
+      expect(openapiRes.status).toBe(200);
+      expect(openapiRes.body.paths['/api/smes'].get).toBeDefined();
+    });
   });
 });
 
