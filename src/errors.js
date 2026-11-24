@@ -191,6 +191,11 @@ const ERROR_CATALOG = {
     status: 404,
     description: 'The requested endpoint does not exist.',
   },
+  RATE_LIMIT_EXCEEDED: {
+    title: 'Too Many Requests',
+    status: 429,
+    description: 'Too many requests were sent in a given time window. Wait for Retry-After seconds before retrying.',
+  },
   INTERNAL: {
     title: 'Internal Server Error',
     status: 500,
@@ -205,6 +210,26 @@ const ERROR_CATALOG = {
     title: 'Indexer Busy',
     status: 409,
     description: 'An indexer run is already in progress; retry the request later.',
+  },
+  IDEMPOTENCY_KEY_REQUIRED: {
+    title: 'Idempotency Key Required',
+    status: 400,
+    description: 'An Idempotency-Key header is required when IDEMPOTENCY_REQUIRED=true.',
+  },
+  INVALID_IDEMPOTENCY_KEY: {
+    title: 'Invalid Idempotency Key',
+    status: 400,
+    description: 'The Idempotency-Key header must be 8-128 characters using letters, digits, underscore or hyphen.',
+  },
+  IDEMPOTENCY_IN_PROGRESS: {
+    title: 'Idempotency Key In Progress',
+    status: 409,
+    description: 'A request with this Idempotency-Key is still in progress; retry after the delay in Retry-After.',
+  },
+  IDEMPOTENCY_KEY_REUSED: {
+    title: 'Idempotency Key Reused',
+    status: 422,
+    description: 'The Idempotency-Key was already used with a different request payload.',
   },
 }
 
@@ -243,7 +268,6 @@ class ApiError extends Error {
     if (req?.id) {
       problem.requestId = req.id
     }
-    problem.error = this.title
     return problem
   }
 }

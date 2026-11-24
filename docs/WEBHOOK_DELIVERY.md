@@ -248,6 +248,15 @@ payload belongs in the dead-letter store, not in normal logs.
 4. Preserve rows until the business owner approves resolution.
 5. Replay only after the receiver is healthy and deduplication is confirmed.
 
+## Delivery Queue and Concurrency Limits
+
+Liquifact bounds outbound webhook deliveries using an internal FIFO queue (`src/webhooks/queue.js`):
+
+- **Concurrency limit (`WEBHOOK_CONCURRENCY`, default `8`)**: At most 8 deliveries (HTTP attempts) are in flight simultaneously across all webhooks.
+- **Queue capacity (`WEBHOOK_QUEUE_MAX`, default `1000`)**: If the pending queue reaches maximum capacity during high volume, the oldest queued job is dropped and marked `status: "dropped"` in the delivery log.
+- **Non-blocking retry backoff**: During exponential backoff sleep (e.g. 1s–256s), worker concurrency slots are released immediately rather than held idle, allowing other pending deliveries to proceed.
+- **Graceful shutdown drain**: When shutting down, `drain(timeoutMs)` waits for in-flight requests and scheduled timers to complete cleanly before process exit.
+
 ## Review checklist
 
 - [ ] The receiver verifies the raw body before JSON parsing.
@@ -267,3 +276,18 @@ The issue-specific contract tests in
 they cover the cryptographic input, freshness guard, canonicalization,
 permanent/transient retry behavior, retry caps, and dead-letter fields. Keep
 them green when changing the delivery or replay implementation.
+
+
+## Retry policy
+
+Deliveries are retried up to **5 attempts** with exponential backoff + jitter
+(~1s, 4s, 16s, 64s, 256s).
+
+- **2xx** → `delivered`, no retry.
+- **4xx other than 408 / 425 / 429** → permanent failure. Exactly one attempt;
+  the record is marked `status: "failed", reason: "permanent_4xx"`.
+- **408 / 425 / 429** → retryable. If the response carries a `Retry-After`
+  header (delta-seconds or HTTP-date), that value is used as the delay for the
+  next attempt, clamped to 256 000 ms. Otherwise the standard backoff applies.
+- **5xx and network errors** → retryable with the standard backoff.
+- After the final attempt fails, `reason` is set to `"attempts_exhausted"`.

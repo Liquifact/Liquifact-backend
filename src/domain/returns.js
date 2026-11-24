@@ -1,29 +1,44 @@
 'use strict';
 
-const { parseDecimal, rescale, decimalToString } = require('../utils/decimal');
+const { todayAsIso } = require('../utils/clock');
+const { toMinorUnits, formatAmount, mulBps } = require('../lib/money');
 
 const MINOR_SCALE = 7;
 
 function toMinor(value) {
-  const parsed = parseDecimal(value);
-  if (parsed.scale > MINOR_SCALE) {
-    throw new TypeError('Amount supports at most 7 decimal places');
+  try {
+    return toMinorUnits(value);
+  } catch (err) {
+    if (err instanceof TypeError && err.message.includes('fractional digits')) {
+      throw new TypeError('Amount supports at most 7 decimal places');
+    }
+    throw err;
   }
-  return rescale(parsed, MINOR_SCALE);
 }
 
 function fromMinor(minor) {
-  return decimalToString(minor, MINOR_SCALE);
+  return formatAmount(typeof minor === 'bigint' ? minor : BigInt(minor), MINOR_SCALE);
 }
 
 function couponMinor(principalMinor, yieldBps) {
-  return (BigInt(principalMinor) * BigInt(yieldBps)) / 10000n;
+  const bps = Number(yieldBps || 0);
+  return mulBps(typeof principalMinor === 'bigint' ? principalMinor : BigInt(principalMinor), bps);
 }
 
 function daysBetween(asOf, maturity) {
   const start = Date.parse(`${asOf}T00:00:00.000Z`);
   const end = Date.parse(`${maturity}T00:00:00.000Z`);
   return Math.round((end - start) / 86400000);
+}
+
+/**
+ * Calculates days to maturity from today (UTC).
+ *
+ * @param {string} maturity maturity date in YYYY-MM-DD format
+ * @returns {number} days until maturity (negative if matured)
+ */
+function daysToMaturity(maturity) {
+  return daysBetween(todayAsIso(), maturity);
 }
 
 function annualisedBps(yieldBps, daysToMaturity) {
@@ -33,4 +48,4 @@ function annualisedBps(yieldBps, daysToMaturity) {
   return { simpleAnnualisedBps: simple, effectiveAnnualisedBps: effective };
 }
 
-module.exports = { MINOR_SCALE, toMinor, fromMinor, couponMinor, daysBetween, annualisedBps };
+module.exports = { MINOR_SCALE, toMinor, fromMinor, couponMinor, daysBetween, daysToMaturity, annualisedBps };

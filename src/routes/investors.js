@@ -12,17 +12,9 @@ const PORTFOLIO_STATUSES = ['open', 'funded', 'settled', 'cancelled'];
 const DEFAULT_PORTFOLIO_LIMIT = 50;
 const MAX_PORTFOLIO_LIMIT = 100;
 
-/**
- * Computes coupon floored in integer minor units (same as the escrow contract).
- * coupon = principal × yieldBps / 10000
- *
- * @param {bigint} principalMinor principal in minor units (7 dp)
- * @param {number} yieldBps yield in basis points
- * @returns {bigint} coupon in minor units
- */
-function computeCouponMinor(principalMinor, yieldBps) {
-  return mulBps(principalMinor, yieldBps || 0);
-}
+const { couponMinor } = require('../domain/returns');
+
+const computeCouponMinor = couponMinor;
 
 router.get('/:address/portfolio', (req, res) => {
   const { address } = req.params;

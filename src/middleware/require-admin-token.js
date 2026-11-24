@@ -39,6 +39,9 @@ function hasValidAdminToken(req) {
  * @returns {void}
  */
 function requireAdminToken(req, res, next) {
+  if (!checkAdminAuthLimit(req, res)) {
+    return;
+  }
   const expected = process.env.ADMIN_API_TOKEN;
   if (!expected) {
     return sendProblem(req, res, 'ADMIN_TOKEN_NOT_CONFIGURED', {
@@ -47,6 +50,7 @@ function requireAdminToken(req, res, next) {
     });
   }
   if (!hasValidAdminToken(req)) {
+    recordAdminAuthFailure(req, res);
     res.set('WWW-Authenticate', 'Bearer');
     return sendProblem(req, res, 'UNAUTHORIZED', {
       detail: 'Admin token required',
