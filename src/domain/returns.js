@@ -1,6 +1,7 @@
 'use strict';
 
 const { parseDecimal, rescale, decimalToString } = require('../utils/decimal');
+const { todayAsIso } = require('../utils/clock');
 
 const MINOR_SCALE = 7;
 
@@ -26,6 +27,16 @@ function daysBetween(asOf, maturity) {
   return Math.round((end - start) / 86400000);
 }
 
+/**
+ * Calculates days to maturity from today (UTC).
+ *
+ * @param {string} maturity maturity date in YYYY-MM-DD format
+ * @returns {number} days until maturity (negative if matured)
+ */
+function daysToMaturity(maturity) {
+  return daysBetween(todayAsIso(), maturity);
+}
+
 function annualisedBps(yieldBps, daysToMaturity) {
   const simple = Math.floor((yieldBps * 365 + daysToMaturity / 2) / daysToMaturity);
   // Effective annualisation is a comparison metric only; never use this float for money.
@@ -33,4 +44,4 @@ function annualisedBps(yieldBps, daysToMaturity) {
   return { simpleAnnualisedBps: simple, effectiveAnnualisedBps: effective };
 }
 
-module.exports = { MINOR_SCALE, toMinor, fromMinor, couponMinor, daysBetween, annualisedBps };
+module.exports = { MINOR_SCALE, toMinor, fromMinor, couponMinor, daysBetween, daysToMaturity, annualisedBps };

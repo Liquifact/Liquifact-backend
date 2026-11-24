@@ -9,6 +9,7 @@ const SwaggerParser = require('@apidevtools/swagger-parser');
 const app = require('../src/app');
 const store = require('../src/data/store');
 const { defaultDocumentStore } = require('../src/data/documentStore');
+const { setTestClock, resetTestClock } = require('../src/utils/clock');
 
 const FIXTURE_PATH = path.join(__dirname, 'fixtures', 'sample.pdf');
 const FIXTURE_BYTES = fs.readFileSync(FIXTURE_PATH);
@@ -20,6 +21,7 @@ beforeEach(() => {
   store.reset();
   defaultDocumentStore.clear();
   idempotency.resetStore();
+  resetTestClock();
 });
 
 describe('system', () => {
@@ -421,6 +423,119 @@ describe('invoices', () => {
   test('settle and cancel return 404 for missing invoice', async () => {
     expect((await request(app).post('/api/invoices/missing/settle').set(authHeader())).status).toBe(404);
     expect((await request(app).post('/api/invoices/missing/cancel').set(authHeader())).status).toBe(404);
+  });
+
+  describe('maturity guard', () => {
+    const INVESTOR = 'GBTUJNOF2WAAUPKCJHBB76ID5HGN6KMTUG43F3Z344T7QRTP7B7TVPVC';
+
+    test('funding a matured invoice (due date is today) returns 409 INVOICE_MATURED', async () => {
+      setTestClock('2026-11-24');
+      const created = await request(app).post('/api/invoices').set(authHeader()).send({
+        sme: 'Test SME',
+        debtor: 'Buyer',
+        amount: 500,
+        dueDate: '2026-11-24',
+      });
+      expect(created.status).toBe(201);
+      const res = await request(app)
+        .post(`/api/invoices/${created.body.data.id}/fund`)
+        .set(authHeader())
+        .send({ amount: 100, investor: INVESTOR });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('INVOICE_MATURED');
+      resetTestClock();
+    });
+
+    test('funding a matured invoice (due date was yesterday) returns 409 INVOICE_MATURED', async () => {
+      setTestClock('2026-11-24');
+      const created = await request(app).post('/api/invoices').set(authHeader()).send({
+        sme: 'Test SME',
+        debtor: 'Buyer',
+        amount: 500,
+        dueDate: '2026-11-23',
+      });
+      expect(created.status).toBe(201);
+      const res = await request(app)
+        .post(`/api/invoices/${created.body.data.id}/fund`)
+        .set(authHeader())
+        .send({ amount: 100, investor: INVESTOR });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('INVOICE_MATURED');
+      resetTestClock();
+    });
+
+    test('funding the day before maturity succeeds', async () => {
+      setTestClock('2026-11-23');
+      const created = await request(app).post('/api/invoices').set(authHeader()).send({
+        sme: 'Test SME',
+        debtor: 'Buyer',
+        amount: 500,
+        dueDate: '2026-11-24',
+      });
+      expect(created.status).toBe(201);
+      const res = await request(app)
+        .post(`/api/invoices/${created.body.data.id}/fund`)
+        .set(authHeader())
+        .send({ amount: 100, investor: INVESTOR });
+      expect(res.status).toBe(200);
+      expect(res.body.data.status).toBe('open');
+      expect(res.body.data.fundedAmount).toBe('100');
+      resetTestClock();
+    });
+
+    test('quote and fund use the same date logic', async () => {
+      setTestClock('2026-11-24');
+      const created = await request(app).post('/api/invoices').set(authHeader()).send({
+        sme: 'Test SME',
+        debtor: 'Buyer',
+        amount: 500,
+        dueDate: '2026-11-24',
+      });
+      expect(created.status).toBe(201);
+
+      const quote = await request(app)
+        .get(`/api/invoices/${created.body.data.id}/quote?amount=100`);
+      expect(quote.status).toBe(409);
+      expect(quote.body.code).toBe('INVOICE_MATURED');
+
+      const fund = await request(app)
+        .post(`/api/invoices/${created.body.data.id}/fund`)
+        .set(authHeader())
+        .send({ amount: 100, investor: INVESTOR });
+      expect(fund.status).toBe(409);
+      expect(fund.body.code).toBe('INVOICE_MATURED');
+      resetTestClock();
+    });
+
+    test('maturity rejection is audited with before state', async () => {
+      const auditLog = require('../src/audit/audit-log').auditLog;
+      auditLog.resetForTests();
+      setTestClock('2026-11-24');
+      const created = await request(app).post('/api/invoices').set(authHeader()).send({
+        sme: 'Test SME',
+        debtor: 'Buyer',
+        amount: 500,
+        dueDate: '2026-11-24',
+      });
+      expect(created.status).toBe(201);
+
+      const fund = await request(app)
+        .post(`/api/invoices/${created.body.data.id}/fund`)
+        .set(authHeader())
+        .send({ amount: 100, investor: INVESTOR });
+      expect(fund.status).toBe(409);
+      expect(fund.body.code).toBe('INVOICE_MATURED');
+
+      const entries = auditLog.entries();
+      const fundEntry = entries.find((e) => e.action === 'invoice.fund');
+      expect(fundEntry).toBeDefined();
+      expect(fundEntry.outcome).toBe('rejected');
+      expect(fundEntry.statusCode).toBe(409);
+      expect(fundEntry.metadata.error).toBe('INVOICE_MATURED');
+      expect(fundEntry.before).toEqual({ fundedAmount: '0', status: 'open' });
+      resetTestClock();
+      auditLog.resetForTests();
+    });
   });
 });
 
