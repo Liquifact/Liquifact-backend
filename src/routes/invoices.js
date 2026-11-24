@@ -1,11 +1,12 @@
 'use strict';
 
 const express = require('express');
+const crypto = require('crypto');
+const config = require('../config');
 const { StrKey } = require('@stellar/stellar-sdk');
 const store = require('../data/store');
 const { auditContext } = require('../audit/middleware');
 const contributions = require('../data/contributions');
-const config = require('../config');
 const { toMinor, fromMinor, couponMinor, daysBetween, annualisedBps } = require('../domain/returns');
 const { ApiError, badRequest, notFound, conflict, unprocessable, sendProblem } = require('../errors');
 const { parseInvoiceQuery, queryInvoices, InvoiceQueryError } = require('../services/invoice-query');
@@ -16,11 +17,64 @@ const { validate } = require('../middleware/validate');
 const emitter = require('../webhooks/emitter');
 const { parseAmount, formatAmount } = require('../lib/money');
 const idempotency = require('../middleware/idempotency');
-const { requireRole } = require('../middleware/auth');
+const { requireRole, assertOwnerOrAdmin } = require('../middleware/auth');
 const smes = require('../data/smes');
 
 const router = express.Router();
 router.use(auditContext());
+
+/**
+ * Builds a strong ETag from an invoice's version.
+ *
+ * @param {object} invoice invoice record
+ * @returns {string} quoted strong ETag
+ */
+function etagFor(invoice) {
+  return `"${invoice.id}-v${invoice.version}"`;
+}
+
+/**
+ * Checks an If-Match precondition against the invoice's current version.
+ *
+ * @param {import('express').Request} req request
+ * @param {object} invoice current invoice record
+ * @returns {{ status: number, code: string }|null} rejection, or null when accepted
+ */
+function checkIfMatch(req, invoice) {
+  const header = req.get('If-Match');
+  if (header === undefined || header === '') {
+    if (config.requireIfMatch) {
+      return { status: 428, code: 'PRECONDITION_REQUIRED' };
+    }
+    return null;
+  }
+  const candidates = header.split(',').map((s) => s.trim());
+  if (candidates.includes('*') || candidates.includes(etagFor(invoice))) {
+    return null;
+  }
+  return { status: 412, code: 'PRECONDITION_FAILED' };
+}
+
+/**
+ * Sends a precondition rejection as problem+json and records the audit entry.
+ *
+ * @param {import('express').Request} req request
+ * @param {import('express').Response} res response
+ * @param {{ status: number, code: string }} rejection precondition failure
+ * @param {string} action audit action
+ * @returns {import('express').Response} response
+ */
+function rejectPrecondition(req, res, rejection, action) {
+  req.audit({
+    action,
+    resourceType: 'invoice',
+    resourceId: req.params.id,
+    outcome: 'rejected',
+    statusCode: rejection.status,
+    metadata: { code: rejection.code },
+  });
+  return sendProblem(req, res, rejection.code, { status: rejection.status });
+}
 
 /**
  * Adds the computed remainingCapacity field to an invoice representation.
@@ -33,7 +87,7 @@ function present(invoice) {
     return invoice;
   }
   // amount/fundedAmount are decimal strings (7 decimals, see lib/money.js).
-  return { ...invoice, remainingCapacity: formatAmount(store.remaining(invoice)), decimals: 7 };
+  return { ...invoice, version: invoice.version || 0, remainingCapacity: formatAmount(store.remaining(invoice)), decimals: 7 };
 }
 
 /**
@@ -96,6 +150,7 @@ router.get('/:id', idParam(), (req, res) => {
   if (!invoice) {
     throw notFound('INVOICE_NOT_FOUND');
   }
+  res.set('ETag', etagFor(invoice));
   return res.json({ data: present(invoice) });
 });
 
@@ -263,6 +318,10 @@ router.post('/:id/fund', requireRole('investor', 'admin'), idempotency, validate
     requestedAmount: (typeof amount === 'number' && Number.isFinite(amount)) || typeof amount === 'string' ? amount : null,
     requestedAmountType: typeof amount,
   };
+  const preconditionRejection = checkIfMatch(req, invoice);
+  if (preconditionRejection) {
+    return rejectPrecondition(req, res, preconditionRejection, 'invoice.fund');
+  }
   if (investor === undefined || investor === null || investor === '') {
     return reject(400, 'INVESTOR_REQUIRED', { before, metadata: requested });
   }
@@ -406,11 +465,17 @@ router.post('/:id/settle', requireRole('admin'), idParam('invoice.settle'), (req
   if (!invoice) {
     return audit.reject(404, 'Invoice not found');
   }
+  const preconditionRejection = checkIfMatch(req, invoice);
+  if (preconditionRejection) {
+    return rejectPrecondition(req, res, preconditionRejection, 'invoice.settle');
+  }
   const before = { fundedAmount: invoice.fundedAmount, status: invoice.status };
   if (invoice.status !== 'funded') {
     return audit.reject(409, `Invoice is ${invoice.status}; only funded invoices can be settled`, before);
   }
-  return audit.success(before, store.settle(invoice));
+  const updated = store.settle(invoice);
+  emitter.emit('invoice.settled', present(updated));
+  return audit.success(before, updated);
 });
 
 router.post('/:id/cancel', requireRole('sme', 'admin'), idParam('invoice.cancel'), (req, res) => {
@@ -419,11 +484,21 @@ router.post('/:id/cancel', requireRole('sme', 'admin'), idParam('invoice.cancel'
   if (!invoice) {
     return audit.reject(404, 'Invoice not found');
   }
+  const preconditionRejection = checkIfMatch(req, invoice);
+  if (preconditionRejection) {
+    return rejectPrecondition(req, res, preconditionRejection, 'invoice.cancel');
+  }
   const before = { fundedAmount: invoice.fundedAmount, status: invoice.status };
+  const ownership = assertOwnerOrAdmin(req, res, invoice, { action: 'invoice.cancel', before });
+  if (ownership !== true) {
+    return ownership;
+  }
   if (invoice.status !== 'open' && invoice.status !== 'funded') {
     return audit.reject(409, `Invoice is ${invoice.status}; only open or funded invoices can be cancelled`, before);
   }
-  return audit.success(before, store.cancel(invoice));
+  const updated = store.cancel(invoice);
+  emitter.emit('invoice.cancelled', present(updated));
+  return audit.success(before, updated);
 });
 
 /**
@@ -526,6 +601,10 @@ router.post('/:id/escrow', requireAdminToken, idParam(), async (req, res) => {
   }
   if (invoice.escrowContractId === contractId) {
     return res.json({ data: present(invoice) });
+  }
+  const preconditionRejection = checkIfMatch(req, invoice);
+  if (preconditionRejection) {
+    return rejectPrecondition(req, res, preconditionRejection, 'invoice.escrow.link');
   }
   if (invoice.escrowContractId) {
     return res.status(409).json({ code: 'ALREADY_LINKED', error: 'Invoice already linked to another escrow' });

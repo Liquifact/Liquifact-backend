@@ -7,9 +7,10 @@
  */
 
 const request = require('supertest');
+const { EVENT_TYPES } = require('../src/indexer/decode');
 
 // Access the real defaultStore directly — the route uses this same singleton
-const { defaultStore } = require('../src/indexer/EventStore');
+const { createEventStore, defaultStore } = require('../src/indexer/EventStore');
 
 // Build app once
 const { createApp } = require('../src/app');
@@ -72,6 +73,12 @@ describe('GET /api/escrow/events', () => {
     expect(res.body.data[0].type).toBe('funded');
   });
 
+  test('returns 400 for an unknown type and lists allowed values', async () => {
+    const res = await request(app).get('/api/escrow/events?type=fundng');
+    expect(res.status).toBe(400);
+    expect(res.body.detail).toContain(EVENT_TYPES.join(', '));
+  });
+
   test('returns empty array when type filter matches nothing', async () => {
     defaultStore.append([makeEvent({ id: '101-1', type: 'funded' })]);
     const res = await request(app).get('/api/escrow/events?type=settled');
@@ -82,14 +89,55 @@ describe('GET /api/escrow/events', () => {
   // ── investor filter ───────────────────────────────────────────────────────
 
   test('filters by investor address', async () => {
+    const investorA = 'GA7TXEBMEPQCLHIYCWDN7RKAO5IMRD2UV7O7TZXMEW6VZUMEXNR4XBB5';
+    const investorB = 'GBTUJNOF2WAAUPKCJHBB76ID5HGN6KMTUG43F3Z344T7QRTP7B7TVPVC';
     defaultStore.append([
-      makeEvent({ id: '200-1', type: 'funded', data: { investor: 'GINVESTOR1' } }),
-      makeEvent({ id: '200-2', type: 'funded', data: { investor: 'GINVESTOR2' } }),
+      makeEvent({ id: '200-1', type: 'funded', data: { investor: investorA } }),
+      makeEvent({ id: '200-2', type: 'funded', data: { investor: investorB } }),
     ]);
-    const res = await request(app).get('/api/escrow/events?investor=GINVESTOR1');
+    const res = await request(app).get(`/api/escrow/events?investor=${investorA}`);
     expect(res.status).toBe(200);
     expect(res.body.data).toHaveLength(1);
-    expect(res.body.data[0].data.investor).toBe('GINVESTOR1');
+    expect(res.body.data[0].data.investor).toBe(investorA);
+  });
+
+  test('returns 400 for a malformed investor address', async () => {
+    const res = await request(app).get('/api/escrow/events?investor=not-a-stellar-address');
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_INVESTOR_ADDRESS');
+  });
+
+  // ── contractId filter ────────────────────────────────────────────────────
+
+  test('filters by originating contractId', async () => {
+    defaultStore.append([
+      makeEvent({ id: '250-1', contractId: 'CCONTRACT_A' }),
+      makeEvent({ id: '250-2', contractId: 'CCONTRACT_B' }),
+      makeEvent({ id: '250-3', contractId: 'CCONTRACT_B' }),
+    ]);
+    const res = await request(app).get('/api/escrow/events?contractId=CCONTRACT_B');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(2);
+    expect(res.body.data.every((e) => e.contractId === 'CCONTRACT_B')).toBe(true);
+  });
+
+  test('returns empty array when contractId matches nothing', async () => {
+    defaultStore.append([makeEvent({ id: '251-1', contractId: 'CCONTRACT_A' })]);
+    const res = await request(app).get('/api/escrow/events?contractId=CMISSING');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(0);
+  });
+
+  test('combines contractId + type filter', async () => {
+    defaultStore.append([
+      makeEvent({ id: '252-1', type: 'funded', contractId: 'CCONTRACT_A' }),
+      makeEvent({ id: '252-2', type: 'settled', contractId: 'CCONTRACT_A' }),
+      makeEvent({ id: '252-3', type: 'funded', contractId: 'CCONTRACT_B' }),
+    ]);
+    const res = await request(app).get('/api/escrow/events?contractId=CCONTRACT_A&type=funded');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(1);
+    expect(res.body.data[0].id).toBe('252-1');
   });
 
   // ── fromLedger filter ─────────────────────────────────────────────────────
@@ -133,6 +181,19 @@ describe('GET /api/escrow/events', () => {
     expect(res.status).toBe(400);
   });
 
+  test.each(['10abc', '1e2', '-1', '5.5', ''])(
+    'returns 400 for malformed limit=%s',
+    async (badLimit) => {
+      const res = await request(app).get(`/api/escrow/events?limit=${encodeURIComponent(badLimit)}`);
+      expect(res.status).toBe(400);
+    },
+  );
+
+  test('returns 400 for repeated limit query param', async () => {
+    const res = await request(app).get('/api/escrow/events?limit=1&limit=2');
+    expect(res.status).toBe(400);
+  });
+
   test('accepts limit=1', async () => {
     defaultStore.append([makeEvent({ id: '1-1' })]);
     const res = await request(app).get('/api/escrow/events?limit=1');
@@ -155,6 +216,27 @@ describe('GET /api/escrow/events', () => {
   test('returns 400 for non-integer fromLedger', async () => {
     const res = await request(app).get('/api/escrow/events?fromLedger=abc');
     expect(res.status).toBe(400);
+  });
+
+  test.each(['10abc', '1e2', '-1', '5.5', '5.9', ''])(
+    'returns 400 for malformed fromLedger=%s',
+    async (badLedger) => {
+      const res = await request(app).get(`/api/escrow/events?fromLedger=${encodeURIComponent(badLedger)}`);
+      expect(res.status).toBe(400);
+    },
+  );
+
+  test('returns 400 for repeated fromLedger, contractId, or after query params', async () => {
+    expect((await request(app).get('/api/escrow/events?fromLedger=1&fromLedger=2')).status).toBe(400);
+    expect((await request(app).get('/api/escrow/events?contractId=CA&contractId=CB')).status).toBe(400);
+    expect((await request(app).get('/api/escrow/events?after=1-1&after=2-1')).status).toBe(400);
+  });
+
+  test('accepts fromLedger=0', async () => {
+    defaultStore.append([makeEvent({ id: '0-1', ledger: 0 })]);
+    const res = await request(app).get('/api/escrow/events?fromLedger=0');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(1);
   });
 
   // ── cursor pagination ─────────────────────────────────────────────────────
@@ -212,5 +294,71 @@ describe('GET /api/escrow/events', () => {
     expect(res.status).toBe(200);
     expect(res.body.data).toHaveLength(2);
     expect(res.body.data.every((e) => e.type === 'funded' && e.ledger >= 600)).toBe(true);
+  });
+
+  test('combines valid type + investor filters', async () => {
+    const investor = 'GA7TXEBMEPQCLHIYCWDN7RKAO5IMRD2UV7O7TZXMEW6VZUMEXNR4XBB5';
+    defaultStore.append([
+      makeEvent({ id: '700-1', type: 'funded', data: { investor } }),
+      makeEvent({ id: '701-1', type: 'settled', data: { investor } }),
+      makeEvent({ id: '702-1', type: 'funded', data: { investor: 'GBTUJNOF2WAAUPKCJHBB76ID5HGN6KMTUG43F3Z344T7QRTP7B7TVPVC' } }),
+    ]);
+
+    const res = await request(app).get(`/api/escrow/events?type=funded&investor=${investor}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(1);
+    expect(res.body.data[0].id).toBe('700-1');
+  });
+
+  test('documents the canonical event type list in OpenAPI', async () => {
+    const res = await request(app).get('/openapi.json');
+    const typeParameter = res.body.paths['/api/escrow/events'].get.parameters
+      .find((parameter) => parameter.name === 'type');
+    expect(typeParameter.schema.enum).toEqual(EVENT_TYPES);
+  });
+
+  test('uses the sequence cursor index and stops after limit plus one matching event', () => {
+    const store = createEventStore({ maxEvents: 10_000 });
+    let filterIterations = 0;
+    let cursorIdReads = 0;
+    const events = Array.from({ length: 10_000 }, (_, i) => {
+      const id = `event-${i}`;
+      return {
+        get id() {
+          cursorIdReads++;
+          return id;
+        },
+        get type() {
+          filterIterations++;
+          return 'funded';
+        },
+        ledger: i,
+        contractId: 'CDUMMY',
+        data: {},
+      };
+    });
+    store.append(events);
+
+    filterIterations = 0;
+    cursorIdReads = 0;
+    const result = store.query({ type: 'funded', limit: 2, after: 'event-9990' });
+
+    expect(filterIterations).toBe(3);
+    expect(cursorIdReads).toBe(1);
+    expect(result.data.map((event) => event.id)).toEqual(['event-9991', 'event-9992']);
+    expect(result.nextCursor).toBe('event-9992');
+  });
+
+  test('eviction removes cursor indexes while duplicate appends remain idempotent', () => {
+    const store = createEventStore({ maxEvents: 2 });
+    const first = makeEvent({ id: 'first' });
+    const second = makeEvent({ id: 'second' });
+    const third = makeEvent({ id: 'third' });
+
+    expect(store.append([first, second])).toBe(2);
+    expect(store.append([first])).toBe(0);
+    expect(store.append([third])).toBe(1);
+    expect(store.query({ after: 'first' })).toEqual({ error: 'INVALID_CURSOR' });
+    expect(store.query({ limit: 2 }).data.map((event) => event.id)).toEqual(['second', 'third']);
   });
 });

@@ -48,8 +48,16 @@ async function readEscrowOnChain(contractId = config.contractId, timeoutMs = 600
     .addOperation(new Contract(contractId).call('get_escrow'))
     .setTimeout(30)
     .build();
-  const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('RPC timeout')), timeoutMs));
-  const sim = await Promise.race([server.simulateTransaction(tx), timeout]);
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('RPC timeout')), timeoutMs);
+  });
+  let sim;
+  try {
+    sim = await Promise.race([server.simulateTransaction(tx), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
   if (!sim.result || !sim.result.retval) {
     throw new Error(sim.error || 'simulation returned no result');
   }

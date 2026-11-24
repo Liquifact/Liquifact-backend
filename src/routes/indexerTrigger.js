@@ -4,10 +4,10 @@
  * @fileoverview Internal indexer trigger route.
  *
  * POST /api/internal/indexer/run
- * Protected by `Authorization: Bearer <CRON_SECRET>`.
- * Returns 404 when CRON_SECRET is not configured so the endpoint is
- * unreachable without the secret — it does not advertise its own existence.
- * Uses a constant-time comparison to prevent timing attacks.
+ * Protected by `Authorization: Bearer <CRON_SECRET>` via the shared
+ * cron-secret middleware. Returns 404 when CRON_SECRET is not configured so
+ * the endpoint is unreachable without the secret — it does not advertise its
+ * own existence.
  *
  * Suitable for use as a Vercel Cron target (vercel.json crons entry).
  *
@@ -16,34 +16,11 @@
 
 const { Router } = require('express');
 const { runOnce } = require('../indexer/escrow-indexer');
+const { sendProblem } = require('../errors');
 const logger = require('../logger');
+const { requireCronSecret } = require('../middleware/cron-secret');
 
 const router = Router();
-
-/**
- * Constant-time string comparison to prevent timing-based secret leakage.
- *
- * @param {string} a
- * @param {string} b
- * @returns {boolean}
- */
-function safeEqual(a, b) {
-  if (typeof a !== 'string' || typeof b !== 'string') { return false; }
-  if (a.length !== b.length) {
-    // Still iterate to avoid length-based timing leakage, but always return false
-    let diff = 0;
-    for (let i = 0; i < Math.max(a.length, b.length); i++) {
-      diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
-    }
-    void diff; // consumed to satisfy linter; result is intentionally discarded
-    return false; // lengths differ, always false
-  }
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return diff === 0;
-}
 
 /**
  * @swagger
@@ -79,6 +56,12 @@ function safeEqual(a, b) {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/IndexerRunResult'
+ *       400:
+ *         description: Invalid maxPages (must be an integer between 1 and 20; VALIDATION_FAILED).
+ *         content:
+ *           application/problem+json:
+ *             schema:
+ *               $ref: '#/components/schemas/Problem'
  *       401:
  *         description: Missing or invalid Authorization header.
  *         content:
@@ -94,6 +77,16 @@ function safeEqual(a, b) {
  *               properties:
  *                 error:
  *                   type: string
+ *       409:
+ *         description: An indexer run is already in progress (INDEXER_BUSY). Retry after Retry-After.
+ *         headers:
+ *           Retry-After:
+ *             schema:
+ *               type: string
+ *         content:
+ *           application/problem+json:
+ *             schema:
+ *               $ref: '#/components/schemas/Problem'
  *       500:
  *         description: Indexer run failed.
  *         content:
@@ -101,51 +94,42 @@ function safeEqual(a, b) {
  *             schema:
  *               $ref: '#/components/schemas/Problem'
  */
-/**
- * Guards the cron trigger with `Authorization: Bearer <CRON_SECRET>`; 404 when
- * CRON_SECRET is unset so the endpoint does not advertise itself.
- *
- * @param {import('express').Request} req request
- * @param {import('express').Response} res response
- * @param {import('express').NextFunction} next next handler
- * @returns {void}
- */
-function requireCronSecret(req, res, next) {
-  const secret = process.env.CRON_SECRET;
-
-  // 404 when secret is not configured — the endpoint is invisible
-  if (!secret) {
-    return res.status(404).json({ error: 'Not found' });
-  }
-
-  // Validate Bearer token
-  const authHeader = req.headers['authorization'] ?? '';
-  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
-
-  if (!safeEqual(token, secret)) {
-    return res.status(401).json({
-      type: 'https://liquifact.io/problems/unauthorized',
-      title: 'Unauthorized',
-      status: 401,
-      detail: 'Invalid or missing Authorization: Bearer <CRON_SECRET>.',
-    });
-  }
-  return next();
-}
-// Marker for the route-table guard test (machine credential, not an API-key role).
-requireCronSecret.requiredRoles = ['cron'];
-
+// requireCronSecret is shared with the scheduled reconciliation trigger.
 router.post('/run', requireCronSecret, async (req, res) => {
-  const maxPages = Math.min(
-    Math.max(1, parseInt(req.body?.maxPages ?? '5', 10) || 5),
-    20,
-  );
+  const rawMaxPages = req.body?.maxPages;
+  let maxPages = 5;
+
+  if (rawMaxPages !== undefined) {
+    if (
+      typeof rawMaxPages !== 'number' ||
+      !Number.isInteger(rawMaxPages) ||
+      rawMaxPages < 1 ||
+      rawMaxPages > 20
+    ) {
+      return sendProblem(req, res, 'VALIDATION_FAILED', {
+        detail: 'maxPages must be an integer between 1 and 20.',
+        errors: [
+          {
+            field: 'maxPages',
+            message: 'maxPages must be an integer between 1 and 20',
+          },
+        ],
+      });
+    }
+    maxPages = rawMaxPages;
+  }
 
   try {
     const result = await runOnce({ maxPages });
     return res.json(result);
   } catch (err) {
-    logger.error({ err }, 'Indexer trigger run failed');
+    if (err?.code === 'INDEXER_BUSY') {
+      res.set('Retry-After', '1');
+      return sendProblem(req, res, 'INDEXER_BUSY', {
+        detail: 'An indexer run is already in progress.',
+      });
+    }
+    logger.error('Indexer trigger run failed', { err: err?.message ?? String(err) });
     return res.status(500).json({
       type: 'https://liquifact.io/problems/indexer-error',
       title: 'Indexer Error',

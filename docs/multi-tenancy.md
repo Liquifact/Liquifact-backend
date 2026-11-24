@@ -1,5 +1,17 @@
 # Multi-Tenant Isolation Model
 
+## Invoice SME Ownership
+
+Invoices created by an API key retain the opaque key id in `createdBy`. The
+`assertOwnerOrAdmin` shared middleware helper allows an SME key to cancel or
+upload a document only when `invoice.createdBy` exactly matches
+`req.principal.keyId`. Admin keys bypass this check.
+
+An SME key receives `403` with problem code `NOT_INVOICE_OWNER` when ownership
+does not match. The rejection is written to the invoice audit stream. Seeded
+demo invoices do not have `createdBy`, so they cannot be claimed by SME keys;
+only admin keys can mutate those records.
+
 This document outlines the multi-tenant architecture and data isolation model implemented in the LiquiFact backend.
 
 ## Overview

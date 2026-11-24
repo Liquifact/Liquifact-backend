@@ -23,6 +23,24 @@ beforeEach(() => {
 });
 
 describe('system', () => {
+  test('generates and returns a request id on successful responses', async () => {
+    const res = await request(app).get('/health');
+    expect(res.headers['x-request-id']).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  test('propagates a valid request id to the response and problem body', async () => {
+    const res = await request(app).get('/nope').set('X-Request-Id', 'req-123');
+    expect(res.headers['x-request-id']).toBe('req-123');
+    expect(res.body.requestId).toBe('req-123');
+  });
+
+  test('replaces an invalid incoming request id', async () => {
+    const res = await request(app).get('/nope').set('X-Request-Id', 'bad id!<script>');
+    expect(res.headers['x-request-id']).toMatch(/^[0-9a-f-]{36}$/);
+    expect(res.body.requestId).toBe(res.headers['x-request-id']);
+    expect(res.body.requestId).not.toBe('bad id!<script>');
+  });
+
   test('GET /health', async () => {
     const res = await request(app).get('/health');
     expect(res.status).toBe(200);
@@ -81,6 +99,7 @@ describe('system', () => {
     expect(res.body.code).toBe('MALFORMED_JSON');
     expect(res.body.title).toBe('Malformed JSON');
     expect(res.body.detail).toBe('The request body contains invalid JSON');
+    expect(res.body.requestId).toBe(res.headers['x-request-id']);
     expect(JSON.stringify(res.body)).not.toContain('Unexpected');
     expect(JSON.stringify(res.body)).not.toContain('position');
   });
@@ -842,5 +861,83 @@ describe('decimal money (#1529)', () => {
     expect(branches(create.properties.amount)).toHaveLength(2);
     const fund = spec.paths['/api/invoices/{id}/fund'].post.requestBody.content['application/json'].schema;
     expect(branches(fund.properties.amount)).toHaveLength(2);
+  });
+});
+
+describe('CORS', () => {
+  test('OPTIONS preflight returns Access-Control-Max-Age and allowed headers including Idempotency-Key', async () => {
+    const res = await request(app)
+      .options('/api/invoices')
+      .set('Origin', 'https://liquifact-frontend.vercel.app')
+      .set('Access-Control-Request-Method', 'POST')
+      .set('Access-Control-Request-Headers', 'Idempotency-Key, Authorization, Content-Type');
+
+    expect(res.status).toBe(204);
+    expect(res.headers['access-control-max-age']).toBe('600');
+    const allowHeaders = (res.headers['access-control-allow-headers'] || '')
+      .split(',')
+      .map((h) => h.trim().toLowerCase());
+    expect(allowHeaders).toEqual(expect.arrayContaining([
+      'authorization',
+      'content-type',
+      'idempotency-key',
+      'x-api-key',
+      'x-request-id',
+    ]));
+  });
+
+  test('actual response exposes idempotency, retry, and ETag headers', async () => {
+    const res = await request(app)
+      .get('/health')
+      .set('Origin', 'https://liquifact-frontend.vercel.app');
+
+    expect(res.status).toBe(200);
+    const exposedHeaders = (res.headers['access-control-expose-headers'] || '')
+      .split(',')
+      .map((h) => h.trim().toLowerCase());
+    expect(exposedHeaders).toEqual(expect.arrayContaining([
+      'idempotent-replayed',
+      'idempotency-key',
+      'retry-after',
+      'etag',
+      'x-request-id',
+    ]));
+  });
+
+  test('disallowed origins do not receive Access-Control-Allow-Origin', async () => {
+    const prevCorsOrigins = process.env.CORS_ORIGINS;
+    process.env.CORS_ORIGINS = 'https://allowed.example';
+    let restrictedApp;
+    try {
+      jest.isolateModules(() => {
+        restrictedApp = require('../src/app');
+      });
+    } finally {
+      if (prevCorsOrigins === undefined) {
+        delete process.env.CORS_ORIGINS;
+      } else {
+        process.env.CORS_ORIGINS = prevCorsOrigins;
+      }
+    }
+
+    const allowedPreflight = await request(restrictedApp)
+      .options('/api/invoices')
+      .set('Origin', 'https://allowed.example')
+      .set('Access-Control-Request-Method', 'POST');
+    expect(allowedPreflight.status).toBe(204);
+    expect(allowedPreflight.headers['access-control-allow-origin']).toBe('https://allowed.example');
+    expect(allowedPreflight.headers['access-control-max-age']).toBe('600');
+
+    const disallowedPreflight = await request(restrictedApp)
+      .options('/api/invoices')
+      .set('Origin', 'https://evil.example')
+      .set('Access-Control-Request-Method', 'POST');
+    expect(disallowedPreflight.headers['access-control-allow-origin']).toBeUndefined();
+
+    const disallowedGet = await request(restrictedApp)
+      .get('/health')
+      .set('Origin', 'https://evil.example');
+    expect(disallowedGet.status).toBe(200);
+    expect(disallowedGet.headers['access-control-allow-origin']).toBeUndefined();
   });
 });

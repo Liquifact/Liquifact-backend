@@ -1,6 +1,61 @@
-'use strict';
+'use strict'
 
 const ERROR_CATALOG = {
+  UNAUTHENTICATED: {
+    title: 'Unauthenticated',
+    status: 401,
+    description: 'Authentication is required or the provided credentials are invalid.',
+  },
+  FORBIDDEN: {
+    title: 'Forbidden',
+    status: 403,
+    description: 'The authenticated principal does not have permission to perform this operation.',
+  },
+  AUTH_NOT_CONFIGURED: {
+    title: 'API Key Authentication Not Configured',
+    status: 503,
+    description: 'API key authentication is not configured for this deployment.',
+  },
+  UNAUTHORIZED: {
+    title: 'Unauthorized',
+    status: 401,
+    description: 'The provided admin token is missing or invalid.',
+  },
+  ADMIN_TOKEN_NOT_CONFIGURED: {
+    title: 'Admin Token Not Configured',
+    status: 503,
+    description: 'The admin API token is not configured for this deployment.',
+  },
+  UNAUTHENTICATED: {
+    title: 'Unauthenticated',
+    status: 401,
+    description: 'Authentication is required or the provided credentials are invalid.',
+  },
+  FORBIDDEN: {
+    title: 'Forbidden',
+    status: 403,
+    description: 'The authenticated principal does not have permission to perform this operation.',
+  },
+  NOT_INVOICE_OWNER: {
+    title: 'Not Invoice Owner',
+    status: 403,
+    description: 'Only the SME key that created the invoice may mutate it.',
+  },
+  AUTH_NOT_CONFIGURED: {
+    title: 'API Key Authentication Not Configured',
+    status: 503,
+    description: 'API key authentication is not configured for this deployment.',
+  },
+  UNAUTHORIZED: {
+    title: 'Unauthorized',
+    status: 401,
+    description: 'The provided admin token is missing or invalid.',
+  },
+  ADMIN_TOKEN_NOT_CONFIGURED: {
+    title: 'Admin Token Not Configured',
+    status: 503,
+    description: 'The admin API token is not configured for this deployment.',
+  },
   MALFORMED_JSON: {
     title: 'Malformed JSON',
     status: 400,
@@ -74,12 +129,12 @@ const ERROR_CATALOG = {
   INVALID_CURSOR: {
     title: 'Invalid Cursor',
     status: 400,
-    description: 'The cursor parameter must be a non-negative integer.',
+    description: 'The cursor parameter must be a valid opaque pagination cursor (1–100 items per page).',
   },
   INVALID_LIMIT: {
     title: 'Invalid Limit',
     status: 400,
-    description: 'The limit parameter must be an integer between 1 and 20.',
+    description: 'The limit parameter must be an integer between 1 and 100.',
   },
   INVALID_DIGEST: {
     title: 'Invalid Digest',
@@ -121,6 +176,16 @@ const ERROR_CATALOG = {
     status: 409,
     description: 'The invoice is not in a status that allows this transition.',
   },
+  PRECONDITION_FAILED: {
+    title: 'Precondition Failed',
+    status: 412,
+    description: 'The If-Match precondition did not match the current version of the invoice.',
+  },
+  PRECONDITION_REQUIRED: {
+    title: 'Precondition Required',
+    status: 428,
+    description: 'This operation requires an If-Match header carrying the current invoice version.',
+  },
   ROUTE_NOT_FOUND: {
     title: 'Route Not Found',
     status: 404,
@@ -131,20 +196,30 @@ const ERROR_CATALOG = {
     status: 500,
     description: 'An unexpected error occurred. Please try again later.',
   },
-};
+  DOCUMENT_EVICTED: {
+    title: 'Document Evicted',
+    status: 410,
+    description: 'The document was evicted from the store to make room for a new entry.',
+  },
+  INDEXER_BUSY: {
+    title: 'Indexer Busy',
+    status: 409,
+    description: 'An indexer run is already in progress; retry the request later.',
+  },
+}
 
-const ERROR_BASE_URI = 'https://liquifact-backend.vercel.app/errors/';
+const ERROR_BASE_URI = 'https://liquifact-backend.vercel.app/errors/'
 
 class ApiError extends Error {
   constructor(status, code, title, { detail, errors, extra } = {}) {
-    super(title);
-    this.name = 'ApiError';
-    this.status = status;
-    this.code = code;
-    this.title = title;
-    this.detail = detail;
-    this.errors = errors;
-    this.extra = extra;
+    super(title)
+    this.name = 'ApiError'
+    this.status = status
+    this.code = code
+    this.title = title
+    this.detail = detail
+    this.errors = errors
+    this.extra = extra
   }
 
   toProblem(req) {
@@ -154,55 +229,59 @@ class ApiError extends Error {
       status: this.status,
       code: this.code,
       instance: req?.originalUrl || '',
-    };
+    }
     if (this.detail !== undefined) {
-      problem.detail = this.detail;
+      problem.detail = this.detail
     }
     if (this.errors !== undefined) {
-      problem.errors = this.errors;
+      problem.errors = this.errors
     }
     if (this.extra !== undefined) {
-      Object.assign(problem, this.extra);
+      Object.assign(problem, this.extra)
     }
-    problem.error = this.title;
-    return problem;
+    problem.error = this.extra?.error || this.title;
+    if (req?.id) {
+      problem.requestId = req.id
+    }
+    problem.error = this.title
+    return problem
   }
 }
 
 function badRequest(code, detail, errors) {
-  const entry = ERROR_CATALOG[code];
+  const entry = ERROR_CATALOG[code]
   if (!entry) {
-    throw new Error(`Unknown error code: ${code}`);
+    throw new Error(`Unknown error code: ${code}`)
   }
-  return new ApiError(entry.status, code, entry.title, { detail, errors });
+  return new ApiError(entry.status, code, entry.title, { detail, errors })
 }
 
 function notFound(code, detail) {
-  const entry = ERROR_CATALOG[code];
+  const entry = ERROR_CATALOG[code]
   if (!entry) {
-    throw new Error(`Unknown error code: ${code}`);
+    throw new Error(`Unknown error code: ${code}`)
   }
-  return new ApiError(entry.status, code, entry.title, { detail });
+  return new ApiError(entry.status, code, entry.title, { detail })
 }
 
 function conflict(code, detail) {
-  const entry = ERROR_CATALOG[code];
+  const entry = ERROR_CATALOG[code]
   if (!entry) {
-    throw new Error(`Unknown error code: ${code}`);
+    throw new Error(`Unknown error code: ${code}`)
   }
-  return new ApiError(entry.status, code, entry.title, { detail });
+  return new ApiError(entry.status, code, entry.title, { detail })
 }
 
 function unprocessable(code, detail) {
-  const entry = ERROR_CATALOG[code];
+  const entry = ERROR_CATALOG[code]
   if (!entry) {
-    throw new Error(`Unknown error code: ${code}`);
+    throw new Error(`Unknown error code: ${code}`)
   }
-  return new ApiError(entry.status, code, entry.title, { detail });
+  return new ApiError(entry.status, code, entry.title, { detail })
 }
 
 function internal(detail) {
-  return new ApiError(500, 'INTERNAL', ERROR_CATALOG.INTERNAL.title, { detail });
+  return new ApiError(500, 'INTERNAL', ERROR_CATALOG.INTERNAL.title, { detail })
 }
 
 /**
@@ -216,20 +295,20 @@ function internal(detail) {
  * @returns {import('express').Response} the response
  */
 function sendProblem(req, res, code, { status, detail, errors, extra } = {}) {
-  const entry = ERROR_CATALOG[code];
+  const entry = ERROR_CATALOG[code]
   if (!entry) {
-    throw new Error(`Unknown error code: ${code}`);
+    throw new Error(`Unknown error code: ${code}`)
   }
-  const error = new ApiError(status || entry.status, code, entry.title, { detail, errors, extra });
-  return res.status(error.status).type('application/problem+json').json(error.toProblem(req));
+  const error = new ApiError(status || entry.status, code, entry.title, { detail, errors, extra })
+  return res.status(error.status).type('application/problem+json').json(error.toProblem(req))
 }
 
 function getCatalogEntry(code) {
-  return ERROR_CATALOG[code] || null;
+  return ERROR_CATALOG[code] || null
 }
 
 function getAllCatalogEntries() {
-  return Object.entries(ERROR_CATALOG).map(([code, entry]) => ({ code, ...entry }));
+  return Object.entries(ERROR_CATALOG).map(([code, entry]) => ({ code, ...entry }))
 }
 
 module.exports = {
@@ -244,4 +323,4 @@ module.exports = {
   sendProblem,
   getCatalogEntry,
   getAllCatalogEntries,
-};
+}

@@ -1,5 +1,6 @@
 'use strict';
 
+const net = require('net');
 const { StrKey } = require('@stellar/stellar-sdk');
 
 class ConfigError extends Error {
@@ -103,6 +104,9 @@ function isValidRpcUrl(urlStr) {
 // Roles an API key can carry. `admin` is accepted wherever a role is required.
 const ROLES = ['sme', 'investor', 'admin'];
 
+// Accepted LOG_LEVEL values, lowest to highest severity.
+const LOG_LEVELS = ['debug', 'info', 'warn', 'error'];
+
 /**
  * Parses `API_KEYS` (`id:role:sha256hex`, comma separated). Only SHA-256
  * hashes are kept; raw keys are never stored. Problems are pushed to `errors`
@@ -161,14 +165,99 @@ function envInt(raw, fallback, min = 0) {
   return value;
 }
 
+const TRUST_PROXY_PRESETS = new Set(['loopback', 'linklocal', 'uniquelocal']);
+
 /**
- * @param {string|undefined} raw environment value
- * @param {number} fallback value used when raw is missing or not a positive integer
- * @returns {number} parsed positive integer
+ * Validates one token in a `TRUST_PROXY` CIDR/IP/subnet list.
+ * Accepts IPv4/IPv6 addresses, IPv4/IPv6 CIDRs, and Express/proxy-addr
+ * subnet presets (`loopback`, `linklocal`, `uniquelocal`).
+ *
+ * @param {string} token trimmed entry
+ * @returns {boolean} whether the token is a valid proxy address/range
  */
-function positiveInt(raw, fallback) {
-  const n = Number(raw);
-  return Number.isInteger(n) && n > 0 ? n : fallback;
+function isValidProxyEntry(token) {
+  if (!token) {
+    return false;
+  }
+  const lower = token.toLowerCase();
+  if (TRUST_PROXY_PRESETS.has(lower)) {
+    return true;
+  }
+  const slashIndex = token.indexOf('/');
+  if (slashIndex === -1) {
+    return net.isIP(token) !== 0;
+  }
+  if (token.indexOf('/', slashIndex + 1) !== -1) {
+    return false;
+  }
+  const addr = token.slice(0, slashIndex);
+  const prefixRaw = token.slice(slashIndex + 1);
+  if (!/^\d+$/.test(prefixRaw)) {
+    return false;
+  }
+  const prefix = Number(prefixRaw);
+  if (net.isIPv4(addr)) {
+    return prefix >= 0 && prefix <= 32;
+  }
+  if (net.isIPv6(addr)) {
+    return prefix >= 0 && prefix <= 128;
+  }
+  return false;
+}
+
+/**
+ * Parses `TRUST_PROXY` for Express `app.set('trust proxy', ...)`.
+ *
+ * Accepted values:
+ *   - unset / empty: `1` when `VERCEL=1`, otherwise `false`
+ *   - `'false'`: `false`
+ *   - non-negative integer string (e.g. `'0'`, `'1'`, `'2'`): hop count number
+ *   - comma-separated IP / CIDR / subnet preset list (e.g. `'loopback, 10.0.0.0/8'`)
+ *
+ * `'true'` and any malformed values are rejected so startup fails with `ConfigError`.
+ *
+ * @param {string|undefined} raw raw `TRUST_PROXY` value
+ * @param {Record<string, string|undefined>} env environment object
+ * @param {string[]} errors accumulated configuration errors
+ * @returns {boolean|number|string} Express `trust proxy` setting
+ */
+function parseTrustProxy(raw, env, errors) {
+  if (raw === undefined || raw.trim() === '') {
+    return env.VERCEL === '1' ? 1 : false;
+  }
+  const trimmed = raw.trim();
+  const lower = trimmed.toLowerCase();
+  if (lower === 'false') {
+    return false;
+  }
+  if (/^\d+$/.test(trimmed)) {
+    const hops = Number(trimmed);
+    if (Number.isSafeInteger(hops)) {
+      return hops;
+    }
+  }
+  const tokens = trimmed.split(',').map((t) => t.trim());
+  if (tokens.every((token) => isValidProxyEntry(token))) {
+    return tokens.map((t) => (TRUST_PROXY_PRESETS.has(t.toLowerCase()) ? t.toLowerCase() : t)).join(', ');
+  }
+  errors.push(
+    `TRUST_PROXY must be "false", a non-negative integer hop count, or a comma-separated list of IPs/CIDRs/presets (got "${raw}")`,
+  );
+  return false;
+}
+
+/**
+ * Parses a boolean environment flag ("true"/"1" => true).
+ *
+ * @param {string|undefined} raw raw environment value
+ * @param {boolean} fallback value used when unset
+ * @returns {boolean}
+ */
+function envBool(raw, fallback = false) {
+  if (raw === undefined || raw === '') {
+    return fallback;
+  }
+  return raw.trim().toLowerCase() === 'true' || raw.trim() === '1';
 }
 
 /**
@@ -305,8 +394,44 @@ function loadConfig(env = process.env) {
   const rawFee = Number(env.PROTOCOL_FEE_BPS);
   const protocolFeeBps = Number.isInteger(rawFee) && rawFee >= 0 ? rawFee : 0;
 
+  // Graceful shutdown timeout (ms, positive integer, default 10000).
+  let shutdownTimeoutMs = 10000;
+  if (env.SHUTDOWN_TIMEOUT_MS !== undefined && env.SHUTDOWN_TIMEOUT_MS !== '') {
+    const parsedShutdownTimeout = Number(env.SHUTDOWN_TIMEOUT_MS);
+    if (!Number.isInteger(parsedShutdownTimeout) || parsedShutdownTimeout < 1) {
+      errors.push(`SHUTDOWN_TIMEOUT_MS must be a positive integer (got "${env.SHUTDOWN_TIMEOUT_MS}")`);
+    } else {
+      shutdownTimeoutMs = parsedShutdownTimeout;
+    }
+  }
+
+  // Log level (debug | info | warn | error, default info).
+  let logLevel = 'info';
+  if (env.LOG_LEVEL !== undefined && env.LOG_LEVEL.trim() !== '') {
+    const normalizedLevel = env.LOG_LEVEL.trim().toLowerCase();
+    if (!LOG_LEVELS.includes(normalizedLevel)) {
+      errors.push(`LOG_LEVEL must be one of ${LOG_LEVELS.join(', ')} (got "${env.LOG_LEVEL}")`);
+    } else {
+      logLevel = normalizedLevel;
+    }
+  }
+
   // API keys for mutating routes (see middleware/auth.js)
   const apiKeys = parseApiKeys(env.API_KEYS, errors);
+
+  // Maximum number of webhook subscriptions (positive integer, default 100).
+  let webhooksMax = 100;
+  if (env.WEBHOOKS_MAX !== undefined && env.WEBHOOKS_MAX !== '') {
+    const parsedMax = Number(env.WEBHOOKS_MAX);
+    if (!Number.isInteger(parsedMax) || parsedMax < 1) {
+      errors.push(`WEBHOOKS_MAX must be a positive integer (got "${env.WEBHOOKS_MAX}")`);
+    } else {
+      webhooksMax = parsedMax;
+    }
+  }
+
+  // Express trust proxy setting (default: 1 hop on Vercel, false otherwise).
+  const trustProxy = parseTrustProxy(env.TRUST_PROXY, env, errors);
 
   if (errors.length > 0) {
     throw new ConfigError(errors);
@@ -332,7 +457,15 @@ function loadConfig(env = process.env) {
     corsOrigins,
     txWaitMs,
     protocolFeeBps,
-    auditMaxEntries: positiveInt(env.AUDIT_MAX_ENTRIES, 10000),
+    indexerStateFile: env.INDEXER_STATE_FILE?.trim() || null,
+    shutdownTimeoutMs,
+    logLevel,
+    auditMaxEntries: envInt(env.AUDIT_MAX_ENTRIES, 10000, 1),
+    webhooksMax,
+    // Optimistic concurrency: when true, fund/settle/cancel/escrow-link
+    // mutations must send an If-Match header (428 Precondition Required otherwise).
+    requireIfMatch: envBool(env.REQUIRE_IF_MATCH, false),
+    trustProxy,
     // Readiness probe: per-check timeout, maximum accepted ledger age and how
     // long a probe result may be reused before the RPC is called again.
     readyCheckTimeoutMs: envInt(env.READY_CHECK_TIMEOUT_MS, 2000, 1),

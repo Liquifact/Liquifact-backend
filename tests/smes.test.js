@@ -4,7 +4,7 @@ const { authHeader } = require('./helpers/auth');
 const request = require('supertest');
 const app = require('../src/app');
 const store = require('../src/data/store');
-const { resetSmes } = require('../src/data/smes');
+const { createSme, resetSmes } = require('../src/data/smes');
 
 const VALID_ADDRESS = 'GA7TXEBMEPQCLHIYCWDN7RKAO5IMRD2UV7O7TZXMEW6VZUMEXNR4XBB5';
 const OTHER_ADDRESS = 'GBTUJNOF2WAAUPKCJHBB76ID5HGN6KMTUG43F3Z344T7QRTP7B7TVPVC';
@@ -286,5 +286,47 @@ describe('SME onboarding and invoice verification (#1557)', () => {
     ]);
     expect(spec.components.schemas.ReviewSmeRequest.properties.decision.enum).toEqual(['verify', 'reject', 'suspend']);
     expect(spec.components.schemas.SmeRecord.properties.contactEmail.description).toContain('PII');
+  });
+
+  describe('SME data store uniqueness indexes', () => {
+    test('detects case-insensitive registration and Stellar address duplicates across 2000 records', () => {
+      for (let i = 0; i < 2000; i += 1) {
+        createSme({
+          legalName: `SME ${i} Ltd`,
+          registrationNumber: `REG-${i}`,
+          country: 'GB',
+          stellarAddress: `G${String(i).padStart(55, 'A')}`,
+          contactEmail: `ops-${i}@acme.test`,
+        });
+      }
+
+      expect(() =>
+        createSme({
+          legalName: 'Duplicate Case Ltd',
+          registrationNumber: 'reg-1000',
+          country: 'GB',
+          stellarAddress: `G${'9'.padStart(55, 'B')}`,
+          contactEmail: 'dup-reg@acme.test',
+        })
+      ).toThrow(expect.objectContaining({ code: 'SME_DUPLICATE' }));
+
+      expect(() =>
+        createSme({
+          legalName: 'Duplicate Address Ltd',
+          registrationNumber: 'REG-UNIQUE',
+          country: 'GB',
+          stellarAddress: `G${String(1500).padStart(55, 'A')}`,
+          contactEmail: 'dup-addr@acme.test',
+        })
+      ).toThrow(expect.objectContaining({ code: 'SME_DUPLICATE' }));
+    });
+
+    test('resetSmes clears uniqueness indexes so records can be recreated', () => {
+      createSme(validSme);
+      resetSmes();
+      const recreated = createSme(validSme);
+      expect(recreated.id).toMatch(/^SME_/);
+      expect(recreated.stellarAddress).toBe(validSme.stellarAddress);
+    });
   });
 });
