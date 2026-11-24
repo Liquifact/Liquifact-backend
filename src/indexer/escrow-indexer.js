@@ -262,6 +262,8 @@ class IndexerBusyError extends Error {
  * @param {object}     [opts.log]            - Logger (injected in tests).
  * @returns {Promise<{
  *   ingested: number,
+ *   skipped: number,
+ *   decodeFailures: number,
  *   cursor: string | null,
  *   cursors: Record<string, string | null>,
  *   contracts: string[],
@@ -297,8 +299,8 @@ async function runOnce({
 
     const chunks = chunkContractIds(contracts);
 
-  let skipped = 0;
-  let decodeFailures = 0;
+    let skipped = 0;
+    let decodeFailures = 0;
     let ingested = 0;
     let latestLedger = 0;
     /** @type {Record<string, string | null>} */

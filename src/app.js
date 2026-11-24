@@ -25,6 +25,8 @@ app.disable('x-powered-by');
 app.set('trust proxy', config.trustProxy);
 app.set('json replacer', (_key, value) => (typeof value === 'bigint' ? value.toString() : value));
 
+app.use(require('./middleware/request-id'));
+
 const API_CSP = { useDefaults: false, directives: { defaultSrc: ["'none'"], frameAncestors: ["'none'"] } };
 const DOCS_CSP = {
   useDefaults: false,
@@ -51,7 +53,7 @@ app.use((req, res, next) => {
 });
 app.use(cors({
   origin: config.corsOrigins.includes('*') ? '*' : config.corsOrigins,
-  exposedHeaders: ['Idempotent-Replayed', 'Idempotency-Key', 'Retry-After', 'ETag'],
+  exposedHeaders: ['Idempotent-Replayed', 'Idempotency-Key', 'Retry-After', 'ETag', 'X-Request-Id'],
   allowedHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key', 'X-Api-Key', 'X-Request-Id'],
   maxAge: 600,
 }));

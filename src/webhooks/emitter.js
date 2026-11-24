@@ -16,7 +16,7 @@ emitter.setMaxListeners(50);
 /**
  * Emits an invoice lifecycle event.
  *
- * @param {'invoice.created'|'invoice.funding_received'|'invoice.funded'|'invoice.reconciliation_drift'} type
+ * @param {'invoice.created'|'invoice.funding_received'|'invoice.funded'|'invoice.settled'|'invoice.cancelled'|'invoice.reconciliation_drift'} type
  * @param {object} invoice the invoice data
  */
 function emit(type, invoice) {

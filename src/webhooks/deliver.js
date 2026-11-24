@@ -265,6 +265,8 @@ function startListening() {
   emitter.on('invoice.created', (invoice) => dispatch('invoice.created', invoice));
   emitter.on('invoice.funding_received', (invoice) => dispatch('invoice.funding_received', invoice));
   emitter.on('invoice.funded', (invoice) => dispatch('invoice.funded', invoice));
+  emitter.on('invoice.settled', (invoice) => dispatch('invoice.settled', invoice));
+  emitter.on('invoice.cancelled', (invoice) => dispatch('invoice.cancelled', invoice));
   emitter.on(RECONCILIATION_DRIFT_EVENT, (invoice) =>
     dispatch(RECONCILIATION_DRIFT_EVENT, invoice));
 }

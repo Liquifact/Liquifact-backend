@@ -21,6 +21,8 @@ const VALID_EVENTS = [
   'invoice.created',
   'invoice.funding_received',
   'invoice.funded',
+  'invoice.settled',
+  'invoice.cancelled',
   'invoice.reconciliation_drift',
 ];
 const MAX_DELIVERIES_PER_WEBHOOK = 50;

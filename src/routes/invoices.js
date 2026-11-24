@@ -473,7 +473,9 @@ router.post('/:id/settle', requireRole('admin'), idParam('invoice.settle'), (req
   if (invoice.status !== 'funded') {
     return audit.reject(409, `Invoice is ${invoice.status}; only funded invoices can be settled`, before);
   }
-  return audit.success(before, store.settle(invoice));
+  const updated = store.settle(invoice);
+  emitter.emit('invoice.settled', present(updated));
+  return audit.success(before, updated);
 });
 
 router.post('/:id/cancel', requireRole('sme', 'admin'), idParam('invoice.cancel'), (req, res) => {
@@ -494,7 +496,9 @@ router.post('/:id/cancel', requireRole('sme', 'admin'), idParam('invoice.cancel'
   if (invoice.status !== 'open' && invoice.status !== 'funded') {
     return audit.reject(409, `Invoice is ${invoice.status}; only open or funded invoices can be cancelled`, before);
   }
-  return audit.success(before, store.cancel(invoice));
+  const updated = store.cancel(invoice);
+  emitter.emit('invoice.cancelled', present(updated));
+  return audit.success(before, updated);
 });
 
 /**
