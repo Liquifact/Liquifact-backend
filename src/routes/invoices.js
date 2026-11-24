@@ -454,7 +454,7 @@ function transitionAudit(req, res, action) {
     },
     success(before, updated) {
       record({ outcome: 'success', statusCode: 200, before, after: { fundedAmount: updated.fundedAmount, status: updated.status } });
-      return res.json({ data: updated });
+      return res.json({ data: present(updated) });
     },
   };
 }
