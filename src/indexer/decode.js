@@ -28,6 +28,8 @@ const EVENT_TYPE_MAP = {
   fund_tgt: 'funding_target_reached',
 };
 
+const EVENT_TYPES = Object.freeze([...Object.values(EVENT_TYPE_MAP), 'unknown']);
+
 /**
  * Extract a string value from an ScVal-like object.
  * Handles both raw JS strings and stellar-sdk ScVal wrappers.
@@ -192,6 +194,8 @@ function coerceVal(v) {
  * ```
  *
  * @param {object} rawEvent - Raw event from Soroban RPC getEvents.
+ * @param {string} [fallbackContractId] - Originating contract id, used when the
+ *   raw event omits `contractId` (e.g. single-contract chunk requests).
  * @returns {{
  *   id: string,
  *   type: string,
@@ -204,7 +208,7 @@ function coerceVal(v) {
  *   schemaWarning?: true,
  * }}
  */
-function decodeEvent(rawEvent) {
+function decodeEvent(rawEvent, fallbackContractId) {
   const topics = Array.isArray(rawEvent.topic)
     ? rawEvent.topic
     : Array.isArray(rawEvent.topics)
@@ -251,7 +255,7 @@ function decodeEvent(rawEvent) {
     ledger: Number(rawEvent.ledger ?? 0),
     ledgerClosedAt: String(rawEvent.ledgerClosedAt ?? ''),
     txHash: String(rawEvent.txHash ?? ''),
-    contractId: String(rawEvent.contractId ?? ''),
+    contractId: String(rawEvent.contractId ?? fallbackContractId ?? ''),
     invoiceId,
     data,
   };
@@ -271,6 +275,7 @@ function decodeEvent(rawEvent) {
 module.exports = {
   decodeEvent,
   EVENT_TYPE_MAP,
+  EVENT_TYPES,
   scValToString,
   scValToAmountString,
   scvMapToObject,

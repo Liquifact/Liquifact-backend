@@ -1,20 +1,28 @@
 # Invoice optimistic concurrency
 
-Invoice reads include a positive integer `version`. A client must send that
-value back as `version` when patching an invoice. The API also accepts a weak
-`If-Match: W/"<version>"` value for clients that keep revisions in HTTP
-metadata; the body value takes precedence when both are present.
+Invoice reads include a positive integer `version` and a strong `ETag` header
+derived from it (`"<version>"`). Every state-changing mutation (`fund`,
+`settle`, `cancel`, escrow link) increments `version` atomically with the state
+change and returns the new `version` in the body and as a fresh `ETag`.
+
+Clients may send `If-Match: "<version>"` (or the weak form `W/"<version>"`) on
+those mutations. When the header is present and does not match the current
+version, the service returns `412 Precondition Failed` as `application/problem+json`
+with code `PRECONDITION_FAILED` and performs no mutation. When the deployment sets
+`REQUIRE_IF_MATCH=true` and the header is absent, the service returns
+`428 Precondition Required` with the same problem envelope and performs no mutation.
 
 The service performs one tenant-scoped `UPDATE` with both `invoice_id` and
-`version` in its predicate, and writes `version + 1` in the same statement.
-The affected-row count is the compare-and-set result. A read followed by an
-unconditional write is deliberately not used, because two workers could both
-pass that check.
+`version` in its predicate (when a precondition is supplied), and writes
+`version + 1` in the same statement. The affected-row count is the
+compare-and-set result. A read followed by an unconditional write is
+deliberately not used, because two workers could both pass that check.
 
-A stale or future revision returns `409` with `version_conflict`, the expected
-revision, and the current revision. The response is safe for retry: callers
-must re-read, merge intentionally, and submit the new revision. Missing or
-malformed revisions return `400`; there is no implicit “latest” mode.
+A stale `If-Match` revision returns `412` with `PRECONDITION_FAILED`; the
+response is safe for retry: callers must re-read, merge intentionally, and
+submit the new revision. Missing precondition headers return `428` only when
+`REQUIRE_IF_MATCH=true`; otherwise the mutation proceeds unconditionally.
+Malformed `If-Match` values return `400`; there is no implicit “latest” mode.
 
 The migration initializes legacy rows to version 1 and adds a covering tenant
 index. Version values are not an audit history and are not reusable across
@@ -26,9 +34,10 @@ write path.
 | Input | Result | Side effect |
 | --- | --- | --- |
 | current version | 200, incremented version | one update |
-| stale version | 409 `version_conflict` | none |
-| future version | 409 `version_conflict` | none |
-| missing/blank version | 400 typed error | none |
+| stale version | 412 `PRECONDITION_FAILED` | none |
+| future version | 412 `PRECONDITION_FAILED` | none |
+| missing header, `REQUIRE_IF_MATCH=true` | 428 `PRECONDITION_REQUIRED` | none |
+| missing header, `REQUIRE_IF_MATCH=false` | proceeds unconditionally | one update |
 | malformed or unsafe version | 400 typed error | none |
 | missing tenant or invoice | 404/tenant-safe result | none |
 

@@ -56,6 +56,17 @@ describe('OpenAPI spec includes webhook routes', () => {
     expect(responses['503']).toBeDefined();
   });
 
+  test('webhook event enum includes settled and cancelled invoice events', () => {
+    const requestEventTypes = spec.paths['/api/webhooks'].post.requestBody.content['application/json']
+      .schema.properties.events.items.enum;
+    const responseEventTypes = spec.paths['/api/webhooks'].get.responses['200'].content['application/json']
+      .schema.properties.data.items.properties.events.items.enum;
+    for (const eventTypes of [requestEventTypes, responseEventTypes]) {
+      expect(eventTypes).toContain('invoice.settled');
+      expect(eventTypes).toContain('invoice.cancelled');
+    }
+  });
+
   test('webhook routes are security-gated in spec', () => {
     const post = spec.paths['/api/webhooks'].post;
     expect(post.security).toBeDefined();

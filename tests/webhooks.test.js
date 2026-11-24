@@ -153,6 +153,67 @@ describe('webhook delivery', () => {
     }
   });
 
+  test.each([
+    ['settle', 'INV_0003', 'invoice.settled', 'settled'],
+    ['cancel', 'INV_0001', 'invoice.cancelled', 'cancelled'],
+  ])('invoice.%s delivers its presented invoice with a valid signature', async (action, invoiceId, eventType, status) => {
+    const regRes = await request(app)
+      .post('/api/webhooks')
+      .set({ authorization: `Bearer ${ADMIN_TOKEN}` })
+      .send({
+        url: `http://127.0.0.1:${receiver.port}/hook`,
+        events: [eventType],
+      });
+    expect(regRes.status).toBe(201);
+    const { secret } = regRes.body.data;
+
+    const transitionRes = await request(app)
+      .post(`/api/invoices/${invoiceId}/${action}`)
+      .set(authHeader())
+      .send();
+    expect(transitionRes.status).toBe(200);
+    expect(transitionRes.body.data.status).toBe(status);
+
+    await waitFor(receiver.received, 1);
+    expect(receiver.received).toHaveLength(1);
+    const call = receiver.received[0];
+    const envelope = JSON.parse(call.body);
+    expect(envelope.type).toBe(eventType);
+    expect(envelope.data.invoice.id).toBe(invoiceId);
+    expect(envelope.data.invoice.status).toBe(status);
+    expect(envelope.data.invoice).toHaveProperty('remainingCapacity');
+    expect(verifySignature(secret, call.headers['liquifact-signature'], call.body).ok).toBe(true);
+  });
+
+  test('rejected settle and cancel transitions do not emit webhook events', async () => {
+    const regRes = await request(app)
+      .post('/api/webhooks')
+      .set({ authorization: `Bearer ${ADMIN_TOKEN}` })
+      .send({
+        url: `http://127.0.0.1:${receiver.port}/hook`,
+        events: ['invoice.settled', 'invoice.cancelled'],
+      });
+    expect(regRes.status).toBe(201);
+
+    // INV_0001 is open and cannot be settled; INV_0003 is seeded as funded.
+    const rejectedSettle = await request(app)
+      .post('/api/invoices/INV_0001/settle')
+      .set(authHeader())
+      .send();
+    expect(rejectedSettle.status).toBe(409);
+
+    // Settle outside the route to make a terminal invoice for the rejected cancel check.
+    store.settle(store.get('INV_0003'));
+    const rejectedCancel = await request(app)
+      .post('/api/invoices/INV_0003/cancel')
+      .set(authHeader())
+      .send();
+    expect(rejectedCancel.status).toBe(409);
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(receiver.received).toHaveLength(0);
+  });
+
   test('webhook receiver being down does NOT change POST /api/invoices status', async () => {
     // Register webhook pointing at a port that is not listening
     await request(app)
@@ -190,6 +251,28 @@ describe('webhook delivery', () => {
     const types = receiver.received.map((r) => JSON.parse(r.body).type);
     expect(types).toContain('invoice.funding_received');
     expect(types).not.toContain('invoice.funded');
+  });
+
+  test('registering duplicate event types delivers the event only once', async () => {
+    const regRes = await request(app)
+      .post('/api/webhooks')
+      .set('Authorization', `Bearer ${ADMIN_TOKEN}`)
+      .send({
+        url: `http://127.0.0.1:${receiver.port}/hook`,
+        events: ['invoice.created', 'invoice.created'],
+      });
+    expect(regRes.status).toBe(201);
+    expect(regRes.body.data.events).toEqual(['invoice.created']);
+
+    const createRes = await request(app)
+      .post('/api/invoices').set(authHeader())
+      .send({ sme: 'Dedupe SME', debtor: 'Buyer Corp', amount: 1000, dueDate: '2027-06-01' });
+    expect(createRes.status).toBe(201);
+
+    await waitFor(receiver.received, 1);
+    // Wait briefly to ensure no second duplicate delivery arrives
+    await new Promise((r) => setTimeout(r, 100));
+    expect(receiver.received.length).toBe(1);
   });
 });
 
@@ -243,6 +326,20 @@ describe('admin webhook routes', () => {
     expect(getRes.status).toBe(200);
     expect(getRes.body.data[0].secret).toBeUndefined();
 
+    delete process.env.ADMIN_API_TOKEN;
+  });
+
+  test('POST /api/webhooks accepts settled and cancelled event names', async () => {
+    process.env.ADMIN_API_TOKEN = 'tok';
+    const res = await request(app)
+      .post('/api/webhooks')
+      .set({ authorization: 'Bearer tok' })
+      .send({
+        url: 'http://localhost:9999/hook',
+        events: ['invoice.settled', 'invoice.cancelled'],
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.data.events).toEqual(['invoice.settled', 'invoice.cancelled']);
     delete process.env.ADMIN_API_TOKEN;
   });
 
@@ -331,5 +428,142 @@ describe('admin webhook routes', () => {
     expect(res.status).toBe(200);
     expect(res.body.data).toEqual([]);
     delete process.env.ADMIN_API_TOKEN;
+  });
+
+  test('GET /api/webhooks/:id/deliveries filters by status and applies limit', async () => {
+    process.env.ADMIN_API_TOKEN = 'tok';
+    const create = await request(app)
+      .post('/api/webhooks')
+      .set('Authorization', 'Bearer tok')
+      .send({ url: 'http://localhost:9999/hook', events: ['invoice.created'] });
+    const { id } = create.body.data;
+    for (const status of ['failed', 'delivered', 'failed', 'pending']) {
+      webhookStore.appendDelivery(id, { status });
+    }
+
+    const filtered = await request(app)
+      .get(`/api/webhooks/${id}/deliveries?status=failed`)
+      .set('Authorization', 'Bearer tok');
+    expect(filtered.status).toBe(200);
+    expect(filtered.body.data.map((item) => item.status)).toEqual(['failed', 'failed']);
+
+    const limited = await request(app)
+      .get(`/api/webhooks/${id}/deliveries?limit=2`)
+      .set('Authorization', 'Bearer tok');
+    expect(limited.status).toBe(200);
+    expect(limited.body.data).toHaveLength(2);
+    delete process.env.ADMIN_API_TOKEN;
+  });
+
+  test.each([
+    ['/api/webhooks/wh_fake/deliveries?status=unknown', 'invalid status'],
+    ['/api/webhooks/wh_fake/deliveries?limit=0', 'limit below minimum'],
+    ['/api/webhooks/wh_fake/deliveries?limit=51', 'limit above maximum'],
+    ['/api/webhooks/wh_fake/deliveries?limit=1.5', 'non-integer limit'],
+  ])('GET %s returns 400 for %s', async (path) => {
+    process.env.ADMIN_API_TOKEN = 'tok';
+    const res = await request(app)
+      .get(path)
+      .set('Authorization', 'Bearer tok');
+    expect(res.status).toBe(400);
+    delete process.env.ADMIN_API_TOKEN;
+  });
+
+  test('POST /api/webhooks de-duplicates event types on registration', async () => {
+    process.env.ADMIN_API_TOKEN = 'tok';
+    const res = await request(app)
+      .post('/api/webhooks')
+      .set('Authorization', 'Bearer tok')
+      .send({
+        url: 'http://localhost:9999/hook',
+        events: ['invoice.created', 'invoice.created', 'invoice.funded', 'invoice.created'],
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.data.events).toEqual(['invoice.created', 'invoice.funded']);
+
+    const listRes = await request(app)
+      .get('/api/webhooks')
+      .set('Authorization', 'Bearer tok');
+    expect(listRes.status).toBe(200);
+    expect(listRes.body.data[0].events).toEqual(['invoice.created', 'invoice.funded']);
+    delete process.env.ADMIN_API_TOKEN;
+  });
+
+  test('POST /api/webhooks rejects the 101st registration when default cap (100) is reached', async () => {
+    process.env.ADMIN_API_TOKEN = 'tok';
+    try {
+      for (let i = 0; i < 100; i += 1) {
+        webhookStore.createWebhook({
+          url: `http://127.0.0.1:9999/hook/${i}`,
+          pinnedUrl: `http://127.0.0.1:9999/hook/${i}`,
+          host: '127.0.0.1:9999',
+          events: ['invoice.created'],
+        });
+      }
+
+      const res = await request(app)
+        .post('/api/webhooks')
+        .set('Authorization', 'Bearer tok')
+        .send({ url: 'http://127.0.0.1:9999/hook/100', events: ['invoice.created'] });
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('WEBHOOKS_MAX_REACHED');
+      expect(res.body.error).toMatch(/limit \(100\) reached/i);
+    } finally {
+      delete process.env.ADMIN_API_TOKEN;
+    }
+  });
+
+  test('POST /api/webhooks respects custom WEBHOOKS_MAX and allows registration after deletion', async () => {
+    process.env.ADMIN_API_TOKEN = 'tok';
+    const origMax = process.env.WEBHOOKS_MAX;
+    process.env.WEBHOOKS_MAX = '2';
+    try {
+      const first = await request(app)
+        .post('/api/webhooks')
+        .set('Authorization', 'Bearer tok')
+        .send({ url: 'http://127.0.0.1:9999/hook/1', events: ['invoice.created'] });
+      expect(first.status).toBe(201);
+
+      const second = await request(app)
+        .post('/api/webhooks')
+        .set('Authorization', 'Bearer tok')
+        .send({ url: 'http://127.0.0.1:9999/hook/2', events: ['invoice.created'] });
+      expect(second.status).toBe(201);
+
+      const third = await request(app)
+        .post('/api/webhooks')
+        .set('Authorization', 'Bearer tok')
+        .send({ url: 'http://127.0.0.1:9999/hook/3', events: ['invoice.created'] });
+      expect(third.status).toBe(409);
+      expect(third.body.code).toBe('WEBHOOKS_MAX_REACHED');
+
+      const del = await request(app)
+        .delete(`/api/webhooks/${first.body.data.id}`)
+        .set('Authorization', 'Bearer tok');
+      expect(del.status).toBe(204);
+
+      const retry = await request(app)
+        .post('/api/webhooks')
+        .set('Authorization', 'Bearer tok')
+        .send({ url: 'http://127.0.0.1:9999/hook/3', events: ['invoice.created'] });
+      expect(retry.status).toBe(201);
+    } finally {
+      delete process.env.ADMIN_API_TOKEN;
+      if (origMax === undefined) {
+        delete process.env.WEBHOOKS_MAX;
+      } else {
+        process.env.WEBHOOKS_MAX = origMax;
+      }
+    }
+  });
+
+  test('WEBHOOKS_MAX is validated in loadConfig', () => {
+    const { loadConfig, ConfigError } = require('../src/config');
+    expect(loadConfig({}).webhooksMax).toBe(100);
+    expect(loadConfig({ WEBHOOKS_MAX: '25' }).webhooksMax).toBe(25);
+    expect(() => loadConfig({ WEBHOOKS_MAX: '0' })).toThrow(ConfigError);
+    expect(() => loadConfig({ WEBHOOKS_MAX: '-5' })).toThrow(ConfigError);
+    expect(() => loadConfig({ WEBHOOKS_MAX: 'abc' })).toThrow(ConfigError);
   });
 });

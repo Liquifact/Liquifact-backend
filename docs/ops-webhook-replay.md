@@ -136,34 +136,34 @@ The auth check is implemented by `adminAuth()` in `src/routes/adminWebhooks.js`:
 
 | Endpoint | Auth required | Purpose |
 |----------|---------------|---------|
-| `POST /api/admin/webhooks/replay/:id` | JWT or API key | Replay a single dead-letter row |
-| `POST /api/admin/webhooks/replay` | JWT or API key | Batch replay by id list or tenant filter |
-| `POST /api/admin/webhooks/resolve/:id` | JWT or API key | Mark a row resolved without re-sending |
+| `GET /api/webhooks/:id/deliveries` | `Authorization: Bearer <ADMIN_API_TOKEN>` | Inspect the last 50 delivery records for a webhook |
+| `POST /api/webhooks/:id/deliveries/:deliveryId/replay` | `Authorization: Bearer <ADMIN_API_TOKEN>` | Replay a completed/failed delivery with a fresh signature timestamp and preserved `eventId` |
 
 ---
 
 ## Admin Endpoint Reference
 
-### Replay a single row
+### Replay a delivery
 
 ```http
-POST /api/admin/webhooks/replay/:id
-Authorization: Bearer <admin-jwt>
+POST /api/webhooks/:id/deliveries/:deliveryId/replay
+Authorization: Bearer <ADMIN_API_TOKEN>
 ```
+
+Re-signs the persisted raw event body (bounded at 64 KiB, retained on the last 50 delivery records) with a **fresh** `LiquiFact-Signature` timestamp, preserves the original `eventId` (`LiquiFact-Event-Id`) so receivers can deduplicate, and appends a new delivery record.
 
 | Status | Meaning |
 |--------|---------|
-| `202` | Replayed — `{ "replayed": ["<id>"] }` |
-| `401` | Missing or invalid credentials |
-| `404` | Dead-letter row not found |
-| `409` | Row already resolved (idempotency guard) |
-| `502` | Delivery attempt failed — `{ "error": "Replay failed: <msg>" }` |
+| `202` | Replay accepted — `{ "data": { "deliveryId": "dlv_...", "eventId": "evt_...", "replayedFrom": "dlv_...", "status": "pending" } }` |
+| `401` | Missing or invalid `ADMIN_API_TOKEN` |
+| `404` | Webhook or delivery not found |
+| `409` | Original delivery is still `pending` or payload is unavailable |
 
 Example:
 
 ```bash
-curl -X POST https://api.example.com/api/admin/webhooks/replay/d1a2b3c4-... \
-  -H "Authorization: Bearer $ADMIN_TOKEN"
+curl -X POST https://api.example.com/api/webhooks/wh_a1b2c3d4e5f6a7b8/deliveries/dlv_001122334455/replay \
+  -H "Authorization: Bearer $ADMIN_API_TOKEN"
 ```
 
 ### Replay a batch

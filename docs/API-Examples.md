@@ -128,6 +128,14 @@ curl "$BASE_URL/api/retention/policies" \
 
 Invoice state routes are mounted at `/api/invoices` because the router owns its `/:id/state`, `/:id/transition`, `/:id/approve`, `/:id/link-escrow`, `/:id/history`, and `/:id/reject` paths.
 
+### Conditional GET for invoice documents
+
+`GET /api/invoices/:id/document` returns an `ETag` header containing the
+SHA-256 of the PDF. Clients may send `If-None-Match` with that value (or a
+weak `W/"..."` form, a comma-separated list, or `*`). When the tag matches,
+the server responds `304 Not Modified` with no body, still including the
+`ETag` and `X-Content-Type-Options: nosniff` headers.
+
 ## Error Response Examples
 
 ### 1. Validation Error (400)

@@ -81,6 +81,7 @@ describe('Investor Contributions and Portfolio', () => {
         expectedPayout: '2130',
       },
     });
+    expect(portA.body.nextCursor).toBeNull();
 
     // Query portfolio for investor B
     // 3000 * 650 / 10000 = 195
@@ -194,7 +195,46 @@ describe('Investor Contributions and Portfolio', () => {
       investor: INVESTOR_EMPTY,
       positions: [],
       totalsByCurrency: {},
+      nextCursor: null,
     });
+  });
+
+  test('portfolio filters by status and paginates deterministically with full filtered totals', async () => {
+    const firstPage = await request(app)
+      .get(`/api/investors/${contributions.DEMO_INVESTOR}/portfolio`)
+      .query({ status: 'funded,settled', limit: 1 });
+    expect(firstPage.status).toBe(200);
+    expect(firstPage.body.positions.map((position) => position.invoiceId)).toEqual(['INV_0003']);
+    expect(firstPage.body.totalsByCurrency).toEqual({
+      USDC: {
+        principal: '54500',
+        expectedCoupon: '4149',
+        expectedPayout: '58649',
+      },
+    });
+    expect(firstPage.body.nextCursor).toBe('INV_0003');
+
+    const secondPage = await request(app)
+      .get(`/api/investors/${contributions.DEMO_INVESTOR}/portfolio`)
+      .query({ status: 'funded,settled', limit: 1, cursor: firstPage.body.nextCursor });
+    expect(secondPage.status).toBe(200);
+    expect(secondPage.body.positions.map((position) => position.invoiceId)).toEqual(['INV_0004']);
+    expect(secondPage.body.totalsByCurrency).toEqual(firstPage.body.totalsByCurrency);
+    expect(secondPage.body.nextCursor).toBeNull();
+  });
+
+  test('portfolio rejects invalid status, limit, and cursor query parameters as problem+json', async () => {
+    const base = `/api/investors/${INVESTOR_A}/portfolio`;
+    for (const [query, code] of [
+      ['?status=open,invalid', 'INVALID_STATUS_FILTER'],
+      ['?limit=101', 'INVALID_LIMIT'],
+      ['?cursor=unknown', 'INVALID_CURSOR'],
+    ]) {
+      const res = await request(app).get(`${base}${query}`);
+      expect(res.status).toBe(400);
+      expect(res.type).toMatch(/application\/problem\+json/);
+      expect(res.body.code).toBe(code);
+    }
   });
 
   test('store.fund enforces required investor parameter', () => {
@@ -308,6 +348,8 @@ describe('Investor Contributions and Portfolio', () => {
     expect(spec.paths['/api/invoices/{id}/contributions'].get).toBeDefined();
     expect(spec.paths['/api/investors/{address}/portfolio']).toBeDefined();
     expect(spec.paths['/api/investors/{address}/portfolio'].get).toBeDefined();
+    expect(spec.paths['/api/investors/{address}/portfolio'].get.parameters.map((param) => param.name))
+      .toEqual(expect.arrayContaining(['status', 'limit', 'cursor']));
 
     const fundOp = spec.paths['/api/invoices/{id}/fund'].post;
     expect(fundOp.requestBody.content['application/json'].schema.required).toContain('investor');
