@@ -191,6 +191,11 @@ const ERROR_CATALOG = {
     status: 404,
     description: 'The requested endpoint does not exist.',
   },
+  RATE_LIMIT_EXCEEDED: {
+    title: 'Too Many Requests',
+    status: 429,
+    description: 'Too many requests were sent in a given time window. Wait for Retry-After seconds before retrying.',
+  },
   INTERNAL: {
     title: 'Internal Server Error',
     status: 500,

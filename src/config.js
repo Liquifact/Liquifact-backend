@@ -507,6 +507,7 @@ function loadConfig(env = process.env) {
     devApiKey: env.DEV_API_KEY || '',
     adminApiToken: env.ADMIN_API_TOKEN || null,
     cronSecret: env.CRON_SECRET || null,
+    rateLimit,
     version,
   };
 }

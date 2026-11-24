@@ -16,6 +16,7 @@ const { requireAdminToken, hasValidAdminToken } = require('../middleware/require
 const { validate } = require('../middleware/validate');
 const { requireRole } = require('../middleware/auth');
 const idempotency = require('../middleware/idempotency');
+const { mutatingLimiter } = require('../middleware/rate-limit');
 const { CreateSmeRequest, ReviewSmeRequest } = require('../schemas');
 
 const router = express.Router();
@@ -42,6 +43,7 @@ function publicSme(record, includePii) {
   return publicRecord;
 }
 
+router.post('/', mutatingLimiter, requireRole('sme', 'admin'), validate({ body: CreateSmeRequest }), (req, res) => {
 router.get('/', requireAdminToken, (req, res) => {
   const { status } = req.query;
   const cursor = req.query.cursor || req.query.after;
@@ -95,7 +97,7 @@ router.get('/:id', (req, res) => {
   return res.json({ data: publicSme(record, hasValidAdminToken(req)) });
 });
 
-router.post('/:id/review', requireAdminToken, validate({ body: ReviewSmeRequest }), (req, res) => {
+router.post('/:id/review', requireAdminToken, mutatingLimiter, validate({ body: ReviewSmeRequest }), (req, res) => {
   const record = getSme(req.params.id);
   if (!record) {
     return res.status(404).json({ error: 'SME not found', code: 'SME_NOT_FOUND' });
