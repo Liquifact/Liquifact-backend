@@ -489,3 +489,88 @@ describe('SME onboarding and invoice verification (#1557)', () => {
     });
   });
 });
+
+describe('SME registration idempotency (#1632)', () => {
+  const idempotency = require('../src/middleware/idempotency');
+
+  const idempotentCreate = (key, payload = validSme) =>
+    request(app).post('/api/smes').set(authHeader()).set('Idempotency-Key', key).send(payload);
+
+  beforeEach(() => {
+    resetSmes();
+    store.reset();
+    idempotency.resetStore();
+  });
+
+  test('same key and same payload replays the original 201 without creating a duplicate', async () => {
+    const key = 'sme-replay-key-1';
+    const first = await idempotentCreate(key);
+    expect(first.status).toBe(201);
+    expect(first.headers['idempotency-key']).toBe(key);
+    expect(first.headers['idempotent-replayed']).toBeUndefined();
+
+    const second = await idempotentCreate(key);
+    expect(second.status).toBe(201);
+    expect(second.headers['idempotency-key']).toBe(key);
+    expect(second.headers['idempotent-replayed']).toBe('true');
+    expect(second.body).toEqual(first.body);
+
+    const read = await request(app).get(`/api/smes/${first.body.data.id}`).set(authHeader());
+    expect(read.status).toBe(200);
+    expect(read.body.data.legalName).toBe(validSme.legalName);
+  });
+
+  test('same key with a different payload returns 422 problem+json and leaves the SME unchanged', async () => {
+    const key = 'sme-reuse-key-1';
+    const first = await idempotentCreate(key);
+    expect(first.status).toBe(201);
+
+    const second = await idempotentCreate(key, { ...validSme, legalName: 'Different Company Ltd' });
+    expect(second.status).toBe(422);
+    expect(second.headers['content-type']).toMatch(/^application\/problem\+json/);
+    expect(second.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
+    expect(second.body.error).toBe('IDEMPOTENCY_KEY_REUSED');
+
+    const read = await request(app).get(`/api/smes/${first.body.data.id}`).set(authHeader());
+    expect(read.body.data.legalName).toBe(validSme.legalName);
+  });
+
+  test('requests without an Idempotency-Key keep the existing non-idempotent behavior', async () => {
+    const response = await request(app).post('/api/smes').set(authHeader()).send(validSme);
+    expect(response.status).toBe(201);
+    expect(response.headers['idempotency-key']).toBeUndefined();
+    expect(response.headers['idempotent-replayed']).toBeUndefined();
+  });
+
+  test('authorization runs before idempotency and cannot be bypassed by replay', async () => {
+    const key = 'sme-auth-key-1';
+    const unauthorized = await request(app).post('/api/smes').set('Idempotency-Key', key).send(validSme);
+    expect(unauthorized.status).toBe(401);
+    expect(unauthorized.body.code).toBe('UNAUTHENTICATED');
+
+    const wrongRole = await request(app).post('/api/smes').set(authHeader('investor')).set('Idempotency-Key', key).send(validSme);
+    expect(wrongRole.status).toBe(403);
+    expect(wrongRole.body.code).toBe('FORBIDDEN');
+
+    const authorized = await idempotentCreate(key);
+    expect(authorized.status).toBe(201);
+    expect(authorized.headers['idempotent-replayed']).toBeUndefined();
+
+    const replay = await idempotentCreate(key);
+    expect(replay.status).toBe(201);
+    expect(replay.headers['idempotent-replayed']).toBe('true');
+  });
+
+  test('openapi documents the Idempotency-Key header, replay and error responses', async () => {
+    const { body: spec } = await request(app).get('/openapi.json');
+    const operation = spec.paths['/api/smes'].post;
+    const param = operation.parameters.find((p) => p.name === 'Idempotency-Key');
+    expect(param).toBeDefined();
+    expect(param.in).toBe('header');
+    expect(operation.responses['201'].headers['Idempotent-Replayed']).toBeDefined();
+    expect(operation.responses['201'].headers['Idempotency-Key']).toBeDefined();
+    expect(operation.responses['400']).toBeDefined();
+    expect(operation.responses['409']).toBeDefined();
+    expect(operation.responses['422'].content['application/problem+json']).toBeDefined();
+  });
+});

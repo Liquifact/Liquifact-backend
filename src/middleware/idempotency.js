@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const { sendProblem } = require('../errors');
 
 const MAX_ENTRIES = parseInt(process.env.IDEMPOTENCY_MAX_ENTRIES, 10) || 10000;
 const TTL_SECONDS = parseInt(process.env.IDEMPOTENCY_TTL_SECONDS, 10) || 86400; // 24 hours
@@ -51,6 +52,23 @@ class LRUCache {
 
   delete(key) {
     this.cache.delete(key);
+  }
+
+  /**
+   * Deletes `key` only while it still holds `value`, so a newer entry that
+   * replaced the original one is never removed by stale cleanup.
+   *
+   * @param {string} key cache key
+   * @param {unknown} value expected current value
+   * @returns {boolean} whether the entry was removed
+   */
+  deleteIf(key, value) {
+    const entry = this.cache.get(key);
+    if (entry && entry.value === value) {
+      this.cache.delete(key);
+      return true;
+    }
+    return false;
   }
 
   clear() {
@@ -131,7 +149,7 @@ function idempotency(req, res, next) {
 
   // Check if key is required (read per request so it can be toggled at runtime)
   if (process.env.IDEMPOTENCY_REQUIRED === 'true' && !idempotencyKey) {
-    return res.status(400).json({ error: 'IDEMPOTENCY_KEY_REQUIRED' });
+    return sendProblem(req, res, 'IDEMPOTENCY_KEY_REQUIRED', { extra: { error: 'IDEMPOTENCY_KEY_REQUIRED' } });
   }
 
   // If no key provided and not required, proceed normally
@@ -141,7 +159,7 @@ function idempotency(req, res, next) {
 
   // Validate key format
   if (!isValidKey(idempotencyKey)) {
-    return res.status(400).json({ error: 'INVALID_IDEMPOTENCY_KEY' });
+    return sendProblem(req, res, 'INVALID_IDEMPOTENCY_KEY', { extra: { error: 'INVALID_IDEMPOTENCY_KEY' } });
   }
 
   const scopedKey = scopeKey(req, idempotencyKey);
@@ -151,12 +169,12 @@ function idempotency(req, res, next) {
   // Check for in-flight request
   if (existing && existing.state === 'in_flight') {
     res.set('Retry-After', '1');
-    return res.status(409).json({ error: 'IDEMPOTENCY_IN_PROGRESS' });
+    return sendProblem(req, res, 'IDEMPOTENCY_IN_PROGRESS', { extra: { error: 'IDEMPOTENCY_IN_PROGRESS' } });
   }
 
   // Check for key reuse with different payload
   if (existing && existing.fingerprint !== fp) {
-    return res.status(422).json({ error: 'IDEMPOTENCY_KEY_REUSED' });
+    return sendProblem(req, res, 'IDEMPOTENCY_KEY_REUSED', { extra: { error: 'IDEMPOTENCY_KEY_REUSED' } });
   }
 
   // Replay cached response
@@ -167,13 +185,21 @@ function idempotency(req, res, next) {
   }
 
   // Mark as in-flight and wrap res.json to capture response
-  idempotencyStore.set(scopedKey, {
+  const inFlight = {
     fingerprint: fp,
     state: 'in_flight',
-  }, TTL_SECONDS);
+  };
+  idempotencyStore.set(scopedKey, inFlight, TTL_SECONDS);
 
   const originalJson = res.json.bind(res);
+  let responded = false;
+
   res.json = function (body) {
+    if (responded) {
+      return res;
+    }
+    responded = true;
+
     const status = res.statusCode;
 
     // Only cache 2xx and 4xx (except 409, 429), never 5xx
@@ -188,13 +214,23 @@ function idempotency(req, res, next) {
         createdAt: new Date().toISOString(),
       }, TTL_SECONDS);
     } else {
-      // Remove the in-flight entry so the client can retry
-      idempotencyStore.delete(scopedKey);
+      // Remove the in-flight entry so the client can retry, unless a newer
+      // request with the same key already replaced it.
+      idempotencyStore.deleteIf(scopedKey, inFlight);
     }
 
     res.set('Idempotency-Key', idempotencyKey);
     return originalJson(body);
   };
+
+  // A response that finishes without calling res.json (res.end, sendStatus,
+  // a thrown handler, or a client disconnect) leaves no cached result, so
+  // release the key instead of blocking retries until the TTL expires.
+  res.once('close', () => {
+    if (!responded) {
+      idempotencyStore.deleteIf(scopedKey, inFlight);
+    }
+  });
 
   next();
 }

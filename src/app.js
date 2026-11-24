@@ -83,6 +83,7 @@ function baseUrl(req) {
 const ENDPOINTS = [
   { method: 'GET', path: '/', description: 'This index' },
   { method: 'GET', path: '/health', description: 'Liveness probe' },
+  { method: 'GET', path: '/healthz', description: 'Liveness probe (alias of /health)' },
   { method: 'GET', path: '/ready', description: 'Readiness probe (Soroban RPC, network, ledger, contract)' },
   { method: 'GET', path: '/docs', description: 'Interactive API docs (Swagger UI)' },
   { method: 'GET', path: '/openapi.json', description: 'OpenAPI 3 document' },
@@ -92,6 +93,8 @@ const ENDPOINTS = [
   { method: 'GET', path: '/api/invoices/:id/quote', description: 'Quote an investment contribution and annualised returns' },
   { method: 'POST', path: '/api/invoices', description: 'Submit an invoice for financing' },
   { method: 'POST', path: '/api/invoices/:id/fund', description: 'Record an investor contribution' },
+  { method: 'POST', path: '/api/invoices/:id/settle', description: 'Admin: mark a funded invoice as settled' },
+  { method: 'POST', path: '/api/invoices/:id/cancel', description: 'Cancel an open or funded invoice' },
   { method: 'POST', path: '/api/invoices/:id/escrow', description: 'Admin: link a verified escrow contract' },
   { method: 'GET', path: '/api/invoices/:id/escrow', description: 'Read the invoice\'s linked on-chain escrow' },
   { method: 'GET', path: '/api/audit', description: 'Audit log entries (admin; ?resourceId=&action=&limit=&after=)' },
@@ -121,6 +124,7 @@ const ENDPOINTS = [
   { method: 'GET', path: '/api/webhooks', description: 'List webhook subscriptions (admin)' },
   { method: 'DELETE', path: '/api/webhooks/:id', description: 'Remove a webhook subscription (admin)' },
   { method: 'GET', path: '/api/webhooks/:id/deliveries', description: 'Last 50 delivery records for a webhook (admin)' },
+  { method: 'POST', path: '/api/webhooks/:id/deliveries/:deliveryId/replay', description: 'Replay a webhook delivery (admin)' },
 ];
 
 app.get('/', (req, res) => {
