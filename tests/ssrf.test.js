@@ -4,6 +4,26 @@
  * Tests for src/webhooks/ssrf.js
  */
 
+'use strict';
+
+const https = require('https');
+const fs = require('fs');
+const path = require('path');
+const selfsigned = require('selfsigned'); // only if already a devDep — else use openssl fixture files in tests/fixtures/
+const { resolveAndValidateForDelivery, isPrivate } = require('../src/webhooks/ssrf');
+
+describe('resolveAndValidateForDelivery', () => {
+  test('refuses private resolution', async () => {
+    // mock dns.resolve4 to return 127.0.0.1
+    const dns = require('dns').promises;
+    jest.spyOn(dns, 'resolve4').mockResolvedValue(['127.0.0.1']);
+    jest.spyOn(dns, 'resolve6').mockResolvedValue([]);
+    await expect(
+      resolveAndValidateForDelivery('https://evil.example/hook'),
+    ).rejects.toThrow(/private/);
+  });
+});
+
 const dns = require('dns').promises;
 const { validateWebhookUrl, isPrivate } = require('../src/webhooks/ssrf');
 

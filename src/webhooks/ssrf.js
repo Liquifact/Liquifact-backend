@@ -262,4 +262,74 @@ async function validateWebhookUrl(urlString) {
   return { url: urlString, pinnedUrl: pinnedString, host: `${hostname}${portSuffix}` };
 }
 
+/**
+ * Re-resolve hostname on every delivery, refuse private ranges, return connect IP.
+ * TLS/SNI still use the original hostname from the URL.
+ *
+ * @param {string} urlString
+ * @returns {Promise<{ address: string, family: 4|6, hostHeader: string }>}
+ */
+async function resolveAndValidateForDelivery(urlString) {
+  const isProd = process.env.NODE_ENV === 'production';
+  let parsed;
+  try {
+    parsed = new URL(urlString);
+  } catch {
+    throw new Error('invalid webhook URL');
+  }
+
+  const { protocol, hostname } = parsed;
+  const portSuffix = parsed.port ? `:${parsed.port}` : '';
+
+  if (protocol === 'http:') {
+    const isLocalhost =
+      hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+    if (isProd || !isLocalhost) {
+      throw new Error('http: URLs are only allowed for localhost in non-production environments');
+    }
+    const address = hostname === 'localhost' ? '127.0.0.1' : hostname;
+    return {
+      address,
+      family: net.isIPv6(address) ? 6 : 4,
+      hostHeader: `\( {hostname} \){portSuffix}`,
+    };
+  }
+
+  if (protocol !== 'https:') {
+    throw new Error('URL must use https: protocol');
+  }
+
+  if (net.isIPv4(hostname) || net.isIPv6(hostname)) {
+    if (isPrivate(hostname)) {
+      throw new Error(`hostname resolves to a private/reserved address (${hostname}); SSRF not allowed`);
+    }
+    return {
+      address: hostname,
+      family: net.isIPv6(hostname) ? 6 : 4,
+      hostHeader: `\( {hostname} \){portSuffix}`,
+    };
+  }
+
+  const [v4, v6] = await Promise.all([
+    dns.resolve4(hostname).catch(() => []),
+    dns.resolve6(hostname).catch(() => []),
+  ]);
+  const addresses = [...v4, ...v6];
+  if (addresses.length === 0) {
+    throw new Error('hostname resolved to no addresses');
+  }
+  for (const addr of addresses) {
+    if (isPrivate(addr)) {
+      throw new Error(`hostname resolves to a private/reserved address (${addr}); SSRF not allowed`);
+    }
+  }
+  const address = addresses[0];
+  return {
+    address,
+    family: net.isIPv6(address) ? 6 : 4,
+    hostHeader: `\( {hostname} \){portSuffix}`,
+  };
+}
+
+module.exports = { validateWebhookUrl, isPrivate, resolveAndValidateForDelivery };
 module.exports = { validateWebhookUrl, isPrivate };

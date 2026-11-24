@@ -35,7 +35,8 @@ const MAX_RAW_BODY_BYTES = 64 * 1024;
  * @type {Map<string, object>}
  */
 let webhooks = new Map();
-
+pinnedUrl: input.pinnedUrl || input.url,
+  
 /**
  * Delivery log: webhookId → array of delivery records (most-recent-first).
  * Each delivery record is mutated in place as attempts are appended.
