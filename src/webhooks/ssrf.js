@@ -291,7 +291,7 @@ async function resolveAndValidateForDelivery(urlString) {
     return {
       address,
       family: net.isIPv6(address) ? 6 : 4,
-      hostHeader: `\( {hostname} \){portSuffix}`,
+      hostHeader: `${hostname}${portSuffix}`,
     };
   }
 
@@ -306,7 +306,7 @@ async function resolveAndValidateForDelivery(urlString) {
     return {
       address: hostname,
       family: net.isIPv6(hostname) ? 6 : 4,
-      hostHeader: `\( {hostname} \){portSuffix}`,
+      hostHeader: `${hostname}${portSuffix}`,
     };
   }
 
@@ -327,9 +327,9 @@ async function resolveAndValidateForDelivery(urlString) {
   return {
     address,
     family: net.isIPv6(address) ? 6 : 4,
-    hostHeader: `\( {hostname} \){portSuffix}`,
+    hostHeader: `${hostname}${portSuffix}`,
   };
 }
 
-module.exports = { validateWebhookUrl, isPrivate, resolveAndValidateForDelivery };
 module.exports = { validateWebhookUrl, isPrivate };
+module.exports = { validateWebhookUrl, isPrivate, resolveAndValidateForDelivery };

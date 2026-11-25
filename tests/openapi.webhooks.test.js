@@ -4,16 +4,13 @@
  * Tests that the OpenAPI spec documents all webhook routes and schemas.
  */
 
-const request = require('supertest');
-const app = require('../src/app');
+const { buildSpec } = require('../src/openapi');
 
 describe('OpenAPI spec includes webhook routes', () => {
   let spec;
 
-  beforeAll(async () => {
-    const res = await request(app).get('/openapi.json');
-    expect(res.status).toBe(200);
-    spec = res.body;
+  beforeAll(() => {
+    spec = buildSpec('http://localhost');
   });
 
   test('spec version is 3.0.3', () => {
@@ -29,6 +26,11 @@ describe('OpenAPI spec includes webhook routes', () => {
   test('/api/webhooks/{id} path exists with DELETE', () => {
     expect(spec.paths['/api/webhooks/{id}']).toBeDefined();
     expect(spec.paths['/api/webhooks/{id}'].delete).toBeDefined();
+  });
+
+  test('/api/webhooks/{id}/enable path exists with POST', () => {
+    expect(spec.paths['/api/webhooks/{id}/enable'].post).toBeDefined();
+    expect(spec.paths['/api/webhooks/{id}/enable'].post.responses['200']).toBeDefined();
   });
 
   test('/api/webhooks/{id}/deliveries path exists with GET', () => {
@@ -65,6 +67,13 @@ describe('OpenAPI spec includes webhook routes', () => {
       expect(eventTypes).toContain('invoice.settled');
       expect(eventTypes).toContain('invoice.cancelled');
     }
+  });
+
+  test('webhook list documents breaker state', () => {
+    const properties = spec.paths['/api/webhooks'].get.responses['200'].content['application/json']
+      .schema.properties.data.items.properties;
+    expect(properties.status.enum).toEqual(['enabled', 'disabled', 'half-open']);
+    expect(properties.consecutiveFailures).toBeDefined();
   });
 
   test('webhook routes are security-gated in spec', () => {

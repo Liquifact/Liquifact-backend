@@ -21,7 +21,18 @@ describe('loadConfig', () => {
     expect(config.trustProxy).toBe(false);
     expect(config.adminApiToken).toBeNull();
     expect(config.cronSecret).toBeNull();
+    expect(config.webhookFailureThreshold).toBe(10);
+    expect(config.webhookCooldownMs).toBe(300000);
     expect(config.version).toBeDefined();
+  });
+
+  test('loads webhook breaker settings from environment', () => {
+    const config = loadConfig({
+      WEBHOOK_FAILURE_THRESHOLD: '4',
+      WEBHOOK_COOLDOWN_MS: '120000',
+    });
+    expect(config.webhookFailureThreshold).toBe(4);
+    expect(config.webhookCooldownMs).toBe(120000);
   });
 
   test('mainnet preset derives explorerUrl containing /public/ and uses public passphrase', () => {

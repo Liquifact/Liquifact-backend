@@ -9,6 +9,7 @@
  * Routes:
  *   POST   /api/webhooks                                 Register a new subscription
  *   GET    /api/webhooks                                 List all subscriptions
+ *   POST   /api/webhooks/:id/enable                      Re-enable a subscription
  *   DELETE /api/webhooks/:id                             Remove a subscription
  *   GET    /api/webhooks/:id/deliveries                  Last 50 delivery records
  *   POST   /api/webhooks/:id/deliveries/:deliveryId/replay  Replay a delivery
@@ -97,7 +98,19 @@ router.get('/', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /api/webhooks/:id - Show webhook details (admin only, no secrets/URL)
+// POST /api/webhooks/:id/enable
+// ---------------------------------------------------------------------------
+
+router.post('/:id/enable', requireAdminToken, mutatingLimiter, (req, res) => {
+  const wh = webhookStore.enableWebhook(req.params.id);
+  if (!wh) {
+    return res.status(404).json({ error: 'Webhook not found' });
+  }
+  return res.json({ data: webhookStore.getWebhook(req.params.id) });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/webhooks/:id - Show public webhook details, including breaker state
 // ---------------------------------------------------------------------------
 
 router.get('/:id', requireAdminToken, (req, res) => {
@@ -105,8 +118,7 @@ router.get('/:id', requireAdminToken, (req, res) => {
   if (!wh) {
     return res.status(404).json({ error: 'Webhook not found' });
   }
-  // Return only public fields: id, url, events, createdAt
-  return res.json({ data: { id: wh.id, url: wh.url, events: wh.events, createdAt: wh.createdAt } });
+  return res.json({ data: wh });
 });
 
 // ---------------------------------------------------------------------------

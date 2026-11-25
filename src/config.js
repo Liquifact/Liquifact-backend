@@ -454,6 +454,27 @@ function loadConfig(env = process.env) {
     }
   }
 
+  const rateLimitValue = (name, fallback, max) => {
+    const raw = env[name];
+    if (raw === undefined || raw === '') { return fallback; }
+    const value = Number(raw);
+    if (!Number.isInteger(value) || value < 1 || value > max) {
+      errors.push(`${name} must be an integer between 1 and ${max} (got "${raw}")`);
+      return fallback;
+    }
+    return value;
+  };
+  const rateLimit = {
+    windowMs: rateLimitValue('RATE_LIMIT_WINDOW_MS', 60000, 86400000),
+    max: rateLimitValue('RATE_LIMIT_MAX', 60, 1000000),
+    maxClients: rateLimitValue('RATE_LIMIT_MAX_CLIENTS', 10000, 1000000),
+    adminAuthWindowMs: rateLimitValue('ADMIN_AUTH_RATE_LIMIT_WINDOW_MS', 60000, 86400000),
+    adminAuthMax: rateLimitValue('ADMIN_AUTH_RATE_LIMIT_MAX', 10, 1000000),
+  };
+
+  const webhookFailureThreshold = envInt(env.WEBHOOK_FAILURE_THRESHOLD, 10, 1);
+  const webhookCooldownMs = envInt(env.WEBHOOK_COOLDOWN_MS, 300000, 0);
+
   // Express trust proxy setting (default: 1 hop on Vercel, false otherwise).
   const trustProxy = parseTrustProxy(env.TRUST_PROXY, env, errors);
 
@@ -492,6 +513,8 @@ function loadConfig(env = process.env) {
     logLevel,
     auditMaxEntries: envInt(env.AUDIT_MAX_ENTRIES, 10000, 1),
     webhooksMax,
+    webhookFailureThreshold,
+    webhookCooldownMs,
     // Optimistic concurrency: when true, fund/settle/cancel/escrow-link
     // mutations must send an If-Match header (428 Precondition Required otherwise).
     requireIfMatch: envBool(env.REQUIRE_IF_MATCH, false),

@@ -499,6 +499,10 @@ const WebhookSubscription = {
         enum: ['invoice.created', 'invoice.funding_received', 'invoice.funded', 'invoice.settled', 'invoice.cancelled', 'invoice.reconciliation_drift'],
       },
     },
+    status: { type: 'string', enum: ['enabled', 'disabled', 'half-open'] },
+    consecutiveFailures: { type: 'integer', minimum: 0 },
+    disabledAt: { type: 'string', format: 'date-time', nullable: true },
+    disabledReason: { type: 'string', nullable: true },
     createdAt: { type: 'string', format: 'date-time' },
   },
 };
@@ -1861,6 +1865,22 @@ function createSpec(baseUrl) {
           parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
           responses: {
             204: { description: 'Deleted' },
+            404: { description: 'Webhook not found', ...json(ErrorBody) },
+            ...adminErrors,
+          },
+        },
+      },
+      '/api/webhooks/{id}/enable': {
+        post: {
+          tags: ['Webhooks'],
+          summary: 'Re-enable a disabled webhook subscription and reset its failure counter',
+          security: adminSecurity,
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            200: {
+              description: 'Webhook enabled',
+              ...json({ type: 'object', properties: { data: WebhookSubscription } }),
+            },
             404: { description: 'Webhook not found', ...json(ErrorBody) },
             ...adminErrors,
           },

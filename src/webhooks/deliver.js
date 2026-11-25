@@ -24,7 +24,7 @@ const { sign } = require('./signature');
 const webhookStore = require('./store');
 const emitter = require('./emitter');
 const webhookQueue = require('./queue');
-const { webhookDeliveriesTotal } = require('../metrics/registry');
+const config = require('../config');
 
 const TIMEOUT_MS = 5000;
 const MAX_ATTEMPTS = 5;
@@ -146,11 +146,11 @@ async function attempt(wh, rawBody, eventId, signatureHeader) {
       : isHttp
         ? 80
         : 443;
-    const path = `\( {parsed.pathname} \){parsed.search}`;
+    const path = `${parsed.pathname}${parsed.search}`;
     const hostname = parsed.hostname;
     const family = resolved.family;
 
-    const status = await new Promise((resolve, reject) => {
+    const response = await new Promise((resolve, reject) => {
       const req = lib.request(
         {
           protocol: parsed.protocol,
@@ -183,7 +183,10 @@ async function attempt(wh, rawBody, eventId, signatureHeader) {
               req.destroy(new Error('response body exceeds 1 MiB cap'));
             }
           });
-          res.on('end', () => resolve(res.statusCode ?? null));
+          res.on('end', () => resolve({
+            status: res.statusCode ?? null,
+            retryAfter: res.headers['retry-after'],
+          }));
           res.on('error', reject);
         },
       );
@@ -196,9 +199,11 @@ async function attempt(wh, rawBody, eventId, signatureHeader) {
       req.end();
     });
 
-    return { status, durationMs: Date.now() - start };
-    const retryAfterMs = parseRetryAfter(res.headers?.get?.('retry-after'));
-    return { status: res.status, durationMs: Date.now() - start, retryAfterMs };
+    return {
+      status: response.status,
+      durationMs: Date.now() - start,
+      retryAfterMs: parseRetryAfter(response.retryAfter),
+    };
   } catch (err) {
     return { status: null, durationMs: Date.now() - start, error: err.message };
   }
@@ -221,51 +226,58 @@ async function attempt(wh, rawBody, eventId, signatureHeader) {
  * @param {string} signatureHeader signed header value
  * @returns {Promise<void>}
  */
-  let pendingDelayMs;
-
-      const base = pendingDelayMs !== undefined ? pendingDelayMs : BASE_DELAYS[i - 1];
-      pendingDelayMs = undefined;
-      await sleep(withJitter(base));
 function executeDelivery(wh, deliveryRecord, rawBody, signatureHeader) {
   let attemptCount = 0;
-
-    delete attemptLog.retryAfterMs; // internal hint, don't persist it
+  const isProbe = wh.status === 'half-open';
   return webhookQueue.enqueue({
     webhookId: wh.id,
     deliveryRecord,
     task: async () => {
       attemptCount++;
       const result = await attempt(wh, rawBody, deliveryRecord.eventId, signatureHeader);
-      const attemptLog = { attempt: attemptCount, ...result };
+      const { retryAfterMs, ...publicResult } = result;
+      const attemptLog = { attempt: attemptCount, ...publicResult };
       deliveryRecord.attempts.push(attemptLog);
 
-
-    if (!isRetryableStatus(result.status)) {
-      deliveryRecord.status = 'failed';
-      deliveryRecord.reason = 'permanent_4xx';
-      return;
-    }
-
-    if (result.retryAfterMs !== undefined) {
-      pendingDelayMs = result.retryAfterMs;
-    }
       const success = result.status !== null && result.status >= 200 && result.status < 300;
       if (success) {
         deliveryRecord.status = 'delivered';
         return { success: true, retryable: false };
       }
 
-  if (!deliveryRecord.reason) {
-    deliveryRecord.reason = 'attempts_exhausted';
-  }
-      if (attemptCount < MAX_ATTEMPTS) {
-        const delay = withJitter(BASE_DELAYS[attemptCount - 1]);
+      if (!isRetryableStatus(result.status)) {
+        deliveryRecord.status = 'failed';
+        deliveryRecord.reason = result.status >= 400 && result.status < 500
+          ? 'permanent_4xx'
+          : 'non_retryable_status';
+        return { success: false, retryable: false };
+      }
+
+      if (!isProbe && attemptCount < MAX_ATTEMPTS) {
+        const delay = retryAfterMs !== undefined
+          ? withJitter(retryAfterMs)
+          : withJitter(BASE_DELAYS[attemptCount - 1]);
         return { success: false, retryable: true, delayMs: delay };
       }
 
       deliveryRecord.status = 'failed';
+      deliveryRecord.reason = isProbe ? 'half_open_probe_failed' : 'attempts_exhausted';
       return { success: false, retryable: false };
     },
+  }).then((result) => {
+    if (result && result.dropped) {
+      if (isProbe) { webhookStore.releaseProbe(wh.id); }
+      return;
+    }
+    webhookStore.recordDeliveryResult(
+      wh.id,
+      deliveryRecord.status === 'delivered',
+      config.webhookFailureThreshold,
+      isProbe,
+    );
+  }, (err) => {
+    webhookStore.recordDeliveryResult(wh.id, false, config.webhookFailureThreshold, isProbe);
+    throw err;
   });
 }
 
@@ -372,7 +384,7 @@ function sleep(ms) {
  * @param {object} invoice
  */
 function dispatch(eventType, invoice) {
-  const subscribers = webhookStore.getWebhooksForEvent(eventType);
+  const subscribers = webhookStore.getWebhooksForEvent(eventType, config.webhookCooldownMs);
   for (const wh of subscribers) {
     // Fire and forget — errors are caught inside deliverToWebhook
     deliverToWebhook(wh, eventType, invoice).catch((err) => {
