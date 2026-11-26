@@ -124,6 +124,7 @@ const ENDPOINTS = [
   { method: 'POST', path: '/api/smes/:id/review', description: 'Review an SME: verify | reject | suspend (admin)' },
   { method: 'POST', path: '/api/webhooks', description: 'Register a webhook subscription (admin)' },
   { method: 'GET', path: '/api/webhooks', description: 'List webhook subscriptions (admin)' },
+  { method: 'POST', path: '/api/webhooks/:id/enable', description: 'Re-enable a webhook subscription (admin)' },
   { method: 'DELETE', path: '/api/webhooks/:id', description: 'Remove a webhook subscription (admin)' },
   { method: 'GET', path: '/api/webhooks/:id/deliveries', description: 'Last 50 delivery records for a webhook (admin)' },
   { method: 'POST', path: '/api/webhooks/:id/deliveries/:deliveryId/replay', description: 'Replay a webhook delivery (admin)' },

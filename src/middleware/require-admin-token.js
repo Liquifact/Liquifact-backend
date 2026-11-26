@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const { sendProblem } = require('../errors');
+const { checkAdminAuthLimit, recordAdminAuthFailure } = require('./rate-limit');
 
 const digest = (text) => crypto.createHash('sha256').update(text).digest();
 

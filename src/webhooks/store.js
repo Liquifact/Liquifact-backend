@@ -35,8 +35,7 @@ const MAX_RAW_BODY_BYTES = 64 * 1024;
  * @type {Map<string, object>}
  */
 let webhooks = new Map();
-pinnedUrl: input.pinnedUrl || input.url,
-  
+
 /**
  * Delivery log: webhookId → array of delivery records (most-recent-first).
  * Each delivery record is mutated in place as attempts are appended.
@@ -64,6 +63,10 @@ function createWebhook({ url, pinnedUrl, host, events }) {
     events: [...new Set(events)],
     secret, // retained in-memory for signing; never exposed via GET
     createdAt: new Date().toISOString(),
+    status: 'enabled',
+    consecutiveFailures: 0,
+    disabledAt: null,
+    disabledReason: null,
   };
 
   webhooks.set(id, record);
@@ -127,8 +130,78 @@ function deleteWebhook(id) {
  * @param {string} eventType
  * @returns {object[]}
  */
-function getWebhooksForEvent(eventType) {
-  return [...webhooks.values()].filter((wh) => wh.events.includes(eventType));
+function getWebhooksForEvent(eventType, cooldownMs = 300000, now = Date.now()) {
+  return [...webhooks.values()].filter((wh) => {
+    if (!wh.events.includes(eventType)) { return false; }
+    if (wh.status === 'enabled') { return true; }
+    if (wh.status !== 'disabled' || !wh.disabledAt) { return false; }
+
+    if (now - Date.parse(wh.disabledAt) < cooldownMs) { return false; }
+    wh.status = 'half-open';
+    return true;
+  });
+}
+
+/**
+ * Records the outcome of a complete delivery (including all its retries).
+ *
+ * @param {string} webhookId
+ * @param {boolean} success
+ * @param {number} failureThreshold
+ * @param {boolean} isProbe
+ */
+function recordDeliveryResult(webhookId, success, failureThreshold, isProbe = false) {
+  const wh = webhooks.get(webhookId);
+  if (!wh) { return; }
+
+  if (success) {
+    wh.status = 'enabled';
+    wh.consecutiveFailures = 0;
+    wh.disabledAt = null;
+    wh.disabledReason = null;
+    return;
+  }
+
+  if (isProbe && wh.status === 'half-open') {
+    wh.status = 'disabled';
+    wh.disabledAt = new Date().toISOString();
+    wh.disabledReason = 'half_open_probe_failed';
+    return;
+  }
+
+  if (wh.status !== 'enabled') { return; }
+  wh.consecutiveFailures += 1;
+  if (wh.consecutiveFailures >= failureThreshold) {
+    wh.status = 'disabled';
+    wh.disabledAt = new Date().toISOString();
+    wh.disabledReason = 'consecutive_failures';
+  }
+}
+
+/**
+ * Re-enables a webhook and clears its breaker state.
+ * @param {string} id
+ * @returns {object|undefined} Updated internal record
+ */
+function enableWebhook(id) {
+  const wh = webhooks.get(id);
+  if (!wh) { return undefined; }
+  wh.status = 'enabled';
+  wh.consecutiveFailures = 0;
+  wh.disabledAt = null;
+  wh.disabledReason = null;
+  return wh;
+}
+
+/**
+ * Releases an unexecuted half-open probe, e.g. if it was dropped from the queue.
+ * @param {string} webhookId
+ */
+function releaseProbe(webhookId) {
+  const wh = webhooks.get(webhookId);
+  if (wh && wh.status === 'half-open') {
+    wh.status = 'disabled';
+  }
 }
 
 /**
@@ -188,6 +261,9 @@ module.exports = {
   getWebhookInternal,
   deleteWebhook,
   getWebhooksForEvent,
+  recordDeliveryResult,
+  enableWebhook,
+  releaseProbe,
   appendDelivery,
   getDeliveries,
   getDelivery,
