@@ -30,6 +30,7 @@
  */
 
 const { decodeEvent } = require('./decode');
+const chainSync = require('../services/chain-sync');
 const { defaultStore } = require('./defaultEventStore');
 const { getRpcServer } = require('../stellar/rpc');
 const dataStore = require('../data/store');
@@ -148,6 +149,8 @@ async function indexChunk({ server, store, log, contractIds, cursorKey, maxPages
   let ingested = 0;
   let skipped = 0;
   let decodeFailures = 0;
+  let applied = 0;
+  let ignored = 0;
   let latestLedger = 0;
   let currentCursor = store.getCursor(cursorKey);
 
@@ -219,6 +222,10 @@ async function indexChunk({ server, store, log, contractIds, cursorKey, maxPages
         ingested += appended;
         if (appended === 0) {
           skipped++;
+        } else {
+          const syncResult = chainSync.applyEvents([decoded]);
+          applied += syncResult.applied;
+          ignored += syncResult.ignored;
         }
       } catch (err) {
         decodeFailures++;
@@ -248,7 +255,7 @@ async function indexChunk({ server, store, log, contractIds, cursorKey, maxPages
     }
   }
 
-  return { ingested, skipped, decodeFailures, cursor: store.getCursor(cursorKey), latestLedger };
+  return { ingested, skipped, applied, ignored, decodeFailures, cursor: store.getCursor(cursorKey), latestLedger };
 }
 
 let runOnceInFlight = false;
@@ -315,6 +322,8 @@ async function runOnce({
     let skipped = 0;
     let decodeFailures = 0;
     let ingested = 0;
+    let applied = 0;
+    let ignored = 0;
     let latestLedger = 0;
     /** @type {Record<string, string | null>} */
     const cursors = {};
@@ -332,6 +341,8 @@ async function runOnce({
       });
       ingested += result.ingested;
       skipped += result.skipped;
+      applied += result.applied || 0;
+      ignored += result.ignored || 0;
       decodeFailures += result.decodeFailures;
       latestLedger = result.latestLedger || latestLedger;
       lastCursor = result.cursor;
@@ -341,6 +352,8 @@ async function runOnce({
     return {
       ingested,
       skipped,
+      applied,
+      ignored,
       decodeFailures,
       cursor: contracts.length <= 1 ? _store.getCursor() : lastCursor,
       cursors,
