@@ -7,6 +7,8 @@
  * GET    /api/invoices/:id/document       — download the PDF
  * GET    /api/invoices/:id/document/meta  — metadata + attestation hash
  *
+ * Error responses use RFC 7807 `application/problem+json` via `sendProblem`.
+ *
  * @module routes/invoiceDocument
  */
 
@@ -18,10 +20,11 @@ const { defaultDocumentStore } = require('../data/documentStore');
 
 const { requireRole, assertOwnerOrAdmin } = require('../middleware/auth');
 const { auditContext } = require('../audit/middleware');
+const { sendProblem } = require('../errors');
 const router = express.Router({ mergeParams: true });
 router.use(auditContext());
 
-// ── Constants ────────────────────────────────────────────────────────────────\
+// ── Constants ──────────────────────────────────────────────────────────────
 
 const MAX_DOCUMENT_BYTES = parseInt(process.env.MAX_DOCUMENT_BYTES || '', 10) || 5 * 1024 * 1024; // 5 MiB
 
@@ -31,18 +34,17 @@ const PDF_MAGIC = Buffer.from('%PDF-');
 /** Byte scan strings that indicate active JavaScript / Launch actions */
 const UNSAFE_PATTERNS = ['/JavaScript', '/JS', '/Launch'];
 
-// ── Multer setup (memory storage, single file) ───────────────────────────────
+// ── Multer setup (memory storage, single file) ─────────────────────────────
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: MAX_DOCUMENT_BYTES, files: 1 },
   fileFilter(_req, _file, cb) {
-    // Accept any file — we validate by magic bytes, not MIME
     cb(null, true);
   },
 });
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// ── Helpers ────────────────────────────────────────────────────────────────
 
 /**
  * Sanitise an original filename: strip path traversal, keep only safe chars,
@@ -54,8 +56,8 @@ const upload = multer({
 function sanitiseName(name) {
   if (typeof name !== 'string') { return 'document.pdf'; }
   const base = name
-    .replace(/[\\/]/g, '')          // strip directory separators
-    .replace(/[^\\w.\\-\\s]/g, '_')    // replace unsafe chars
+    .replace(/[\\/]/g, '')
+    .replace(/[^\w.\-\s]/g, '_')
     .trim()
     .slice(0, 120);
   return base || 'document.pdf';
@@ -68,49 +70,34 @@ function sanitiseName(name) {
  * @returns {{ ok: boolean, reason?: string }}
  */
 function validatePdf(buf) {
-  // Magic-byte check: must start with %PDF-
   if (buf.length < 5 || !buf.slice(0, 5).equals(PDF_MAGIC)) {
     return { ok: false, reason: 'File does not start with %PDF- magic bytes' };
   }
-
-  // Trailer check: %%EOF must appear within the last 1 KiB
   const tail = buf.slice(Math.max(0, buf.length - 1024));
   if (!tail.includes('%%EOF')) {
     return { ok: false, reason: 'File does not contain %%EOF trailer in the last 1 KiB' };
   }
-
-  // Safety check: reject PDFs containing JavaScript or Launch actions
-  const content = buf.toString('latin1'); // raw byte scan
+  const content = buf.toString('latin1');
   for (const pattern of UNSAFE_PATTERNS) {
     if (content.includes(pattern)) {
       return { ok: false, reason: `Unsafe PDF: contains '${pattern}' action` };
     }
   }
-
   return { ok: true };
 }
 
-// ── Multer error handler helper ───────────────────────────────────────────────
+// ── Multer error handler helper ────────────────────────────────────────────
 
-/**
- * Wrap multer single-file upload and handle its errors.
- *
- * @param {import('express').Request} req
- * @param {import('express').Response} res
- * @param {import('express').NextFunction} next
- */
 function uploadSingle(req, res, next) {
   upload.single('file')(req, res, (err) => {
     if (!err) { return next(); }
     if (err.code === 'LIMIT_FILE_SIZE') {
-      return res.status(413).json({
-        error: 'PAYLOAD_TOO_LARGE',
+      return sendProblem(req, res, 'FILE_TOO_LARGE', {
         detail: `File exceeds the ${MAX_DOCUMENT_BYTES} byte limit.`,
       });
     }
     if (err.code === 'LIMIT_FILE_COUNT' || err.code === 'LIMIT_UNEXPECTED_FILE') {
-      return res.status(400).json({
-        error: 'BAD_REQUEST',
+      return sendProblem(req, res, 'UPLOAD_ERROR', {
         detail: 'Only one file field named "file" is accepted.',
       });
     }
@@ -118,7 +105,7 @@ function uploadSingle(req, res, next) {
   });
 }
 
-// ── Routes ────────────────────────────────────────────────────────────────────\
+// ── Routes ─────────────────────────────────────────────────────────────────
 
 /**
  * POST /api/invoices/:id/document
@@ -130,7 +117,7 @@ router.post('/', requireRole('sme', 'admin'), (req, res, next) => {
   const { id } = req.params;
   const invoice = store.get(id);
   if (!invoice) {
-    return res.status(404).json({ error: 'Invoice not found' });
+    return sendProblem(req, res, 'INVOICE_NOT_FOUND');
   }
   const ownership = assertOwnerOrAdmin(req, res, invoice, { action: 'invoice.document.upload' });
   if (ownership !== true) {
@@ -141,38 +128,28 @@ router.post('/', requireRole('sme', 'admin'), (req, res, next) => {
   const { id } = req.params;
   const invoice = store.get(id);
 
-  // Invoice must be open
   if (invoice.status !== 'open') {
-    return res.status(409).json({
-      error: 'CONFLICT',
+    return sendProblem(req, res, 'DOCUMENT_EXISTS', {
       detail: `Invoice is '${invoice.status}'; documents can only be uploaded to open invoices.`,
     });
   }
 
-  // File must be present
   if (!req.file) {
-    return res.status(400).json({
-      error: 'BAD_REQUEST',
-      detail: 'No file received. Send a multipart/form-data request with a "file" field.',
-    });
+    return sendProblem(req, res, 'NO_FILE');
   }
 
   const buf = req.file.buffer;
 
-  // Validate PDF
   const validation = validatePdf(buf);
   if (!validation.ok) {
     const isUnsafe = validation.reason && validation.reason.startsWith('Unsafe');
-    return res.status(isUnsafe ? 422 : 415).json({
-      error: isUnsafe ? 'UNSAFE_PDF' : 'UNSUPPORTED_MEDIA_TYPE',
+    return sendProblem(req, res, isUnsafe ? 'UNSAFE_PDF' : 'UNSUPPORTED_MEDIA_TYPE', {
       detail: validation.reason,
     });
   }
 
-  // Compute SHA-256
   const sha256Hex = crypto.createHash('sha256').update(buf).digest('hex');
 
-  // Persist to document store (may trigger LRU eviction)
   const evicted = defaultDocumentStore.save(id, {
     sha256Hex,
     sizeBytes: buf.length,
@@ -180,16 +157,11 @@ router.post('/', requireRole('sme', 'admin'), (req, res, next) => {
     originalName: sanitiseName(req.file.originalname),
   }, buf);
 
-  // Attach metadata to the invoice record
   const meta = defaultDocumentStore.getMeta(id);
   invoice.document = meta;
 
-  // Return 410 DOCUMENT_EVICTED if an LRU eviction occurred
   if (evicted) {
-    return res.status(410).json({
-      error: 'DOCUMENT_EVICTED',
-      detail: 'The document was evicted from the store to make room for a new entry.',
-    });
+    return sendProblem(req, res, 'DOCUMENT_EVICTED');
   }
 
   return res.status(201).json({ data: meta });
@@ -197,11 +169,6 @@ router.post('/', requireRole('sme', 'admin'), (req, res, next) => {
 
 /**
  * Parse an If-None-Match header value and report whether it matches the given ETag.
- * Supports the wildcard "*", comma-separated lists, and weak ("W/") validators.
- *
- * @param {string|undefined} header - Raw If-None-Match header value.
- * @param {string} etag - Strong ETag value including quotes, e.g. "\"abc\"".
- * @returns {boolean} True when the client's cached representation matches.
  */
 function etagMatches(header, etag) {
   if (typeof header !== 'string' || header.trim() === '') { return false; }
@@ -220,14 +187,14 @@ router.get('/', (req, res) => {
 
   const invoice = store.get(id);
   if (!invoice) {
-    return res.status(404).json({ error: 'Invoice not found' });
+    return sendProblem(req, res, 'INVOICE_NOT_FOUND');
   }
 
   const meta = defaultDocumentStore.getMeta(id);
   const buf = defaultDocumentStore.getBuffer(id);
 
   if (!buf || !meta) {
-    return res.status(404).json({ error: 'No document found for this invoice' });
+    return sendProblem(req, res, 'DOCUMENT_NOT_FOUND');
   }
 
   const safeName = sanitiseName(meta.originalName);
@@ -256,19 +223,17 @@ router.get('/meta', (req, res) => {
 
   const invoice = store.get(id);
   if (!invoice) {
-    return res.status(404).json({ error: 'Invoice not found' });
+    return sendProblem(req, res, 'INVOICE_NOT_FOUND');
   }
 
   const meta = defaultDocumentStore.getMeta(id);
   if (!meta) {
-    return res.status(404).json({ error: 'No document found for this invoice' });
+    return sendProblem(req, res, 'DOCUMENT_NOT_FOUND');
   }
 
   return res.json({
     data: {
       ...meta,
-      // attestationHash is the same 32-byte SHA-256 digest in hex,
-      // ready to pass to bind_primary_attestation_hash(digest: BytesN<32>)
       attestationHash: meta.sha256Hex,
     },
   });
