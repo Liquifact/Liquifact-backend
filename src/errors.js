@@ -206,6 +206,11 @@ const ERROR_CATALOG = {
     status: 410,
     description: 'The document was evicted from the store to make room for a new entry.',
   },
+  WEBHOOK_NOT_FOUND: {
+    title: 'Webhook Not Found',
+    status: 404,
+    description: 'No webhook subscription exists with the given identifier.',
+  },
   INDEXER_BUSY: {
     title: 'Indexer Busy',
     status: 409,

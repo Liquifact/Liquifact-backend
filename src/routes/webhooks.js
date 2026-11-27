@@ -132,6 +132,33 @@ router.delete('/:id', requireAdminToken, mutatingLimiter, (req, res) => {
   }
   return res.status(204).end();
 });
+// ---------------------------------------------------------------------------
+// POST /api/webhooks/:id/rotate-secret
+// Returns the new secret exactly once; old secret stops signing immediately.
+// ---------------------------------------------------------------------------
+
+router.post('/:id/rotate-secret', requireAdminToken, mutatingLimiter, (req, res) => {
+  const wh = webhookStore.getWebhookInternal(req.params.id);
+  if (!wh) {
+    return res.status(404).json({ error: 'Webhook not found', code: 'WEBHOOK_NOT_FOUND' });
+  }
+  const rotated = webhookStore.rotateSecret(req.params.id);
+  if (!rotated) {
+    return res.status(404).json({ error: 'Webhook not found', code: 'WEBHOOK_NOT_FOUND' });
+  }
+  // Audit without the secret value (issue #1654).
+  if (typeof req.audit === 'function') {
+    req.audit({
+      action: 'webhook.rotate_secret',
+      resourceType: 'webhook',
+      resourceId: req.params.id,
+      outcome: 'success',
+      statusCode: 200,
+    });
+  }
+  return res.json({ data: rotated });
+});
+
 
 // ---------------------------------------------------------------------------
 // GET /api/webhooks/:id/deliveries
