@@ -126,6 +126,26 @@ function deleteWebhook(id) {
 }
 
 /**
+ * Rotates a webhook's HMAC signing secret.
+ * The new secret replaces the old one in the in-memory record, so deliveries
+ * after this call are signed with the new secret. Returns the plaintext new
+ * secret exactly once; subsequent GETs never expose it.
+ *
+ * @param {string} id
+ * @returns {{ id: string, secret: string, rotatedAt: string }|null}
+ */
+function rotateSecret(id) {
+  const record = webhooks.get(id);
+  if (!record) { return null; }
+  const newSecret = crypto.randomBytes(32).toString('base64url');
+  const rotatedAt = new Date().toISOString();
+  record.secret = newSecret;
+  record.secretRotatedAt = rotatedAt;
+  return { id, secret: newSecret, rotatedAt };
+}
+
+
+/**
  * Returns all webhooks subscribed to a given event type (internal records).
  * @param {string} eventType
  * @returns {object[]}
@@ -260,6 +280,7 @@ module.exports = {
   getWebhook,
   getWebhookInternal,
   deleteWebhook,
+  rotateSecret,
   getWebhooksForEvent,
   recordDeliveryResult,
   enableWebhook,

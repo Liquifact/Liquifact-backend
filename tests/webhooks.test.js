@@ -567,3 +567,102 @@ describe('admin webhook routes', () => {
     expect(() => loadConfig({ WEBHOOKS_MAX: 'abc' })).toThrow(ConfigError);
   });
 });
+
+// ===========================================================================
+// POST /api/webhooks/:id/rotate-secret  (issue #1654)
+// ===========================================================================
+
+describe('POST /api/webhooks/:id/rotate-secret', () => {
+  const ADMIN = 'rotate-admin-token';
+  let original;
+
+  beforeAll(() => {
+    original = process.env.ADMIN_API_TOKEN;
+    process.env.ADMIN_API_TOKEN = ADMIN;
+  });
+  afterAll(() => {
+    if (original === undefined) { delete process.env.ADMIN_API_TOKEN; }
+    else { process.env.ADMIN_API_TOKEN = original; }
+  });
+  beforeEach(() => { webhookStore.reset(); });
+
+  test('rotate-secret returns new base64url secret exactly once', async () => {
+    const created = webhookStore.createWebhook({
+      url: 'https://example.com/hook',
+      pinnedUrl: 'https://93.184.216.34/hook',
+      host: 'example.com',
+      events: ['invoice.created'],
+    });
+
+    const res = await request(app)
+      .post(/api/webhooks//rotate-secret)
+      .set('Authorization', Bearer );
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.id).toBe(created.id);
+    expect(typeof res.body.data.secret).toBe('string');
+    expect(res.body.data.secret.length).toBeGreaterThanOrEqual(32);
+    expect(res.body.data.secret).not.toBe(created.secret);
+    expect(res.body.data.rotatedAt).toBeDefined();
+  });
+
+  test('GET never exposes the rotated secret', async () => {
+    const created = webhookStore.createWebhook({
+      url: 'https://example.com/hook',
+      pinnedUrl: 'https://93.184.216.34/hook',
+      host: 'example.com',
+      events: ['invoice.created'],
+    });
+    await request(app)
+      .post(/api/webhooks//rotate-secret)
+      .set('Authorization', Bearer );
+
+    const one = await request(app)
+      .get(/api/webhooks/)
+      .set('Authorization', Bearer );
+    expect(one.status).toBe(200);
+    expect(one.body.data.secret).toBeUndefined();
+
+    const list = await request(app)
+      .get('/api/webhooks')
+      .set('Authorization', Bearer );
+    expect(list.status).toBe(200);
+    expect(list.body.data[0].secret).toBeUndefined();
+  });
+
+  test('old secret no longer signs new deliveries after rotation', async () => {
+    const created = webhookStore.createWebhook({
+      url: 'https://example.com/hook',
+      pinnedUrl: 'https://93.184.216.34/hook',
+      host: 'example.com',
+      events: ['invoice.created'],
+    });
+    const oldSecret = created.secret;
+
+    await request(app)
+      .post(/api/webhooks//rotate-secret)
+      .set('Authorization', Bearer );
+
+    const internal = webhookStore.getWebhookInternal(created.id);
+    expect(internal.secret).not.toBe(oldSecret);
+
+    const body = JSON.stringify({ id: 'evt_rotate_test', type: 'invoice.created' });
+    const header = require('../src/webhooks/signature').sign(internal.secret, body);
+
+    expect(verifySignature(oldSecret, header, body).ok).toBe(false);
+    expect(verifySignature(internal.secret, header, body).ok).toBe(true);
+  });
+
+  test('returns 404 for unknown webhook', async () => {
+    const res = await request(app)
+      .post('/api/webhooks/wh_missing/rotate-secret')
+      .set('Authorization', Bearer );
+    expect(res.status).toBe(404);
+  });
+
+  test('requires admin token', async () => {
+    const res = await request(app)
+      .post('/api/webhooks/wh_x/rotate-secret');
+    expect([401, 403, 503]).toContain(res.status);
+  });
+});
